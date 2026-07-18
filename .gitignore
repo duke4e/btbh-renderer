@@ -233,6 +233,8 @@ _pkginfo.txt
 ClientBin/
 ~$*
 *~
+.build/
+.swiftpm/
 *.dbmdl
 *.dbproj.schemaview
 *.jfm
