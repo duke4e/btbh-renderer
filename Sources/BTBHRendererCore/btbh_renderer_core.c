@@ -29,12 +29,27 @@ static bool btbh_unpack_handle(uint64_t handle, uint32_t *index, uint32_t *gener
     return *generation != 0u;
 }
 
-static bool btbh_handle_pool_grow(BTBHHandlePool *pool) {
+#if defined(__GNUC__)
+__attribute__((visibility("hidden")))
+#endif
+BTBHHandleResult btbh_handle_generation_advance(uint32_t generation, uint32_t *out_generation);
+
+BTBHHandleResult btbh_handle_generation_advance(uint32_t generation, uint32_t *out_generation) {
+    if (generation == 0u || !out_generation) return BTBH_HANDLE_INVALID_ARGUMENT;
+    if (generation == UINT32_MAX) return BTBH_HANDLE_EXHAUSTED;
+    *out_generation = generation + 1u;
+    return BTBH_HANDLE_OK;
+}
+
+static BTBHHandleResult btbh_handle_pool_grow(BTBHHandlePool *pool) {
     const uint32_t old_capacity = pool->capacity;
-    const uint32_t new_capacity = old_capacity > 0u ? old_capacity * 2u : 8u;
-    if (new_capacity < old_capacity) return false;
+    if (old_capacity == UINT32_MAX) return BTBH_HANDLE_EXHAUSTED;
+    const uint32_t new_capacity = old_capacity == 0u
+        ? 8u
+        : old_capacity > UINT32_MAX / 2u ? UINT32_MAX : old_capacity * 2u;
+    if ((size_t)new_capacity > SIZE_MAX / sizeof(*pool->slots)) return BTBH_HANDLE_EXHAUSTED;
     BTBHHandleSlot *grown = realloc(pool->slots, sizeof(*grown) * new_capacity);
-    if (!grown) return false;
+    if (!grown) return BTBH_HANDLE_OUT_OF_MEMORY;
     pool->slots = grown;
     memset(pool->slots + old_capacity, 0, sizeof(*grown) * (new_capacity - old_capacity));
     for (uint32_t index = old_capacity; index < new_capacity; ++index) {
@@ -43,7 +58,7 @@ static bool btbh_handle_pool_grow(BTBHHandlePool *pool) {
     }
     pool->free_head = old_capacity;
     pool->capacity = new_capacity;
-    return true;
+    return BTBH_HANDLE_OK;
 }
 
 uint32_t btbh_renderer_abi_version(void) {
@@ -55,7 +70,7 @@ BTBHHandlePool *btbh_handle_pool_create(uint32_t initial_capacity) {
     if (!pool) return NULL;
     pool->free_head = BTBH_NO_SLOT;
     while (pool->capacity < initial_capacity) {
-        if (!btbh_handle_pool_grow(pool)) {
+        if (btbh_handle_pool_grow(pool) != BTBH_HANDLE_OK) {
             btbh_handle_pool_destroy(pool);
             return NULL;
         }
@@ -71,7 +86,10 @@ void btbh_handle_pool_destroy(BTBHHandlePool *pool) {
 
 BTBHHandleResult btbh_handle_pool_acquire(BTBHHandlePool *pool, uint64_t *out_handle) {
     if (!pool || !out_handle) return BTBH_HANDLE_INVALID_ARGUMENT;
-    if (pool->free_head == BTBH_NO_SLOT && !btbh_handle_pool_grow(pool)) return BTBH_HANDLE_OUT_OF_MEMORY;
+    if (pool->free_head == BTBH_NO_SLOT) {
+        const BTBHHandleResult result = btbh_handle_pool_grow(pool);
+        if (result != BTBH_HANDLE_OK) return result;
+    }
     const uint32_t index = pool->free_head;
     BTBHHandleSlot *slot = &pool->slots[index];
     pool->free_head = slot->next_free;
@@ -95,9 +113,15 @@ BTBHHandleResult btbh_handle_pool_release(BTBHHandlePool *pool, uint64_t handle)
     if (!pool || !btbh_unpack_handle(handle, &index, &generation) || index >= pool->capacity) return BTBH_HANDLE_INVALID_ARGUMENT;
     BTBHHandleSlot *slot = &pool->slots[index];
     if (!slot->occupied || slot->generation != generation) return BTBH_HANDLE_STALE;
+    uint32_t next_generation = 0u;
+    const BTBHHandleResult advance_result = btbh_handle_generation_advance(slot->generation, &next_generation);
+    if (advance_result != BTBH_HANDLE_OK && advance_result != BTBH_HANDLE_EXHAUSTED) return advance_result;
     slot->occupied = false;
-    slot->generation += 1u;
-    if (slot->generation == 0u) slot->generation = 1u;
+    if (advance_result == BTBH_HANDLE_EXHAUSTED) {
+        slot->next_free = BTBH_NO_SLOT;
+        return BTBH_HANDLE_OK;
+    }
+    slot->generation = next_generation;
     slot->next_free = pool->free_head;
     pool->free_head = index;
     return BTBH_HANDLE_OK;

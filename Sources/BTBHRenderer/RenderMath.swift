@@ -141,7 +141,14 @@ public enum RenderProjection: UInt8, Hashable, Sendable {
     }
 
     init(core: BTBHProjection) {
-        self = core == BTBH_PROJECTION_ORTHOGRAPHIC ? .orthographic : .perspective
+        switch core {
+        case BTBH_PROJECTION_PERSPECTIVE:
+            self = .perspective
+        case BTBH_PROJECTION_ORTHOGRAPHIC:
+            self = .orthographic
+        default:
+            preconditionFailure("Unknown projection value: \(core.rawValue)")
+        }
     }
 }
 

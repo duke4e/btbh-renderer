@@ -27,7 +27,21 @@ public struct AmbientMapHandle: RenderHandle { public let rawValue: UInt64; publ
 public struct SurfaceShaderHandle: RenderHandle { public let rawValue: UInt64; public init(rawValue: UInt64) { self.rawValue = rawValue } }
 public struct ScreenShaderHandle: RenderHandle { public let rawValue: UInt64; public init(rawValue: UInt64) { self.rawValue = rawValue } }
 
-public enum HandlePoolError: Error { case allocationFailed; case exhausted }
+public enum HandlePoolError: Error, Equatable {
+    case allocationFailed
+    case exhausted
+
+    init(coreResult: BTBHHandleResult) {
+        switch coreResult {
+        case BTBH_HANDLE_OUT_OF_MEMORY:
+            self = .allocationFailed
+        case BTBH_HANDLE_EXHAUSTED:
+            self = .exhausted
+        default:
+            preconditionFailure("Unexpected handle acquisition result: \(coreResult)")
+        }
+    }
+}
 
 public final class HandlePool {
     private let raw: OpaquePointer
@@ -41,7 +55,8 @@ public final class HandlePool {
 
     public func acquire<H: RenderHandle>(_ type: H.Type) throws -> H {
         var value: UInt64 = 0
-        guard btbh_handle_pool_acquire(raw, &value) == BTBH_HANDLE_OK else { throw HandlePoolError.exhausted }
+        let result = btbh_handle_pool_acquire(raw, &value)
+        guard result == BTBH_HANDLE_OK else { throw HandlePoolError(coreResult: result) }
         return H(rawValue: value)
     }
 
