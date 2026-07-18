@@ -367,3 +367,4 @@ CMakeSettings.json
 .vscode/
 build/
 .worktrees/
+.superpowers/sdd/
