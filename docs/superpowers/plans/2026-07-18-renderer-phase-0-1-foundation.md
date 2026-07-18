@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Renderer work starts from renderer commit `92d83c9`; game work starts from game commit `b13cb809`.
+- Renderer work starts from renderer commit `92d83c9`; game work starts from current authoritative game commit `cf8e740a`, which includes the completed projectile pipeline work after the original `b13cb809` planning snapshot.
 - Execute in isolated worktrees created with `superpowers:using-git-worktrees`; preserve the unrelated `.DS_Store` changes already present in the game repository.
 - Use branch `codex/renderer-phase-0-1` in both repositories so the renderer submodule can pin a named remote branch during development and a detached commit at each game commit.
 - The renderer private remote is `git@github.com:duke4e/btbh-renderer.git`; retain `https://github.com/Bigfoot71/r3d.git` as read-only remote `upstream`.
@@ -660,7 +660,7 @@ Expected: all tests pass; stale handles remain invalid after slot reuse.
 
 **Interfaces:**
 - Consumes: renderer package commit from Task 2.
-- Produces: local SwiftPM dependency `BTBHRenderer`, deterministic `RenderAPIInventory`, and committed baseline showing 82 raw-import files, 86 called r3d functions, 116 raylib/raymath candidates, five rlgl functions, and five SDL3-import files on game commit `b13cb809`.
+- Produces: local SwiftPM dependency `BTBHRenderer`, deterministic `RenderAPIInventory`, and committed baseline showing 85 raw-import files, 98 called r3d functions, 116 raylib/raymath candidates, five rlgl functions, and five SDL3-import files on game commit `cf8e740a`.
 
 - [ ] **Step 1: Add the submodule at the approved path**
 
@@ -694,8 +694,8 @@ final class RenderAPIAuditTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let inventory = try RenderAPIAudit.scan(projectRoot: root)
 
-        XCTAssertEqual(inventory.rawRaylibOrR3DImportFiles.count, 82)
-        XCTAssertEqual(inventory.r3dFunctionCalls.count, 86)
+        XCTAssertEqual(inventory.rawRaylibOrR3DImportFiles.count, 85)
+        XCTAssertEqual(inventory.r3dFunctionCalls.count, 98)
         XCTAssertEqual(inventory.raylibFunctionCandidates.count, 116)
         XCTAssertEqual(inventory.rlglFunctionCalls, [
             "rlDisableScissorTest", "rlDrawRenderBatchActive", "rlEnableScissorTest", "rlScissor", "rlSetBlendMode"
@@ -707,10 +707,10 @@ final class RenderAPIAuditTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let inventory = try RenderAPIAudit.scan(projectRoot: root)
-        let first = inventory.text(commit: "b13cb809")
-        let second = inventory.text(commit: "b13cb809")
+        let first = inventory.text(commit: "cf8e740a")
+        let second = inventory.text(commit: "cf8e740a")
         XCTAssertEqual(first, second)
-        XCTAssertTrue(first.hasPrefix("BTBH LEGACY RENDER API INVENTORY\ncommit=b13cb809\n"))
+        XCTAssertTrue(first.hasPrefix("BTBH LEGACY RENDER API INVENTORY\ncommit=cf8e740a\n"))
     }
 }
 ```
@@ -798,7 +798,7 @@ set -euo pipefail
 project_dir="${0:A:h:h}"
 output="${1:-$project_dir/docs/rendering/legacy-api-usage.txt}"
 cd "$project_dir"
-swift run RenderAPIAuditTool --root "$project_dir" --commit b13cb809 --output "$output"
+swift run RenderAPIAuditTool --root "$project_dir" --commit cf8e740a --output "$output"
 ```
 
 `RenderAPIAuditTool` accepts exactly `--root`, `--commit`, and `--output`, rejects unknown/missing arguments with exit code 64, calls `RenderAPIAudit.scan(projectRoot:)`, and writes atomically through `Data.write(options: .atomic)`.
@@ -806,7 +806,7 @@ swift run RenderAPIAuditTool --root "$project_dir" --commit b13cb809 --output "$
 Run:
 
 ```bash
-swift run RenderAPIAuditTool --root "$PWD" --commit b13cb809 --output docs/rendering/legacy-api-usage.txt
+swift run RenderAPIAuditTool --root "$PWD" --commit cf8e740a --output docs/rendering/legacy-api-usage.txt
 swift test --filter RenderAPIAuditTests
 ```
 
@@ -2122,6 +2122,9 @@ Every starting raw-import file is assigned to at least one batch. Remove its raw
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockEditorPreviewCache.swift`
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockEditorState.swift`
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockProceduralTemplateGenerator.swift`
+- `Sources/Main/Sources/Classes/Combat/ProjectileRenderItem.swift`
+- `Sources/Main/Sources/Classes/Combat/ProjectileRendererBenchmark.swift`
+- `Sources/Main/Sources/Classes/Combat/ProjectileRendererBenchmarkRunner.swift`
 - `Sources/Main/Sources/Classes/Enemy/Enemy.swift`
 - `Sources/Main/Sources/Classes/Enemy/EnemyOrchestrator.swift`
 - `Sources/Main/Sources/Classes/Fusion/FusionRenderMapping.swift`
@@ -2166,6 +2169,7 @@ Every starting raw-import file is assigned to at least one batch. Remove its raw
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockEditorRunner.swift`
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockEditorUI.swift`
 - `Sources/Main/Sources/Classes/CombatLab/CombatLabPanel.swift`
+- `Sources/Main/Sources/Classes/Combat/ProjectileRendererBenchmarkRunner.swift`
 - `Sources/Main/Sources/Classes/Game/Game+Progression.swift`
 - `Sources/Main/Sources/Classes/Game/Game+UIRender.swift`
 - `Sources/Main/Sources/Classes/Game/LevelUpPreview3D.swift`
@@ -2211,6 +2215,7 @@ Every starting raw-import file is assigned to at least one batch. Remove its raw
 - `Sources/Main/Sources/Classes/CityBlockEditor/CityBlockEditorRunner.swift`
 - `Sources/Main/Sources/Classes/CityRenderer.swift`
 - `Sources/Main/Sources/Classes/Combat/ProjectileRenderSystem.swift`
+- `Sources/Main/Sources/Classes/Combat/ProjectileRendererBenchmarkRunner.swift`
 - `Sources/Main/Sources/Classes/Fusion/FusionConstructRenderSystem.swift`
 - `Sources/Main/Sources/Classes/Game/Game+EncounterRender.swift`
 - `Sources/Main/Sources/Classes/Game/Game+GrowthTrial.swift`
