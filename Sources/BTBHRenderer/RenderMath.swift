@@ -129,6 +129,16 @@ public struct RenderBounds3: Hashable, Sendable {
     init(core: BTBHBounds3) { self.init(minimum: RenderVec3(core: core.minimum), maximum: RenderVec3(core: core.maximum)) }
 }
 
+public struct RenderRay: Hashable, Sendable {
+    public let origin: RenderVec3
+    public let direction: RenderVec3
+
+    public init(origin: RenderVec3, direction: RenderVec3) {
+        self.origin = origin
+        self.direction = direction
+    }
+}
+
 public enum RenderProjection: UInt8, Hashable, Sendable {
     case perspective
     case orthographic
