@@ -72,6 +72,46 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertIdentical(access.scene as AnyObject, recording)
     }
 
+    func testAccessShutsRendererExactlyOnceBeforeBundleUninstall() throws {
+        let recording = RecordingRenderBundle()
+        try RenderServices.install(recording)
+
+        let firstAccess = RenderServices.access
+        let secondAccess = RenderServices.access
+        firstAccess.shutdownRenderer()
+        secondAccess.shutdownRenderer()
+        firstAccess.shutdownRenderer()
+        RenderServices.uninstall()
+
+        XCTAssertEqual(recording.events, [
+            .rendererShutdown,
+            .shutdown,
+        ])
+    }
+
+    func testPublicAccessInitializerInjectsExactBackendsWithoutGlobalInstallation() throws {
+        let recording = RecordingRenderBundle()
+        let access = RenderServicesAccess(
+            platform: recording,
+            canvas: recording,
+            resources: recording,
+            scene: recording,
+            shutdownRenderer: { recording.shutdownRenderer() }
+        )
+
+        XCTAssertIdentical(access.platform as AnyObject, recording)
+        XCTAssertIdentical(access.canvas as AnyObject, recording)
+        XCTAssertIdentical(access.resources as AnyObject, recording)
+        XCTAssertIdentical(access.scene as AnyObject, recording)
+        let copiedAccess = access
+        access.shutdownRenderer()
+        copiedAccess.shutdownRenderer()
+        XCTAssertEqual(recording.events, [.rendererShutdown])
+        XCTAssertThrowsError(try RenderServices.requireInstalled()) { error in
+            XCTAssertEqual(error as? RenderServicesError, .notInstalled)
+        }
+    }
+
     func testUninstallShutsDownExactlyOnceAndDoubleUninstallDoesNothing() throws {
         let recording = RecordingRenderBundle()
         try RenderServices.install(recording)
@@ -210,7 +250,7 @@ final class RenderServicesTests: XCTestCase {
         let platform: any GamePlatform = recording
         let canvas: any Canvas2DBackend = recording
         let scene: any SceneBackend = recording
-        let dialogSelection = LockedBox<[URL]?>(nil)
+        let dialogSelection = LockedBox<Result<[URL], FileDialogError>?>(nil)
 
         let frame = platform.beginFrame()
         XCTAssertEqual(frame.deltaSeconds, 0)
@@ -250,7 +290,7 @@ final class RenderServicesTests: XCTestCase {
         platform.showOpenFileDialog(.init(title: "open", allowedExtensions: [])) {
             dialogSelection.set($0)
         }
-        XCTAssertEqual(dialogSelection.value, [])
+        XCTAssertEqual(dialogSelection.value, .success([]))
 
         XCTAssertEqual(canvas.measureText("text", font: .invalid, size: 12, spacing: 1), .zero)
         let camera = RenderCamera(

@@ -10,6 +10,7 @@ enum RecordingRenderEvent: Equatable {
     case canvasBegin
     case fillRect
     case canvasEnd
+    case rendererShutdown
     case shutdown
 }
 
@@ -25,6 +26,7 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     }
 
     private(set) var events: [RecordingRenderEvent] = []
+    private(set) var mousePositions: [RenderVec2] = []
     private var activeFrame: ActiveFrame?
 
     var platform: any GamePlatform { self }
@@ -47,7 +49,11 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     var isWindowFocused: Bool { false }
     var refreshRate: Int { 0 }
     var framesPerSecond: Int { 0 }
+    var logicalSize: PixelSize2D { .init(width: 640, height: 360) }
+    var drawableSize: PixelSize2D { .init(width: 1280, height: 720) }
+    var monotonicElapsedSeconds: Double { 42.5 }
     var mousePosition: RenderVec2 { .zero }
+    func setMousePosition(_ position: RenderVec2) throws { mousePositions.append(position) }
     var mouseDelta: RenderVec2 { .zero }
     var mouseWheelDelta: Float { 0 }
     func isKeyDown(_ key: InputKey) -> Bool { false }
@@ -73,8 +79,11 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     func setCursorVisible(_ visible: Bool) {}
     var isCursorVisible: Bool { false }
     func setClipboardText(_ text: String) throws { throw unexpected() }
-    func showOpenFileDialog(_ request: FileDialogRequest, completion: @escaping @Sendable ([URL]) -> Void) {
-        completion([])
+    func showOpenFileDialog(
+        _ request: FileDialogRequest,
+        completion: @escaping @Sendable (Result<[URL], FileDialogError>) -> Void
+    ) {
+        completion(.success([]))
     }
 
     func beginFrame() {
@@ -160,6 +169,7 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     func readbackWorldFrame() throws -> FrameReadback { throw unexpected() }
     func captureWorldFrameTexture() throws -> TextureHandle { throw unexpected() }
 
+    func shutdownRenderer() { events.append(.rendererShutdown) }
     func shutdown() { events.append(.shutdown) }
 
     private func unexpected(_ function: String = #function) -> RecordingRenderError {

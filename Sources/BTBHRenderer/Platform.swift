@@ -1,5 +1,16 @@
 import Foundation
 
+public enum FrameRatePolicy: Equatable, Sendable {
+    case displayRefresh(minimum: Int)
+    case fixed(Int)
+    case uncapped
+}
+
+public enum DrawableScalePolicy: Equatable, Sendable {
+    case system
+    case oneToOne
+}
+
 public struct WindowDescriptor: Equatable, Sendable {
     public enum Mode: Equatable, Sendable {
         case windowed
@@ -11,12 +22,23 @@ public struct WindowDescriptor: Equatable, Sendable {
     public let width: Int
     public let height: Int
     public let mode: Mode
+    public let frameRatePolicy: FrameRatePolicy
+    public let drawableScalePolicy: DrawableScalePolicy
 
-    public init(title: String, width: Int, height: Int, mode: Mode) {
+    public init(
+        title: String,
+        width: Int,
+        height: Int,
+        mode: Mode,
+        frameRatePolicy: FrameRatePolicy = .displayRefresh(minimum: 30),
+        drawableScalePolicy: DrawableScalePolicy = .system
+    ) {
         self.title = title
         self.width = width
         self.height = height
         self.mode = mode
+        self.frameRatePolicy = frameRatePolicy
+        self.drawableScalePolicy = drawableScalePolicy
     }
 }
 
@@ -95,15 +117,44 @@ public struct PixelSize2D: Equatable, Sendable {
     }
 }
 
+public enum FileDialogKind: Equatable, Sendable {
+    case open
+    case save
+}
+
+public enum FileDialogError: Error, Equatable, Sendable {
+    case invalidRequest(String)
+    case backendFailure(String)
+
+    public var message: String {
+        switch self {
+        case let .invalidRequest(message), let .backendFailure(message): message
+        }
+    }
+}
+
 public struct FileDialogRequest: Equatable, Sendable {
+    public let kind: FileDialogKind
     public let title: String
     public let allowedExtensions: [String]
     public let allowsMultipleSelection: Bool
+    public let initialDirectory: URL?
+    public let suggestedFileName: String?
 
-    public init(title: String, allowedExtensions: [String], allowsMultipleSelection: Bool = false) {
+    public init(
+        kind: FileDialogKind = .open,
+        title: String,
+        allowedExtensions: [String],
+        allowsMultipleSelection: Bool = false,
+        initialDirectory: URL? = nil,
+        suggestedFileName: String? = nil
+    ) {
+        self.kind = kind
         self.title = title
         self.allowedExtensions = allowedExtensions
         self.allowsMultipleSelection = allowsMultipleSelection
+        self.initialDirectory = initialDirectory
+        self.suggestedFileName = suggestedFileName
     }
 }
 
@@ -117,7 +168,11 @@ public protocol GamePlatform: AnyObject {
     var isWindowFocused: Bool { get }
     var refreshRate: Int { get }
     var framesPerSecond: Int { get }
+    var logicalSize: PixelSize2D { get }
+    var drawableSize: PixelSize2D { get }
+    var monotonicElapsedSeconds: Double { get }
     var mousePosition: RenderVec2 { get }
+    func setMousePosition(_ position: RenderVec2) throws
     var mouseDelta: RenderVec2 { get }
     var mouseWheelDelta: Float { get }
     func isKeyDown(_ key: InputKey) -> Bool
@@ -133,5 +188,8 @@ public protocol GamePlatform: AnyObject {
     func setCursorVisible(_ visible: Bool)
     var isCursorVisible: Bool { get }
     func setClipboardText(_ text: String) throws
-    func showOpenFileDialog(_ request: FileDialogRequest, completion: @escaping @Sendable ([URL]) -> Void)
+    func showOpenFileDialog(
+        _ request: FileDialogRequest,
+        completion: @escaping @Sendable (Result<[URL], FileDialogError>) -> Void
+    )
 }
