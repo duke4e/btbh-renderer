@@ -1,0 +1,22 @@
+[
+  {
+    "bounds" : {
+      "height" : 1080,
+      "width" : 1920,
+      "x" : 0,
+      "y" : 0
+    },
+    "minimumLumaCoverage" : 0.02,
+    "name" : "player-world-viewport"
+  },
+  {
+    "bounds" : {
+      "height" : 138,
+      "width" : 1920,
+      "x" : 0,
+      "y" : 942
+    },
+    "minimumLumaCoverage" : 0.04,
+    "name" : "critical-hud-strip"
+  }
+]
