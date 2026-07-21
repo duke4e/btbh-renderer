@@ -1,0 +1,127 @@
+<div id="r3d-rc-contract">
+  <style>
+    #r3d-rc-contract .rc-flow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 18px;
+      margin: 18px 0 24px;
+    }
+    #r3d-rc-contract .node {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 92px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--viz-series-3) 12%, var(--card));
+      color: var(--card-foreground);
+      text-align: center;
+    }
+    #r3d-rc-contract .node:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -14px;
+      top: 50%;
+      color: var(--viz-series-3);
+      transform: translateY(-50%);
+    }
+    #r3d-rc-contract .contract-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0 24px;
+    }
+    #r3d-rc-contract .contract {
+      padding: 13px;
+      border-top: 3px solid var(--viz-series-1);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+    }
+    #r3d-rc-contract .contract h3 { margin-top: 0; }
+    #r3d-rc-contract .contract p { margin-bottom: 0; color: var(--muted-foreground); }
+    #r3d-rc-contract .fallback {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 24px;
+    }
+    #r3d-rc-contract .tier {
+      padding: 12px;
+      border-top: 3px solid var(--viz-series-2);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+    }
+    #r3d-rc-contract .tier strong { display: block; margin-bottom: 5px; }
+    #r3d-rc-contract .tier span { color: var(--muted-foreground); }
+    #r3d-rc-contract .limits {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    #r3d-rc-contract .limit {
+      padding: 11px 0;
+      border-top: 1px solid var(--border);
+    }
+    #r3d-rc-contract .limit strong { display: block; margin-bottom: 5px; }
+    #r3d-rc-contract .limit span { color: var(--muted-foreground); }
+    @media (max-width: 820px) {
+      #r3d-rc-contract .rc-flow { grid-template-columns: 1fr; gap: 10px; }
+      #r3d-rc-contract .node:not(:last-child)::after { content: "↓"; right: auto; left: 50%; top: auto; bottom: -14px; transform: translateX(-50%); }
+      #r3d-rc-contract .fallback { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 620px) {
+      #r3d-rc-contract .contract-grid, #r3d-rc-contract .fallback, #r3d-rc-contract .limits { grid-template-columns: 1fr; }
+    }
+  </style>
+
+  <h2>Radiance Cascades contract</h2>
+  <p class="subtitle">PoE2-style screen-space “2.5D” diffuse GI: determinističan iz aktualnog framea, bez obveznog temporal accumulationa.</p>
+
+  <div class="rc-flow" role="img" aria-label="Radiance Cascades tok: G-buffer i direktna svjetlost, izvori radiancea, screen-space raymarch kaskade, spajanje od dalekih prema bliskima, depth-normal interpolacija, indirect diffuse i confidence, kompozicija s fallbackom.">
+    <div class="node"><strong>Ulazi</strong><span>depth · normal · albedo · emission · direct diffuse</span></div>
+    <div class="node"><strong>Seed</strong><span>vidljivi emitteri i osvijetljene površine</span></div>
+    <div class="node"><strong>Trace</strong><span>screen-space intervali po kaskadi</span></div>
+    <div class="node"><strong>Merge</strong><span>far → near</span></div>
+    <div class="node"><strong>Resolve</strong><span>depth/normal-aware interpolation</span></div>
+    <div class="node"><strong>Izlazi</strong><span>HDR diffuse indirect + confidence</span></div>
+    <div class="node"><strong>Compose</strong><span>GI ↔ IBL/ambient fallback</span></div>
+  </div>
+
+  <div class="contract-grid">
+    <div class="contract"><h3>Vizualni contract</h3><p>Jedan diffuse indirect bounce. Bez specular RC-a u prvom milestoneu. Normalna kamera ne smije pokazivati shimmer ili history ghosting.</p></div>
+    <div class="contract"><h3>Performance contract</h3><p>RC cilj ≤ 3,0 ms median i ≤ 4,0 ms p95 na 1080p minimum hardveru; cijeli frame ostaje ≤ 16,67 ms.</p></div>
+    <div class="contract"><h3>Gameplay contract</h3><p>Gameplay signal nikad ne ovisi samo o indirect lightu. Opasnosti, pickupovi i projektili zadržavaju direct/emissive čitljivost kad je RC ugašen.</p></div>
+    <div class="contract"><h3>Camera contract</h3><p>Pose je fiksan unutar levela. Novi profil primjenjuje se iza kartica; RC se invalidira i skriveno ponovno izračuna prije reveala.</p></div>
+    <div class="contract"><h3>Backend contract</h3><p>Isti compute algoritam i reflection layout na Metalu i Vulkanu. Golden slike smiju imati toleranciju, ali ne divergentnu logiku.</p></div>
+    <div class="contract"><h3>Debug contract</h3><p>Obvezni prikazi cascade intervala, hit distancea, confidencea, finalnog indirecta i razloga runtime fallbacka.</p></div>
+  </div>
+
+  <div class="label">Quality i fallback hijerarhija</div>
+  <div class="fallback">
+    <div class="tier"><strong>High</strong><span>Puni odabrani RC budget; cilj za hardver iznad minimuma.</span></div>
+    <div class="tier"><strong>Low</strong><span>Niža interna rezolucija i sample budget; ista semantika i composite.</span></div>
+    <div class="tier"><strong>Off</strong><span>IBL + ambient + SSAO; igra ostaje vizualno i gameplay funkcionalna.</span></div>
+    <div class="tier"><strong>Auto</strong><span>Tier se bira pri warm-upu; promjene se primjenjuju iza kartica, uz hysteresis.</span></div>
+  </div>
+
+  <div class="limits">
+    <div class="limit"><strong>Off-screen emitter</strong><span>Nema indirect doprinosa. Kritični izvor mora imati direct light ili emissive cue.</span></div>
+    <div class="limit"><strong>Skriveni occluder</strong><span>Confidence pada; composite prelazi prema IBL/ambientu umjesto prema crnom.</span></div>
+    <div class="limit"><strong>Disocclusion</strong><span>Bez temporal historyja u baselineu; camera cut je skriven iza postojećeg snapshot-a.</span></div>
+    <div class="limit"><strong>Transparentnost</strong><span>Transparentni objekti primaju riješeni indirect, ali ne ulaze u cascade visibility u prvom milestoneu.</span></div>
+    <div class="limit"><strong>Slab hardver</strong><span>RC se degradira ili gasi; renderer init ne pada zbog opcionalnog GI-ja.</span></div>
+    <div class="limit"><strong>Budući 3D/hibrid</strong><span>World-space emitter/occluder podatke dodajemo samo ako reprezentativne scene dokažu vidljiv problem.</span></div>
+  </div>
+
+  <div class="options">
+    <div class="option" data-choice="approve-rc" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content"><h3>Odobri RC contract</h3><p>Nastavi na migracijske faze, testove i release gateove.</p></div>
+    </div>
+    <div class="option" data-choice="revise-rc" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content"><h3>Traži izmjene</h3><p>Napiši što treba promijeniti u kvaliteti, budgetu ili fallbacku.</p></div>
+    </div>
+  </div>
+</div>

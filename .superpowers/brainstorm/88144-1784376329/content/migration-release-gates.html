@@ -1,0 +1,123 @@
+<div id="r3d-migration">
+  <style>
+    #r3d-migration .timeline {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 16px;
+      margin: 18px 0 24px;
+    }
+    #r3d-migration .phase {
+      position: relative;
+      min-height: 152px;
+      padding: 12px;
+      border-top: 4px solid var(--viz-series-1);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+    }
+    #r3d-migration .phase:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      right: -13px;
+      top: 50%;
+      color: var(--viz-series-1);
+      transform: translateY(-50%);
+    }
+    #r3d-migration .phase strong { display: block; margin: 5px 0 8px; }
+    #r3d-migration .phase span { color: var(--muted-foreground); }
+    #r3d-migration .phase.final { border-color: var(--viz-series-3); }
+    #r3d-migration .gate-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 18px 0 24px;
+    }
+    #r3d-migration .gate {
+      padding: 13px;
+      border-top: 2px solid var(--viz-series-2);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+    }
+    #r3d-migration .gate h3 { margin-top: 0; }
+    #r3d-migration .gate p { margin-bottom: 0; color: var(--muted-foreground); }
+    #r3d-migration .matrix {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 24px;
+    }
+    #r3d-migration .check {
+      padding: 11px;
+      border-top: 1px solid var(--border);
+    }
+    #r3d-migration .check strong { display: block; margin-bottom: 5px; }
+    #r3d-migration .check span { color: var(--muted-foreground); }
+    #r3d-migration .error-flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 14px 0 22px;
+    }
+    #r3d-migration .error {
+      padding: 12px;
+      border-left: 3px solid var(--destructive);
+      background: color-mix(in srgb, var(--card) 86%, transparent);
+    }
+    #r3d-migration .error.optional { border-color: var(--viz-series-3); }
+    #r3d-migration .error strong { display: block; margin-bottom: 5px; }
+    #r3d-migration .error span { color: var(--muted-foreground); }
+    @media (max-width: 980px) {
+      #r3d-migration .timeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #r3d-migration .phase::after { content: none !important; }
+    }
+    @media (max-width: 680px) {
+      #r3d-migration .timeline, #r3d-migration .gate-grid, #r3d-migration .matrix, #r3d-migration .error-flow { grid-template-columns: 1fr; }
+    }
+  </style>
+
+  <h2>Migracija i release gateovi</h2>
+  <p class="subtitle">Legacy put ostaje uporabljiv dok novi renderer ne dokaže parity. Svaka faza ima dokaz; nijedna ne prolazi samo zato što se builda.</p>
+
+  <div class="timeline" role="img" aria-label="Sedam migracijskih faza od baselinea do uklanjanja legacy koda.">
+    <div class="phase"><span>Faza 0</span><strong>Baseline</strong><span>Golden slike, perf scene, API usage manifest i capture svih launch modeova.</span></div>
+    <div class="phase"><span>Faza 1</span><strong>Game seamovi</strong><span>Projektni math, platform, Canvas2D i renderer interface; legacy raylib adapter održava igru.</span></div>
+    <div class="phase"><span>Faza 2</span><strong>GPU spike</strong><span>SDL3 + SDL_GPU, novi G-buffer, PBR, sjene, animacija, transparentnost i compute na oba backenda.</span></div>
+    <div class="phase"><span>Faza 3</span><strong>Feature parity</strong><span>Instancing, IBL, SSAO, surface varijante, post chain, asset i 2D/text put.</span></div>
+    <div class="phase"><span>Faza 4</span><strong>Svi modeovi</strong><span>Game, combat lab, city editori i particle editor rade kroz novi renderer.</span></div>
+    <div class="phase"><span>Faza 5</span><strong>RC + kamera</strong><span>Production RC, quality tierovi i deterministički CameraProfile level-up cut.</span></div>
+    <div class="phase final"><span>Faza 6</span><strong>Delete legacy</strong><span>Ukloniti r3d OpenGL, raylib, rlgl, stare shadere, binarne libraryje i neportane featuree.</span></div>
+  </div>
+
+  <div class="gate-grid">
+    <div class="gate"><h3>Spike gate</h3><p>Metal na M1 i Vulkan na GTX 1060/RX 580 moraju proći obvezne featuree, shader reflection i GPU capture bez portability workarounds koji cure kroz interface.</p></div>
+    <div class="gate"><h3>Parity gate</h3><p>Automatski perceptual diff cilja SSIM ≥ 0,98 za odobrene scene; gameplay cue maske ne smiju nestati. Prvi novi golden update traži ljudski review.</p></div>
+    <div class="gate"><h3>Performance gate</h3><p>1080p p95 frame ≤ 16,67 ms na minimum hardveru; RC p95 ≤ 4,0 ms. Capture mora pokazati uzrok svake regresije iznad 5%.</p></div>
+    <div class="gate"><h3>Mode gate</h3><p>Svaki launch mode ima smoke capture, resize/high-DPI provjeru, asset load/unload i clean shutdown na macOS-u i Windowsu.</p></div>
+    <div class="gate"><h3>Removal gate</h3><p>Nula runtime linkova i source includeova za raylib/rlgl/OpenGL; samo povijesna dokumentacija smije spominjati legacy nazive.</p></div>
+    <div class="gate"><h3>Rollback gate</h3><p>Legacy ostaje odvojiv build/runtime izbor do završetka faze 5. Nakon removal commita rollback je git revert, ne trajni compatibility shim.</p></div>
+  </div>
+
+  <div class="label">Test matrica</div>
+  <div class="matrix">
+    <div class="check"><strong>Unit</strong><span>Handle generation, allocator/ring arena, frame-graph lifetime/cycles, math/projection i CameraProfile determinism.</span></div>
+    <div class="check"><strong>Build-time</strong><span>Shader compile, reflection manifest, binding/format validation i zabranjeni dependency scan.</span></div>
+    <div class="check"><strong>GPU integration</strong><span>Mesh/PBR, shadow atlas, skinning, instancing, transparent, storage compute i resize/device teardown.</span></div>
+    <div class="check"><strong>Visual/perf</strong><span>Golden slike i benchmark scene na stvarnim Metal/Vulkan referentnim strojevima.</span></div>
+  </div>
+
+  <div class="label">Failure ponašanje</div>
+  <div class="error-flow">
+    <div class="error"><strong>Nedostaje obvezni GPU feature</strong><span>Init prekida s jasnim backend/device/feature izvještajem. Nema tihog D3D12 fallbacka.</span></div>
+    <div class="error optional"><strong>RC nije dostupan</strong><span>Logirani razlog; nastavi s IBL + ambient + SSAO.</span></div>
+    <div class="error"><strong>Shader/reflection mismatch</strong><span>Build mora pasti; production ne pokušava runtime pogoditi binding.</span></div>
+    <div class="error"><strong>Device loss</strong><span>Prva verzija završava kontrolirano s dijagnostikom; live recovery nije skriveni v1 scope.</span></div>
+  </div>
+
+  <div class="options">
+    <div class="option" data-choice="approve-migration" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content"><h3>Odobri cijeli dizajn</h3><p>Zapiši i provjeri design spec prije implementation plana.</p></div>
+    </div>
+    <div class="option" data-choice="revise-migration" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content"><h3>Traži izmjene</h3><p>Napiši koju fazu, gate ili failure politiku treba promijeniti.</p></div>
+    </div>
+  </div>
+</div>
