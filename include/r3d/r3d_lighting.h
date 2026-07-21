@@ -102,6 +102,13 @@ R3DAPI void R3D_DestroyLight(R3D_Light id);
 R3DAPI bool R3D_IsLightValid(R3D_Light id);
 
 /**
+ * @brief Compatibility alias for R3D_IsLightValid.
+ *
+ * @deprecated Use R3D_IsLightValid instead.
+ */
+R3DAPI bool R3D_IsLightExist(R3D_Light id);
+
+/**
  * @brief Gets the type of a light.
  *
  * This function returns the type of the specified light (directional, spot or omni-directional).
@@ -143,6 +150,13 @@ R3DAPI void R3D_EnableLight(R3D_Light id);
  * @param id The ID of the light to disable.
  */
 R3DAPI void R3D_DisableLight(R3D_Light id);
+
+/**
+ * @brief Compatibility setter for a light's enabled state.
+ *
+ * @deprecated Use R3D_EnableLight or R3D_DisableLight instead.
+ */
+R3DAPI void R3D_SetLightActive(R3D_Light id, bool active);
 
 /**
  * @brief Gets the color of a light in sRGB space.
@@ -273,6 +287,13 @@ R3DAPI void R3D_SetLightDirection(R3D_Light id, Vector3 direction);
  * @param target The point the light should look at.
  */
 R3DAPI void R3D_SetLightTarget(R3D_Light id, Vector3 position, Vector3 target);
+
+/**
+ * @brief Compatibility alias for R3D_SetLightTarget.
+ *
+ * @deprecated Use R3D_SetLightTarget instead.
+ */
+R3DAPI void R3D_LightLookAt(R3D_Light id, Vector3 position, Vector3 target);
 
 /**
  * @brief Gets the energy level of a light.

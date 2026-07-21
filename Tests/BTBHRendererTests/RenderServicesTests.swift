@@ -6,11 +6,15 @@ import BTBHRenderer
 final class RenderServicesTests: XCTestCase {
     override func setUp() {
         super.setUp()
-        RenderServices.uninstall()
+        MainActor.assumeIsolated {
+            RenderServices.uninstall()
+        }
     }
 
     override func tearDown() {
-        RenderServices.uninstall()
+        MainActor.assumeIsolated {
+            RenderServices.uninstall()
+        }
         super.tearDown()
     }
 

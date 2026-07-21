@@ -53,6 +53,11 @@ bool R3D_IsLightValid(R3D_Light id)
     return r3d_light_is_valid(id);
 }
 
+bool R3D_IsLightExist(R3D_Light id)
+{
+    return R3D_IsLightValid(id);
+}
+
 R3D_LightType R3D_GetLightType(R3D_Light id)
 {
     GET_LIGHT_OR_RETURN(light, id, 0);
@@ -91,6 +96,15 @@ void R3D_DisableLight(R3D_Light id)
     GET_LIGHT_OR_RETURN(light, id);
     if (!light->enabled) return;
     light->enabled = false;
+}
+
+void R3D_SetLightActive(R3D_Light id, bool active)
+{
+    if (active) {
+        R3D_EnableLight(id);
+    } else {
+        R3D_DisableLight(id);
+    }
 }
 
 Color R3D_GetLightColor(R3D_Light id)
@@ -171,6 +185,11 @@ void R3D_SetLightTarget(R3D_Light id, Vector3 position, Vector3 target)
     }
     light->state.matrixShouldBeUpdated = true;
     light->position = position;
+}
+
+void R3D_LightLookAt(R3D_Light id, Vector3 position, Vector3 target)
+{
+    R3D_SetLightTarget(id, position, target);
 }
 
 float R3D_GetLightEnergy(R3D_Light id)
