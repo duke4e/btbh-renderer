@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 import BTBHRenderer
 
-@MainActor
+@preconcurrency @MainActor
 final class RenderServicesTests: XCTestCase {
     override func setUp() {
         super.setUp()

@@ -1,7 +1,7 @@
 import BTBHRenderer
 import XCTest
 
-@MainActor
+@preconcurrency @MainActor
 final class PlatformContractTests: XCTestCase {
     func testWindowDescriptorCarriesEveryFrameRatePolicy() {
         let policies: [FrameRatePolicy] = [
