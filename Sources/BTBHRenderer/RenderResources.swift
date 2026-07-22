@@ -129,37 +129,37 @@ public enum MaterialBlendMode: UInt8, Hashable, Sendable {
 }
 
 public struct MaterialDescriptor: Hashable, Sendable {
-    public let albedoTexture: TextureHandle
-    public let albedoColor: RenderColor
-    public let emissionTexture: TextureHandle
-    public let emissionColor: RenderColor
-    public let emissionEnergy: Float
-    public let normalTexture: TextureHandle
-    public let normalScale: Float
-    public let ormTexture: TextureHandle
-    public let occlusion: Float
-    public let roughness: Float
-    public let metalness: Float
-    public let uvOffset: RenderVec2
-    public let uvScale: RenderVec2
-    public let alphaCutoff: Float
-    public let depthCompare: CompareFunction
-    public let depthOffsetFactor: Float
-    public let depthOffsetUnits: Float
-    public let depthRangeNear: Float
-    public let depthRangeFar: Float
-    public let stencilCompare: CompareFunction
-    public let stencilReference: UInt8
-    public let stencilMask: UInt8
-    public let stencilFail: StencilOperation
-    public let stencilDepthFail: StencilOperation
-    public let stencilPass: StencilOperation
-    public let cullMode: CullMode
-    public let transparency: TransparencyMode
-    public let billboard: BillboardMode
-    public let blend: MaterialBlendMode
-    public let unlit: Bool
-    public let surfaceShader: SurfaceShaderHandle
+    public var albedoTexture: TextureHandle
+    public var albedoColor: RenderColor
+    public var emissionTexture: TextureHandle
+    public var emissionColor: RenderColor
+    public var emissionEnergy: Float
+    public var normalTexture: TextureHandle
+    public var normalScale: Float
+    public var ormTexture: TextureHandle
+    public var occlusion: Float
+    public var roughness: Float
+    public var metalness: Float
+    public var uvOffset: RenderVec2
+    public var uvScale: RenderVec2
+    public var alphaCutoff: Float
+    public var depthCompare: CompareFunction
+    public var depthOffsetFactor: Float
+    public var depthOffsetUnits: Float
+    public var depthRangeNear: Float
+    public var depthRangeFar: Float
+    public var stencilCompare: CompareFunction
+    public var stencilReference: UInt8
+    public var stencilMask: UInt8
+    public var stencilFail: StencilOperation
+    public var stencilDepthFail: StencilOperation
+    public var stencilPass: StencilOperation
+    public var cullMode: CullMode
+    public var transparency: TransparencyMode
+    public var billboard: BillboardMode
+    public var blend: MaterialBlendMode
+    public var unlit: Bool
+    public var surfaceShader: SurfaceShaderHandle
 
     public init(
         albedoTexture: TextureHandle,
@@ -226,6 +226,30 @@ public struct MaterialDescriptor: Hashable, Sendable {
         self.unlit = unlit
         self.surfaceShader = surfaceShader
     }
+
+    public static let `default` = Self(
+        albedoTexture: .invalid,
+        albedoColor: .white,
+        emissionTexture: .invalid,
+        emissionColor: .white,
+        emissionEnergy: 0,
+        normalTexture: .invalid,
+        normalScale: 1,
+        ormTexture: .invalid,
+        occlusion: 1,
+        roughness: 1,
+        metalness: 0,
+        uvOffset: .zero,
+        uvScale: .init(x: 1, y: 1),
+        alphaCutoff: 0.01,
+        depthCompare: .less,
+        cullMode: .back,
+        transparency: .disabled,
+        billboard: .disabled,
+        blend: .mix,
+        unlit: false,
+        surfaceShader: .invalid
+    )
 }
 
 public struct InstanceBufferDescriptor: Sendable {

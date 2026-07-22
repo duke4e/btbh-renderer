@@ -531,6 +531,25 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertTrue(materialDescriptor.unlit)
         XCTAssertEqual(materialDescriptor.surfaceShader, surfaceShader)
 
+        var defaultMaterial = MaterialDescriptor.default
+        XCTAssertEqual(defaultMaterial.albedoColor, .white)
+        XCTAssertEqual(defaultMaterial.emissionColor, .white)
+        XCTAssertEqual(defaultMaterial.normalScale, 1)
+        XCTAssertEqual(defaultMaterial.occlusion, 1)
+        XCTAssertEqual(defaultMaterial.roughness, 1)
+        XCTAssertEqual(defaultMaterial.metalness, 0)
+        XCTAssertEqual(defaultMaterial.uvScale, RenderVec2(x: 1, y: 1))
+        XCTAssertEqual(defaultMaterial.alphaCutoff, 0.01)
+        XCTAssertEqual(defaultMaterial.depthCompare, .less)
+        XCTAssertEqual(defaultMaterial.stencilCompare, .always)
+        XCTAssertEqual(defaultMaterial.stencilMask, 0xFF)
+        XCTAssertEqual(defaultMaterial.stencilPass, .replace)
+        XCTAssertEqual(defaultMaterial.cullMode, .back)
+        defaultMaterial.albedoColor = .black
+        defaultMaterial.stencilReference = 1
+        XCTAssertEqual(defaultMaterial.albedoColor, .black)
+        XCTAssertEqual(defaultMaterial.stencilReference, 1)
+
         let instanceBuffer = InstanceBufferDescriptor(
             capacity: 100, stride: 64, includesColor: true, customFloatCount: 4
         )
