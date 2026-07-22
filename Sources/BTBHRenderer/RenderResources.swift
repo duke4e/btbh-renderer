@@ -490,10 +490,69 @@ public struct ScreenShaderDescriptor: Sendable {
 public struct ProceduralSkyDescriptor: Sendable {
     public let color: RenderColor
     public let resolution: Int
+    public let groundBottomColor: RenderColor
+    public let groundEnergy: Float
+    public let groundHorizonColor: RenderColor
+    public let groundHorizonCurve: Float
+    public let skyEnergy: Float
+    public let skyHorizonColor: RenderColor
+    public let skyHorizonCurve: Float
+    public let skyTopColor: RenderColor
+    public let sunColor: RenderColor
+    public let sunCurve: Float
+    public let sunDirection: RenderVec3
+    public let sunEnergy: Float
+    public let sunSizeRadians: Float
 
     public init(color: RenderColor, resolution: Int) {
         self.color = color
         self.resolution = resolution
+        groundBottomColor = color
+        groundEnergy = 1
+        groundHorizonColor = color
+        groundHorizonCurve = 0.02
+        skyEnergy = 1
+        skyHorizonColor = color
+        skyHorizonCurve = 0.15
+        skyTopColor = color
+        sunColor = color
+        sunCurve = 0.15
+        sunDirection = RenderVec3(x: 0, y: -1, z: 0)
+        sunEnergy = 0
+        sunSizeRadians = 0
+    }
+
+    public init(
+        resolution: Int,
+        groundBottomColor: RenderColor,
+        groundEnergy: Float,
+        groundHorizonColor: RenderColor,
+        groundHorizonCurve: Float,
+        skyEnergy: Float,
+        skyHorizonColor: RenderColor,
+        skyHorizonCurve: Float,
+        skyTopColor: RenderColor,
+        sunColor: RenderColor,
+        sunCurve: Float,
+        sunDirection: RenderVec3,
+        sunEnergy: Float,
+        sunSizeRadians: Float
+    ) {
+        color = skyTopColor
+        self.resolution = resolution
+        self.groundBottomColor = groundBottomColor
+        self.groundEnergy = groundEnergy
+        self.groundHorizonColor = groundHorizonColor
+        self.groundHorizonCurve = groundHorizonCurve
+        self.skyEnergy = skyEnergy
+        self.skyHorizonColor = skyHorizonColor
+        self.skyHorizonCurve = skyHorizonCurve
+        self.skyTopColor = skyTopColor
+        self.sunColor = sunColor
+        self.sunCurve = sunCurve
+        self.sunDirection = sunDirection
+        self.sunEnergy = sunEnergy
+        self.sunSizeRadians = sunSizeRadians
     }
 }
 

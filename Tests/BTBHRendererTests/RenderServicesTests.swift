@@ -650,6 +650,50 @@ final class RenderServicesTests: XCTestCase {
         let sky = ProceduralSkyDescriptor(color: .white, resolution: 256)
         XCTAssertEqual(sky.color, .white)
         XCTAssertEqual(sky.resolution, 256)
+        XCTAssertEqual(sky.groundBottomColor, .white)
+        XCTAssertEqual(sky.groundEnergy, 1)
+        XCTAssertEqual(sky.groundHorizonColor, .white)
+        XCTAssertEqual(sky.groundHorizonCurve, 0.02)
+        XCTAssertEqual(sky.skyEnergy, 1)
+        XCTAssertEqual(sky.skyHorizonColor, .white)
+        XCTAssertEqual(sky.skyHorizonCurve, 0.15)
+        XCTAssertEqual(sky.skyTopColor, .white)
+        XCTAssertEqual(sky.sunColor, .white)
+        XCTAssertEqual(sky.sunCurve, 0.15)
+        XCTAssertEqual(sky.sunDirection, RenderVec3(x: 0, y: -1, z: 0))
+        XCTAssertEqual(sky.sunEnergy, 0)
+        XCTAssertEqual(sky.sunSizeRadians, 0)
+
+        let detailedSky = ProceduralSkyDescriptor(
+            resolution: 32,
+            groundBottomColor: .black,
+            groundEnergy: 0.7,
+            groundHorizonColor: .clear,
+            groundHorizonCurve: 0.03,
+            skyEnergy: 1.2,
+            skyHorizonColor: .white,
+            skyHorizonCurve: 0.2,
+            skyTopColor: .black,
+            sunColor: .white,
+            sunCurve: 0.1,
+            sunDirection: RenderVec3(x: -1, y: -1, z: -1),
+            sunEnergy: 2,
+            sunSizeRadians: 0.02
+        )
+        XCTAssertEqual(detailedSky.resolution, 32)
+        XCTAssertEqual(detailedSky.groundBottomColor, .black)
+        XCTAssertEqual(detailedSky.groundEnergy, 0.7)
+        XCTAssertEqual(detailedSky.groundHorizonColor, .clear)
+        XCTAssertEqual(detailedSky.groundHorizonCurve, 0.03)
+        XCTAssertEqual(detailedSky.skyEnergy, 1.2)
+        XCTAssertEqual(detailedSky.skyHorizonColor, .white)
+        XCTAssertEqual(detailedSky.skyHorizonCurve, 0.2)
+        XCTAssertEqual(detailedSky.skyTopColor, .black)
+        XCTAssertEqual(detailedSky.sunColor, .white)
+        XCTAssertEqual(detailedSky.sunCurve, 0.1)
+        XCTAssertEqual(detailedSky.sunDirection, RenderVec3(x: -1, y: -1, z: -1))
+        XCTAssertEqual(detailedSky.sunEnergy, 2)
+        XCTAssertEqual(detailedSky.sunSizeRadians, 0.02)
 
         let postChain = PostChainDescriptor(
             screenShaders: [screenShader], casSharpness: 0.8, tiltShiftEnabled: true
