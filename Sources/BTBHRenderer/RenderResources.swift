@@ -278,15 +278,75 @@ public struct AnimationPlayerDescriptor: Sendable {
     }
 }
 
+public struct AnimationClipDescriptor: Hashable, Sendable {
+    public let name: String
+    public let animationIndex: Int
+    public let loop: Bool
+    public let speed: Float
+
+    public init(name: String, animationIndex: Int, loop: Bool, speed: Float) {
+        self.name = name
+        self.animationIndex = animationIndex
+        self.loop = loop
+        self.speed = speed
+    }
+}
+
+public struct AnimationSwitchDescriptor: Hashable, Sendable {
+    public let name: String
+    public let inputs: [String]
+    public let activeInput: Int
+    public let crossfadeSeconds: Float
+    public let synchronized: Bool
+
+    public init(
+        name: String,
+        inputs: [String],
+        activeInput: Int,
+        crossfadeSeconds: Float,
+        synchronized: Bool
+    ) {
+        self.name = name
+        self.inputs = inputs
+        self.activeInput = activeInput
+        self.crossfadeSeconds = crossfadeSeconds
+        self.synchronized = synchronized
+    }
+}
+
 public struct AnimationTreeDescriptor: Sendable {
     public let model: ModelHandle
     public let library: AnimationLibraryHandle
-    public let rootAnimation: String
+    public let clips: [AnimationClipDescriptor]
+    public let switches: [AnimationSwitchDescriptor]
+    public let rootNode: String
+    public let rootBone: Int?
+
+    public var rootAnimation: String { rootNode }
+
+    public init(
+        model: ModelHandle,
+        library: AnimationLibraryHandle,
+        clips: [AnimationClipDescriptor],
+        switches: [AnimationSwitchDescriptor],
+        rootNode: String,
+        rootBone: Int?
+    ) {
+        self.model = model
+        self.library = library
+        self.clips = clips
+        self.switches = switches
+        self.rootNode = rootNode
+        self.rootBone = rootBone
+    }
 
     public init(model: ModelHandle, library: AnimationLibraryHandle, rootAnimation: String) {
         self.model = model
         self.library = library
-        self.rootAnimation = rootAnimation
+        clips = []
+        switches = []
+        rootNode = rootAnimation
+        rootBone = nil
     }
 }
 

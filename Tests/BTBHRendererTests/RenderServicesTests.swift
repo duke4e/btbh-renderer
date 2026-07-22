@@ -566,11 +566,32 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(animationPlayer.initialAnimation, "idle")
 
         let animationTree = AnimationTreeDescriptor(
-            model: model, library: library, rootAnimation: "root"
+            model: model,
+            library: library,
+            clips: [
+                .init(name: "idle", animationIndex: 17, loop: true, speed: 1),
+                .init(name: "walk", animationIndex: 24, loop: true, speed: 0.5),
+            ],
+            switches: [
+                .init(
+                    name: "root",
+                    inputs: ["idle", "walk"],
+                    activeInput: 0,
+                    crossfadeSeconds: 0.24,
+                    synchronized: false
+                ),
+            ],
+            rootNode: "root",
+            rootBone: nil
         )
         XCTAssertEqual(animationTree.model, model)
         XCTAssertEqual(animationTree.library, library)
-        XCTAssertEqual(animationTree.rootAnimation, "root")
+        XCTAssertEqual(animationTree.clips.map(\.name), ["idle", "walk"])
+        XCTAssertEqual(animationTree.clips.map(\.animationIndex), [17, 24])
+        XCTAssertEqual(animationTree.switches.first?.inputs, ["idle", "walk"])
+        XCTAssertEqual(animationTree.switches.first?.crossfadeSeconds, 0.24)
+        XCTAssertEqual(animationTree.rootNode, "root")
+        XCTAssertNil(animationTree.rootBone)
 
         let light = LightDescriptor(
             kind: .directional, active: true, position: .zero, direction: .up,
