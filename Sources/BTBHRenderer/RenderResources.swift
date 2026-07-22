@@ -116,6 +116,30 @@ public struct ModelMetadata: Hashable, Sendable {
     }
 }
 
+/// Backend-neutral vertex payload consumed by `RenderResourceBackend` mesh APIs.
+/// Index buffers use 32-bit unsigned indices.
+public struct RenderVertex: Hashable, Sendable {
+    public var position: RenderVec3
+    public var textureCoordinate: RenderVec2
+    public var normal: RenderVec3
+    public var tangent: RenderVec4
+    public var color: RenderColor
+
+    public init(
+        position: RenderVec3,
+        textureCoordinate: RenderVec2,
+        normal: RenderVec3,
+        tangent: RenderVec4,
+        color: RenderColor
+    ) {
+        self.position = position
+        self.textureCoordinate = textureCoordinate
+        self.normal = normal
+        self.tangent = tangent
+        self.color = color
+    }
+}
+
 public enum CompareFunction: UInt8, Hashable, Sendable {
     case always = 0
     case lessEqual = 1
@@ -627,6 +651,36 @@ public protocol RenderResourceBackend: AnyObject {
 }
 
 public extension RenderResourceBackend {
+    func createMesh(
+        _ descriptor: MeshDescriptor,
+        vertices: [RenderVertex],
+        indices: [UInt32]? = nil
+    ) throws -> MeshHandle {
+        try vertices.withUnsafeBytes { vertexBytes in
+            guard let indices else {
+                return try createMesh(descriptor, vertices: vertexBytes, indices: nil)
+            }
+            return try indices.withUnsafeBytes { indexBytes in
+                try createMesh(descriptor, vertices: vertexBytes, indices: indexBytes)
+            }
+        }
+    }
+
+    func updateMesh(
+        _ handle: MeshHandle,
+        vertices: [RenderVertex],
+        indices: [UInt32]? = nil
+    ) throws {
+        try vertices.withUnsafeBytes { vertexBytes in
+            guard let indices else {
+                return try updateMesh(handle, vertices: vertexBytes, indices: nil)
+            }
+            try indices.withUnsafeBytes { indexBytes in
+                try updateMesh(handle, vertices: vertexBytes, indices: indexBytes)
+            }
+        }
+    }
+
     func modelBounds(_ handle: ModelHandle) throws -> RenderBounds3 {
         try modelMetadata(handle).bounds
     }

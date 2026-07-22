@@ -472,6 +472,19 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(mesh.indexCount, 6)
         XCTAssertEqual(mesh.bounds, bounds)
 
+        let vertex = RenderVertex(
+            position: .init(x: 1, y: 2, z: 3),
+            textureCoordinate: .init(x: 0.25, y: 0.75),
+            normal: .up,
+            tangent: .init(x: 1, y: 0, z: 0, w: 1),
+            color: .init(r: 10, g: 20, b: 30, a: 40)
+        )
+        XCTAssertEqual(vertex.position, .init(x: 1, y: 2, z: 3))
+        XCTAssertEqual(vertex.textureCoordinate, .init(x: 0.25, y: 0.75))
+        XCTAssertEqual(vertex.normal, .up)
+        XCTAssertEqual(vertex.tangent, .init(x: 1, y: 0, z: 0, w: 1))
+        XCTAssertEqual(vertex.color, .init(r: 10, g: 20, b: 30, a: 40))
+
         let importFlags: ModelImportFlags = [.meshData, .highQuality]
         XCTAssertEqual(
             importFlags.rawValue,
