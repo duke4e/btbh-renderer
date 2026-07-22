@@ -174,6 +174,7 @@ final class RenderServicesTests: XCTestCase {
         assertUnexpectedCall("createRenderTarget(_:)") { try recording.createRenderTarget(targetDescriptor) }
         assertUnexpectedCall("colorTexture(of:)") { try recording.colorTexture(of: .invalid) }
         assertUnexpectedCall("loadModel(path:flags:)") { try recording.loadModel(path: "model", flags: []) }
+        assertUnexpectedCall("modelBounds(_:)") { try recording.modelBounds(.invalid) }
         assertUnexpectedCall("createMesh(_:vertices:indices:)") {
             try recording.createMesh(meshDescriptor, vertices: emptyBytes, indices: nil)
         }

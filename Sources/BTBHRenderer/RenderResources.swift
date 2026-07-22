@@ -387,6 +387,7 @@ public protocol RenderResourceBackend: AnyObject {
     func colorTexture(of target: RenderTargetHandle) throws -> TextureHandle
     func destroyRenderTarget(_ handle: RenderTargetHandle)
     func loadModel(path: String, flags: ModelImportFlags) throws -> ModelHandle
+    func modelBounds(_ handle: ModelHandle) throws -> RenderBounds3
     func destroyModel(_ handle: ModelHandle)
     func createMesh(_ descriptor: MeshDescriptor, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws -> MeshHandle
     func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws
