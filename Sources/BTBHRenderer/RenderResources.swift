@@ -98,7 +98,18 @@ public struct ModelImportFlags: OptionSet, Sendable {
 }
 
 public enum CompareFunction: UInt8, Hashable, Sendable {
-    case always, lessEqual, greater, notEqual
+    case always = 0
+    case lessEqual = 1
+    case greater = 2
+    case notEqual = 3
+    case less = 4
+    case equal = 5
+    case greaterEqual = 6
+    case never = 7
+}
+
+public enum StencilOperation: UInt8, Hashable, Sendable {
+    case keep, zero, replace, incrementClamp, decrementClamp
 }
 
 public enum CullMode: UInt8, Hashable, Sendable {
@@ -133,6 +144,16 @@ public struct MaterialDescriptor: Hashable, Sendable {
     public let uvScale: RenderVec2
     public let alphaCutoff: Float
     public let depthCompare: CompareFunction
+    public let depthOffsetFactor: Float
+    public let depthOffsetUnits: Float
+    public let depthRangeNear: Float
+    public let depthRangeFar: Float
+    public let stencilCompare: CompareFunction
+    public let stencilReference: UInt8
+    public let stencilMask: UInt8
+    public let stencilFail: StencilOperation
+    public let stencilDepthFail: StencilOperation
+    public let stencilPass: StencilOperation
     public let cullMode: CullMode
     public let transparency: TransparencyMode
     public let billboard: BillboardMode
@@ -156,6 +177,16 @@ public struct MaterialDescriptor: Hashable, Sendable {
         uvScale: RenderVec2,
         alphaCutoff: Float,
         depthCompare: CompareFunction,
+        depthOffsetFactor: Float = 0,
+        depthOffsetUnits: Float = 0,
+        depthRangeNear: Float = 0,
+        depthRangeFar: Float = 1,
+        stencilCompare: CompareFunction = .always,
+        stencilReference: UInt8 = 0,
+        stencilMask: UInt8 = 0xFF,
+        stencilFail: StencilOperation = .keep,
+        stencilDepthFail: StencilOperation = .keep,
+        stencilPass: StencilOperation = .replace,
         cullMode: CullMode,
         transparency: TransparencyMode,
         billboard: BillboardMode,
@@ -178,6 +209,16 @@ public struct MaterialDescriptor: Hashable, Sendable {
         self.uvScale = uvScale
         self.alphaCutoff = alphaCutoff
         self.depthCompare = depthCompare
+        self.depthOffsetFactor = depthOffsetFactor
+        self.depthOffsetUnits = depthOffsetUnits
+        self.depthRangeNear = depthRangeNear
+        self.depthRangeFar = depthRangeFar
+        self.stencilCompare = stencilCompare
+        self.stencilReference = stencilReference
+        self.stencilMask = stencilMask
+        self.stencilFail = stencilFail
+        self.stencilDepthFail = stencilDepthFail
+        self.stencilPass = stencilPass
         self.cullMode = cullMode
         self.transparency = transparency
         self.billboard = billboard

@@ -484,7 +484,18 @@ final class RenderServicesTests: XCTestCase {
             normalTexture: normalTexture, normalScale: 1,
             ormTexture: ormTexture, occlusion: 0.75, roughness: 0.5, metalness: 0.25,
             uvOffset: .left, uvScale: .right, alphaCutoff: 0.125,
-            depthCompare: .lessEqual, cullMode: .back,
+            depthCompare: .lessEqual,
+            depthOffsetFactor: 1.5,
+            depthOffsetUnits: -2,
+            depthRangeNear: 0.1,
+            depthRangeFar: 0.9,
+            stencilCompare: .notEqual,
+            stencilReference: 7,
+            stencilMask: 0xF0,
+            stencilFail: .zero,
+            stencilDepthFail: .incrementClamp,
+            stencilPass: .replace,
+            cullMode: .back,
             transparency: .alpha, billboard: .yAxis, blend: .mix,
             unlit: true, surfaceShader: surfaceShader
         )
@@ -503,6 +514,16 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(materialDescriptor.uvScale, .right)
         XCTAssertEqual(materialDescriptor.alphaCutoff, 0.125)
         XCTAssertEqual(materialDescriptor.depthCompare, .lessEqual)
+        XCTAssertEqual(materialDescriptor.depthOffsetFactor, 1.5)
+        XCTAssertEqual(materialDescriptor.depthOffsetUnits, -2)
+        XCTAssertEqual(materialDescriptor.depthRangeNear, 0.1)
+        XCTAssertEqual(materialDescriptor.depthRangeFar, 0.9)
+        XCTAssertEqual(materialDescriptor.stencilCompare, .notEqual)
+        XCTAssertEqual(materialDescriptor.stencilReference, 7)
+        XCTAssertEqual(materialDescriptor.stencilMask, 0xF0)
+        XCTAssertEqual(materialDescriptor.stencilFail, .zero)
+        XCTAssertEqual(materialDescriptor.stencilDepthFail, .incrementClamp)
+        XCTAssertEqual(materialDescriptor.stencilPass, .replace)
         XCTAssertEqual(materialDescriptor.cullMode, .back)
         XCTAssertEqual(materialDescriptor.transparency, .alpha)
         XCTAssertEqual(materialDescriptor.billboard, .yAxis)
