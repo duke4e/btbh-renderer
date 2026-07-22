@@ -174,7 +174,7 @@ final class RenderServicesTests: XCTestCase {
         assertUnexpectedCall("createRenderTarget(_:)") { try recording.createRenderTarget(targetDescriptor) }
         assertUnexpectedCall("colorTexture(of:)") { try recording.colorTexture(of: .invalid) }
         assertUnexpectedCall("loadModel(path:flags:)") { try recording.loadModel(path: "model", flags: []) }
-        assertUnexpectedCall("modelBounds(_:)") { try recording.modelBounds(.invalid) }
+        assertUnexpectedCall("modelMetadata(_:)") { try recording.modelMetadata(.invalid) }
         assertUnexpectedCall("createMesh(_:vertices:indices:)") {
             try recording.createMesh(meshDescriptor, vertices: emptyBytes, indices: nil)
         }
@@ -477,6 +477,17 @@ final class RenderServicesTests: XCTestCase {
             importFlags.rawValue,
             ModelImportFlags.meshData.rawValue | ModelImportFlags.highQuality.rawValue
         )
+
+        let modelMetadata = ModelMetadata(
+            bounds: bounds,
+            meshCount: 3,
+            materialCount: 2,
+            meshMaterialSlots: [0, 1, 1]
+        )
+        XCTAssertEqual(modelMetadata.bounds, bounds)
+        XCTAssertEqual(modelMetadata.meshCount, 3)
+        XCTAssertEqual(modelMetadata.materialCount, 2)
+        XCTAssertEqual(modelMetadata.meshMaterialSlots, [0, 1, 1])
 
         let materialDescriptor = MaterialDescriptor(
             albedoTexture: albedoTexture, albedoColor: .white,

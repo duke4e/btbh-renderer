@@ -97,6 +97,25 @@ public struct ModelImportFlags: OptionSet, Sendable {
     public static let highQuality = Self(rawValue: 1 << 1)
 }
 
+public struct ModelMetadata: Hashable, Sendable {
+    public let bounds: RenderBounds3
+    public let meshCount: Int
+    public let materialCount: Int
+    public let meshMaterialSlots: [Int]
+
+    public init(
+        bounds: RenderBounds3,
+        meshCount: Int,
+        materialCount: Int,
+        meshMaterialSlots: [Int]
+    ) {
+        self.bounds = bounds
+        self.meshCount = meshCount
+        self.materialCount = materialCount
+        self.meshMaterialSlots = meshMaterialSlots
+    }
+}
+
 public enum CompareFunction: UInt8, Hashable, Sendable {
     case always = 0
     case lessEqual = 1
@@ -512,7 +531,7 @@ public protocol RenderResourceBackend: AnyObject {
     func colorTexture(of target: RenderTargetHandle) throws -> TextureHandle
     func destroyRenderTarget(_ handle: RenderTargetHandle)
     func loadModel(path: String, flags: ModelImportFlags) throws -> ModelHandle
-    func modelBounds(_ handle: ModelHandle) throws -> RenderBounds3
+    func modelMetadata(_ handle: ModelHandle) throws -> ModelMetadata
     func destroyModel(_ handle: ModelHandle)
     func createMesh(_ descriptor: MeshDescriptor, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws -> MeshHandle
     func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws
@@ -546,4 +565,10 @@ public protocol RenderResourceBackend: AnyObject {
     func createScreenShader(_ descriptor: ScreenShaderDescriptor) throws -> ScreenShaderHandle
     func updateScreenShader(_ handle: ScreenShaderHandle, parameter: String, value: ShaderParameterValue) throws
     func destroyScreenShader(_ handle: ScreenShaderHandle)
+}
+
+public extension RenderResourceBackend {
+    func modelBounds(_ handle: ModelHandle) throws -> RenderBounds3 {
+        try modelMetadata(handle).bounds
+    }
 }
