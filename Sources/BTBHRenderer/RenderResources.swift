@@ -314,6 +314,44 @@ public struct MaterialDescriptor: Hashable, Sendable {
     )
 }
 
+/// Backend-neutral edits applied to a material copied from a model slot.
+///
+/// Unspecified fields preserve the imported material. The returned material
+/// remains an independently managed `MaterialHandle`.
+public struct ModelMaterialPatch: Hashable, Sendable {
+    public var albedoColor: RenderColor?
+    public var clearEmissionTexture: Bool
+    public var emissionColor: RenderColor?
+    public var emissionEnergy: Float?
+    public var minimumEmissionEnergy: Float?
+    public var stencilReference: UInt8?
+    public var surfaceShader: SurfaceShaderHandle?
+
+    public init(
+        albedoColor: RenderColor? = nil,
+        clearEmissionTexture: Bool = false,
+        emissionColor: RenderColor? = nil,
+        emissionEnergy: Float? = nil,
+        minimumEmissionEnergy: Float? = nil,
+        stencilReference: UInt8? = nil,
+        surfaceShader: SurfaceShaderHandle? = nil
+    ) {
+        self.albedoColor = albedoColor
+        self.clearEmissionTexture = clearEmissionTexture
+        self.emissionColor = emissionColor
+        self.emissionEnergy = emissionEnergy
+        self.minimumEmissionEnergy = minimumEmissionEnergy
+        self.stencilReference = stencilReference
+        self.surfaceShader = surfaceShader
+    }
+
+    public static let identity = Self()
+}
+
+public enum RenderResourceBackendError: Error, Equatable, Sendable {
+    case unsupportedOperation(String)
+}
+
 public struct InstanceBufferDescriptor: Sendable {
     public let capacity: Int
     public let stride: Int
@@ -639,6 +677,11 @@ public protocol RenderResourceBackend: AnyObject {
     func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws
     func destroyMesh(_ handle: MeshHandle)
     func createMaterial(_ descriptor: MaterialDescriptor) throws -> MaterialHandle
+    func createMaterialOverride(
+        from model: ModelHandle,
+        materialIndex: Int,
+        patch: ModelMaterialPatch
+    ) throws -> MaterialHandle
     func updateMaterial(_ handle: MaterialHandle, descriptor: MaterialDescriptor) throws
     func destroyMaterial(_ handle: MaterialHandle)
     func createInstanceBuffer(_ descriptor: InstanceBufferDescriptor) throws -> InstanceBufferHandle
@@ -670,6 +713,19 @@ public protocol RenderResourceBackend: AnyObject {
 }
 
 public extension RenderResourceBackend {
+    func createMaterialOverride(
+        from model: ModelHandle,
+        materialIndex: Int,
+        patch: ModelMaterialPatch
+    ) throws -> MaterialHandle {
+        _ = model
+        _ = materialIndex
+        _ = patch
+        throw RenderResourceBackendError.unsupportedOperation(
+            "This backend cannot derive a material override from an imported model"
+        )
+    }
+
     func loadTexture(path: String) throws -> TextureHandle {
         try loadTexture(.init(path: path))
     }

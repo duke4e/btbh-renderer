@@ -587,6 +587,23 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(defaultMaterial.albedoColor, .black)
         XCTAssertEqual(defaultMaterial.stencilReference, 1)
 
+        let modelMaterialPatch = ModelMaterialPatch(
+            albedoColor: .black,
+            clearEmissionTexture: true,
+            emissionColor: .white,
+            emissionEnergy: 0.35,
+            minimumEmissionEnergy: 0.2,
+            stencilReference: 1,
+            surfaceShader: surfaceShader
+        )
+        XCTAssertEqual(modelMaterialPatch.albedoColor, .black)
+        XCTAssertTrue(modelMaterialPatch.clearEmissionTexture)
+        XCTAssertEqual(modelMaterialPatch.emissionColor, .white)
+        XCTAssertEqual(modelMaterialPatch.emissionEnergy, 0.35)
+        XCTAssertEqual(modelMaterialPatch.minimumEmissionEnergy, 0.2)
+        XCTAssertEqual(modelMaterialPatch.stencilReference, 1)
+        XCTAssertEqual(modelMaterialPatch.surfaceShader, surfaceShader)
+
         let instanceBuffer = InstanceBufferDescriptor(
             capacity: 100, stride: 64, includesColor: true, customFloatCount: 4
         )
