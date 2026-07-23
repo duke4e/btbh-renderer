@@ -138,6 +138,7 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     func createAnimationTree(_ descriptor: AnimationTreeDescriptor) throws -> AnimationTreeHandle { throw unexpected() }
     func updateAnimationTree(_ handle: AnimationTreeHandle, deltaSeconds: Float) throws { throw unexpected() }
     func setAnimationTreeParameter(_ handle: AnimationTreeHandle, name: String, value: Float) throws { throw unexpected() }
+    func animationTreeParameter(_ handle: AnimationTreeHandle, name: String) throws -> Float { throw unexpected() }
     func destroyAnimationTree(_ handle: AnimationTreeHandle) {}
     func createLight(_ descriptor: LightDescriptor) throws -> LightHandle { throw unexpected() }
     func updateLight(_ handle: LightHandle, descriptor: LightDescriptor) throws { throw unexpected() }

@@ -206,6 +206,9 @@ final class RenderServicesTests: XCTestCase {
         assertUnexpectedCall("setAnimationTreeParameter(_:name:value:)") {
             try recording.setAnimationTreeParameter(.invalid, name: "speed", value: 0)
         }
+        assertUnexpectedCall("animationTreeParameter(_:name:)") {
+            try recording.animationTreeParameter(.invalid, name: "clip.idle.time")
+        }
         assertUnexpectedCall("createLight(_:)") { try recording.createLight(lightDescriptor) }
         assertUnexpectedCall("updateLight(_:descriptor:)") {
             try recording.updateLight(.invalid, descriptor: lightDescriptor)

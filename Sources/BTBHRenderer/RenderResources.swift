@@ -696,6 +696,7 @@ public protocol RenderResourceBackend: AnyObject {
     func createAnimationTree(_ descriptor: AnimationTreeDescriptor) throws -> AnimationTreeHandle
     func updateAnimationTree(_ handle: AnimationTreeHandle, deltaSeconds: Float) throws
     func setAnimationTreeParameter(_ handle: AnimationTreeHandle, name: String, value: Float) throws
+    func animationTreeParameter(_ handle: AnimationTreeHandle, name: String) throws -> Float
     func destroyAnimationTree(_ handle: AnimationTreeHandle)
     func createLight(_ descriptor: LightDescriptor) throws -> LightHandle
     func updateLight(_ handle: LightHandle, descriptor: LightDescriptor) throws
@@ -713,6 +714,17 @@ public protocol RenderResourceBackend: AnyObject {
 }
 
 public extension RenderResourceBackend {
+    func animationTreeParameter(
+        _ handle: AnimationTreeHandle,
+        name: String
+    ) throws -> Float {
+        _ = handle
+        _ = name
+        throw RenderResourceBackendError.unsupportedOperation(
+            "This backend cannot query animation-tree parameters"
+        )
+    }
+
     func createMaterialOverride(
         from model: ModelHandle,
         materialIndex: Int,
