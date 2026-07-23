@@ -752,6 +752,7 @@ final class RenderServicesTests: XCTestCase {
         let tree = AnimationTreeHandle(rawValue: 10)
         let transform = RenderTransform(matrix: .identity)
         let custom = RenderVec4(x: 1, y: 2, z: 3, w: 4)
+        let zeroCustom = RenderVec4(x: 0, y: 0, z: 0, w: 0)
         let instance = RenderInstance(transform: transform, color: .white, custom: custom)
         let override = MaterialOverride(slot: 2, material: material)
 
@@ -814,6 +815,45 @@ final class RenderServicesTests: XCTestCase {
         }
         XCTAssertEqual(submittedStreams.sourceStart, 1)
         XCTAssertEqual(submittedStreams.count, 1)
+
+        let modelTransformStreams = ModelTransformStreamsDraw(
+            model: model,
+            positions: [.zero, .one],
+            rotations: [.identity, .identity],
+            scales: [.one, .one],
+            colors: [.black, .white],
+            customs: [zeroCustom, custom],
+            overrides: [override],
+            sourceStart: 1,
+            count: 1
+        )
+        XCTAssertEqual(modelTransformStreams.model, model)
+        XCTAssertEqual(modelTransformStreams.positions, [.zero, .one])
+        XCTAssertEqual(modelTransformStreams.rotations, [.identity, .identity])
+        XCTAssertEqual(modelTransformStreams.scales, [.one, .one])
+        XCTAssertEqual(modelTransformStreams.colors, [.black, .white])
+        XCTAssertEqual(modelTransformStreams.customs, [zeroCustom, custom])
+        XCTAssertEqual(modelTransformStreams.overrides, [override])
+        XCTAssertEqual(modelTransformStreams.sourceStart, 1)
+        XCTAssertEqual(modelTransformStreams.count, 1)
+        guard case let .modelTransformStreams(submittedModelStreams) =
+            SceneDraw.modelTransformStreams(modelTransformStreams)
+        else {
+            return XCTFail("Expected model transform stream draw")
+        }
+        XCTAssertEqual(submittedModelStreams.sourceStart, 1)
+        XCTAssertEqual(submittedModelStreams.count, 1)
+
+        let basicModelTransformStreams = ModelTransformStreamsDraw(
+            model: model,
+            positions: [.zero],
+            rotations: [.identity],
+            scales: [.one],
+            count: 1
+        )
+        XCTAssertNil(basicModelTransformStreams.colors)
+        XCTAssertNil(basicModelTransformStreams.customs)
+        XCTAssertTrue(basicModelTransformStreams.overrides.isEmpty)
 
         let animatedModel = AnimatedModelDraw(
             model: model, player: player, tree: tree,

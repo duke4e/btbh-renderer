@@ -61,6 +61,45 @@ public struct ModelInstancesDraw: Sendable {
     }
 }
 
+/// Pre-decomposed model instance streams for allocation-sensitive render paths.
+///
+/// `sourceStart` and `count` select the same contiguous range in every present
+/// stream. Omitting `colors` or `customs` leaves that instance channel disabled.
+/// The backend consumes the streams during `SceneBackend.submit(_:)`.
+public struct ModelTransformStreamsDraw: Sendable {
+    public let model: ModelHandle
+    public let positions: [RenderVec3]
+    public let rotations: [RenderQuaternion]
+    public let scales: [RenderVec3]
+    public let colors: [RenderColor]?
+    public let customs: [RenderVec4]?
+    public let overrides: [MaterialOverride]
+    public let sourceStart: Int
+    public let count: Int
+
+    public init(
+        model: ModelHandle,
+        positions: [RenderVec3],
+        rotations: [RenderQuaternion],
+        scales: [RenderVec3],
+        colors: [RenderColor]? = nil,
+        customs: [RenderVec4]? = nil,
+        overrides: [MaterialOverride] = [],
+        sourceStart: Int = 0,
+        count: Int
+    ) {
+        self.model = model
+        self.positions = positions
+        self.rotations = rotations
+        self.scales = scales
+        self.colors = colors
+        self.customs = customs
+        self.overrides = overrides
+        self.sourceStart = sourceStart
+        self.count = count
+    }
+}
+
 public struct MeshDraw: Sendable {
     public let mesh: MeshHandle
     public let material: MaterialHandle
@@ -183,6 +222,7 @@ public enum DebugDraw: Sendable {
 public enum SceneDraw: Sendable {
     case model(ModelDraw)
     case modelInstances(ModelInstancesDraw)
+    case modelTransformStreams(ModelTransformStreamsDraw)
     case mesh(MeshDraw)
     case meshInstances(MeshInstancesDraw)
     case meshTransformStreams(MeshTransformStreamsDraw)
