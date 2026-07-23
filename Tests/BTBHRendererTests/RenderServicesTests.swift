@@ -789,6 +789,32 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(meshInstances.instances, [instance])
         XCTAssertEqual(meshInstances.persistentBuffer, instances)
 
+        let meshTransformStreams = MeshTransformStreamsDraw(
+            mesh: mesh,
+            material: material,
+            positions: [.zero, .one],
+            rotations: [.identity, .identity],
+            scales: [.one, .one],
+            colors: [.black, .white],
+            sourceStart: 1,
+            count: 1
+        )
+        XCTAssertEqual(meshTransformStreams.mesh, mesh)
+        XCTAssertEqual(meshTransformStreams.material, material)
+        XCTAssertEqual(meshTransformStreams.positions, [.zero, .one])
+        XCTAssertEqual(meshTransformStreams.rotations, [.identity, .identity])
+        XCTAssertEqual(meshTransformStreams.scales, [.one, .one])
+        XCTAssertEqual(meshTransformStreams.colors, [.black, .white])
+        XCTAssertEqual(meshTransformStreams.sourceStart, 1)
+        XCTAssertEqual(meshTransformStreams.count, 1)
+        guard case let .meshTransformStreams(submittedStreams) =
+            SceneDraw.meshTransformStreams(meshTransformStreams)
+        else {
+            return XCTFail("Expected mesh transform stream draw")
+        }
+        XCTAssertEqual(submittedStreams.sourceStart, 1)
+        XCTAssertEqual(submittedStreams.count, 1)
+
         let animatedModel = AnimatedModelDraw(
             model: model, player: player, tree: tree,
             transform: transform, overrides: [override]

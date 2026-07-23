@@ -92,6 +92,41 @@ public struct MeshInstancesDraw: Sendable {
     }
 }
 
+/// Pre-decomposed mesh instance streams for allocation-sensitive render paths.
+///
+/// `sourceStart` and `count` select the same contiguous range in every stream.
+/// The backend consumes the streams during `SceneBackend.submit(_:)`.
+public struct MeshTransformStreamsDraw: Sendable {
+    public let mesh: MeshHandle
+    public let material: MaterialHandle
+    public let positions: [RenderVec3]
+    public let rotations: [RenderQuaternion]
+    public let scales: [RenderVec3]
+    public let colors: [RenderColor]
+    public let sourceStart: Int
+    public let count: Int
+
+    public init(
+        mesh: MeshHandle,
+        material: MaterialHandle,
+        positions: [RenderVec3],
+        rotations: [RenderQuaternion],
+        scales: [RenderVec3],
+        colors: [RenderColor],
+        sourceStart: Int = 0,
+        count: Int
+    ) {
+        self.mesh = mesh
+        self.material = material
+        self.positions = positions
+        self.rotations = rotations
+        self.scales = scales
+        self.colors = colors
+        self.sourceStart = sourceStart
+        self.count = count
+    }
+}
+
 public struct AnimatedModelDraw: Sendable {
     public let model: ModelHandle
     public let player: AnimationPlayerHandle?
@@ -150,6 +185,7 @@ public enum SceneDraw: Sendable {
     case modelInstances(ModelInstancesDraw)
     case mesh(MeshDraw)
     case meshInstances(MeshInstancesDraw)
+    case meshTransformStreams(MeshTransformStreamsDraw)
     case animatedModel(AnimatedModelDraw)
     case animatedModelInstances(AnimatedModelInstancesDraw)
     case debug(DebugDraw)
