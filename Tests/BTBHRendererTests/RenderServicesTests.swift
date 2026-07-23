@@ -511,12 +511,21 @@ final class RenderServicesTests: XCTestCase {
             bounds: bounds,
             meshCount: 3,
             materialCount: 2,
-            meshMaterialSlots: [0, 1, 1]
+            meshMaterialSlots: [0, 1, 1],
+            baseFootprint: [
+                .init(x: -1, y: -2),
+                .init(x: 3, y: -2),
+                .init(x: 3, y: 4),
+                .init(x: -1, y: 4)
+            ],
+            footprintKind: .concaveHull
         )
         XCTAssertEqual(modelMetadata.bounds, bounds)
         XCTAssertEqual(modelMetadata.meshCount, 3)
         XCTAssertEqual(modelMetadata.materialCount, 2)
         XCTAssertEqual(modelMetadata.meshMaterialSlots, [0, 1, 1])
+        XCTAssertEqual(modelMetadata.baseFootprint.count, 4)
+        XCTAssertEqual(modelMetadata.footprintKind, .concaveHull)
 
         let materialDescriptor = MaterialDescriptor(
             albedoTexture: albedoTexture, albedoColor: .white,
@@ -799,12 +808,19 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertTrue(ModelDraw(model: model, transform: transform).overrides.isEmpty)
 
         let modelInstances = ModelInstancesDraw(
-            model: model, instances: [instance], overrides: [override], persistentBuffer: instances
+            model: model,
+            instances: [instance, instance],
+            overrides: [override],
+            persistentBuffer: instances,
+            sourceStart: 1,
+            count: 1
         )
         XCTAssertEqual(modelInstances.model, model)
-        XCTAssertEqual(modelInstances.instances, [instance])
+        XCTAssertEqual(modelInstances.instances, [instance, instance])
         XCTAssertEqual(modelInstances.overrides, [override])
         XCTAssertEqual(modelInstances.persistentBuffer, instances)
+        XCTAssertEqual(modelInstances.sourceStart, 1)
+        XCTAssertEqual(modelInstances.count, 1)
 
         let meshDraw = MeshDraw(mesh: mesh, material: material, transform: transform)
         XCTAssertEqual(meshDraw.mesh, mesh)

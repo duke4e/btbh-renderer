@@ -116,22 +116,35 @@ public struct ModelImportFlags: OptionSet, Sendable {
     public static let highQuality = Self(rawValue: 1 << 1)
 }
 
+public enum ModelFootprintKind: UInt8, Hashable, Sendable {
+    case bounds
+    case convexHull
+    case concaveHull
+    case raster
+}
+
 public struct ModelMetadata: Hashable, Sendable {
     public let bounds: RenderBounds3
     public let meshCount: Int
     public let materialCount: Int
     public let meshMaterialSlots: [Int]
+    public let baseFootprint: [RenderVec2]
+    public let footprintKind: ModelFootprintKind
 
     public init(
         bounds: RenderBounds3,
         meshCount: Int,
         materialCount: Int,
-        meshMaterialSlots: [Int]
+        meshMaterialSlots: [Int],
+        baseFootprint: [RenderVec2] = [],
+        footprintKind: ModelFootprintKind = .bounds
     ) {
         self.bounds = bounds
         self.meshCount = meshCount
         self.materialCount = materialCount
         self.meshMaterialSlots = meshMaterialSlots
+        self.baseFootprint = baseFootprint
+        self.footprintKind = footprintKind
     }
 }
 

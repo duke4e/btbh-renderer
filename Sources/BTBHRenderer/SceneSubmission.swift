@@ -47,17 +47,23 @@ public struct ModelInstancesDraw: Sendable {
     public let instances: [RenderInstance]
     public let overrides: [MaterialOverride]
     public let persistentBuffer: InstanceBufferHandle?
+    public let sourceStart: Int
+    public let count: Int
 
     public init(
         model: ModelHandle,
         instances: [RenderInstance],
         overrides: [MaterialOverride],
-        persistentBuffer: InstanceBufferHandle?
+        persistentBuffer: InstanceBufferHandle?,
+        sourceStart: Int = 0,
+        count: Int? = nil
     ) {
         self.model = model
         self.instances = instances
         self.overrides = overrides
         self.persistentBuffer = persistentBuffer
+        self.sourceStart = sourceStart
+        self.count = count ?? max(0, instances.count - sourceStart)
     }
 }
 
