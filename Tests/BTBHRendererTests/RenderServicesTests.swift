@@ -591,7 +591,10 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(defaultMaterial.stencilReference, 1)
 
         let modelMaterialPatch = ModelMaterialPatch(
+            albedoTexture: albedoTexture,
             albedoColor: .black,
+            normalTexture: normalTexture,
+            ormTexture: ormTexture,
             clearEmissionTexture: true,
             emissionColor: .white,
             emissionEnergy: 0.35,
@@ -599,7 +602,10 @@ final class RenderServicesTests: XCTestCase {
             stencilReference: 1,
             surfaceShader: surfaceShader
         )
+        XCTAssertEqual(modelMaterialPatch.albedoTexture, albedoTexture)
         XCTAssertEqual(modelMaterialPatch.albedoColor, .black)
+        XCTAssertEqual(modelMaterialPatch.normalTexture, normalTexture)
+        XCTAssertEqual(modelMaterialPatch.ormTexture, ormTexture)
         XCTAssertTrue(modelMaterialPatch.clearEmissionTexture)
         XCTAssertEqual(modelMaterialPatch.emissionColor, .white)
         XCTAssertEqual(modelMaterialPatch.emissionEnergy, 0.35)

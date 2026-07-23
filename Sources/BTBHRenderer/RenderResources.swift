@@ -319,7 +319,10 @@ public struct MaterialDescriptor: Hashable, Sendable {
 /// Unspecified fields preserve the imported material. The returned material
 /// remains an independently managed `MaterialHandle`.
 public struct ModelMaterialPatch: Hashable, Sendable {
+    public var albedoTexture: TextureHandle?
     public var albedoColor: RenderColor?
+    public var normalTexture: TextureHandle?
+    public var ormTexture: TextureHandle?
     public var clearEmissionTexture: Bool
     public var emissionColor: RenderColor?
     public var emissionEnergy: Float?
@@ -328,7 +331,10 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var surfaceShader: SurfaceShaderHandle?
 
     public init(
+        albedoTexture: TextureHandle? = nil,
         albedoColor: RenderColor? = nil,
+        normalTexture: TextureHandle? = nil,
+        ormTexture: TextureHandle? = nil,
         clearEmissionTexture: Bool = false,
         emissionColor: RenderColor? = nil,
         emissionEnergy: Float? = nil,
@@ -336,7 +342,10 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         stencilReference: UInt8? = nil,
         surfaceShader: SurfaceShaderHandle? = nil
     ) {
+        self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
+        self.normalTexture = normalTexture
+        self.ormTexture = ormTexture
         self.clearEmissionTexture = clearEmissionTexture
         self.emissionColor = emissionColor
         self.emissionEnergy = emissionEnergy
