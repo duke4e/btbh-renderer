@@ -213,6 +213,49 @@ public struct AnimatedModelInstancesDraw: Sendable {
     }
 }
 
+/// Pre-decomposed animated model instance streams for allocation-sensitive paths.
+///
+/// Exactly one of `player` and `tree` must be supplied by the caller.
+public struct AnimatedModelTransformStreamsDraw: Sendable {
+    public let model: ModelHandle
+    public let player: AnimationPlayerHandle?
+    public let tree: AnimationTreeHandle?
+    public let positions: [RenderVec3]
+    public let rotations: [RenderQuaternion]
+    public let scales: [RenderVec3]
+    public let colors: [RenderColor]?
+    public let customs: [RenderVec4]?
+    public let overrides: [MaterialOverride]
+    public let sourceStart: Int
+    public let count: Int
+
+    public init(
+        model: ModelHandle,
+        player: AnimationPlayerHandle?,
+        tree: AnimationTreeHandle?,
+        positions: [RenderVec3],
+        rotations: [RenderQuaternion],
+        scales: [RenderVec3],
+        colors: [RenderColor]? = nil,
+        customs: [RenderVec4]? = nil,
+        overrides: [MaterialOverride] = [],
+        sourceStart: Int = 0,
+        count: Int
+    ) {
+        self.model = model
+        self.player = player
+        self.tree = tree
+        self.positions = positions
+        self.rotations = rotations
+        self.scales = scales
+        self.colors = colors
+        self.customs = customs
+        self.overrides = overrides
+        self.sourceStart = sourceStart
+        self.count = count
+    }
+}
+
 public enum DebugDraw: Sendable {
     case line(start: RenderVec3, end: RenderVec3, color: RenderColor)
     case grid(slices: Int, spacing: Float)
@@ -231,6 +274,7 @@ public enum SceneDraw: Sendable {
     case meshTransformStreams(MeshTransformStreamsDraw)
     case animatedModel(AnimatedModelDraw)
     case animatedModelInstances(AnimatedModelInstancesDraw)
+    case animatedModelTransformStreams(AnimatedModelTransformStreamsDraw)
     case debug(DebugDraw)
 }
 

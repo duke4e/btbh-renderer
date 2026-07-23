@@ -896,6 +896,38 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(animatedInstances.instances, [instance])
         XCTAssertEqual(animatedInstances.overrides, [override])
 
+        let animatedTransformStreams = AnimatedModelTransformStreamsDraw(
+            model: model,
+            player: nil,
+            tree: tree,
+            positions: [.zero, .one],
+            rotations: [.identity, .identity],
+            scales: [.one, .one],
+            colors: [.black, .white],
+            customs: [zeroCustom, custom],
+            overrides: [override],
+            sourceStart: 1,
+            count: 1
+        )
+        XCTAssertEqual(animatedTransformStreams.model, model)
+        XCTAssertNil(animatedTransformStreams.player)
+        XCTAssertEqual(animatedTransformStreams.tree, tree)
+        XCTAssertEqual(animatedTransformStreams.positions, [.zero, .one])
+        XCTAssertEqual(animatedTransformStreams.rotations, [.identity, .identity])
+        XCTAssertEqual(animatedTransformStreams.scales, [.one, .one])
+        XCTAssertEqual(animatedTransformStreams.colors, [.black, .white])
+        XCTAssertEqual(animatedTransformStreams.customs, [zeroCustom, custom])
+        XCTAssertEqual(animatedTransformStreams.overrides, [override])
+        XCTAssertEqual(animatedTransformStreams.sourceStart, 1)
+        XCTAssertEqual(animatedTransformStreams.count, 1)
+        guard case let .animatedModelTransformStreams(submittedAnimatedStreams) =
+            SceneDraw.animatedModelTransformStreams(animatedTransformStreams)
+        else {
+            return XCTFail("Expected animated model transform stream draw")
+        }
+        XCTAssertEqual(submittedAnimatedStreams.sourceStart, 1)
+        XCTAssertEqual(submittedAnimatedStreams.count, 1)
+
         let camera = RenderCamera(position: .zero, target: .up, up: .up, verticalFOVDegrees: 45, projection: .perspective)
         let frame = FrameDescriptor(camera: camera, environment: .default)
         XCTAssertEqual(frame.camera, camera)
