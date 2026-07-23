@@ -291,6 +291,7 @@ public struct FrameDescriptor: Sendable {
     public let antiAliasing: AntiAliasing
     public let upscaleMode: UpscaleMode
     public let postChain: PostChainDescriptor
+    public let viewport: NormalizedViewport
 
     public init(
         camera: RenderCamera,
@@ -298,7 +299,8 @@ public struct FrameDescriptor: Sendable {
         renderScale: Float = 1,
         antiAliasing: AntiAliasing = .smaaMedium,
         upscaleMode: UpscaleMode = .linear,
-        postChain: PostChainDescriptor = .empty
+        postChain: PostChainDescriptor = .empty,
+        viewport: NormalizedViewport = .full
     ) {
         self.camera = camera
         self.environment = environment
@@ -306,6 +308,7 @@ public struct FrameDescriptor: Sendable {
         self.antiAliasing = antiAliasing
         self.upscaleMode = upscaleMode
         self.postChain = postChain
+        self.viewport = viewport
     }
 }
 
