@@ -33,6 +33,7 @@ option(R3D_ASSIMP_VENDORED "Use vendored assimp from submodule" OFF)
 option(R3D_SUPPORT_ASSIMP "Build with Assimp importer support" ON)
 option(R3D_BUILD_EXAMPLES "Build the examples" ${R3D_IS_MAIN})
 option(R3D_BUILD_DOCS "Build the doxygen documentation" OFF)
+option(R3D_BUILD_TESTS "Build focused r3d regression tests" ${R3D_IS_MAIN})
 
 # ========================================
 # Output Directories
@@ -496,4 +497,17 @@ endif()
 
 if(R3D_BUILD_EXAMPLES)
     include("${R3D_ROOT_PATH}/examples/CMakeLists.txt")
+endif()
+
+if(R3D_BUILD_TESTS)
+    enable_testing()
+    add_executable(r3d_animation_identity_test
+        "${R3D_ROOT_PATH}/tests/r3d_animation_identity_test.c"
+    )
+    target_include_directories(r3d_animation_identity_test PRIVATE
+        "${R3D_ROOT_PATH}/include"
+        "${R3D_RAYLIB_INC}"
+    )
+    target_link_libraries(r3d_animation_identity_test PRIVATE r3d)
+    add_test(NAME r3d_animation_identity COMMAND r3d_animation_identity_test)
 endif()
