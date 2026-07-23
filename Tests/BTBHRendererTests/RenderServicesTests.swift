@@ -600,6 +600,7 @@ final class RenderServicesTests: XCTestCase {
             emissionEnergy: 0.35,
             minimumEmissionEnergy: 0.2,
             stencilReference: 1,
+            cullMode: CullMode.none,
             surfaceShader: surfaceShader
         )
         XCTAssertEqual(modelMaterialPatch.albedoTexture, albedoTexture)
@@ -611,6 +612,7 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(modelMaterialPatch.emissionEnergy, 0.35)
         XCTAssertEqual(modelMaterialPatch.minimumEmissionEnergy, 0.2)
         XCTAssertEqual(modelMaterialPatch.stencilReference, 1)
+        XCTAssertEqual(modelMaterialPatch.cullMode, CullMode.none)
         XCTAssertEqual(modelMaterialPatch.surfaceShader, surfaceShader)
 
         let instanceBuffer = InstanceBufferDescriptor(

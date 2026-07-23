@@ -328,6 +328,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var emissionEnergy: Float?
     public var minimumEmissionEnergy: Float?
     public var stencilReference: UInt8?
+    public var cullMode: CullMode?
     public var surfaceShader: SurfaceShaderHandle?
 
     public init(
@@ -340,6 +341,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         emissionEnergy: Float? = nil,
         minimumEmissionEnergy: Float? = nil,
         stencilReference: UInt8? = nil,
+        cullMode: CullMode? = nil,
         surfaceShader: SurfaceShaderHandle? = nil
     ) {
         self.albedoTexture = albedoTexture
@@ -351,6 +353,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.emissionEnergy = emissionEnergy
         self.minimumEmissionEnergy = minimumEmissionEnergy
         self.stencilReference = stencilReference
+        self.cullMode = cullMode
         self.surfaceShader = surfaceShader
     }
 
