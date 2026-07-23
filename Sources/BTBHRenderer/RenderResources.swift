@@ -32,6 +32,25 @@ public struct TextureDescriptor: Sendable {
     }
 }
 
+public struct TextureLoadDescriptor: Sendable {
+    public let path: String
+    public let generateMipmaps: Bool
+    public let filter: TextureFilter?
+    public let wrap: TextureWrap?
+
+    public init(
+        path: String,
+        generateMipmaps: Bool = false,
+        filter: TextureFilter? = nil,
+        wrap: TextureWrap? = nil
+    ) {
+        self.path = path
+        self.generateMipmaps = generateMipmaps
+        self.filter = filter
+        self.wrap = wrap
+    }
+}
+
 public struct FontDescriptor: Sendable {
     public let path: String
     public let baseSize: Int
@@ -604,7 +623,7 @@ public struct PostChainDescriptor: Sendable {
 
 @MainActor
 public protocol RenderResourceBackend: AnyObject {
-    func loadTexture(path: String) throws -> TextureHandle
+    func loadTexture(_ descriptor: TextureLoadDescriptor) throws -> TextureHandle
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws
     func destroyTexture(_ handle: TextureHandle)
@@ -651,6 +670,10 @@ public protocol RenderResourceBackend: AnyObject {
 }
 
 public extension RenderResourceBackend {
+    func loadTexture(path: String) throws -> TextureHandle {
+        try loadTexture(.init(path: path))
+    }
+
     func createMesh(
         _ descriptor: MeshDescriptor,
         vertices: [RenderVertex],

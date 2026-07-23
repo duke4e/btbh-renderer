@@ -167,7 +167,9 @@ final class RenderServicesTests: XCTestCase {
         assertUnexpectedCall("setClipboardText(_:)") { try recording.setClipboardText("text") }
         assertUnexpectedCall("readbackPresentedFrame()") { try recording.readbackPresentedFrame() }
         assertUnexpectedCall("writePresentedFramePNG(to:)") { try recording.writePresentedFramePNG(to: "frame.png") }
-        assertUnexpectedCall("loadTexture(path:)") { try recording.loadTexture(path: "texture") }
+        assertUnexpectedCall("loadTexture(_:)") {
+            try recording.loadTexture(.init(path: "texture"))
+        }
         assertUnexpectedCall("createTexture(_:bytes:)") { try recording.createTexture(textureDescriptor, bytes: nil) }
         assertUnexpectedCall("updateTexture(_:bytes:)") { try recording.updateTexture(.invalid, bytes: emptyBytes) }
         assertUnexpectedCall("loadFont(_:)") { try recording.loadFont(fontDescriptor) }
@@ -451,6 +453,17 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(textureDescriptor.usage, usage)
         XCTAssertEqual(textureDescriptor.filter, .bilinear)
         XCTAssertEqual(textureDescriptor.wrap, .clamp)
+
+        let textureLoad = TextureLoadDescriptor(
+            path: "blueprint.png",
+            generateMipmaps: true,
+            filter: .trilinear,
+            wrap: .repeatMode
+        )
+        XCTAssertEqual(textureLoad.path, "blueprint.png")
+        XCTAssertTrue(textureLoad.generateMipmaps)
+        XCTAssertEqual(textureLoad.filter, .trilinear)
+        XCTAssertEqual(textureLoad.wrap, .repeatMode)
 
         let font = FontDescriptor(path: "font", baseSize: 16, glyphs: [65])
         XCTAssertEqual(font.path, "font")

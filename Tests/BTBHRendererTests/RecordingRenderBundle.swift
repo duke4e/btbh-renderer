@@ -108,7 +108,7 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     func readbackPresentedFrame() throws -> FrameReadback { throw unexpected() }
     func writePresentedFramePNG(to path: String) throws { throw unexpected() }
 
-    func loadTexture(path: String) throws -> TextureHandle { throw unexpected() }
+    func loadTexture(_ descriptor: TextureLoadDescriptor) throws -> TextureHandle { throw unexpected() }
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle { throw unexpected() }
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws { throw unexpected() }
     func destroyTexture(_ handle: TextureHandle) {}
