@@ -74,6 +74,7 @@ public struct ModelTransformStreamsDraw: Sendable {
     public let colors: [RenderColor]?
     public let customs: [RenderVec4]?
     public let overrides: [MaterialOverride]
+    public let clusterBounds: RenderBounds3?
     public let sourceStart: Int
     public let count: Int
 
@@ -85,6 +86,7 @@ public struct ModelTransformStreamsDraw: Sendable {
         colors: [RenderColor]? = nil,
         customs: [RenderVec4]? = nil,
         overrides: [MaterialOverride] = [],
+        clusterBounds: RenderBounds3? = nil,
         sourceStart: Int = 0,
         count: Int
     ) {
@@ -95,6 +97,7 @@ public struct ModelTransformStreamsDraw: Sendable {
         self.colors = colors
         self.customs = customs
         self.overrides = overrides
+        self.clusterBounds = clusterBounds
         self.sourceStart = sourceStart
         self.count = count
     }

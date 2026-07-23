@@ -753,6 +753,7 @@ final class RenderServicesTests: XCTestCase {
         let transform = RenderTransform(matrix: .identity)
         let custom = RenderVec4(x: 1, y: 2, z: 3, w: 4)
         let zeroCustom = RenderVec4(x: 0, y: 0, z: 0, w: 0)
+        let clusterBounds = RenderBounds3(minimum: .zero, maximum: .one)
         let instance = RenderInstance(transform: transform, color: .white, custom: custom)
         let override = MaterialOverride(slot: 2, material: material)
 
@@ -824,6 +825,7 @@ final class RenderServicesTests: XCTestCase {
             colors: [.black, .white],
             customs: [zeroCustom, custom],
             overrides: [override],
+            clusterBounds: clusterBounds,
             sourceStart: 1,
             count: 1
         )
@@ -834,6 +836,7 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(modelTransformStreams.colors, [.black, .white])
         XCTAssertEqual(modelTransformStreams.customs, [zeroCustom, custom])
         XCTAssertEqual(modelTransformStreams.overrides, [override])
+        XCTAssertEqual(modelTransformStreams.clusterBounds, clusterBounds)
         XCTAssertEqual(modelTransformStreams.sourceStart, 1)
         XCTAssertEqual(modelTransformStreams.count, 1)
         guard case let .modelTransformStreams(submittedModelStreams) =
@@ -854,6 +857,7 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertNil(basicModelTransformStreams.colors)
         XCTAssertNil(basicModelTransformStreams.customs)
         XCTAssertTrue(basicModelTransformStreams.overrides.isEmpty)
+        XCTAssertNil(basicModelTransformStreams.clusterBounds)
 
         let animatedModel = AnimatedModelDraw(
             model: model, player: player, tree: tree,
