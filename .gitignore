@@ -370,3 +370,4 @@ CMakeSettings.json
 build/
 .worktrees/
 .superpowers/sdd/
+/.tmp-*/
