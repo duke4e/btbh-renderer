@@ -18,6 +18,14 @@ The inverse path has the same defect: logical pointer coordinates are passed
 to `GetScreenToWorldRayEx` together with drawable dimensions. This changes the
 ray direction on Retina displays.
 
+This is also a simulation bug, not only a presentation bug.
+`cameraGroundFootprint` unprojects the four logical screen corners. At 2×,
+the logical bottom-right corner is interpreted as the drawable center, so the
+computed footprint covers only part of the visible world. Enemies visibly
+inside the right or lower part of the screen are then classified as offscreen
+and incorrectly receive the existing `2.6×` maximum-speed and `3.2×`
+acceleration catch-up multipliers.
+
 The mismatch predates the direct preview viewport change. It became visible
 when game call sites migrated from raylib `GetWorldToScreen`, which used
 logical screen dimensions, to the renderer seam.
@@ -132,6 +140,7 @@ utility:
 - elite/boss indicators and encounter labels;
 - beam screen-density calculations;
 - growth-trial pointer rays and camera footprints;
+- enemy visible-footprint classification and offscreen catch-up movement;
 - city-block editor overlays and picking;
 - particle preview picking.
 
@@ -164,9 +173,15 @@ Game contract tests prove that world-to-Canvas and Canvas-to-world conversion
 use logical dimensions and that no direct ambiguous `scene.project` calls
 remain.
 
+Camera-footprint regression tests prove that the four logical screen corners
+produce the same ground polygon at 1× and 2× drawable scales. An enemy located
+inside the right or lower half of that visible polygon must remain in the
+normal movement branch and must not receive the `2.6×`/`3.2×` offscreen
+catch-up multipliers.
+
 Focused suites run before the full renderer and game suites. Final manual
-verification checks damage numbers, enemy health bars, encounter labels, and
-pointer picking on the Retina build.
+verification checks damage numbers, enemy health bars, encounter labels,
+pointer picking, and enemy speed across both halves of the Retina viewport.
 
 ## Non-Goals
 
