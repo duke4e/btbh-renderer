@@ -366,3 +366,5 @@ FodyWeavers.xsd
 CMakeSettings.json
 .vscode/
 build/
+.build/
+.tmp*
