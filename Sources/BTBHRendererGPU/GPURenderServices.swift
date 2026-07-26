@@ -38,7 +38,7 @@ public final class GPURenderServicesBundle: RenderBackendBundle {
         )
         gpuPlatform = platform
         gpuCanvas = GPUCanvas(platform: platform)
-        gpuResources = GPUResourceBackend()
+        gpuResources = GPUResourceBackend(platform: platform)
         gpuScene = GPUSceneBackend(platform: platform)
     }
 

@@ -6,6 +6,12 @@ public enum GPUBackendUnsupportedError: Error, Equatable {
 
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
+    private let platform: GPUPlatform
+
+    init(platform: GPUPlatform) {
+        self.platform = platform
+    }
+
     func loadTexture(_ descriptor: TextureLoadDescriptor) throws -> TextureHandle { throw unsupported() }
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle { throw unsupported() }
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws { throw unsupported() }
@@ -55,7 +61,9 @@ final class GPUResourceBackend: RenderResourceBackend {
     private func unsupported(
         _ function: String = #function
     ) -> GPUBackendUnsupportedError {
-        .operation("resources.\(function)")
+        let operation = "resources.\(function)"
+        platform.failClosed(operation: operation)
+        return .operation(operation)
     }
 }
 

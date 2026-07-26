@@ -41,4 +41,36 @@ final class GPURenderServicesTests: XCTestCase {
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif
     }
+
+    func testUnsupportedResourceCallFailsClosedWithExactOperation() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU unsupported resource test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+
+        XCTAssertThrowsError(try RenderServices.resources.loadTexture(
+            .init(path: "not-yet-supported.png")
+        )) { error in
+            XCTAssertEqual(
+                error as? GPUBackendUnsupportedError,
+                .operation("resources.loadTexture(_:)")
+            )
+        }
+        XCTAssertTrue(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
 }
