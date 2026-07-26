@@ -45,6 +45,7 @@ public final class GPURenderServicesBundle: RenderBackendBundle {
     public func shutdownRenderer() {
         guard !isRendererShutdown else { return }
         gpuScene.shutdown()
+        gpuResources.shutdown()
         isRendererShutdown = true
     }
 

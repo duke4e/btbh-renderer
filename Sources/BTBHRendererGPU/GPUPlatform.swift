@@ -14,6 +14,7 @@ public final class GPUPlatform: GamePlatform {
     private let debugMode: Bool
     private var window: GPUWindowProbe?
     private var state = GPUPlatformState.empty
+    private var forcedClose = false
     private var targetFramesPerSecond = 0
     private var previousFrameStart: TimeInterval?
 
@@ -55,6 +56,7 @@ public final class GPUPlatform: GamePlatform {
             debugMode: debugMode
         )
         self.window = window
+        forcedClose = false
         state = try window.pollPlatform()
         targetFramesPerSecond = try Self.targetFrameRate(
             policy: descriptor.frameRatePolicy,
@@ -109,7 +111,7 @@ public final class GPUPlatform: GamePlatform {
     }
 
     public var shouldClose: Bool {
-        window == nil || state.shouldClose
+        forcedClose || window == nil || state.shouldClose
     }
 
     public var isWindowFocused: Bool {
@@ -275,10 +277,23 @@ public final class GPUPlatform: GamePlatform {
         )
     }
 
+    func loadTexture(
+        _ descriptor: TextureLoadDescriptor
+    ) throws -> GPUTextureProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.loadTexture(descriptor)
+    }
+
+    func destroyTexture(_ texture: OpaquePointer) {
+        GPUWindowProbe.destroyTexture(texture)
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)
-        closeWindow()
+        forcedClose = true
     }
 
     private func throttleIfNeeded() {

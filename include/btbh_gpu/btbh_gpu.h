@@ -165,6 +165,27 @@ typedef struct BTBHGPUPlatformSnapshot {
 } BTBHGPUPlatformSnapshot;
 
 typedef struct BTBHGPUWindow BTBHGPUWindow;
+typedef struct BTBHGPUTexture BTBHGPUTexture;
+
+typedef enum BTBHGPUTextureFilter {
+    BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
+    BTBH_GPU_TEXTURE_FILTER_LINEAR = 1,
+    BTBH_GPU_TEXTURE_FILTER_TRILINEAR = 2
+} BTBHGPUTextureFilter;
+
+typedef enum BTBHGPUTextureWrap {
+    BTBH_GPU_TEXTURE_WRAP_CLAMP = 0,
+    BTBH_GPU_TEXTURE_WRAP_REPEAT = 1,
+    BTBH_GPU_TEXTURE_WRAP_MIRROR = 2
+} BTBHGPUTextureWrap;
+
+typedef struct BTBHGPUTextureReport {
+    BTBHGPUResult result;
+    uint32_t width;
+    uint32_t height;
+    uint32_t mip_count;
+    char message[256];
+} BTBHGPUTextureReport;
 
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
 BTBHGPUShaderFormat btbh_gpu_backend_shader_format(BTBHGPUBackendRequest backend);
@@ -253,6 +274,15 @@ uint8_t btbh_gpu_window_mouse_button_released(
     BTBHGPUWindow *window,
     uint8_t project_button
 );
+BTBHGPUTexture *btbh_gpu_window_texture_load(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
+void btbh_gpu_texture_destroy(BTBHGPUTexture *texture);
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 
 #if defined(__cplusplus)

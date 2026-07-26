@@ -7,15 +7,43 @@ public enum GPUBackendUnsupportedError: Error, Equatable {
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
+    private let textureHandles = try? HandlePool(initialCapacity: 64)
+    private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
 
     init(platform: GPUPlatform) {
         self.platform = platform
     }
 
-    func loadTexture(_ descriptor: TextureLoadDescriptor) throws -> TextureHandle { throw unsupported() }
+    func loadTexture(
+        _ descriptor: TextureLoadDescriptor
+    ) throws -> TextureHandle {
+        guard let textureHandles else {
+            throw GPUTextureProbeError.operationFailed(
+                message: "Could not allocate the GPU texture handle pool"
+            )
+        }
+        let resource = try platform.loadTexture(descriptor)
+        do {
+            let handle = try textureHandles.acquire(TextureHandle.self)
+            textures[handle] = resource
+            return handle
+        } catch {
+            platform.destroyTexture(resource.pointer)
+            throw error
+        }
+    }
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle { throw unsupported() }
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws { throw unsupported() }
-    func destroyTexture(_ handle: TextureHandle) {}
+    func destroyTexture(_ handle: TextureHandle) {
+        guard
+            let textureHandles,
+            let resource = textures.removeValue(forKey: handle),
+            textureHandles.release(handle)
+        else {
+            return
+        }
+        platform.destroyTexture(resource.pointer)
+    }
     func loadFont(_ descriptor: FontDescriptor) throws -> FontHandle { throw unsupported() }
     func destroyFont(_ handle: FontHandle) {}
     func createRenderTarget(_ descriptor: RenderTargetDescriptor) throws -> RenderTargetHandle { throw unsupported() }
@@ -64,6 +92,13 @@ final class GPUResourceBackend: RenderResourceBackend {
         let operation = "resources.\(function)"
         platform.failClosed(operation: operation)
         return .operation(operation)
+    }
+
+    func shutdown() {
+        for resource in textures.values {
+            platform.destroyTexture(resource.pointer)
+        }
+        textures.removeAll()
     }
 }
 

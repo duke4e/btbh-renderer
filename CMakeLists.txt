@@ -699,12 +699,15 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_phase2_runtime.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_resources.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_spike_scene.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_texture.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_vertical_smoke.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_window.c"
     )
     target_include_directories(btbh_gpu
         PUBLIC
             "${R3D_ROOT_PATH}/include"
+        PRIVATE
+            "${R3D_ROOT_PATH}/external/raylib/src/external"
     )
     target_compile_definitions(btbh_gpu PRIVATE SDL_MAIN_HANDLED)
     target_link_libraries(btbh_gpu PRIVATE SDL3::SDL3-static)

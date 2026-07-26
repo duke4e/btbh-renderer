@@ -20,7 +20,8 @@ var rendererTargets: [Target] = [
         cSettings: [
             .headerSearchPath("../../include"),
             .headerSearchPath("../../src/gpu"),
-            .headerSearchPath("../../external/SDL/include")
+            .headerSearchPath("../../external/SDL/include"),
+            .headerSearchPath("../../external/raylib/src/external")
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),

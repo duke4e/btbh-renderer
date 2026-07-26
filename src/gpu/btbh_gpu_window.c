@@ -5,26 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct BTBHGPUWindow {
-    SDL_Window *window;
-    BTBHGPUDevice *device;
-    BTBHGPUTextureFormat swapchain_format;
-    BTBHGPUPresentMode present_mode;
-    BTBHGPUSwapchainComposition composition;
-    bool owns_video_subsystem;
-    bool claimed;
-    bool should_close;
-    bool cursor_visible;
-    uint64_t last_frame_ticks;
-    float mouse_delta_x;
-    float mouse_delta_y;
-    float mouse_wheel_x;
-    float mouse_wheel_y;
-    bool key_pressed[SDL_SCANCODE_COUNT];
-    bool mouse_pressed[4];
-    bool mouse_released[4];
-};
-
 static void btbh_gpu_set_window_error(
     BTBHGPUWindowReport *report,
     BTBHGPUErrorStage stage,
@@ -868,6 +848,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;
     }
+    btbh_gpu_window_release_textures(window);
     if (
         window->claimed &&
         window->device != NULL &&

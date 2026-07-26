@@ -154,6 +154,17 @@ public enum GPUWindowProbeError: Error, Equatable {
     )
 }
 
+enum GPUTextureProbeError: Error, Equatable {
+    case unsupportedWrap
+    case operationFailed(message: String)
+}
+
+struct GPUTextureProbeResource {
+    let pointer: OpaquePointer
+    let size: PixelSize2D
+    let mipCount: Int
+}
+
 @MainActor
 public final class GPUWindowProbe {
     public var deviceDiagnostics: GPUDeviceDiagnostics {
@@ -358,6 +369,67 @@ public final class GPUWindowProbe {
             window,
             button.rawValue
         ) != 0
+    }
+
+    func loadTexture(
+        _ descriptor: TextureLoadDescriptor
+    ) throws -> GPUTextureProbeResource {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "loadTexture",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        let filter: BTBHGPUTextureFilter
+        switch descriptor.filter ?? .bilinear {
+        case .nearest:
+            filter = BTBH_GPU_TEXTURE_FILTER_NEAREST
+        case .bilinear:
+            filter = BTBH_GPU_TEXTURE_FILTER_LINEAR
+        case .trilinear:
+            filter = BTBH_GPU_TEXTURE_FILTER_TRILINEAR
+        }
+        let wrap: BTBHGPUTextureWrap
+        switch descriptor.wrap ?? .clamp {
+        case .repeatMode:
+            wrap = BTBH_GPU_TEXTURE_WRAP_REPEAT
+        case .clamp:
+            wrap = BTBH_GPU_TEXTURE_WRAP_CLAMP
+        case .mirrorRepeat:
+            wrap = BTBH_GPU_TEXTURE_WRAP_MIRROR
+        case .mirrorClamp:
+            throw GPUTextureProbeError.unsupportedWrap
+        }
+
+        var report = BTBHGPUTextureReport()
+        let texture = descriptor.path.withCString { path in
+            btbh_gpu_window_texture_load(
+                window,
+                path,
+                descriptor.generateMipmaps ? 1 : 0,
+                filter,
+                wrap,
+                &report
+            )
+        }
+        guard let texture else {
+            throw GPUTextureProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return GPUTextureProbeResource(
+            pointer: texture,
+            size: .init(
+                width: Int(report.width),
+                height: Int(report.height)
+            ),
+            mipCount: Int(report.mip_count)
+        )
+    }
+
+    static func destroyTexture(_ texture: OpaquePointer) {
+        btbh_gpu_texture_destroy(texture)
     }
 
     public func shutdown() {
