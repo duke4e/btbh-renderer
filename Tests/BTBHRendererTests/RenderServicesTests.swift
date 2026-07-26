@@ -363,6 +363,16 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(stroke.rect, rect)
         XCTAssertEqual(stroke.thickness, 2)
         XCTAssertEqual(stroke.color, .black)
+        XCTAssertEqual(stroke.rasterization, .inside)
+        XCTAssertEqual(
+            StrokeRectCommand(
+                rect: rect,
+                thickness: 1,
+                color: .black,
+                rasterization: .pixelAligned
+            ).rasterization,
+            .pixelAligned
+        )
 
         let rounded = RoundedRectCommand(rect: rect, roundness: 0.5, segments: 8, color: .white)
         XCTAssertEqual(rounded.rect, rect)
@@ -473,10 +483,20 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(font.baseSize, 16)
         XCTAssertEqual(font.glyphs, [65])
 
-        let target = RenderTargetDescriptor(size: size, colorFormat: .rgba16Float, hasDepth: true)
+        let target = RenderTargetDescriptor(
+            size: size,
+            colorFormat: .rgba16Float,
+            hasDepth: true,
+            filter: .trilinear
+        )
         XCTAssertEqual(target.size, size)
         XCTAssertEqual(target.colorFormat, .rgba16Float)
         XCTAssertTrue(target.hasDepth)
+        XCTAssertEqual(target.filter, .trilinear)
+        XCTAssertEqual(
+            RenderTargetDescriptor(size: size, colorFormat: .rgba8, hasDepth: false).filter,
+            .bilinear
+        )
 
         let mesh = MeshDescriptor(
             topology: .triangles, storage: .streamed,

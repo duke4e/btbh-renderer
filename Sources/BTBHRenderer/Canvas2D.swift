@@ -14,6 +14,11 @@ public enum TextureWrap: UInt8, Sendable {
     case repeatMode, clamp, mirrorRepeat, mirrorClamp
 }
 
+public enum RectStrokeRasterization: UInt8, Sendable {
+    case inside
+    case pixelAligned
+}
+
 public struct FillRectCommand: Sendable {
     public let rect: RenderRect
     public let color: RenderColor
@@ -28,11 +33,18 @@ public struct StrokeRectCommand: Sendable {
     public let rect: RenderRect
     public let thickness: Float
     public let color: RenderColor
+    public let rasterization: RectStrokeRasterization
 
-    public init(rect: RenderRect, thickness: Float, color: RenderColor) {
+    public init(
+        rect: RenderRect,
+        thickness: Float,
+        color: RenderColor,
+        rasterization: RectStrokeRasterization = .inside
+    ) {
         self.rect = rect
         self.thickness = thickness
         self.color = color
+        self.rasterization = rasterization
     }
 }
 

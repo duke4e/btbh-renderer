@@ -67,11 +67,18 @@ public struct RenderTargetDescriptor: Sendable {
     public let size: PixelSize2D
     public let colorFormat: PixelFormat
     public let hasDepth: Bool
+    public let filter: TextureFilter
 
-    public init(size: PixelSize2D, colorFormat: PixelFormat, hasDepth: Bool) {
+    public init(
+        size: PixelSize2D,
+        colorFormat: PixelFormat,
+        hasDepth: Bool,
+        filter: TextureFilter = .bilinear
+    ) {
         self.size = size
         self.colorFormat = colorFormat
         self.hasDepth = hasDepth
+        self.filter = filter
     }
 }
 
