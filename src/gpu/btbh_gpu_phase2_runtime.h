@@ -31,6 +31,7 @@ typedef struct BTBHGPUPhase2Report {
     uint64_t scene_signature;
     uint64_t final_image_checksum;
     uint8_t center_rgba[4];
+    uint8_t directional_shadow_rgba[4];
     uint8_t skinned_rgba[4];
     float interval_center_rgba[4];
     char driver_name[BTBH_GPU_DRIVER_NAME_CAPACITY];

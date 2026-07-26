@@ -73,13 +73,20 @@ int main(void)
         report.scene_signature != UINT64_C(0x7cc30645be466e5f) ||
         report.executed_pass_count != 11u ||
         report.final_image_checksum == 0u ||
-        report.center_rgba[0] < 63u ||
-        report.center_rgba[0] > 67u ||
-        report.center_rgba[1] < 133u ||
-        report.center_rgba[1] > 137u ||
-        report.center_rgba[2] < 181u ||
-        report.center_rgba[2] > 185u ||
+        report.center_rgba[0] < 45u ||
+        report.center_rgba[0] > 49u ||
+        report.center_rgba[1] < 115u ||
+        report.center_rgba[1] > 119u ||
+        report.center_rgba[2] < 162u ||
+        report.center_rgba[2] > 166u ||
         report.center_rgba[3] != 255u ||
+        report.directional_shadow_rgba[0] < 54u ||
+        report.directional_shadow_rgba[0] > 62u ||
+        report.directional_shadow_rgba[1] < 92u ||
+        report.directional_shadow_rgba[1] > 100u ||
+        report.directional_shadow_rgba[2] < 126u ||
+        report.directional_shadow_rgba[2] > 136u ||
+        report.directional_shadow_rgba[3] != 255u ||
         report.skinned_rgba[0] < 115u ||
         report.skinned_rgba[0] > 150u ||
         report.skinned_rgba[1] < 50u ||
@@ -98,6 +105,7 @@ int main(void)
             stderr,
             "invalid Phase 2 runtime report: %ux%u passes=%u "
             "signature=%016llx checksum=%016llx center=%u,%u,%u,%u "
+            "directional_shadow=%u,%u,%u,%u "
             "skinned=%u,%u,%u,%u "
             "interval=%.6f,%.6f,%.6f,%.6f\n",
             report.width,
@@ -109,6 +117,10 @@ int main(void)
             report.center_rgba[1],
             report.center_rgba[2],
             report.center_rgba[3],
+            report.directional_shadow_rgba[0],
+            report.directional_shadow_rgba[1],
+            report.directional_shadow_rgba[2],
+            report.directional_shadow_rgba[3],
             report.skinned_rgba[0],
             report.skinned_rgba[1],
             report.skinned_rgba[2],
@@ -121,7 +133,7 @@ int main(void)
         return 1;
     }
 #if !defined(__APPLE__)
-    if (report.final_image_checksum != UINT64_C(0x762c956977d071a6)) {
+    if (report.final_image_checksum != UINT64_C(0xd2ee844acc01f04c)) {
         fprintf(
             stderr,
             "unexpected Windows Phase 2 image checksum: %016llx\n",

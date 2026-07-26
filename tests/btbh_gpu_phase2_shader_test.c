@@ -83,7 +83,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 4"
+            "\"samplers\": 6"
         ) ||
         !require_text(
             BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH,

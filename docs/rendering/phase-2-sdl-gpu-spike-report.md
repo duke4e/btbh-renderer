@@ -86,7 +86,7 @@ The expanded Vulkan runtime executes this fixed 11-pass sequence:
 7. deterministic compute-pattern write;
 8. interval-buffer compute trace;
 9. deferred-lighting fullscreen draw sampling all three G-buffer targets and
-   the compute-pattern texture;
+   the compute-pattern texture plus directional and spot depth maps;
 10. alpha-blended forward draw;
 11. final-color and interval-texture readback.
 
@@ -101,9 +101,11 @@ manifest and canonical fixture bytes:
 Windows/Vulkan 1920x1080 capture A and B were byte-identical:
 
 - SHA-256:
-  `F37361966B8C7AF3A892D1FFFE49D29A71E9799B8270DDF74AB344247A3728FD`;
-- final-image FNV-1a checksum: `2f8d46837ea197bb`;
-- center final pixel: `[65, 135, 184, 255]`;
+  `9CD14A90A5A562937C4F4F7E23A2A7311151A66BC9F8672A503572B5E0FCC73E`;
+- final-image FNV-1a checksum: `58b10bf80d3441b1`;
+- center final pixel: `[47, 117, 164, 255]`;
+- directional-only shadow pixel: `[58, 96, 131, 255]`;
+- skinned-region final pixel: `[130, 67, 87, 255]`;
 - center interval cue: `[0.125000, 0.125000, 0.000000, 1.000000]`;
 - driver: exactly `vulkan`;
 - executed pass count: `11`.
@@ -115,15 +117,22 @@ The expanded 1920x1080 result was manually inspected. It shows the expected
 4x4 colored geometry fixture, deterministic lighting gradient, visibly
 rotated animated-bone instances and transparent overlay without corruption.
 The 320x180 runtime regression also checks center RGB/alpha, a dedicated
-animated-bone region cue, interval RGB/alpha and Windows final-image checksum
-`762c956977d071a6`. Metal checks the same tolerant semantic cues, including
-the skinned region, without falsely requiring byte-identical antialiased
-edges.
+directional-only shadow cue, an animated-bone region cue, interval RGB/alpha
+and Windows final-image checksum `d2ee844acc01f04c`. Metal checks the same
+tolerant semantic cues, including separate shadow-map contribution and the
+skinned region, without falsely requiring byte-identical antialiased edges.
 
-This is not yet the final Windows gate. Both shadow maps execute a real depth
-pipeline and clean lifecycle, but their sampled contribution to the lighting
-shader remains to be added. Warm in-process frame metrics, resize/minimize
-coverage and external GPU-capture validation are also still pending.
+Both shadow maps now execute a real depth pipeline and contribute independently
+to the lighting shader through six reflected sampler bindings. Shadow depth
+uses a dedicated nearest sampler so D32 does not rely on optional Vulkan linear
+filter support. The spike uses deterministic screen-aligned depth lookup to
+expose cross-backend binding and depth-sampling failures; production
+light-space projection, comparison sampling, bias and filtering remain later
+renderer work.
+
+This is not yet the final Windows gate. Warm in-process frame metrics,
+resize/minimize coverage and external GPU-capture validation are still
+pending.
 
 ## Determinism evidence
 
@@ -174,10 +183,9 @@ HLSL-to-SPIR-V/MSL path and is not evidence for the still-unrun macOS gate.
 
 ## Remaining gates
 
-1. sample the directional and spot shadow depth results in lighting;
-2. route concrete scene ownership through the generation/deferred-release
+1. route concrete scene ownership through the generation/deferred-release
    seam;
-3. structured per-frame metrics and warmed median/p95/worst results;
-4. final Windows resize/minimize/restore, capture and diagnostics series;
-5. native macOS/Metal metallib build, captures and cross-backend SSIM/manual
+2. structured per-frame metrics and warmed median/p95/worst results;
+3. final Windows resize/minimize/restore, capture and diagnostics series;
+4. native macOS/Metal metallib build, captures and cross-backend SSIM/manual
    comparison.

@@ -74,6 +74,7 @@ int main(int argc, char **argv)
         "\"scene_signature\":\"%016llx\","
         "\"final_image_checksum\":\"%016llx\","
         "\"center_rgba\":[%u,%u,%u,%u],"
+        "\"directional_shadow_rgba\":[%u,%u,%u,%u],"
         "\"skinned_rgba\":[%u,%u,%u,%u],"
         "\"interval_center_rgba\":[%.6f,%.6f,%.6f,%.6f],"
         "\"capture\":\"%s\",\"message\":\"%s\"}\n",
@@ -88,6 +89,10 @@ int main(int argc, char **argv)
         report.center_rgba[1],
         report.center_rgba[2],
         report.center_rgba[3],
+        report.directional_shadow_rgba[0],
+        report.directional_shadow_rgba[1],
+        report.directional_shadow_rgba[2],
+        report.directional_shadow_rgba[3],
         report.skinned_rgba[0],
         report.skinned_rgba[1],
         report.skinned_rgba[2],

@@ -378,6 +378,7 @@ int btbh_gpu_run_phase2(
     SDL_GPUBuffer *bone_buffer = NULL;
     SDL_GPUBuffer *interval_buffer = NULL;
     SDL_GPUSampler *sampler = NULL;
+    SDL_GPUSampler *shadow_sampler = NULL;
     SDL_GPUTransferBuffer *upload = NULL;
     SDL_GPUTransferBuffer *final_download = NULL;
     SDL_GPUTransferBuffer *interval_download = NULL;
@@ -522,7 +523,7 @@ int btbh_gpu_run_phase2(
         config->shader_entrypoint,
         format,
         SDL_GPU_SHADERSTAGE_FRAGMENT,
-        4u,
+        6u,
         0u,
         0u,
         0u
@@ -720,13 +721,17 @@ int btbh_gpu_run_phase2(
     sampler_info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     sampler_info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     sampler = SDL_CreateGPUSampler(device->gpu, &sampler_info);
+    sampler_info.min_filter = SDL_GPU_FILTER_NEAREST;
+    sampler_info.mag_filter = SDL_GPU_FILTER_NEAREST;
+    shadow_sampler = SDL_CreateGPUSampler(device->gpu, &sampler_info);
     if (instance_buffer == NULL ||
         bone_buffer == NULL ||
         interval_buffer == NULL ||
         upload == NULL ||
         final_download == NULL ||
         interval_download == NULL ||
-        sampler == NULL) {
+        sampler == NULL ||
+        shadow_sampler == NULL) {
         btbh_phase2_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
         goto cleanup;
     }
@@ -798,6 +803,11 @@ int btbh_gpu_run_phase2(
     executed_passes += 1u;
     float identity[16];
     btbh_phase2_identity(identity);
+    float shadow_matrices[2][16];
+    btbh_phase2_identity(shadow_matrices[0]);
+    btbh_phase2_identity(shadow_matrices[1]);
+    shadow_matrices[1][0] = 0.60f;
+    shadow_matrices[1][5] = 0.60f;
     SDL_GPUTexture *shadow_textures[2] = {
         directional_shadow,
         spot_shadow
@@ -814,8 +824,8 @@ int btbh_gpu_run_phase2(
         SDL_PushGPUVertexUniformData(
             command_buffer,
             0u,
-            identity,
-            sizeof(identity)
+            shadow_matrices[index],
+            sizeof(shadow_matrices[index])
         );
         SDL_GPURenderPass *shadow_pass = SDL_BeginGPURenderPass(
             command_buffer,
@@ -972,21 +982,25 @@ int btbh_gpu_run_phase2(
         btbh_phase2_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
         goto cleanup;
     }
-    SDL_GPUTextureSamplerBinding lighting_bindings[4];
+    SDL_GPUTextureSamplerBinding lighting_bindings[6];
     SDL_zeroa(lighting_bindings);
     lighting_bindings[0].texture = albedo;
     lighting_bindings[1].texture = normal_material;
     lighting_bindings[2].texture = emission;
     lighting_bindings[3].texture = pattern_output;
+    lighting_bindings[4].texture = directional_shadow;
+    lighting_bindings[5].texture = spot_shadow;
     for (uint32_t index = 0u; index < 4u; ++index) {
         lighting_bindings[index].sampler = sampler;
     }
+    lighting_bindings[4].sampler = shadow_sampler;
+    lighting_bindings[5].sampler = shadow_sampler;
     SDL_BindGPUGraphicsPipeline(lighting_pass, lighting_pipeline);
     SDL_BindGPUFragmentSamplers(
         lighting_pass,
         0u,
         lighting_bindings,
-        4u
+        6u
     );
     SDL_DrawGPUPrimitives(lighting_pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(lighting_pass);
@@ -1069,6 +1083,14 @@ int btbh_gpu_run_phase2(
         (const uint8_t *)final_map + center_index,
         4u
     );
+    const size_t directional_shadow_index =
+        ((((size_t)config->height * 7u) / 10u) * config->width +
+         config->width / 2u) * 4u;
+    (void)memcpy(
+        report->directional_shadow_rgba,
+        (const uint8_t *)final_map + directional_shadow_index,
+        4u
+    );
     const size_t skinned_index =
         ((((size_t)config->height * 11u) / 12u) * config->width +
          ((size_t)config->width * 25u) / 32u) * 4u;
@@ -1131,6 +1153,9 @@ cleanup:
         (void)SDL_CancelGPUCommandBuffer(command_buffer);
     }
     if (device != NULL) {
+        if (shadow_sampler != NULL) {
+            SDL_ReleaseGPUSampler(device->gpu, shadow_sampler);
+        }
         if (interval_download != NULL) {
             SDL_ReleaseGPUTransferBuffer(device->gpu, interval_download);
         }
