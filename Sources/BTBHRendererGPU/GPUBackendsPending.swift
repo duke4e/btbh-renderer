@@ -1,14 +1,31 @@
 import BTBHRenderer
+import Foundation
 
 public enum GPUBackendUnsupportedError: Error, Equatable {
     case operation(String)
+}
+
+enum GPUResourceStagingError: Error, Equatable {
+    case missingAsset(String)
+    case invalidTexture(UInt64)
+    case invalidScreenShader(UInt64)
+}
+
+private struct GPUScreenShaderResource {
+    let fragmentPath: String
+    var parameters: [String: ShaderParameterValue]
 }
 
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
+    private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
+    private var screenShaders: [
+        ScreenShaderHandle: GPUScreenShaderResource
+    ] = [:]
+    private var pendingTextureDestruction: Set<TextureHandle> = []
 
     init(platform: GPUPlatform) {
         self.platform = platform
@@ -35,6 +52,15 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle { throw unsupported() }
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws { throw unsupported() }
     func destroyTexture(_ handle: TextureHandle) {
+        if screenShaders.values.contains(where: {
+            Self.textureDependencies(in: $0.parameters).contains(handle)
+        }) {
+            pendingTextureDestruction.insert(handle)
+            return
+        }
+        destroyTextureNow(handle)
+    }
+    private func destroyTextureNow(_ handle: TextureHandle) {
         guard
             let textureHandles,
             let resource = textures.removeValue(forKey: handle),
@@ -43,6 +69,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             return
         }
         platform.destroyTexture(resource.pointer)
+        pendingTextureDestruction.remove(handle)
     }
     func loadFont(_ descriptor: FontDescriptor) throws -> FontHandle { throw unsupported() }
     func destroyFont(_ handle: FontHandle) {}
@@ -82,9 +109,68 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createSurfaceShader(_ descriptor: SurfaceShaderDescriptor) throws -> SurfaceShaderHandle { throw unsupported() }
     func updateSurfaceShader(_ handle: SurfaceShaderHandle, parameter: String, value: ShaderParameterValue) throws { throw unsupported() }
     func destroySurfaceShader(_ handle: SurfaceShaderHandle) {}
-    func createScreenShader(_ descriptor: ScreenShaderDescriptor) throws -> ScreenShaderHandle { throw unsupported() }
-    func updateScreenShader(_ handle: ScreenShaderHandle, parameter: String, value: ShaderParameterValue) throws { throw unsupported() }
-    func destroyScreenShader(_ handle: ScreenShaderHandle) {}
+    func createScreenShader(
+        _ descriptor: ScreenShaderDescriptor
+    ) throws -> ScreenShaderHandle {
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(
+                atPath: descriptor.fragmentPath,
+                isDirectory: &isDirectory
+            ),
+            !isDirectory.boolValue
+        else {
+            throw GPUResourceStagingError.missingAsset(
+                descriptor.fragmentPath
+            )
+        }
+        try validateTextureDependencies(descriptor.parameters)
+        guard let screenShaderHandles else {
+            throw GPUTextureProbeError.operationFailed(
+                message: "Could not allocate the GPU screen shader handle pool"
+            )
+        }
+        let handle = try screenShaderHandles.acquire(
+            ScreenShaderHandle.self
+        )
+        screenShaders[handle] = .init(
+            fragmentPath: descriptor.fragmentPath,
+            parameters: descriptor.parameters
+        )
+        return handle
+    }
+
+    func updateScreenShader(
+        _ handle: ScreenShaderHandle,
+        parameter: String,
+        value: ShaderParameterValue
+    ) throws {
+        guard var resource = screenShaders[handle] else {
+            throw GPUResourceStagingError.invalidScreenShader(
+                handle.rawValue
+            )
+        }
+        try validateTextureDependencies([parameter: value])
+        let oldDependencies = Self.textureDependencies(
+            in: resource.parameters
+        )
+        resource.parameters[parameter] = value
+        screenShaders[handle] = resource
+        collectPendingTextures(oldDependencies)
+    }
+
+    func destroyScreenShader(_ handle: ScreenShaderHandle) {
+        guard
+            let screenShaderHandles,
+            let resource = screenShaders.removeValue(forKey: handle),
+            screenShaderHandles.release(handle)
+        else {
+            return
+        }
+        collectPendingTextures(
+            Self.textureDependencies(in: resource.parameters)
+        )
+    }
 
     private func unsupported(
         _ function: String = #function
@@ -95,10 +181,42 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 
     func shutdown() {
+        screenShaders.removeAll()
+        pendingTextureDestruction.removeAll()
         for resource in textures.values {
             platform.destroyTexture(resource.pointer)
         }
         textures.removeAll()
+    }
+
+    private func validateTextureDependencies(
+        _ parameters: [String: ShaderParameterValue]
+    ) throws {
+        for handle in Self.textureDependencies(in: parameters)
+        where textures[handle] == nil {
+            throw GPUResourceStagingError.invalidTexture(handle.rawValue)
+        }
+    }
+
+    private func collectPendingTextures(
+        _ candidates: Set<TextureHandle>
+    ) {
+        for handle in candidates
+        where pendingTextureDestruction.contains(handle) &&
+            !screenShaders.values.contains(where: {
+                Self.textureDependencies(in: $0.parameters).contains(handle)
+            }) {
+            destroyTextureNow(handle)
+        }
+    }
+
+    private static func textureDependencies(
+        in parameters: [String: ShaderParameterValue]
+    ) -> Set<TextureHandle> {
+        Set(parameters.values.compactMap { value in
+            guard case .texture(let handle) = value else { return nil }
+            return handle
+        })
     }
 }
 

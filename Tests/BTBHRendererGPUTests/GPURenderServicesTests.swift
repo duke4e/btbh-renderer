@@ -202,4 +202,67 @@ final class GPURenderServicesTests: XCTestCase {
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif
     }
+
+    func testScreenShaderDescriptorStagesTypedParametersAndTextureDependency() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU staged screen shader test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let texture = try RenderServices.resources.loadTexture(.init(
+            path: packageRoot
+                .appendingPathComponent("external/SDL/test/icon.png")
+                .path
+        ))
+        let shader = try RenderServices.resources.createScreenShader(.init(
+            fragmentPath: packageRoot
+                .appendingPathComponent("shaders/post/output.frag")
+                .path,
+            parameters: [
+                "u_texture": .texture(texture),
+                "sharpness": .float(0.5)
+            ]
+        ))
+        XCTAssertTrue(shader.isValid)
+        RenderServices.resources.destroyTexture(texture)
+        try RenderServices.resources.updateScreenShader(
+            shader,
+            parameter: "sharpness",
+            value: .float(0.8)
+        )
+
+        RenderServices.resources.destroyScreenShader(shader)
+        XCTAssertThrowsError(
+            try RenderServices.resources.createScreenShader(.init(
+                fragmentPath: packageRoot
+                    .appendingPathComponent("shaders/post/output.frag")
+                    .path,
+                parameters: ["u_texture": .texture(texture)]
+            ))
+        ) { error in
+            XCTAssertEqual(
+                error as? GPUResourceStagingError,
+                .invalidTexture(texture.rawValue)
+            )
+        }
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
 }
