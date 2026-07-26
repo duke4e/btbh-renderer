@@ -8,6 +8,9 @@
 struct BTBHGPUWindow {
     SDL_Window *window;
     BTBHGPUDevice *device;
+    BTBHGPUTextureFormat swapchain_format;
+    BTBHGPUPresentMode present_mode;
+    BTBHGPUSwapchainComposition composition;
     bool owns_video_subsystem;
     bool claimed;
 };
@@ -33,6 +36,16 @@ static bool btbh_gpu_valid_window_size(uint32_t width, uint32_t height) {
         height > 0 &&
         width <= (uint32_t) INT_MAX &&
         height <= (uint32_t) INT_MAX;
+}
+
+static void btbh_gpu_write_window_state(
+    const BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+) {
+    report->claimed = window->claimed ? 1u : 0u;
+    report->swapchain_format = window->swapchain_format;
+    report->present_mode = window->present_mode;
+    report->composition = window->composition;
 }
 
 static bool btbh_gpu_refresh_window_sizes(
@@ -65,6 +78,11 @@ static bool btbh_gpu_refresh_window_sizes(
     report->logical_height = (uint32_t) logical_height;
     report->drawable_width = (uint32_t) drawable_width;
     report->drawable_height = (uint32_t) drawable_height;
+    const SDL_WindowFlags flags = SDL_GetWindowFlags(window->window);
+    report->minimized =
+        (flags & SDL_WINDOW_MINIMIZED) != 0 ? 1u : 0u;
+    report->hidden = (flags & SDL_WINDOW_HIDDEN) != 0 ? 1u : 0u;
+    btbh_gpu_write_window_state(window, report);
     return true;
 }
 
@@ -255,17 +273,17 @@ BTBHGPUResult btbh_gpu_window_claim(
         return report->result;
     }
 
-    report->swapchain_format = btbh_gpu_texture_format(
+    const BTBHGPUTextureFormat swapchain_format = btbh_gpu_texture_format(
         SDL_GetGPUSwapchainTextureFormat(device->gpu, window->window)
     );
     if (
-        report->swapchain_format == BTBH_GPU_TEXTURE_FORMAT_INVALID ||
+        swapchain_format == BTBH_GPU_TEXTURE_FORMAT_INVALID ||
         !btbh_gpu_refresh_window_sizes(window, report)
     ) {
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
-            report->swapchain_format == BTBH_GPU_TEXTURE_FORMAT_INVALID
+            swapchain_format == BTBH_GPU_TEXTURE_FORMAT_INVALID
                 ? "SDL_GPU selected an unsupported swapchain format"
                 : SDL_GetError()
         );
@@ -275,10 +293,11 @@ BTBHGPUResult btbh_gpu_window_claim(
         return report->result;
     }
 
+    window->swapchain_format = swapchain_format;
+    window->present_mode = project_present_mode;
+    window->composition = BTBH_GPU_SWAPCHAIN_SDR;
+    btbh_gpu_write_window_state(window, report);
     report->result = BTBH_GPU_OK;
-    report->claimed = 1;
-    report->present_mode = project_present_mode;
-    report->composition = BTBH_GPU_SWAPCHAIN_SDR;
     return report->result;
 }
 
@@ -297,11 +316,6 @@ BTBHGPUResult btbh_gpu_window_resize(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
-    const uint8_t claimed = window->claimed ? 1 : 0;
-    const BTBHGPUTextureFormat swapchain_format =
-        report->swapchain_format;
-    const BTBHGPUPresentMode present_mode = report->present_mode;
-    const BTBHGPUSwapchainComposition composition = report->composition;
     if (
         !SDL_SetWindowSize(window->window, (int) width, (int) height) ||
         !SDL_SyncWindow(window->window)
@@ -325,10 +339,162 @@ BTBHGPUResult btbh_gpu_window_resize(
 
     report->result = BTBH_GPU_OK;
     report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
-    report->claimed = claimed;
-    report->swapchain_format = swapchain_format;
-    report->present_mode = present_mode;
-    report->composition = composition;
+    report->message[0] = '\0';
+    return report->result;
+}
+
+static BTBHGPUResult btbh_gpu_window_set_minimized(
+    BTBHGPUWindow *window,
+    bool minimized,
+    BTBHGPUWindowReport *report
+) {
+    if (window == NULL || window->window == NULL || report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+
+    const bool changed = minimized
+        ? SDL_MinimizeWindow(window->window)
+        : SDL_RestoreWindow(window->window);
+    if (!changed || !SDL_SyncWindow(window->window)) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_WINDOW_RESIZE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    SDL_PumpEvents();
+    if (!btbh_gpu_refresh_window_sizes(window, report) ||
+        (report->minimized != 0) != minimized) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_WINDOW_RESIZE,
+            "Window minimize/restore state did not converge"
+        );
+        return report->result;
+    }
+    report->result = BTBH_GPU_OK;
+    report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
+    report->message[0] = '\0';
+    return report->result;
+}
+
+BTBHGPUResult btbh_gpu_window_minimize(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+) {
+    return btbh_gpu_window_set_minimized(window, true, report);
+}
+
+BTBHGPUResult btbh_gpu_window_restore(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+) {
+    return btbh_gpu_window_set_minimized(window, false, report);
+}
+
+BTBHGPUResult btbh_gpu_window_present_clear(
+    BTBHGPUWindow *window,
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue,
+    uint8_t alpha,
+    BTBHGPUWindowReport *report
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->claimed ||
+        report == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+
+    SDL_GPUCommandBuffer *command_buffer =
+        SDL_AcquireGPUCommandBuffer(window->device->gpu);
+    if (command_buffer == NULL) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+
+    SDL_GPUTexture *swapchain_texture = NULL;
+    if (!SDL_WaitAndAcquireGPUSwapchainTexture(
+        command_buffer,
+        window->window,
+        &swapchain_texture,
+        NULL,
+        NULL
+    )) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        (void) SDL_CancelGPUCommandBuffer(command_buffer);
+        return report->result;
+    }
+    if (swapchain_texture == NULL) {
+        (void) SDL_CancelGPUCommandBuffer(command_buffer);
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            "SDL_GPU swapchain is unavailable"
+        );
+        return report->result;
+    }
+
+    SDL_GPUColorTargetInfo color_target = {0};
+    color_target.texture = swapchain_texture;
+    color_target.clear_color.r = (float) red / 255.0f;
+    color_target.clear_color.g = (float) green / 255.0f;
+    color_target.clear_color.b = (float) blue / 255.0f;
+    color_target.clear_color.a = (float) alpha / 255.0f;
+    color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+
+    SDL_GPURenderPass *render_pass = SDL_BeginGPURenderPass(
+        command_buffer,
+        &color_target,
+        1,
+        NULL
+    );
+    if (render_pass == NULL) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        (void) SDL_SubmitGPUCommandBuffer(command_buffer);
+        return report->result;
+    }
+    SDL_EndGPURenderPass(render_pass);
+
+    if (!SDL_SubmitGPUCommandBuffer(command_buffer)) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+
+    if (!btbh_gpu_refresh_window_sizes(window, report)) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+
+    report->result = BTBH_GPU_OK;
+    report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
     report->message[0] = '\0';
     return report->result;
 }

@@ -1,18 +1,21 @@
 # Phase 2 SDL_GPU spike report
 
-Status: **Windows vertical-foundation checkpoint; Phase 2 is not closed**
+Status: **Windows/Vulkan gate complete; native macOS/Metal gate remains**
 
 Date: 2026-07-26
 
-This checkpoint proves the pinned toolchain, explicit Windows/Vulkan device
-contract, window/swapchain lifecycle, offline shader artefacts and a minimal
-offscreen graphics+compute+readback path. It does not yet claim the complete
-Phase 2 scene or Windows/macOS parity gate.
+This report proves the pinned toolchain, explicit Windows/Vulkan device
+contract, window/swapchain lifecycle, offline shader artefacts, expanded
+graphics+compute+readback scene, deterministic ownership teardown, warmed
+metrics and an external swapchain capture. It does not claim the still-unrun
+native macOS/Metal or cross-backend parity gate.
 
 ## Source and host
 
 - Renderer baseline before this checkpoint:
   `6c9cc49432e66fcc02f7fcb00dc9f66f5d590d15`
+- Windows closeout source builds on renderer commit:
+  `ad33b94623be2e3f8f617caa5d9a4e4bbea7bc03`
 - SDL: `683181b47cfabd293e3ea409f838915b8297a4fd`
   (`release-3.4.2`)
 - SDL_shadercross:
@@ -31,8 +34,9 @@ Phase 2 scene or Windows/macOS parity gate.
 - Supported feature mask: `0x00000000000001ff`.
 - Missing feature mask: `0x0000000000000000`.
 - Public `btbh_gpu` header exposes no SDL, Vulkan or Metal API types.
-- Hidden high-DPI window creation, device claim, SDR swapchain selection,
-  resize and clean shutdown pass.
+- Visible high-DPI window creation, device claim, SDR swapchain selection,
+  two real swapchain presents, resize, minimize, restore and clean shutdown
+  pass.
 - Offline HLSL produces SPIR-V, MSL and JSON reflection. The fragment
   reflection reports three outputs and the compute reflection reports one
   read-write storage texture with `8x8x1` threads.
@@ -45,8 +49,8 @@ Phase 2 scene or Windows/macOS parity gate.
   buffer reads back both compute output and G0.
 
 The original minimal scene remains as a diagnostic-triangle regression test.
-The expanded scene checkpoint below now covers the planned pass families, but
-the final Windows performance/resize gate and native macOS gate remain open.
+The expanded scene below covers the planned pass families. The Windows gate
+is closed; the native macOS gate remains open.
 
 ## Resource and frame lifecycle checkpoint
 
@@ -66,8 +70,11 @@ backend-neutral ownership seam required by the larger scene:
 
 Focused tests cover stale handles, double retirement, type mismatch, deferred
 release, resize-style texture recreation, full queues, stale frame tokens,
-arena exhaustion, 100 warm frame cycles and row-pitch overflow. Both public
-GPU headers are separately scanned for SDL, Vulkan and Metal API leakage.
+arena exhaustion, 100 warm frame cycles and row-pitch overflow. The expanded
+runtime now registers all 30 live SDL_GPU resources by exact kind, verifies
+every handle lookup, retires all 30 at completed serial 1 and observes 30
+exactly-once release callbacks before device shutdown. Both public GPU headers
+are separately scanned for SDL, Vulkan and Metal API leakage.
 
 The expanded scene adds concrete pipeline, transfer and readback helpers. The
 existing minimal spike remains unchanged as the smaller regression path.
@@ -130,9 +137,52 @@ expose cross-backend binding and depth-sampling failures; production
 light-space projection, comparison sampling, bias and filtering remain later
 renderer work.
 
-This is not yet the final Windows gate. Warm in-process frame metrics,
-resize/minimize coverage and external GPU-capture validation are still
-pending.
+## Windows/Vulkan closeout
+
+The checked-in `tools/capture-gpu-spike.ps1` runner executes two independent
+warmed 1920x1080 series. Each series uses five warm-up iterations and 30
+measured iterations, then writes one untimed BMP. Every measured iteration
+recreates the isolated spike device and its resources; CPU submit excludes
+setup and BMP encoding, while GPU wait is the public SDL_GPU fence-completion
+proxy. SDL_GPU does not expose native GPU timestamps or presented-frame
+timings, so these values must not be relabelled as either.
+
+| Series | CPU submit median / p95 / worst | GPU wait median / p95 / worst |
+| --- | ---: | ---: |
+| A | 0.0882 / 0.1364 / 0.2168 ms | 1.1815 / 1.7306 / 1.7973 ms |
+| B | 0.0828 / 0.1038 / 0.2358 ms | 1.1676 / 1.5811 / 1.9320 ms |
+
+Both series reported exactly `vulkan`, 30 resources retired per iteration,
+scene signature `7cc30645be466e5f`, image checksum `58b10bf80d3441b1`
+and byte-identical BMP SHA-256
+`9CD14A90A5A562937C4F4F7E23A2A7311151A66BC9F8672A503572B5E0FCC73E`.
+
+The A/B deltas are 6.12% CPU-submit median, 23.90% CPU-submit p95, 1.17%
+GPU-wait median and 8.64% GPU-wait p95. The ratios above 5% were investigated:
+their absolute deltas are 0.0054 ms, 0.0326 ms and 0.1495 ms respectively;
+signatures, checksums, resource counts and output bytes did not move. Longer
+10-warm-up/120-sample diagnostic series showed the same sub-millisecond
+Windows scheduler/driver lifecycle sensitivity while preserving all semantic
+outputs. This is recorded as measurement-floor and per-iteration
+device/resource-lifecycle noise, not hidden by a threshold change.
+
+The historical Windows Run 3/4 values are full-game legacy-renderer results
+for five different workloads. They are retained and already evaluated in the
+game's Phase 1 parity report; comparing their 0.5-40 ms presented-frame values
+numerically with this tiny isolated fence-completion spike would be a
+load-mismatched regression claim. The comparable Run 3/4 to current-game
+analysis remains unchanged: heavy Game and Combat Lab median/p95 deltas are
+below 5%, while documented editor deltas above 5% are at most 0.193 ms.
+
+The visible-window gate presented clear frames before and after
+640x360→800x450 resize plus minimize/restore. RenderDoc 1.45 captured the
+second Vulkan present with API validation enabled; the process exited cleanly.
+The `.rdc` SHA-256 is
+`3A5684E6764DA82BD418B72303EC6652BD3417AAE9B26F56943990DEF41E4CF8`.
+This external capture validates the swapchain/present boundary. The expanded
+offscreen scene remains validated by SDL debug mode, deterministic readback,
+cue pixels and checksum rather than being falsely described as a presented
+frame.
 
 ## Determinism evidence
 
@@ -169,7 +219,7 @@ Phase 0-1 goldens.
 
 - `swift test`: 65 XCTest tests and 1 Windows Swift Testing smoke passed.
 - `cmake --build out/build/x64-gpu-debug --parallel 8`: passed.
-- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 12/12
+- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 13/13
   passed.
 - `cmake --preset x64-release` followed by the `r3d` target build: passed.
 - `git diff --check`: passed before report creation and must be repeated at
@@ -181,11 +231,16 @@ vertical-spike targets build successfully in the current repository path.
 The missing `METAL_IRCONVERTER` configure warning does not affect the
 HLSL-to-SPIR-V/MSL path and is not evidence for the still-unrun macOS gate.
 
-## Remaining gates
+## Remaining gate
 
-1. route concrete scene ownership through the generation/deferred-release
-   seam;
-2. structured per-frame metrics and warmed median/p95/worst results;
-3. final Windows resize/minimize/restore, capture and diagnostics series;
-4. native macOS/Metal metallib build, captures and cross-backend SSIM/manual
-   comparison.
+Only the native macOS/Metal gate remains:
+
+1. build the same source and native `metallib` artifacts on macOS;
+2. repeat both warmed series and the resize/high-DPI/minimize/restore gate;
+3. confirm exact Metal selection, identical semantic signature and clean
+   shutdown;
+4. manually inspect Vulkan/Metal cues and run the documented SSIM comparison.
+
+The historical Windows→Apple differences around text and antialiased edges
+remain documented diagnostics. This Windows closeout does not claim that
+cross-platform SSIM issue is resolved, and no golden or threshold changed.

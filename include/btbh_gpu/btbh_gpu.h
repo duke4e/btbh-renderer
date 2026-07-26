@@ -141,7 +141,9 @@ typedef struct BTBHGPUWindowReport {
     BTBHGPUPresentMode present_mode;
     BTBHGPUSwapchainComposition composition;
     uint8_t claimed;
-    uint8_t reserved[7];
+    uint8_t minimized;
+    uint8_t hidden;
+    uint8_t reserved[5];
     char message[256];
 } BTBHGPUWindowReport;
 
@@ -174,6 +176,22 @@ BTBHGPUResult btbh_gpu_window_resize(
     BTBHGPUWindow *window,
     uint32_t width,
     uint32_t height,
+    BTBHGPUWindowReport *report
+);
+BTBHGPUResult btbh_gpu_window_minimize(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+);
+BTBHGPUResult btbh_gpu_window_restore(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+);
+BTBHGPUResult btbh_gpu_window_present_clear(
+    BTBHGPUWindow *window,
+    uint8_t red,
+    uint8_t green,
+    uint8_t blue,
+    uint8_t alpha,
     BTBHGPUWindowReport *report
 );
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);

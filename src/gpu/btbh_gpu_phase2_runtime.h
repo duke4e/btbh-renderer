@@ -28,6 +28,10 @@ typedef struct BTBHGPUPhase2Report {
     uint32_t width;
     uint32_t height;
     uint32_t executed_pass_count;
+    uint32_t tracked_resource_count;
+    uint32_t deferred_release_count;
+    uint64_t cpu_submit_nanoseconds;
+    uint64_t gpu_wait_nanoseconds;
     uint64_t scene_signature;
     uint64_t final_image_checksum;
     uint8_t center_rgba[4];

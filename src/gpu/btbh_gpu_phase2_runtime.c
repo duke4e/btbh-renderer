@@ -1,5 +1,6 @@
 #include "btbh_gpu_phase2_runtime.h"
 
+#include "btbh_gpu/btbh_gpu_resources.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_spike_scene.h"
 
@@ -32,6 +33,11 @@ typedef struct BTBHPhase2ShaderBytes {
     size_t size;
 } BTBHPhase2ShaderBytes;
 
+typedef struct BTBHPhase2ReleaseContext {
+    SDL_GPUDevice *device;
+    uint32_t released_count;
+} BTBHPhase2ReleaseContext;
+
 static void btbh_phase2_error(
     BTBHGPUPhase2Report *report,
     BTBHGPUResult result,
@@ -44,6 +50,111 @@ static void btbh_phase2_error(
         "%s",
         message != NULL ? message : ""
     );
+}
+
+static bool btbh_phase2_track_resource(
+    BTBHGPUResourceRegistry *registry,
+    BTBHGPUResourceKind kind,
+    uintptr_t payload,
+    BTBHGPUResourceHandle handles[30],
+    BTBHGPUResourceKind kinds[30],
+    uint32_t *handle_count,
+    BTBHGPUPhase2Report *report
+) {
+    BTBHGPUResourceHandle handle = BTBH_GPU_INVALID_RESOURCE_HANDLE;
+    uintptr_t verified_payload = 0u;
+    if (registry == NULL ||
+        payload == 0u ||
+        handles == NULL ||
+        kinds == NULL ||
+        handle_count == NULL ||
+        *handle_count >= 30u ||
+        btbh_gpu_resource_insert(
+            registry,
+            kind,
+            payload,
+            &handle
+        ) != BTBH_GPU_RESOURCE_OK ||
+        btbh_gpu_resource_lookup(
+            registry,
+            handle,
+            kind,
+            &verified_payload
+        ) != BTBH_GPU_RESOURCE_OK ||
+        verified_payload != payload) {
+        btbh_phase2_error(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "Could not register a Phase 2 GPU resource"
+        );
+        return false;
+    }
+    handles[*handle_count] = handle;
+    kinds[*handle_count] = kind;
+    *handle_count += 1u;
+    return true;
+}
+
+static void btbh_phase2_release_resource(
+    BTBHGPUResourceKind kind,
+    uintptr_t payload,
+    void *context
+) {
+    BTBHPhase2ReleaseContext *release_context =
+        (BTBHPhase2ReleaseContext *)context;
+    if (release_context == NULL ||
+        release_context->device == NULL ||
+        payload == 0u) {
+        return;
+    }
+    switch (kind) {
+        case BTBH_GPU_RESOURCE_BUFFER:
+            SDL_ReleaseGPUBuffer(
+                release_context->device,
+                (SDL_GPUBuffer *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_TEXTURE:
+            SDL_ReleaseGPUTexture(
+                release_context->device,
+                (SDL_GPUTexture *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_SAMPLER:
+            SDL_ReleaseGPUSampler(
+                release_context->device,
+                (SDL_GPUSampler *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_SHADER:
+            SDL_ReleaseGPUShader(
+                release_context->device,
+                (SDL_GPUShader *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_GRAPHICS_PIPELINE:
+            SDL_ReleaseGPUGraphicsPipeline(
+                release_context->device,
+                (SDL_GPUGraphicsPipeline *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_COMPUTE_PIPELINE:
+            SDL_ReleaseGPUComputePipeline(
+                release_context->device,
+                (SDL_GPUComputePipeline *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_TRANSFER_BUFFER:
+            SDL_ReleaseGPUTransferBuffer(
+                release_context->device,
+                (SDL_GPUTransferBuffer *)payload
+            );
+            break;
+        case BTBH_GPU_RESOURCE_INVALID:
+        default:
+            return;
+    }
+    release_context->released_count += 1u;
 }
 
 static SDL_GPUShaderFormat btbh_phase2_shader_format(
@@ -384,6 +495,12 @@ int btbh_gpu_run_phase2(
     SDL_GPUTransferBuffer *interval_download = NULL;
     SDL_GPUCommandBuffer *command_buffer = NULL;
     SDL_GPUFence *fence = NULL;
+    BTBHGPUResourceRegistry *resource_registry = NULL;
+    BTBHGPUResourceHandle resource_handles[30] = { 0 };
+    BTBHGPUResourceKind resource_kinds[30] = { 0 };
+    BTBHPhase2ReleaseContext release_context = { 0 };
+    uint32_t resource_handle_count = 0u;
+    bool resources_registered = false;
     void *final_map = NULL;
     void *interval_map = NULL;
     BTBHGPUSceneFixture fixture;
@@ -406,7 +523,6 @@ int btbh_gpu_run_phase2(
     shader_paths[7] = config->lighting_fragment_path;
     shader_paths[8] = config->transparent_fragment_path;
     if (config->shader_entrypoint == NULL ||
-        config->capture_path == NULL ||
         config->width == 0u ||
         config->height == 0u ||
         ((uint64_t)config->width * config->height * 4u) > UINT32_MAX ||
@@ -735,6 +851,83 @@ int btbh_gpu_run_phase2(
         btbh_phase2_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
         goto cleanup;
     }
+
+    resource_registry = btbh_gpu_resource_registry_create(30u, 30u);
+    if (resource_registry == NULL) {
+        btbh_phase2_error(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "Could not create the Phase 2 resource registry"
+        );
+        goto cleanup;
+    }
+#define BTBH_PHASE2_TRACK(kind, pointer) \
+    btbh_phase2_track_resource( \
+        resource_registry, \
+        (kind), \
+        (uintptr_t)(pointer), \
+        resource_handles, \
+        resource_kinds, \
+        &resource_handle_count, \
+        report \
+    )
+    if (!BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TRANSFER_BUFFER, upload) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_TRANSFER_BUFFER,
+            final_download
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_TRANSFER_BUFFER,
+            interval_download
+        ) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_SAMPLER, sampler) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_SAMPLER, shadow_sampler) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_BUFFER, instance_buffer) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_BUFFER, bone_buffer) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_BUFFER, interval_buffer) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, final_color) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, interval_output) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, pattern_output) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, depth) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, emission) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, normal_material) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, albedo) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, spot_shadow) ||
+        !BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_TEXTURE, directional_shadow) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_GRAPHICS_PIPELINE,
+            transparent_pipeline
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_GRAPHICS_PIPELINE,
+            lighting_pipeline
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_GRAPHICS_PIPELINE,
+            gbuffer_pipeline
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_GRAPHICS_PIPELINE,
+            shadow_pipeline
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_COMPUTE_PIPELINE,
+            interval_pipeline
+        ) ||
+        !BTBH_PHASE2_TRACK(
+            BTBH_GPU_RESOURCE_COMPUTE_PIPELINE,
+            pattern_pipeline
+        )) {
+        goto cleanup;
+    }
+    for (uint32_t index = 0u; index < 7u; ++index) {
+        if (!BTBH_PHASE2_TRACK(BTBH_GPU_RESOURCE_SHADER, shaders[index])) {
+            goto cleanup;
+        }
+    }
+#undef BTBH_PHASE2_TRACK
+    resources_registered = true;
+    report->tracked_resource_count = resource_handle_count;
     void *upload_map = SDL_MapGPUTransferBuffer(
         device->gpu,
         upload,
@@ -1054,10 +1247,19 @@ int btbh_gpu_run_phase2(
     SDL_EndGPUCopyPass(copy_pass);
     executed_passes += 1u;
 
+    const uint64_t submit_started = SDL_GetTicksNS();
     fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command_buffer);
+    report->cpu_submit_nanoseconds = SDL_GetTicksNS() - submit_started;
     command_buffer = NULL;
-    if (fence == NULL ||
-        !SDL_WaitForGPUFences(device->gpu, true, &fence, 1u)) {
+    if (fence == NULL) {
+        btbh_phase2_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+        goto cleanup;
+    }
+    const uint64_t wait_started = SDL_GetTicksNS();
+    const bool wait_succeeded =
+        SDL_WaitForGPUFences(device->gpu, true, &fence, 1u);
+    report->gpu_wait_nanoseconds = SDL_GetTicksNS() - wait_started;
+    if (!wait_succeeded) {
         btbh_phase2_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
         goto cleanup;
     }
@@ -1113,7 +1315,8 @@ int btbh_gpu_run_phase2(
             interval_half[interval_center + channel]
         );
     }
-    if (!btbh_phase2_save_capture(
+    if (config->capture_path != NULL &&
+        !btbh_phase2_save_capture(
             config->capture_path,
             final_map,
             config->width,
@@ -1152,7 +1355,43 @@ cleanup:
     if (command_buffer != NULL) {
         (void)SDL_CancelGPUCommandBuffer(command_buffer);
     }
-    if (device != NULL) {
+    if (resources_registered && resource_registry != NULL && device != NULL) {
+        bool retirement_ok = true;
+        release_context.device = device->gpu;
+        for (uint32_t index = 0u;
+             index < resource_handle_count;
+             ++index) {
+            if (btbh_gpu_resource_retire(
+                    resource_registry,
+                    resource_handles[index],
+                    resource_kinds[index],
+                    1u
+                ) != BTBH_GPU_RESOURCE_OK) {
+                retirement_ok = false;
+                break;
+            }
+        }
+        if (retirement_ok) {
+            report->deferred_release_count = btbh_gpu_resource_collect(
+                resource_registry,
+                1u,
+                btbh_phase2_release_resource,
+                &release_context
+            );
+            retirement_ok =
+                report->deferred_release_count == resource_handle_count &&
+                release_context.released_count == resource_handle_count;
+        }
+        if (!retirement_ok) {
+            btbh_phase2_error(
+                report,
+                BTBH_GPU_PLATFORM_FAILURE,
+                "Could not retire Phase 2 GPU resources"
+            );
+            result = 1;
+        }
+    }
+    if (device != NULL && !resources_registered) {
         if (shadow_sampler != NULL) {
             SDL_ReleaseGPUSampler(device->gpu, shadow_sampler);
         }
@@ -1223,6 +1462,14 @@ cleanup:
                 SDL_ReleaseGPUShader(device->gpu, shaders[index]);
             }
         }
+    }
+    if (resource_registry != NULL) {
+        btbh_gpu_resource_registry_destroy(
+            resource_registry,
+            resources_registered ? btbh_phase2_release_resource : NULL,
+            resources_registered ? &release_context : NULL
+        );
+        resource_registry = NULL;
     }
     btbh_gpu_device_destroy(device);
     for (uint32_t index = 0u;

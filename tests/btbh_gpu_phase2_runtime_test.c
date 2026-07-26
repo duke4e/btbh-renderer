@@ -72,6 +72,10 @@ int main(void)
         report.height != 180u ||
         report.scene_signature != UINT64_C(0x7cc30645be466e5f) ||
         report.executed_pass_count != 11u ||
+        report.tracked_resource_count != 30u ||
+        report.deferred_release_count != 30u ||
+        report.cpu_submit_nanoseconds == 0u ||
+        report.gpu_wait_nanoseconds == 0u ||
         report.final_image_checksum == 0u ||
         report.center_rgba[0] < 45u ||
         report.center_rgba[0] > 49u ||
@@ -104,13 +108,16 @@ int main(void)
         fprintf(
             stderr,
             "invalid Phase 2 runtime report: %ux%u passes=%u "
-            "signature=%016llx checksum=%016llx center=%u,%u,%u,%u "
+            "resources=%u/%u signature=%016llx checksum=%016llx "
+            "center=%u,%u,%u,%u "
             "directional_shadow=%u,%u,%u,%u "
             "skinned=%u,%u,%u,%u "
             "interval=%.6f,%.6f,%.6f,%.6f\n",
             report.width,
             report.height,
             report.executed_pass_count,
+            report.tracked_resource_count,
+            report.deferred_release_count,
             (unsigned long long)report.scene_signature,
             (unsigned long long)report.final_image_checksum,
             report.center_rgba[0],

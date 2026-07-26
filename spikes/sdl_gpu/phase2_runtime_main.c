@@ -71,6 +71,8 @@ int main(int argc, char **argv)
     (void)printf(
         "{\"status\":\"%s\",\"driver\":\"%s\","
         "\"width\":%u,\"height\":%u,\"passes\":%u,"
+        "\"resources\":{\"tracked\":%u,\"released\":%u},"
+        "\"cpu_submit_ns\":%llu,\"gpu_wait_ns\":%llu,"
         "\"scene_signature\":\"%016llx\","
         "\"final_image_checksum\":\"%016llx\","
         "\"center_rgba\":[%u,%u,%u,%u],"
@@ -83,6 +85,10 @@ int main(int argc, char **argv)
         report.width,
         report.height,
         report.executed_pass_count,
+        report.tracked_resource_count,
+        report.deferred_release_count,
+        (unsigned long long)report.cpu_submit_nanoseconds,
+        (unsigned long long)report.gpu_wait_nanoseconds,
         (unsigned long long)report.scene_signature,
         (unsigned long long)report.final_image_checksum,
         report.center_rgba[0],

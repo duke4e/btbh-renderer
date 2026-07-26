@@ -833,6 +833,25 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
     btbh_configure_phase2_runtime_target(btbh_gpu_phase2_runtime)
 
+    add_executable(btbh_gpu_phase2_metrics
+        "${R3D_ROOT_PATH}/spikes/sdl_gpu/phase2_metrics_main.c"
+    )
+    target_link_libraries(
+        btbh_gpu_phase2_metrics
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    btbh_configure_phase2_runtime_target(btbh_gpu_phase2_metrics)
+    add_test(
+        NAME btbh_gpu_phase2_metrics
+        COMMAND
+            btbh_gpu_phase2_metrics
+            "${CMAKE_CURRENT_BINARY_DIR}/btbh_gpu_phase2_metrics_test.bmp"
+            320
+            180
+            1
+            3
+    )
+
     add_executable(btbh_gpu_device_smoke
         "${R3D_ROOT_PATH}/tests/btbh_gpu_device_smoke.c"
     )
