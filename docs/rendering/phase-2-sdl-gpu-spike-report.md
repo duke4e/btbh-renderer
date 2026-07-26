@@ -14,8 +14,8 @@ native macOS/Metal or cross-backend parity gate.
 
 - Renderer baseline before this checkpoint:
   `6c9cc49432e66fcc02f7fcb00dc9f66f5d590d15`
-- Windows closeout source builds on renderer commit:
-  `ad33b94623be2e3f8f617caa5d9a4e4bbea7bc03`
+- Windows closeout implementation commit:
+  `f67d575085f3fcd68ee84737d5555982bba01c68`
 - SDL: `683181b47cfabd293e3ea409f838915b8297a4fd`
   (`release-3.4.2`)
 - SDL_shadercross:
