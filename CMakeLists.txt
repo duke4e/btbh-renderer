@@ -35,6 +35,11 @@ option(R3D_BUILD_EXAMPLES "Build the examples" ${R3D_IS_MAIN})
 option(R3D_BUILD_DOCS "Build the doxygen documentation" OFF)
 option(R3D_BUILD_TESTS "Build focused r3d regression tests" ${R3D_IS_MAIN})
 option(BTBH_BUILD_GPU_SPIKE "Build the isolated SDL_GPU Phase 2 spike" OFF)
+option(
+    BTBH_BUILD_GPU_PACKAGE_RUNTIME
+    "Build SDL3-static for the production Swift GPU package"
+    OFF
+)
 
 # ========================================
 # Output Directories
@@ -513,9 +518,7 @@ if(R3D_BUILD_TESTS)
     add_test(NAME r3d_animation_identity COMMAND r3d_animation_identity_test)
 endif()
 
-if(BTBH_BUILD_GPU_SPIKE)
-    enable_testing()
-
+if(BTBH_BUILD_GPU_SPIKE OR BTBH_BUILD_GPU_PACKAGE_RUNTIME)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
     set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
@@ -527,6 +530,10 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${CMAKE_CURRENT_BINARY_DIR}/external/SDL"
         EXCLUDE_FROM_ALL
     )
+endif()
+
+if(BTBH_BUILD_GPU_SPIKE)
+    enable_testing()
 
     set(SDLSHADERCROSS_DXC ON CACHE BOOL "" FORCE)
     set(SDLSHADERCROSS_SHARED OFF CACHE BOOL "" FORCE)

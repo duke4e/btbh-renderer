@@ -147,6 +147,23 @@ typedef struct BTBHGPUWindowReport {
     char message[256];
 } BTBHGPUWindowReport;
 
+typedef struct BTBHGPUPlatformSnapshot {
+    double elapsed_seconds;
+    float delta_seconds;
+    float mouse_x;
+    float mouse_y;
+    float mouse_delta_x;
+    float mouse_delta_y;
+    float mouse_wheel_x;
+    float mouse_wheel_y;
+    int32_t refresh_rate;
+    int32_t frames_per_second;
+    uint8_t should_close;
+    uint8_t focused;
+    uint8_t cursor_visible;
+    uint8_t reserved[5];
+} BTBHGPUPlatformSnapshot;
+
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
@@ -193,6 +210,48 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     uint8_t blue,
     uint8_t alpha,
     BTBHGPUWindowReport *report
+);
+BTBHGPUResult btbh_gpu_window_poll_events(
+    BTBHGPUWindow *window,
+    BTBHGPUPlatformSnapshot *snapshot
+);
+BTBHGPUResult btbh_gpu_window_begin_frame(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report,
+    BTBHGPUPlatformSnapshot *snapshot
+);
+BTBHGPUResult btbh_gpu_window_set_mouse_position(
+    BTBHGPUWindow *window,
+    float x,
+    float y
+);
+BTBHGPUResult btbh_gpu_window_set_cursor_visible(
+    BTBHGPUWindow *window,
+    uint8_t visible
+);
+BTBHGPUResult btbh_gpu_window_set_clipboard_text(
+    BTBHGPUWindow *window,
+    const char *text
+);
+uint8_t btbh_gpu_window_key_down(
+    BTBHGPUWindow *window,
+    uint16_t project_key
+);
+uint8_t btbh_gpu_window_key_pressed(
+    BTBHGPUWindow *window,
+    uint16_t project_key
+);
+uint8_t btbh_gpu_window_mouse_button_down(
+    BTBHGPUWindow *window,
+    uint8_t project_button
+);
+uint8_t btbh_gpu_window_mouse_button_pressed(
+    BTBHGPUWindow *window,
+    uint8_t project_button
+);
+uint8_t btbh_gpu_window_mouse_button_released(
+    BTBHGPUWindow *window,
+    uint8_t project_button
 );
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 

@@ -13,6 +13,16 @@ struct BTBHGPUWindow {
     BTBHGPUSwapchainComposition composition;
     bool owns_video_subsystem;
     bool claimed;
+    bool should_close;
+    bool cursor_visible;
+    uint64_t last_frame_ticks;
+    float mouse_delta_x;
+    float mouse_delta_y;
+    float mouse_wheel_x;
+    float mouse_wheel_y;
+    bool key_pressed[SDL_SCANCODE_COUNT];
+    bool mouse_pressed[4];
+    bool mouse_released[4];
 };
 
 static void btbh_gpu_set_window_error(
@@ -199,6 +209,8 @@ BTBHGPUWindow *btbh_gpu_window_create(
         btbh_gpu_window_destroy(window);
         return NULL;
     }
+    window->cursor_visible = true;
+    window->last_frame_ticks = SDL_GetTicksNS();
     if (!btbh_gpu_refresh_window_sizes(window, report)) {
         btbh_gpu_set_window_error(
             report,
@@ -497,6 +509,359 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
     report->message[0] = '\0';
     return report->result;
+}
+
+static void btbh_gpu_platform_snapshot(
+    BTBHGPUWindow *window,
+    BTBHGPUPlatformSnapshot *snapshot,
+    float delta_seconds
+) {
+    float mouse_x = 0.0f;
+    float mouse_y = 0.0f;
+    (void) SDL_GetMouseState(&mouse_x, &mouse_y);
+
+    int refresh_rate = 0;
+    const SDL_DisplayID display = SDL_GetDisplayForWindow(window->window);
+    const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(display);
+    if (mode != NULL) {
+        refresh_rate = (int) mode->refresh_rate;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->elapsed_seconds = (double) SDL_GetTicksNS() / 1000000000.0;
+    snapshot->delta_seconds = delta_seconds;
+    snapshot->mouse_x = mouse_x;
+    snapshot->mouse_y = mouse_y;
+    snapshot->mouse_delta_x = window->mouse_delta_x;
+    snapshot->mouse_delta_y = window->mouse_delta_y;
+    snapshot->mouse_wheel_x = window->mouse_wheel_x;
+    snapshot->mouse_wheel_y = window->mouse_wheel_y;
+    snapshot->refresh_rate = refresh_rate;
+    snapshot->frames_per_second = delta_seconds > 0.0f
+        ? (int32_t) (1.0f / delta_seconds)
+        : 0;
+    snapshot->should_close = window->should_close ? 1u : 0u;
+    snapshot->focused =
+        (SDL_GetWindowFlags(window->window) & SDL_WINDOW_INPUT_FOCUS) != 0
+            ? 1u
+            : 0u;
+    snapshot->cursor_visible = window->cursor_visible ? 1u : 0u;
+}
+
+BTBHGPUResult btbh_gpu_window_poll_events(
+    BTBHGPUWindow *window,
+    BTBHGPUPlatformSnapshot *snapshot
+) {
+    if (window == NULL || window->window == NULL || snapshot == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+
+    window->mouse_delta_x = 0.0f;
+    window->mouse_delta_y = 0.0f;
+    window->mouse_wheel_x = 0.0f;
+    window->mouse_wheel_y = 0.0f;
+    memset(window->key_pressed, 0, sizeof(window->key_pressed));
+    memset(window->mouse_pressed, 0, sizeof(window->mouse_pressed));
+    memset(window->mouse_released, 0, sizeof(window->mouse_released));
+    const SDL_WindowID window_id = SDL_GetWindowID(window->window);
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_QUIT) {
+            window->should_close = true;
+        } else if (
+            event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
+            event.window.windowID == window_id
+        ) {
+            window->should_close = true;
+        } else if (
+            event.type == SDL_EVENT_MOUSE_MOTION &&
+            event.motion.windowID == window_id
+        ) {
+            window->mouse_delta_x += event.motion.xrel;
+            window->mouse_delta_y += event.motion.yrel;
+        } else if (
+            event.type == SDL_EVENT_MOUSE_WHEEL &&
+            event.wheel.windowID == window_id
+        ) {
+            const float direction =
+                event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED
+                    ? -1.0f
+                    : 1.0f;
+            window->mouse_wheel_x += event.wheel.x * direction;
+            window->mouse_wheel_y += event.wheel.y * direction;
+        } else if (
+            event.type == SDL_EVENT_KEY_DOWN &&
+            event.key.windowID == window_id &&
+            !event.key.repeat &&
+            event.key.scancode < SDL_SCANCODE_COUNT
+        ) {
+            window->key_pressed[event.key.scancode] = true;
+        } else if (
+            event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
+            event.button.windowID == window_id &&
+            event.button.button < 4
+        ) {
+            window->mouse_pressed[event.button.button] = true;
+        } else if (
+            event.type == SDL_EVENT_MOUSE_BUTTON_UP &&
+            event.button.windowID == window_id &&
+            event.button.button < 4
+        ) {
+            window->mouse_released[event.button.button] = true;
+        }
+    }
+
+    btbh_gpu_platform_snapshot(window, snapshot, 0.0f);
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_begin_frame(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report,
+    BTBHGPUPlatformSnapshot *snapshot
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        report == NULL ||
+        snapshot == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (!btbh_gpu_refresh_window_sizes(window, report)) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_WINDOW_RESIZE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+
+    const uint64_t ticks = SDL_GetTicksNS();
+    const float delta_seconds = window->last_frame_ticks == 0
+        ? 0.0f
+        : (float) (
+            (double) (ticks - window->last_frame_ticks) /
+            1000000000.0
+        );
+    window->last_frame_ticks = ticks;
+    btbh_gpu_platform_snapshot(window, snapshot, delta_seconds);
+    report->result = BTBH_GPU_OK;
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_set_mouse_position(
+    BTBHGPUWindow *window,
+    float x,
+    float y
+) {
+    if (window == NULL || window->window == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    SDL_WarpMouseInWindow(window->window, x, y);
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_set_cursor_visible(
+    BTBHGPUWindow *window,
+    uint8_t visible
+) {
+    if (window == NULL || window->window == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    const bool succeeded = visible != 0
+        ? SDL_ShowCursor()
+        : SDL_HideCursor();
+    if (!succeeded) {
+        return BTBH_GPU_WINDOW_FAILURE;
+    }
+    window->cursor_visible = visible != 0;
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_set_clipboard_text(
+    BTBHGPUWindow *window,
+    const char *text
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        text == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    return SDL_SetClipboardText(text)
+        ? BTBH_GPU_OK
+        : BTBH_GPU_WINDOW_FAILURE;
+}
+
+static SDL_Scancode btbh_gpu_project_key_scancode(uint16_t key) {
+    static const SDL_Scancode scancodes[] = {
+        SDL_SCANCODE_UP,
+        SDL_SCANCODE_DOWN,
+        SDL_SCANCODE_LEFT,
+        SDL_SCANCODE_RIGHT,
+        SDL_SCANCODE_RETURN,
+        SDL_SCANCODE_KP_ENTER,
+        SDL_SCANCODE_ESCAPE,
+        SDL_SCANCODE_TAB,
+        SDL_SCANCODE_SPACE,
+        SDL_SCANCODE_BACKSPACE,
+        SDL_SCANCODE_PAUSE,
+        SDL_SCANCODE_LCTRL,
+        SDL_SCANCODE_RCTRL,
+        SDL_SCANCODE_LSHIFT,
+        SDL_SCANCODE_RSHIFT,
+        SDL_SCANCODE_LGUI,
+        SDL_SCANCODE_RGUI,
+        SDL_SCANCODE_F1,
+        SDL_SCANCODE_F2,
+        SDL_SCANCODE_F3,
+        SDL_SCANCODE_F4,
+        SDL_SCANCODE_F5,
+        SDL_SCANCODE_F6,
+        SDL_SCANCODE_F7,
+        SDL_SCANCODE_F8,
+        SDL_SCANCODE_F9,
+        SDL_SCANCODE_F10,
+        SDL_SCANCODE_F11,
+        SDL_SCANCODE_F12,
+        SDL_SCANCODE_KP_0,
+        SDL_SCANCODE_KP_1,
+        SDL_SCANCODE_KP_2,
+        SDL_SCANCODE_KP_3,
+        SDL_SCANCODE_KP_PLUS,
+        SDL_SCANCODE_KP_MINUS,
+        SDL_SCANCODE_1,
+        SDL_SCANCODE_2,
+        SDL_SCANCODE_3,
+        SDL_SCANCODE_4,
+        SDL_SCANCODE_5,
+        SDL_SCANCODE_6,
+        SDL_SCANCODE_7,
+        SDL_SCANCODE_8,
+        SDL_SCANCODE_A,
+        SDL_SCANCODE_B,
+        SDL_SCANCODE_C,
+        SDL_SCANCODE_D,
+        SDL_SCANCODE_E,
+        SDL_SCANCODE_G,
+        SDL_SCANCODE_H,
+        SDL_SCANCODE_I,
+        SDL_SCANCODE_J,
+        SDL_SCANCODE_K,
+        SDL_SCANCODE_M,
+        SDL_SCANCODE_N,
+        SDL_SCANCODE_O,
+        SDL_SCANCODE_P,
+        SDL_SCANCODE_Q,
+        SDL_SCANCODE_R,
+        SDL_SCANCODE_S,
+        SDL_SCANCODE_U,
+        SDL_SCANCODE_V,
+        SDL_SCANCODE_W,
+        SDL_SCANCODE_X,
+        SDL_SCANCODE_Y,
+        SDL_SCANCODE_Z,
+        SDL_SCANCODE_APOSTROPHE,
+        SDL_SCANCODE_SEMICOLON,
+        SDL_SCANCODE_LEFTBRACKET,
+        SDL_SCANCODE_RIGHTBRACKET,
+        SDL_SCANCODE_MINUS,
+        SDL_SCANCODE_EQUALS,
+        SDL_SCANCODE_COMMA,
+        SDL_SCANCODE_PERIOD
+    };
+    const size_t count = sizeof(scancodes) / sizeof(scancodes[0]);
+    return key < count ? scancodes[key] : SDL_SCANCODE_UNKNOWN;
+}
+
+static uint8_t btbh_gpu_project_mouse_button(uint8_t button) {
+    switch (button) {
+        case 0:
+            return SDL_BUTTON_LEFT;
+        case 1:
+            return SDL_BUTTON_RIGHT;
+        case 2:
+            return SDL_BUTTON_MIDDLE;
+        default:
+            return 0;
+    }
+}
+
+uint8_t btbh_gpu_window_key_down(
+    BTBHGPUWindow *window,
+    uint16_t project_key
+) {
+    if (window == NULL || window->window == NULL) {
+        return 0;
+    }
+    const SDL_Scancode scancode =
+        btbh_gpu_project_key_scancode(project_key);
+    int count = 0;
+    const bool *state = SDL_GetKeyboardState(&count);
+    return
+        state != NULL &&
+        scancode > SDL_SCANCODE_UNKNOWN &&
+        (int) scancode < count &&
+        state[scancode]
+            ? 1u
+            : 0u;
+}
+
+uint8_t btbh_gpu_window_key_pressed(
+    BTBHGPUWindow *window,
+    uint16_t project_key
+) {
+    if (window == NULL || window->window == NULL) {
+        return 0;
+    }
+    const SDL_Scancode scancode =
+        btbh_gpu_project_key_scancode(project_key);
+    return
+        scancode > SDL_SCANCODE_UNKNOWN &&
+        scancode < SDL_SCANCODE_COUNT &&
+        window->key_pressed[scancode]
+            ? 1u
+            : 0u;
+}
+
+uint8_t btbh_gpu_window_mouse_button_down(
+    BTBHGPUWindow *window,
+    uint8_t project_button
+) {
+    if (window == NULL || window->window == NULL) {
+        return 0;
+    }
+    const uint8_t button = btbh_gpu_project_mouse_button(project_button);
+    const SDL_MouseButtonFlags state = SDL_GetMouseState(NULL, NULL);
+    return
+        button != 0 &&
+        (state & SDL_BUTTON_MASK(button)) != 0
+            ? 1u
+            : 0u;
+}
+
+uint8_t btbh_gpu_window_mouse_button_pressed(
+    BTBHGPUWindow *window,
+    uint8_t project_button
+) {
+    if (window == NULL || window->window == NULL) {
+        return 0;
+    }
+    const uint8_t button = btbh_gpu_project_mouse_button(project_button);
+    return button < 4 && window->mouse_pressed[button] ? 1u : 0u;
+}
+
+uint8_t btbh_gpu_window_mouse_button_released(
+    BTBHGPUWindow *window,
+    uint8_t project_button
+) {
+    if (window == NULL || window->window == NULL) {
+        return 0;
+    }
+    const uint8_t button = btbh_gpu_project_mouse_button(project_button);
+    return button < 4 && window->mouse_released[button] ? 1u : 0u;
 }
 
 void btbh_gpu_window_destroy(BTBHGPUWindow *window) {

@@ -171,6 +171,7 @@ public final class GPUWindowProbe {
         width: UInt32,
         height: UInt32,
         hidden: Bool,
+        highPixelDensity: Bool = true,
         debugMode: Bool
     ) throws {
         deviceProbe = try GPUDeviceProbe(
@@ -183,7 +184,7 @@ public final class GPUWindowProbe {
         descriptor.width = width
         descriptor.height = height
         descriptor.hidden = hidden ? 1 : 0
-        descriptor.high_pixel_density = 1
+        descriptor.high_pixel_density = highPixelDensity ? 1 : 0
         createdWindow = title.withCString { titlePointer in
             descriptor.title = titlePointer
             return btbh_gpu_window_create(&descriptor, &report)
@@ -253,6 +254,112 @@ public final class GPUWindowProbe {
         }
     }
 
+    func pollPlatform() throws -> GPUPlatformState {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "pollEvents",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        var snapshot = BTBHGPUPlatformSnapshot()
+        guard btbh_gpu_window_poll_events(
+            window,
+            &snapshot
+        ) == BTBH_GPU_OK else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "pollEvents",
+                stage: -1,
+                message: "SDL GPU event polling failed"
+            )
+        }
+        return GPUPlatformState(snapshot: snapshot)
+    }
+
+    func beginPlatformFrame() throws -> GPUPlatformState {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "beginFrame",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUWindowReport()
+        var snapshot = BTBHGPUPlatformSnapshot()
+        guard btbh_gpu_window_begin_frame(
+            window,
+            &report,
+            &snapshot
+        ) == BTBH_GPU_OK else {
+            throw Self.error(
+                operation: "beginFrame",
+                report: &report
+            )
+        }
+        windowDiagnostics = GPUWindowDiagnostics(report: &report)
+        return GPUPlatformState(snapshot: snapshot)
+    }
+
+    func setMousePosition(x: Float, y: Float) throws {
+        try performPlatformOperation("setMousePosition") { window in
+            btbh_gpu_window_set_mouse_position(window, x, y)
+        }
+    }
+
+    func setCursorVisible(_ visible: Bool) throws {
+        try performPlatformOperation("setCursorVisible") { window in
+            btbh_gpu_window_set_cursor_visible(
+                window,
+                visible ? 1 : 0
+            )
+        }
+    }
+
+    func setClipboardText(_ text: String) throws {
+        try text.withCString { textPointer in
+            try performPlatformOperation("setClipboardText") { window in
+                btbh_gpu_window_set_clipboard_text(
+                    window,
+                    textPointer
+                )
+            }
+        }
+    }
+
+    func isKeyDown(_ key: InputKey) -> Bool {
+        guard let window, !isShutdown else { return false }
+        return btbh_gpu_window_key_down(window, key.rawValue) != 0
+    }
+
+    func wasKeyPressed(_ key: InputKey) -> Bool {
+        guard let window, !isShutdown else { return false }
+        return btbh_gpu_window_key_pressed(window, key.rawValue) != 0
+    }
+
+    func isMouseButtonDown(_ button: MouseButton) -> Bool {
+        guard let window, !isShutdown else { return false }
+        return btbh_gpu_window_mouse_button_down(
+            window,
+            button.rawValue
+        ) != 0
+    }
+
+    func wasMouseButtonPressed(_ button: MouseButton) -> Bool {
+        guard let window, !isShutdown else { return false }
+        return btbh_gpu_window_mouse_button_pressed(
+            window,
+            button.rawValue
+        ) != 0
+    }
+
+    func wasMouseButtonReleased(_ button: MouseButton) -> Bool {
+        guard let window, !isShutdown else { return false }
+        return btbh_gpu_window_mouse_button_released(
+            window,
+            button.rawValue
+        ) != 0
+    }
+
     public func shutdown() {
         if let window {
             btbh_gpu_window_destroy(window)
@@ -292,6 +399,26 @@ public final class GPUWindowProbe {
         windowDiagnostics = GPUWindowDiagnostics(report: &report)
     }
 
+    private func performPlatformOperation(
+        _ operation: String,
+        _ body: (OpaquePointer) -> BTBHGPUResult
+    ) throws {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: operation,
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        guard body(window) == BTBH_GPU_OK else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: operation,
+                stage: -1,
+                message: "SDL GPU platform operation failed"
+            )
+        }
+    }
+
     private static func error(
         operation: String,
         report: inout BTBHGPUWindowReport
@@ -301,5 +428,89 @@ public final class GPUWindowProbe {
             stage: Int32(report.error_stage.rawValue),
             message: GPUDeviceProbe.string(from: &report.message)
         )
+    }
+}
+
+struct GPUPlatformState {
+    let elapsedSeconds: Double
+    let deltaSeconds: Float
+    let mousePosition: RenderVec2
+    let mouseDelta: RenderVec2
+    let mouseWheelDelta: Float
+    let refreshRate: Int
+    let framesPerSecond: Int
+    let shouldClose: Bool
+    let isWindowFocused: Bool
+    let isCursorVisible: Bool
+
+    init(snapshot: BTBHGPUPlatformSnapshot) {
+        elapsedSeconds = snapshot.elapsed_seconds
+        deltaSeconds = snapshot.delta_seconds
+        mousePosition = .init(
+            x: snapshot.mouse_x,
+            y: snapshot.mouse_y
+        )
+        mouseDelta = .init(
+            x: snapshot.mouse_delta_x,
+            y: snapshot.mouse_delta_y
+        )
+        mouseWheelDelta = snapshot.mouse_wheel_y
+        refreshRate = Int(snapshot.refresh_rate)
+        framesPerSecond = Int(snapshot.frames_per_second)
+        shouldClose = snapshot.should_close != 0
+        isWindowFocused = snapshot.focused != 0
+        isCursorVisible = snapshot.cursor_visible != 0
+    }
+
+    static let empty = Self(
+        elapsedSeconds: 0,
+        deltaSeconds: 0,
+        mousePosition: .zero,
+        mouseDelta: .zero,
+        mouseWheelDelta: 0,
+        refreshRate: 0,
+        framesPerSecond: 0,
+        shouldClose: false,
+        isWindowFocused: false,
+        isCursorVisible: true
+    )
+
+    func settingCursorVisible(_ visible: Bool) -> Self {
+        Self(
+            elapsedSeconds: elapsedSeconds,
+            deltaSeconds: deltaSeconds,
+            mousePosition: mousePosition,
+            mouseDelta: mouseDelta,
+            mouseWheelDelta: mouseWheelDelta,
+            refreshRate: refreshRate,
+            framesPerSecond: framesPerSecond,
+            shouldClose: shouldClose,
+            isWindowFocused: isWindowFocused,
+            isCursorVisible: visible
+        )
+    }
+
+    init(
+        elapsedSeconds: Double,
+        deltaSeconds: Float,
+        mousePosition: RenderVec2,
+        mouseDelta: RenderVec2,
+        mouseWheelDelta: Float,
+        refreshRate: Int,
+        framesPerSecond: Int,
+        shouldClose: Bool,
+        isWindowFocused: Bool,
+        isCursorVisible: Bool
+    ) {
+        self.elapsedSeconds = elapsedSeconds
+        self.deltaSeconds = deltaSeconds
+        self.mousePosition = mousePosition
+        self.mouseDelta = mouseDelta
+        self.mouseWheelDelta = mouseWheelDelta
+        self.refreshRate = refreshRate
+        self.framesPerSecond = framesPerSecond
+        self.shouldClose = shouldClose
+        self.isWindowFocused = isWindowFocused
+        self.isCursorVisible = isCursorVisible
     }
 }
