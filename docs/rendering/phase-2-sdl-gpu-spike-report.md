@@ -44,9 +44,9 @@ Phase 2 scene or Windows/macOS parity gate.
 - A compute pass writes deterministic `RGBA16_FLOAT` data and the same command
   buffer reads back both compute output and G0.
 
-The minimal scene is intentionally only a diagnostic triangle. Directional
-and spot shadows, instancing, skinning, deferred lighting, transparent draw
-and interval-trace compute remain required before the final Phase 2 gate.
+The original minimal scene remains as a diagnostic-triangle regression test.
+The expanded scene checkpoint below now covers the planned pass families, but
+the final Windows performance/resize gate and native macOS gate remain open.
 
 ## Resource and frame lifecycle checkpoint
 
@@ -69,9 +69,61 @@ release, resize-style texture recreation, full queues, stale frame tokens,
 arena exhaustion, 100 warm frame cycles and row-pitch overflow. Both public
 GPU headers are separately scanned for SDL, Vulkan and Metal API leakage.
 
-Concrete pipeline and readback wrappers will be introduced with the expanded
-scene; the existing minimal spike still owns its concrete SDL objects
-directly.
+The expanded scene adds concrete pipeline, transfer and readback helpers. The
+existing minimal spike remains unchanged as the smaller regression path.
+
+## Expanded deterministic scene checkpoint
+
+The expanded Vulkan runtime executes this fixed 11-pass sequence:
+
+1. instance, bone and interval-buffer upload;
+2. directional shadow depth;
+3. spot shadow depth;
+4. opaque G-buffer draw;
+5. 14-instance G-buffer draw;
+6. skinned G-buffer draw with four storage-buffer bone matrices, including a
+   deterministic non-identity 22.5-degree animation sample;
+7. deterministic compute-pattern write;
+8. interval-buffer compute trace;
+9. deferred-lighting fullscreen draw sampling all three G-buffer targets and
+   the compute-pattern texture;
+10. alpha-blended forward draw;
+11. final-color and interval-texture readback.
+
+The canonical backend-neutral scene contract fixes seed `0x42544248`, camera,
+16 instances, four bones, animation time `1250 ms`, entity counts and pass
+order. The same contract now generates the exact instance, bone and interval
+payload uploaded by the runtime. Its FNV-1a signature covers both the pass
+manifest and canonical fixture bytes:
+
+`7cc30645be466e5f`
+
+Windows/Vulkan 1920x1080 capture A and B were byte-identical:
+
+- SHA-256:
+  `F37361966B8C7AF3A892D1FFFE49D29A71E9799B8270DDF74AB344247A3728FD`;
+- final-image FNV-1a checksum: `2f8d46837ea197bb`;
+- center final pixel: `[65, 135, 184, 255]`;
+- center interval cue: `[0.125000, 0.125000, 0.000000, 1.000000]`;
+- driver: exactly `vulkan`;
+- executed pass count: `11`.
+
+All 24 new Phase 2 SPIR-V, MSL and JSON reflection artefacts were rebuilt and
+remained byte-identical by SHA-256.
+
+The expanded 1920x1080 result was manually inspected. It shows the expected
+4x4 colored geometry fixture, deterministic lighting gradient, visibly
+rotated animated-bone instances and transparent overlay without corruption.
+The 320x180 runtime regression also checks center RGB/alpha, a dedicated
+animated-bone region cue, interval RGB/alpha and Windows final-image checksum
+`762c956977d071a6`. Metal checks the same tolerant semantic cues, including
+the skinned region, without falsely requiring byte-identical antialiased
+edges.
+
+This is not yet the final Windows gate. Both shadow maps execute a real depth
+pipeline and clean lifecycle, but their sampled contribution to the lighting
+shader remains to be added. Warm in-process frame metrics, resize/minimize
+coverage and external GPU-capture validation are also still pending.
 
 ## Determinism evidence
 
@@ -108,7 +160,7 @@ Phase 0-1 goldens.
 
 - `swift test`: 65 XCTest tests and 1 Windows Swift Testing smoke passed.
 - `cmake --build out/build/x64-gpu-debug --parallel 8`: passed.
-- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 9/9
+- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 12/12
   passed.
 - `cmake --preset x64-release` followed by the `r3d` target build: passed.
 - `git diff --check`: passed before report creation and must be repeated at
@@ -122,11 +174,10 @@ HLSL-to-SPIR-V/MSL path and is not evidence for the still-unrun macOS gate.
 
 ## Remaining gates
 
-1. concrete pipeline/readback wrappers using the new ownership seam;
-2. full deterministic scene and semantic signature;
-3. shadows, instancing, skinning, transparent and deferred-lighting passes;
-4. interval-trace compute and compute-to-graphics sampling;
-5. structured per-frame metrics and warmed median/p95/worst results;
-6. final Windows resize/minimize/restore, capture and diagnostics series;
-7. native macOS/Metal metallib build, captures and cross-backend SSIM/manual
+1. sample the directional and spot shadow depth results in lighting;
+2. route concrete scene ownership through the generation/deferred-release
+   seam;
+3. structured per-frame metrics and warmed median/p95/worst results;
+4. final Windows resize/minimize/restore, capture and diagnostics series;
+5. native macOS/Metal metallib build, captures and cross-backend SSIM/manual
    comparison.

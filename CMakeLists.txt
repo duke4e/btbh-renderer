@@ -547,6 +547,11 @@ if(BTBH_BUILD_GPU_SPIKE)
         BTBH_GPU_SHADER_OUTPUT_DIR
         "${CMAKE_CURRENT_BINARY_DIR}/generated/btbh_gpu/shaders"
     )
+    if(APPLE)
+        set(BTBH_GPU_RUNTIME_SHADER_EXTENSION "metallib")
+    else()
+        set(BTBH_GPU_RUNTIME_SHADER_EXTENSION "spv")
+    endif()
     if(WIN32 AND TARGET dxcompiler AND TARGET dxildll)
         set_target_properties(
             dxcompiler
@@ -557,30 +562,39 @@ if(BTBH_BUILD_GPU_SPIKE)
     endif()
 
     set(BTBH_GPU_SHADER_ARTIFACTS)
-    foreach(_shader_stage IN ITEMS vert frag comp)
-        if(_shader_stage STREQUAL "vert")
-            set(_shadercross_stage vertex)
-        elseif(_shader_stage STREQUAL "frag")
-            set(_shadercross_stage fragment)
-        else()
-            set(_shadercross_stage compute)
-        endif()
+    set(BTBH_GPU_SHADER_SPECS
+        "vertical_spike.vert|vertex"
+        "vertical_spike.frag|fragment"
+        "vertical_spike.comp|compute"
+        "phase2_shadow.vert|vertex"
+        "phase2_shadow.frag|fragment"
+        "phase2_gbuffer.vert|vertex"
+        "phase2_gbuffer.frag|fragment"
+        "phase2_interval.comp|compute"
+        "phase2_lighting.vert|vertex"
+        "phase2_lighting.frag|fragment"
+        "phase2_transparent.frag|fragment"
+    )
+    foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
+        string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
+        list(GET _shader_parts 0 _shader_name)
+        list(GET _shader_parts 1 _shadercross_stage)
 
         set(
             _shader_source
-            "${R3D_ROOT_PATH}/shaders/gpu_spike/vertical_spike.${_shader_stage}.hlsl"
+            "${R3D_ROOT_PATH}/shaders/gpu_spike/${_shader_name}.hlsl"
         )
         set(
             _shader_spirv
-            "${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.${_shader_stage}.spv"
+            "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.spv"
         )
         set(
             _shader_msl
-            "${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.${_shader_stage}.msl"
+            "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.msl"
         )
         set(
             _shader_reflection
-            "${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.${_shader_stage}.json"
+            "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.json"
         )
 
         add_custom_command(
@@ -599,7 +613,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             DEPENDS
                 shadercross
                 "${_shader_source}"
-            COMMENT "Compiling ${_shader_stage} HLSL to SPIR-V"
+            COMMENT "Compiling ${_shader_name} HLSL to SPIR-V"
             VERBATIM
         )
         add_custom_command(
@@ -626,7 +640,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             DEPENDS
                 shadercross
                 "${_shader_spirv}"
-            COMMENT "Translating and reflecting ${_shader_stage} SPIR-V"
+            COMMENT "Translating and reflecting ${_shader_name} SPIR-V"
             VERBATIM
         )
 
@@ -641,11 +655,11 @@ if(BTBH_BUILD_GPU_SPIKE)
         if(APPLE)
             set(
                 _shader_air
-                "${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.${_shader_stage}.air"
+                "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.air"
             )
             set(
                 _shader_metallib
-                "${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.${_shader_stage}.metallib"
+                "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.metallib"
             )
             add_custom_command(
                 OUTPUT "${_shader_metallib}"
@@ -659,7 +673,7 @@ if(BTBH_BUILD_GPU_SPIKE)
                     "${_shader_air}"
                     -o "${_shader_metallib}"
                 DEPENDS "${_shader_msl}"
-                COMMENT "Compiling ${_shader_stage} MSL to metallib"
+                COMMENT "Compiling ${_shader_name} MSL to metallib"
                 VERBATIM
             )
             list(APPEND BTBH_GPU_SHADER_ARTIFACTS "${_shader_metallib}")
@@ -675,7 +689,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_contract.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_device.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_frame.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_phase2_runtime.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_resources.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_spike_scene.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_vertical_smoke.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_window.c"
     )
@@ -743,6 +759,79 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
     endif()
     add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
+
+    add_executable(btbh_gpu_spike_scene_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_spike_scene_test.c"
+    )
+    target_include_directories(btbh_gpu_spike_scene_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(btbh_gpu_spike_scene_test PRIVATE btbh_gpu)
+    if(MSVC)
+        target_compile_options(btbh_gpu_spike_scene_test PRIVATE /W4 /WX)
+    else()
+        target_compile_options(btbh_gpu_spike_scene_test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror
+        )
+    endif()
+    add_test(NAME btbh_gpu_spike_scene COMMAND btbh_gpu_spike_scene_test)
+
+    add_executable(btbh_gpu_phase2_shader_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_phase2_shader_test.c"
+    )
+    target_compile_definitions(btbh_gpu_phase2_shader_test
+        PRIVATE
+            BTBH_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_shadow.vert.json"
+            BTBH_GBUFFER_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_gbuffer.vert.json"
+            BTBH_GBUFFER_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_gbuffer.frag.json"
+            BTBH_INTERVAL_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_interval.comp.json"
+            BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_lighting.frag.json"
+            BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_transparent.frag.json"
+    )
+    add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
+    add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)
+
+    function(btbh_configure_phase2_runtime_target target)
+        target_include_directories(${target}
+            PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+        )
+        target_compile_definitions(${target}
+            PRIVATE
+            BTBH_PHASE2_SHADOW_VERTEX_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_shadow.vert.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_SHADOW_FRAGMENT_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_shadow.frag.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_GBUFFER_VERTEX_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_gbuffer.vert.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_GBUFFER_FRAGMENT_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_gbuffer.frag.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_PATTERN_COMPUTE_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/vertical_spike.comp.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_INTERVAL_COMPUTE_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_interval.comp.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_LIGHTING_VERTEX_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_lighting.vert.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_LIGHTING_FRAGMENT_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_lighting.frag.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+            BTBH_PHASE2_TRANSPARENT_FRAGMENT_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_transparent.frag.${BTBH_GPU_RUNTIME_SHADER_EXTENSION}"
+        )
+        add_dependencies(${target} btbh_gpu_shaders)
+    endfunction()
+
+    add_executable(btbh_gpu_phase2_runtime_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_phase2_runtime_test.c"
+    )
+    target_compile_definitions(btbh_gpu_phase2_runtime_test
+        PRIVATE
+            BTBH_PHASE2_CAPTURE_PATH="${CMAKE_CURRENT_BINARY_DIR}/btbh_gpu_phase2_runtime_test.bmp"
+    )
+    target_link_libraries(
+        btbh_gpu_phase2_runtime_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    btbh_configure_phase2_runtime_target(btbh_gpu_phase2_runtime_test)
+    add_test(NAME btbh_gpu_phase2_runtime COMMAND btbh_gpu_phase2_runtime_test)
+
+    add_executable(btbh_gpu_phase2_runtime
+        "${R3D_ROOT_PATH}/spikes/sdl_gpu/phase2_runtime_main.c"
+    )
+    target_link_libraries(
+        btbh_gpu_phase2_runtime
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    btbh_configure_phase2_runtime_target(btbh_gpu_phase2_runtime)
 
     add_executable(btbh_gpu_device_smoke
         "${R3D_ROOT_PATH}/tests/btbh_gpu_device_smoke.c"
