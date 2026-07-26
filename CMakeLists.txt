@@ -674,6 +674,8 @@ if(BTBH_BUILD_GPU_SPIKE)
     add_library(btbh_gpu STATIC
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_contract.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_device.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_frame.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_resources.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_vertical_smoke.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_window.c"
     )
@@ -715,6 +717,32 @@ if(BTBH_BUILD_GPU_SPIKE)
         NAME btbh_gpu_public_header
         COMMAND btbh_gpu_public_header_test
     )
+
+    add_executable(btbh_gpu_resources_public_header_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_public_header_test.c"
+    )
+    target_compile_definitions(
+        btbh_gpu_resources_public_header_test
+        PRIVATE
+            BTBH_GPU_PUBLIC_HEADER_PATH="${R3D_ROOT_PATH}/include/btbh_gpu/btbh_gpu_resources.h"
+    )
+    add_test(
+        NAME btbh_gpu_resources_public_header
+        COMMAND btbh_gpu_resources_public_header_test
+    )
+
+    add_executable(btbh_gpu_resource_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_resource_test.c"
+    )
+    target_link_libraries(btbh_gpu_resource_test PRIVATE btbh_gpu)
+    if(MSVC)
+        target_compile_options(btbh_gpu_resource_test PRIVATE /W4 /WX)
+    else()
+        target_compile_options(btbh_gpu_resource_test PRIVATE
+            -Wall -Wextra -Wpedantic -Werror
+        )
+    endif()
+    add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
 
     add_executable(btbh_gpu_device_smoke
         "${R3D_ROOT_PATH}/tests/btbh_gpu_device_smoke.c"

@@ -45,9 +45,33 @@ Phase 2 scene or Windows/macOS parity gate.
   buffer reads back both compute output and G0.
 
 The minimal scene is intentionally only a diagnostic triangle. Directional
-and spot shadows, instancing, skinning, deferred lighting, transparent draw,
-interval-trace compute, resource registry and frame arenas remain required
-before the final Phase 2 gate.
+and spot shadows, instancing, skinning, deferred lighting, transparent draw
+and interval-trace compute remain required before the final Phase 2 gate.
+
+## Resource and frame lifecycle checkpoint
+
+The source after the vertical-foundation commit now also contains the
+backend-neutral ownership seam required by the larger scene:
+
+- opaque, fixed-capacity resource registry;
+- generation-checked 64-bit handles;
+- exact resource-kind validation;
+- atomic rejection when the registry or deferred queue is full;
+- retirement keyed by completed submission serial;
+- stable deferred collection and exactly-once release callbacks;
+- fixed frame slots that cannot be reused before their retire serial;
+- generation-checked frame tokens;
+- per-slot upload/readback arenas with no warm-frame heap allocation;
+- power-of-two allocation alignment and overflow-safe row-pitch alignment.
+
+Focused tests cover stale handles, double retirement, type mismatch, deferred
+release, resize-style texture recreation, full queues, stale frame tokens,
+arena exhaustion, 100 warm frame cycles and row-pitch overflow. Both public
+GPU headers are separately scanned for SDL, Vulkan and Metal API leakage.
+
+Concrete pipeline and readback wrappers will be introduced with the expanded
+scene; the existing minimal spike still owns its concrete SDL objects
+directly.
 
 ## Determinism evidence
 
@@ -84,7 +108,7 @@ Phase 0-1 goldens.
 
 - `swift test`: 65 XCTest tests and 1 Windows Swift Testing smoke passed.
 - `cmake --build out/build/x64-gpu-debug --parallel 8`: passed.
-- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 7/7
+- `ctest --test-dir out/build/x64-gpu-debug --output-on-failure`: 9/9
   passed.
 - `cmake --preset x64-release` followed by the `r3d` target build: passed.
 - `git diff --check`: passed before report creation and must be repeated at
@@ -98,7 +122,7 @@ HLSL-to-SPIR-V/MSL path and is not evidence for the still-unrun macOS gate.
 
 ## Remaining gates
 
-1. generation-checked resource registry, deferred release and frame arenas;
+1. concrete pipeline/readback wrappers using the new ownership seam;
 2. full deterministic scene and semantic signature;
 3. shadows, instancing, skinning, transparent and deferred-lighting passes;
 4. interval-trace compute and compute-to-graphics sampling;
