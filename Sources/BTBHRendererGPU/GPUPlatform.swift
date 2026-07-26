@@ -263,6 +263,24 @@ public final class GPUPlatform: GamePlatform {
         )))
     }
 
+    func presentClear(_ color: RenderColor) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        try window.presentClear(
+            red: color.r,
+            green: color.g,
+            blue: color.b,
+            alpha: color.a
+        )
+    }
+
+    func failClosed(operation: String) {
+        print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
+        fflush(stdout)
+        closeWindow()
+    }
+
     private func throttleIfNeeded() {
         let now = ProcessInfo.processInfo.systemUptime
         defer {
