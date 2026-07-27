@@ -8,6 +8,7 @@ public enum GPUBackendUnsupportedError: Error, Equatable {
 enum GPUResourceStagingError: Error, Equatable {
     case missingAsset(String)
     case invalidTexture(UInt64)
+    case invalidModel(UInt64)
     case invalidScreenShader(UInt64)
 }
 
@@ -20,8 +21,10 @@ private struct GPUScreenShaderResource {
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
+    private let modelHandles = try? HandlePool(initialCapacity: 32)
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
+    private var models: [ModelHandle: GPUModelProbeResource] = [:]
     private var screenShaders: [
         ScreenShaderHandle: GPUScreenShaderResource
     ] = [:]
@@ -76,9 +79,45 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createRenderTarget(_ descriptor: RenderTargetDescriptor) throws -> RenderTargetHandle { throw unsupported() }
     func colorTexture(of target: RenderTargetHandle) throws -> TextureHandle { throw unsupported() }
     func destroyRenderTarget(_ handle: RenderTargetHandle) {}
-    func loadModel(path: String, flags: ModelImportFlags) throws -> ModelHandle { throw unsupported() }
-    func modelMetadata(_ handle: ModelHandle) throws -> ModelMetadata { throw unsupported() }
-    func destroyModel(_ handle: ModelHandle) {}
+    func loadModel(
+        path: String,
+        flags: ModelImportFlags
+    ) throws -> ModelHandle {
+        _ = flags
+        guard let modelHandles else {
+            throw GPUModelProbeError.operationFailed(
+                message: "Could not allocate the GPU model handle pool"
+            )
+        }
+        let resource = try platform.loadModel(path: path)
+        let handle: ModelHandle
+        do {
+            handle = try modelHandles.acquire(ModelHandle.self)
+        } catch {
+            platform.destroyModel(resource.pointer)
+            throw error
+        }
+        models[handle] = resource
+        return handle
+    }
+
+    func modelMetadata(_ handle: ModelHandle) throws -> ModelMetadata {
+        guard let resource = models[handle] else {
+            throw GPUResourceStagingError.invalidModel(handle.rawValue)
+        }
+        return resource.metadata
+    }
+
+    func destroyModel(_ handle: ModelHandle) {
+        guard
+            let modelHandles,
+            let resource = models.removeValue(forKey: handle),
+            modelHandles.release(handle)
+        else {
+            return
+        }
+        platform.destroyModel(resource.pointer)
+    }
     func createMesh(_ descriptor: MeshDescriptor, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws -> MeshHandle { throw unsupported() }
     func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws { throw unsupported() }
     func destroyMesh(_ handle: MeshHandle) {}
@@ -183,6 +222,10 @@ final class GPUResourceBackend: RenderResourceBackend {
     func shutdown() {
         screenShaders.removeAll()
         pendingTextureDestruction.removeAll()
+        for resource in models.values {
+            platform.destroyModel(resource.pointer)
+        }
+        models.removeAll()
         for resource in textures.values {
             platform.destroyTexture(resource.pointer)
         }

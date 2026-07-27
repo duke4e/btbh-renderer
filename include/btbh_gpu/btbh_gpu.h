@@ -166,6 +166,7 @@ typedef struct BTBHGPUPlatformSnapshot {
 
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
+typedef struct BTBHGPUModel BTBHGPUModel;
 
 typedef enum BTBHGPUTextureFilter {
     BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
@@ -186,6 +187,19 @@ typedef struct BTBHGPUTextureReport {
     uint32_t mip_count;
     char message[256];
 } BTBHGPUTextureReport;
+
+typedef struct BTBHGPUModelReport {
+    BTBHGPUResult result;
+    float minimum_x;
+    float minimum_y;
+    float minimum_z;
+    float maximum_x;
+    float maximum_y;
+    float maximum_z;
+    uint32_t mesh_count;
+    uint32_t material_count;
+    char message[256];
+} BTBHGPUModelReport;
 
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
 BTBHGPUShaderFormat btbh_gpu_backend_shader_format(BTBHGPUBackendRequest backend);
@@ -283,6 +297,16 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUTextureReport *report
 );
 void btbh_gpu_texture_destroy(BTBHGPUTexture *texture);
+BTBHGPUModel *btbh_gpu_window_model_load(
+    BTBHGPUWindow *window,
+    const char *path,
+    BTBHGPUModelReport *report
+);
+int32_t btbh_gpu_model_material_slot(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index
+);
+void btbh_gpu_model_destroy(BTBHGPUModel *model);
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 
 #if defined(__cplusplus)

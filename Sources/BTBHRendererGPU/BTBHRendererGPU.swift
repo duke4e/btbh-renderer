@@ -165,6 +165,15 @@ struct GPUTextureProbeResource {
     let mipCount: Int
 }
 
+enum GPUModelProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUModelProbeResource {
+    let pointer: OpaquePointer
+    let metadata: ModelMetadata
+}
+
 @MainActor
 public final class GPUWindowProbe {
     public var deviceDiagnostics: GPUDeviceDiagnostics {
@@ -430,6 +439,57 @@ public final class GPUWindowProbe {
 
     static func destroyTexture(_ texture: OpaquePointer) {
         btbh_gpu_texture_destroy(texture)
+    }
+
+    func loadModel(path: String) throws -> GPUModelProbeResource {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "loadModel",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUModelReport()
+        let model = path.withCString { pathPointer in
+            btbh_gpu_window_model_load(
+                window,
+                pathPointer,
+                &report
+            )
+        }
+        guard let model else {
+            throw GPUModelProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        let meshCount = Int(report.mesh_count)
+        let slots = (0..<meshCount).map {
+            Int(btbh_gpu_model_material_slot(model, UInt32($0)))
+        }
+        return GPUModelProbeResource(
+            pointer: model,
+            metadata: .init(
+                bounds: .init(
+                    minimum: .init(
+                        x: report.minimum_x,
+                        y: report.minimum_y,
+                        z: report.minimum_z
+                    ),
+                    maximum: .init(
+                        x: report.maximum_x,
+                        y: report.maximum_y,
+                        z: report.maximum_z
+                    )
+                ),
+                meshCount: meshCount,
+                materialCount: Int(report.material_count),
+                meshMaterialSlots: slots
+            )
+        )
+    }
+
+    static func destroyModel(_ model: OpaquePointer) {
+        btbh_gpu_model_destroy(model)
     }
 
     public func shutdown() {

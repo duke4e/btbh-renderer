@@ -290,6 +290,17 @@ public final class GPUPlatform: GamePlatform {
         GPUWindowProbe.destroyTexture(texture)
     }
 
+    func loadModel(path: String) throws -> GPUModelProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.loadModel(path: path)
+    }
+
+    func destroyModel(_ model: OpaquePointer) {
+        GPUWindowProbe.destroyModel(model)
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)

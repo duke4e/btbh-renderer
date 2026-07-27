@@ -265,4 +265,175 @@ final class GPURenderServicesTests: XCTestCase {
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif
     }
+
+    func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU model upload test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelPath = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_MODEL_TEST_PATH"
+        ] ?? packageRoot
+            .appendingPathComponent(
+                "external/raylib/examples/models/resources/models/gltf/raylib_logo_3d.glb"
+            )
+            .path
+        let model = try RenderServices.resources.loadModel(
+            path: modelPath,
+            flags: [.meshData, .highQuality]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+
+        XCTAssertTrue(model.isValid)
+        XCTAssertGreaterThan(metadata.meshCount, 0)
+        XCTAssertGreaterThan(metadata.materialCount, 0)
+        XCTAssertEqual(metadata.meshMaterialSlots.count, metadata.meshCount)
+        XCTAssertLessThan(metadata.bounds.minimum.x, metadata.bounds.maximum.x)
+        XCTAssertLessThan(metadata.bounds.minimum.y, metadata.bounds.maximum.y)
+        XCTAssertLessThan(metadata.bounds.minimum.z, metadata.bounds.maximum.z)
+
+        RenderServices.resources.destroyModel(model)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        let detachedModel = try RenderServices.resources.loadModel(
+            path: modelPath,
+            flags: [.meshData]
+        )
+        RenderServices.platform.closeWindow()
+        RenderServices.resources.destroyModel(detachedModel)
+        XCTAssertTrue(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testGLTFModelLoadHandlesNodesSparseDataMaterialsAndUnicodePath() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU glTF correctness test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fixtures = packageRoot.appendingPathComponent("Tests/Fixtures")
+        let instanced = try RenderServices.resources.loadModel(
+            path: fixtures
+                .appendingPathComponent(
+                    "instanced-transformed-default-material.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let instancedMetadata = try RenderServices.resources.modelMetadata(
+            instanced
+        )
+        XCTAssertEqual(instancedMetadata.meshCount, 4)
+        XCTAssertEqual(instancedMetadata.materialCount, 2)
+        XCTAssertEqual(instancedMetadata.meshMaterialSlots, [0, 1, 0, 1])
+        XCTAssertEqual(instancedMetadata.bounds.minimum.x, 0, accuracy: 0.001)
+        XCTAssertEqual(instancedMetadata.bounds.maximum.x, 11, accuracy: 0.001)
+        XCTAssertEqual(instancedMetadata.bounds.maximum.y, 1, accuracy: 0.001)
+        XCTAssertEqual(instancedMetadata.bounds.maximum.z, 1, accuracy: 0.001)
+
+        let sparse = try RenderServices.resources.loadModel(
+            path: fixtures
+                .appendingPathComponent(
+                    "sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let sparseMetadata = try RenderServices.resources.modelMetadata(sparse)
+        XCTAssertEqual(sparseMetadata.meshCount, 1)
+        XCTAssertEqual(sparseMetadata.materialCount, 1)
+        XCTAssertEqual(sparseMetadata.meshMaterialSlots, [0])
+        XCTAssertEqual(sparseMetadata.bounds.minimum.x, 0, accuracy: 0.001)
+        XCTAssertEqual(sparseMetadata.bounds.maximum.x, 1, accuracy: 0.001)
+        XCTAssertEqual(sparseMetadata.bounds.maximum.y, 1, accuracy: 0.001)
+        XCTAssertEqual(sparseMetadata.bounds.maximum.z, 1, accuracy: 0.001)
+
+        let unicodeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btbh-模型-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: unicodeDirectory) }
+        try FileManager.default.createDirectory(
+            at: unicodeDirectory,
+            withIntermediateDirectories: true
+        )
+        let unicodeFixture = unicodeDirectory
+            .appendingPathComponent("场景-model.gltf")
+        let embeddedURI =
+            "data:application/octet-stream;base64," +
+            "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAIA/AAABAAIA"
+        let unicodeBufferName = "几何.bin"
+        let sourceJSON = try String(
+            contentsOf: fixtures.appendingPathComponent(
+                "instanced-transformed-default-material.gltf"
+            ),
+            encoding: .utf8
+        )
+        try sourceJSON
+            .replacingOccurrences(
+                of: embeddedURI,
+                with: unicodeBufferName
+            )
+            .write(
+                to: unicodeFixture,
+                atomically: true,
+                encoding: .utf8
+            )
+        let externalBytes = try XCTUnwrap(
+            Data(
+                base64Encoded:
+                    "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAIA/AAABAAIA"
+            )
+        )
+        try externalBytes.write(
+            to: unicodeDirectory.appendingPathComponent(unicodeBufferName)
+        )
+        let unicodeModel = try RenderServices.resources.loadModel(
+            path: unicodeFixture.path,
+            flags: [.meshData]
+        )
+        let unicodeMetadata = try RenderServices.resources.modelMetadata(
+            unicodeModel
+        )
+        XCTAssertEqual(unicodeMetadata.meshCount, 4)
+        XCTAssertEqual(unicodeMetadata.bounds.maximum.x, 11, accuracy: 0.001)
+
+        RenderServices.resources.destroyModel(unicodeModel)
+        RenderServices.resources.destroyModel(sparse)
+        RenderServices.resources.destroyModel(instanced)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
 }
