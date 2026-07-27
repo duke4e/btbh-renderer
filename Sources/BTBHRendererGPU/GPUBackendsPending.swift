@@ -263,6 +263,32 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
     }
 
+    func animationPose(
+        model: ModelHandle,
+        player: AnimationPlayerHandle?,
+        tree treeHandle: AnimationTreeHandle?
+    ) throws -> GPUAnimationPoseProbe {
+        guard player == nil,
+              let treeHandle,
+              let tree = animationTrees[treeHandle],
+              tree.model == model,
+              let clip = activeAnimationClip(
+                named: tree.rootNode,
+                tree: tree,
+                visited: []
+              ),
+              let library = animationLibraries[tree.library] else {
+            throw GPUResourceStagingError.invalidAnimationTree(
+                treeHandle?.rawValue ?? 0
+            )
+        }
+        return .init(
+            library: library.pointer,
+            animationIndex: clip.animationIndex,
+            time: clip.time
+        )
+    }
+
     func destroyModel(_ handle: ModelHandle) {
         if isModelReferenced(handle) {
             pendingModelDestruction.insert(handle)
@@ -1081,6 +1107,30 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
     }
 
+    private func activeAnimationClip(
+        named name: String,
+        tree: GPUAnimationTreeResource,
+        visited: Set<String>
+    ) -> GPUAnimationClipState? {
+        guard !visited.contains(name) else { return nil }
+        if let clip = tree.clips[name] {
+            return clip
+        }
+        guard let animationSwitch = tree.switches[name],
+              animationSwitch.inputs.indices.contains(
+                animationSwitch.activeInput
+              ) else {
+            return nil
+        }
+        var visited = visited
+        visited.insert(name)
+        return activeAnimationClip(
+            named: animationSwitch.inputs[animationSwitch.activeInput],
+            tree: tree,
+            visited: visited
+        )
+    }
+
     private func materialResource(
         _ descriptor: MaterialDescriptor
     ) throws -> GPUMaterialResource {
@@ -1631,6 +1681,9 @@ final class GPUSceneBackend: SceneBackend {
         case mesh(MeshDraw)
         case meshInstances(MeshInstancesDraw)
         case meshTransformStreams(MeshTransformStreamsDraw)
+        case animated(AnimatedModelDraw)
+        case animatedInstances(AnimatedModelInstancesDraw)
+        case animatedTransformStreams(AnimatedModelTransformStreamsDraw)
     }
 
     private let platform: GPUPlatform
@@ -1671,6 +1724,16 @@ final class GPUSceneBackend: SceneBackend {
             pendingModelDraws.append(.meshInstances(meshInstances))
         case .meshTransformStreams(let streams):
             pendingModelDraws.append(.meshTransformStreams(streams))
+        case .animatedModel(let animated):
+            pendingModelDraws.append(.animated(animated))
+        case .animatedModelInstances(let animatedInstances):
+            pendingModelDraws.append(
+                .animatedInstances(animatedInstances)
+            )
+        case .animatedModelTransformStreams(let streams):
+            pendingModelDraws.append(
+                .animatedTransformStreams(streams)
+            )
         default:
             guard unsupportedOperation == nil else { return }
             unsupportedOperation = Self.submitOperation(draw)
@@ -1720,6 +1783,7 @@ final class GPUSceneBackend: SceneBackend {
                     geometry: .model(
                         try resources.modelPointer(draw.model)
                     ),
+                    animation: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -1769,6 +1833,7 @@ final class GPUSceneBackend: SceneBackend {
                     geometry: .model(
                         try resources.modelPointer(draw.model)
                     ),
+                    animation: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -1783,6 +1848,7 @@ final class GPUSceneBackend: SceneBackend {
                     geometry: .customMesh(
                         try resources.meshPointer(draw.mesh)
                     ),
+                    animation: nil,
                     firstInstance: firstInstance,
                     instanceCount: 1
                 ))
@@ -1810,6 +1876,7 @@ final class GPUSceneBackend: SceneBackend {
                     geometry: .customMesh(
                         try resources.meshPointer(draw.mesh)
                     ),
+                    animation: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.instances.count
                 ))
@@ -1853,6 +1920,102 @@ final class GPUSceneBackend: SceneBackend {
                 batches.append(.init(
                     geometry: .customMesh(
                         try resources.meshPointer(draw.mesh)
+                    ),
+                    animation: nil,
+                    firstInstance: firstInstance,
+                    instanceCount: draw.count
+                ))
+            case .animated(let draw):
+                let firstInstance = packedInstances.count / 20
+                Self.append(
+                    matrix: draw.transform.matrix,
+                    color: .white,
+                    to: &packedInstances
+                )
+                batches.append(.init(
+                    geometry: .model(
+                        try resources.modelPointer(draw.model)
+                    ),
+                    animation: try resources.animationPose(
+                        model: draw.model,
+                        player: draw.player,
+                        tree: draw.tree
+                    ),
+                    firstInstance: firstInstance,
+                    instanceCount: 1
+                ))
+            case .animatedInstances(let draw):
+                guard !draw.instances.isEmpty else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "GPU animated model instance draw is empty"
+                    )
+                }
+                let firstInstance = packedInstances.count / 20
+                for instance in draw.instances {
+                    Self.append(
+                        matrix: instance.transform.matrix,
+                        color: instance.color,
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    geometry: .model(
+                        try resources.modelPointer(draw.model)
+                    ),
+                    animation: try resources.animationPose(
+                        model: draw.model,
+                        player: draw.player,
+                        tree: draw.tree
+                    ),
+                    firstInstance: firstInstance,
+                    instanceCount: draw.instances.count
+                ))
+            case .animatedTransformStreams(let draw):
+                guard draw.sourceStart >= 0,
+                      draw.count > 0,
+                      draw.sourceStart <= draw.positions.count,
+                      draw.count <=
+                        draw.positions.count - draw.sourceStart,
+                      draw.sourceStart <= draw.rotations.count,
+                      draw.count <=
+                        draw.rotations.count - draw.sourceStart,
+                      draw.sourceStart <= draw.scales.count,
+                      draw.count <=
+                        draw.scales.count - draw.sourceStart,
+                      Self.containsRange(
+                        draw.colors,
+                        start: draw.sourceStart,
+                        count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.customs,
+                        start: draw.sourceStart,
+                        count: draw.count
+                      ) else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Invalid GPU animated transform stream range"
+                    )
+                }
+                let firstInstance = packedInstances.count / 20
+                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
+                    Self.append(
+                        matrix: Self.transformMatrix(
+                            position: draw.positions[index],
+                            rotation: draw.rotations[index],
+                            scale: draw.scales[index]
+                        ),
+                        color: draw.colors?[index] ?? .white,
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    geometry: .model(
+                        try resources.modelPointer(draw.model)
+                    ),
+                    animation: try resources.animationPose(
+                        model: draw.model,
+                        player: draw.player,
+                        tree: draw.tree
                     ),
                     firstInstance: firstInstance,
                     instanceCount: draw.count

@@ -198,8 +198,15 @@ enum GPUSceneGeometryProbe {
     case customMesh(OpaquePointer)
 }
 
+struct GPUAnimationPoseProbe {
+    let library: OpaquePointer
+    let animationIndex: Int
+    let time: Float
+}
+
 struct GPUSceneGeometryProbeBatch {
     let geometry: GPUSceneGeometryProbe
+    let animation: GPUAnimationPoseProbe?
     let firstInstance: Int
     let instanceCount: Int
 }
@@ -702,6 +709,7 @@ public final class GPUWindowProbe {
 
     func presentModelInstances(
         vertexShaderPath: String,
+        animatedVertexShaderPath: String,
         fragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
@@ -742,36 +750,53 @@ public final class GPUWindowProbe {
                 model = nil
                 customMesh = pointer
             }
+            if let animation = batch.animation {
+                guard animation.animationIndex >= 0,
+                      animation.animationIndex <= Int(UInt32.max),
+                      animation.time.isFinite else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Invalid GPU animation pose"
+                    )
+                }
+            }
             return BTBHGPUSceneGeometryBatch(
                 kind: kind,
                 model: model,
                 custom_mesh: customMesh,
+                animation_library: batch.animation?.library,
+                animation_index: UInt32(
+                    batch.animation?.animationIndex ?? 0
+                ),
+                animation_time: batch.animation?.time ?? 0,
                 first_instance: UInt32(batch.firstInstance),
                 instance_count: UInt32(batch.instanceCount)
             )
         }
         var report = BTBHGPUSceneReport()
         let result = vertexShaderPath.withCString { vertexPath in
-            fragmentShaderPath.withCString { fragmentPath in
-                viewProjection.withUnsafeBufferPointer { matrix in
-                    instances.withUnsafeBufferPointer { instanceData in
-                        nativeBatches.withUnsafeBufferPointer { batchData in
-                            btbh_gpu_window_scene_present_instances(
-                                window,
-                                vertexPath,
-                                fragmentPath,
-                                shaderFormat,
-                                matrix.baseAddress,
-                                instanceData.baseAddress,
-                                UInt32(instances.count / 20),
-                                batchData.baseAddress,
-                                UInt32(nativeBatches.count),
-                                clearColor.r,
-                                clearColor.g,
-                                clearColor.b,
-                                clearColor.a,
-                                &report
-                            )
+            animatedVertexShaderPath.withCString { animatedVertexPath in
+                fragmentShaderPath.withCString { fragmentPath in
+                    viewProjection.withUnsafeBufferPointer { matrix in
+                        instances.withUnsafeBufferPointer { instanceData in
+                            nativeBatches.withUnsafeBufferPointer { batchData in
+                                btbh_gpu_window_scene_present_instances(
+                                    window,
+                                    vertexPath,
+                                    animatedVertexPath,
+                                    fragmentPath,
+                                    shaderFormat,
+                                    matrix.baseAddress,
+                                    instanceData.baseAddress,
+                                    UInt32(instances.count / 20),
+                                    batchData.baseAddress,
+                                    UInt32(nativeBatches.count),
+                                    clearColor.r,
+                                    clearColor.g,
+                                    clearColor.b,
+                                    clearColor.a,
+                                    &report
+                                )
+                            }
                         }
                     }
                 }

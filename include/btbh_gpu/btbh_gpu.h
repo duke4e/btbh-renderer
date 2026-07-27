@@ -236,6 +236,9 @@ typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
     BTBHGPUCustomMesh *custom_mesh;
+    BTBHGPUAnimationLibrary *animation_library;
+    uint32_t animation_index;
+    float animation_time;
     uint32_t first_instance;
     uint32_t instance_count;
 } BTBHGPUSceneGeometryBatch;
@@ -391,6 +394,7 @@ void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],

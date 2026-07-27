@@ -1,5 +1,6 @@
 #include "btbh_gpu_internal.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,10 +8,13 @@
 
 #define BTBH_GPU_MODEL_VERTEX_STRIDE 96u
 #define BTBH_GPU_MODEL_COLOR_OFFSET 48u
+#define BTBH_GPU_MODEL_JOINTS_OFFSET 64u
+#define BTBH_GPU_MODEL_WEIGHTS_OFFSET 80u
 #define BTBH_GPU_SCENE_INSTANCE_FLOATS 20u
 
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipeline;
+    SDL_GPUGraphicsPipeline *animated_model_pipeline;
     SDL_GPUTexture *depth_texture;
     uint32_t depth_width;
     uint32_t depth_height;
@@ -89,6 +93,7 @@ static SDL_GPUShader *btbh_gpu_scene_load_shader(
 static bool btbh_gpu_scene_create_pipeline(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     BTBHGPUSceneReport *report
@@ -130,7 +135,7 @@ static bool btbh_gpu_scene_create_pipeline(
 
     SDL_GPUColorTargetDescription color_target;
     SDL_GPUVertexBufferDescription vertex_buffer;
-    SDL_GPUVertexAttribute attributes[2];
+    SDL_GPUVertexAttribute attributes[4];
     SDL_GPUGraphicsPipelineCreateInfo info;
     SDL_zero(color_target);
     SDL_zero(vertex_buffer);
@@ -166,6 +171,14 @@ static bool btbh_gpu_scene_create_pipeline(
     attributes[1].buffer_slot = 0u;
     attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
     attributes[1].offset = BTBH_GPU_MODEL_COLOR_OFFSET;
+    attributes[2].location = 2u;
+    attributes[2].buffer_slot = 0u;
+    attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[2].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
+    attributes[3].location = 3u;
+    attributes[3].buffer_slot = 0u;
+    attributes[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[3].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
 
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
@@ -188,9 +201,37 @@ static bool btbh_gpu_scene_create_pipeline(
 
     window->scene_runtime->model_pipeline =
         SDL_CreateGPUGraphicsPipeline(device, &info);
-    SDL_ReleaseGPUShader(device, fragment_shader);
     SDL_ReleaseGPUShader(device, vertex_shader);
     if (window->scene_runtime->model_pipeline == NULL) {
+        SDL_ReleaseGPUShader(device, fragment_shader);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return false;
+    }
+    SDL_GPUShader *animated_vertex_shader = btbh_gpu_scene_load_shader(
+        device,
+        animated_vertex_shader_path,
+        entrypoint,
+        format,
+        SDL_GPU_SHADERSTAGE_VERTEX,
+        2u,
+        1u,
+        report
+    );
+    if (animated_vertex_shader == NULL) {
+        SDL_ReleaseGPUShader(device, fragment_shader);
+        return false;
+    }
+    info.vertex_shader = animated_vertex_shader;
+    info.vertex_input_state.num_vertex_attributes = 4u;
+    window->scene_runtime->animated_model_pipeline =
+        SDL_CreateGPUGraphicsPipeline(device, &info);
+    SDL_ReleaseGPUShader(device, animated_vertex_shader);
+    SDL_ReleaseGPUShader(device, fragment_shader);
+    if (window->scene_runtime->animated_model_pipeline == NULL) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -204,6 +245,7 @@ static bool btbh_gpu_scene_create_pipeline(
 static bool btbh_gpu_scene_ensure_runtime(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     BTBHGPUSceneReport *report
@@ -226,6 +268,7 @@ static bool btbh_gpu_scene_ensure_runtime(
     if (!btbh_gpu_scene_create_pipeline(
             window,
             vertex_shader_path,
+            animated_vertex_shader_path,
             fragment_shader_path,
             shader_format,
             report
@@ -296,7 +339,12 @@ static bool btbh_gpu_scene_validate_batches(
                 batch->custom_mesh != NULL &&
                 batch->custom_mesh->owner == window &&
                 batch->custom_mesh->vertex_buffer != NULL);
+        const bool valid_animation =
+            batch->animation_library == NULL ||
+            (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
+                isfinite(batch->animation_time));
         if (!valid_geometry ||
+            !valid_animation ||
             batch->instance_count == 0u ||
             batch->first_instance > total_instance_count ||
             batch->instance_count >
@@ -307,9 +355,135 @@ static bool btbh_gpu_scene_validate_batches(
     return true;
 }
 
+static bool btbh_gpu_scene_prepare_bones(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    uint32_t **bone_offsets,
+    uint32_t *geometry_count,
+    float **bone_matrices,
+    uint32_t *bone_count
+) {
+    uint32_t total_geometry_count = 0u;
+    uint32_t total_bone_count = 0u;
+    for (uint32_t batch_index = 0u;
+         batch_index < batch_count;
+         batch_index += 1u) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        const uint32_t batch_geometry_count =
+            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                ? batch->model->primitive_count
+                : 1u;
+        if (
+            batch_geometry_count > UINT32_MAX - total_geometry_count
+        ) {
+            return false;
+        }
+        total_geometry_count += batch_geometry_count;
+        if (batch->animation_library == NULL) {
+            continue;
+        }
+        for (uint32_t primitive_index = 0u;
+             primitive_index < batch_geometry_count;
+             primitive_index += 1u) {
+            const int32_t skin_index =
+                batch->model->primitives[primitive_index].skin_index;
+            if (skin_index < 0) {
+                continue;
+            }
+            const uint32_t joint_count =
+                btbh_gpu_animation_library_skin_joint_count(
+                    batch->animation_library,
+                    (uint32_t)skin_index
+                );
+            if (
+                joint_count == 0u ||
+                joint_count > UINT32_MAX - total_bone_count
+            ) {
+                return false;
+            }
+            total_bone_count += joint_count;
+        }
+    }
+    if (
+        total_geometry_count == 0u ||
+        (size_t)total_geometry_count >
+            SIZE_MAX / sizeof(uint32_t) ||
+        (size_t)total_bone_count >
+            SIZE_MAX / (sizeof(float) * 16u)
+    ) {
+        return false;
+    }
+    uint32_t *offsets = malloc(
+        (size_t)total_geometry_count * sizeof(*offsets)
+    );
+    float *matrices = total_bone_count > 0u
+        ? malloc(
+            (size_t)total_bone_count *
+            sizeof(float) *
+            16u
+        )
+        : NULL;
+    if (offsets == NULL || (total_bone_count > 0u && matrices == NULL)) {
+        free(matrices);
+        free(offsets);
+        return false;
+    }
+
+    uint32_t geometry_index = 0u;
+    uint32_t bone_index = 0u;
+    bool valid = true;
+    for (uint32_t batch_index = 0u;
+         valid && batch_index < batch_count;
+         batch_index += 1u) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        const uint32_t batch_geometry_count =
+            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                ? batch->model->primitive_count
+                : 1u;
+        for (uint32_t primitive_index = 0u;
+             valid && primitive_index < batch_geometry_count;
+             primitive_index += 1u) {
+            offsets[geometry_index] = UINT32_MAX;
+            if (batch->animation_library != NULL) {
+                const int32_t skin_index =
+                    batch->model->primitives[primitive_index].skin_index;
+                if (skin_index >= 0) {
+                    const uint32_t joint_count =
+                        btbh_gpu_animation_library_skin_joint_count(
+                            batch->animation_library,
+                            (uint32_t)skin_index
+                        );
+                    offsets[geometry_index] = bone_index;
+                    valid = btbh_gpu_animation_library_sample_skin(
+                        batch->animation_library,
+                        batch->animation_index,
+                        batch->animation_time,
+                        (uint32_t)skin_index,
+                        &matrices[(size_t)bone_index * 16u],
+                        joint_count
+                    );
+                    bone_index += joint_count;
+                }
+            }
+            geometry_index += 1u;
+        }
+    }
+    if (!valid) {
+        free(matrices);
+        free(offsets);
+        return false;
+    }
+    *bone_offsets = offsets;
+    *geometry_count = total_geometry_count;
+    *bone_matrices = matrices;
+    *bone_count = total_bone_count;
+    return true;
+}
+
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],
@@ -333,6 +507,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         window->device->gpu == NULL ||
         !window->claimed ||
         vertex_shader_path == NULL ||
+        animated_vertex_shader_path == NULL ||
         fragment_shader_path == NULL ||
         view_projection == NULL ||
         instances == NULL ||
@@ -359,10 +534,36 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     if (!btbh_gpu_scene_ensure_runtime(
             window,
             vertex_shader_path,
+            animated_vertex_shader_path,
             fragment_shader_path,
             shader_format,
             report
         )) {
+        return report->result;
+    }
+
+    uint32_t *bone_offsets = NULL;
+    uint32_t prepared_geometry_count = 0u;
+    float *bone_matrices = NULL;
+    uint32_t bone_count = 0u;
+    if (
+        !btbh_gpu_scene_prepare_bones(
+            batches,
+            batch_count,
+            &bone_offsets,
+            &prepared_geometry_count,
+            &bone_matrices,
+            &bone_count
+        ) ||
+        bone_count > UINT32_MAX / (sizeof(float) * 16u)
+    ) {
+        free(bone_matrices);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Could not prepare GPU animation pose"
+        );
         return report->result;
     }
 
@@ -371,6 +572,19 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         total_instance_count *
         BTBH_GPU_SCENE_INSTANCE_FLOATS *
         (uint32_t)sizeof(float);
+    const uint32_t bone_bytes =
+        bone_count * (uint32_t)(sizeof(float) * 16u);
+    if (bone_bytes > UINT32_MAX - instance_bytes) {
+        free(bone_matrices);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene upload exceeds buffer limits"
+        );
+        return report->result;
+    }
+    const uint32_t transfer_bytes = instance_bytes + bone_bytes;
     SDL_GPUBufferCreateInfo buffer_info;
     SDL_GPUTransferBufferCreateInfo transfer_info;
     SDL_zero(buffer_info);
@@ -383,17 +597,32 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         device,
         &buffer_info
     );
+    SDL_GPUBuffer *bone_buffer = NULL;
+    if (bone_bytes > 0u) {
+        buffer_info.size = bone_bytes;
+        bone_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+    }
+    transfer_info.size = transfer_bytes;
     SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
         device,
         &transfer_info
     );
-    if (instance_buffer == NULL || transfer == NULL) {
+    if (
+        instance_buffer == NULL ||
+        (bone_bytes > 0u && bone_buffer == NULL) ||
+        transfer == NULL
+    ) {
         if (transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(device, transfer);
+        }
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
         }
         if (instance_buffer != NULL) {
             SDL_ReleaseGPUBuffer(device, instance_buffer);
         }
+        free(bone_matrices);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -404,7 +633,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
     if (mapped == NULL) {
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_matrices);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -413,12 +647,25 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
     (void)memcpy(mapped, instances, instance_bytes);
+    if (bone_bytes > 0u) {
+        (void)memcpy(
+            (uint8_t *)mapped + instance_bytes,
+            bone_matrices,
+            bone_bytes
+        );
+    }
     SDL_UnmapGPUTransferBuffer(device, transfer);
+    free(bone_matrices);
+    bone_matrices = NULL;
 
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
     if (command == NULL) {
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -430,7 +677,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     if (copy == NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -446,6 +697,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     destination.buffer = instance_buffer;
     destination.size = instance_bytes;
     SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    if (bone_buffer != NULL) {
+        source.offset = instance_bytes;
+        destination.buffer = bone_buffer;
+        destination.size = bone_bytes;
+        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    }
     SDL_EndGPUCopyPass(copy);
 
     SDL_GPUTexture *swapchain = NULL;
@@ -476,7 +733,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         }
         (void)SDL_CancelGPUCommandBuffer(command);
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
         return report->result;
     }
 
@@ -499,12 +760,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth_target.cycle = true;
 
-    SDL_PushGPUVertexUniformData(
-        command,
-        0u,
-        view_projection,
-        sizeof(float) * 16u
-    );
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
         command,
         &color_target,
@@ -514,7 +769,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     if (pass == NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -522,17 +781,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
         return report->result;
     }
-    SDL_BindGPUGraphicsPipeline(
-        pass,
-        window->scene_runtime->model_pipeline
-    );
-    SDL_BindGPUVertexStorageBuffers(
-        pass,
-        0u,
-        &instance_buffer,
-        1u
-    );
-
     uint32_t primitive_draw_count = 0u;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
@@ -545,6 +793,60 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
              ++geometry_index) {
+            const uint32_t bone_offset =
+                bone_offsets[primitive_draw_count];
+            const bool animated = bone_offset != UINT32_MAX;
+            if (animated) {
+                struct {
+                    float view_projection[16];
+                    uint32_t bone_offset;
+                    uint32_t padding[3];
+                } uniforms;
+                (void)memset(&uniforms, 0, sizeof(uniforms));
+                (void)memcpy(
+                    uniforms.view_projection,
+                    view_projection,
+                    sizeof(uniforms.view_projection)
+                );
+                uniforms.bone_offset = bone_offset;
+                SDL_PushGPUVertexUniformData(
+                    command,
+                    0u,
+                    &uniforms,
+                    sizeof(uniforms)
+                );
+                SDL_BindGPUGraphicsPipeline(
+                    pass,
+                    window->scene_runtime->animated_model_pipeline
+                );
+                SDL_GPUBuffer *storage_buffers[2] = {
+                    instance_buffer,
+                    bone_buffer
+                };
+                SDL_BindGPUVertexStorageBuffers(
+                    pass,
+                    0u,
+                    storage_buffers,
+                    2u
+                );
+            } else {
+                SDL_PushGPUVertexUniformData(
+                    command,
+                    0u,
+                    view_projection,
+                    sizeof(float) * 16u
+                );
+                SDL_BindGPUGraphicsPipeline(
+                    pass,
+                    window->scene_runtime->model_pipeline
+                );
+                SDL_BindGPUVertexStorageBuffers(
+                    pass,
+                    0u,
+                    &instance_buffer,
+                    1u
+                );
+            }
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
             uint32_t vertex_count = 0u;
@@ -601,9 +903,28 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         }
     }
     SDL_EndGPURenderPass(pass);
+    if (primitive_draw_count != prepared_geometry_count) {
+        (void)SDL_CancelGPUCommandBuffer(command);
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
+        SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            "GPU scene geometry preparation changed during submission"
+        );
+        return report->result;
+    }
     if (!SDL_SubmitGPUCommandBuffer(command)) {
         SDL_ReleaseGPUTransferBuffer(device, transfer);
+        if (bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, bone_buffer);
+        }
         SDL_ReleaseGPUBuffer(device, instance_buffer);
+        free(bone_offsets);
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -612,7 +933,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
     SDL_ReleaseGPUTransferBuffer(device, transfer);
+    if (bone_buffer != NULL) {
+        SDL_ReleaseGPUBuffer(device, bone_buffer);
+    }
     SDL_ReleaseGPUBuffer(device, instance_buffer);
+    free(bone_offsets);
 
     report->result = BTBH_GPU_OK;
     report->drawable_width = drawable_width;
@@ -643,6 +968,12 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUGraphicsPipeline(
                 device,
                 window->scene_runtime->model_pipeline
+            );
+        }
+        if (window->scene_runtime->animated_model_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(
+                device,
+                window->scene_runtime->animated_model_pipeline
             );
         }
     }

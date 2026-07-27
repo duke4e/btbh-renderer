@@ -582,6 +582,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "phase2_lighting.frag|fragment"
         "phase2_transparent.frag|fragment"
         "production_model.vert|vertex"
+        "production_animated_model.vert|vertex"
         "production_model.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)

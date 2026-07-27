@@ -13,6 +13,7 @@ typedef struct BTBHGPUModelPrimitive {
     uint32_t vertex_count;
     uint32_t index_count;
     int32_t material_slot;
+    int32_t skin_index;
 } BTBHGPUModelPrimitive;
 
 typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
@@ -75,5 +76,17 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
+uint32_t btbh_gpu_animation_library_skin_joint_count(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t skin_index
+);
+bool btbh_gpu_animation_library_sample_skin(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index,
+    float time,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+);
 
 #endif

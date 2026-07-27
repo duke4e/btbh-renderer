@@ -1023,6 +1023,7 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
         }
         BTBHGPUModelPrimitive *destination =
             &model->primitives[output_index];
+        destination->skin_index = -1;
         destination->material_slot =
             mesh->mMaterialIndex < model->material_count
                 ? (int32_t) mesh->mMaterialIndex
@@ -1166,6 +1167,15 @@ BTBHGPUModel *btbh_gpu_window_model_load(
         }
         float world_transform[16];
         cgltf_node_transform_world(node, world_transform);
+        static const float identity_transform[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+        const float *vertex_transform = node->skin != NULL
+            ? identity_transform
+            : world_transform;
         for (
             cgltf_size primitive_index = 0;
             valid && primitive_index < mesh->primitives_count;
@@ -1185,6 +1195,9 @@ BTBHGPUModel *btbh_gpu_window_model_load(
             }
             BTBHGPUModelPrimitive *destination =
                 &model->primitives[output_index];
+            destination->skin_index = node->skin != NULL
+                ? (int32_t)(node->skin - data->skins)
+                : -1;
             destination->material_slot = primitive->material != NULL
                 ? (int32_t) (
                     primitive->material - data->materials + 1
@@ -1194,7 +1207,7 @@ BTBHGPUModel *btbh_gpu_window_model_load(
                 btbh_gpu_model_decode_vertices(
                     model,
                     primitive,
-                    world_transform,
+                    vertex_transform,
                     destination
                 ) &&
                 btbh_gpu_model_decode_indices(
@@ -1380,6 +1393,519 @@ float btbh_gpu_animation_library_duration(
         }
     }
     return duration;
+}
+
+static bool btbh_gpu_animation_read_value(
+    const cgltf_animation_sampler *sampler,
+    cgltf_size key_index,
+    cgltf_size value_index,
+    cgltf_size component_count,
+    float *value
+) {
+    if (
+        sampler == NULL ||
+        sampler->output == NULL ||
+        value == NULL
+    ) {
+        return false;
+    }
+    const cgltf_size sample_index =
+        sampler->interpolation == cgltf_interpolation_type_cubic_spline
+            ? key_index * 3u + value_index
+            : key_index;
+    return cgltf_accessor_read_float(
+        sampler->output,
+        sample_index,
+        value,
+        component_count
+    );
+}
+
+static bool btbh_gpu_animation_sample_value(
+    const cgltf_animation_sampler *sampler,
+    float time,
+    cgltf_size component_count,
+    float *value
+) {
+    if (
+        sampler == NULL ||
+        sampler->input == NULL ||
+        sampler->output == NULL ||
+        sampler->input->count == 0u ||
+        component_count == 0u ||
+        component_count > 4u ||
+        value == NULL
+    ) {
+        return false;
+    }
+    const cgltf_size key_count = sampler->input->count;
+    float first_time = 0.0f;
+    float last_time = 0.0f;
+    if (
+        !cgltf_accessor_read_float(
+            sampler->input,
+            0u,
+            &first_time,
+            1u
+        ) ||
+        !cgltf_accessor_read_float(
+            sampler->input,
+            key_count - 1u,
+            &last_time,
+            1u
+        )
+    ) {
+        return false;
+    }
+    if (key_count == 1u || time <= first_time) {
+        return btbh_gpu_animation_read_value(
+            sampler,
+            0u,
+            1u,
+            component_count,
+            value
+        );
+    }
+    if (time >= last_time) {
+        return btbh_gpu_animation_read_value(
+            sampler,
+            key_count - 1u,
+            1u,
+            component_count,
+            value
+        );
+    }
+
+    cgltf_size lower = 0u;
+    cgltf_size upper = key_count - 1u;
+    while (upper - lower > 1u) {
+        const cgltf_size middle = lower + (upper - lower) / 2u;
+        float middle_time = 0.0f;
+        if (!cgltf_accessor_read_float(
+                sampler->input,
+                middle,
+                &middle_time,
+                1u
+            )) {
+            return false;
+        }
+        if (time < middle_time) {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    float lower_time = 0.0f;
+    float upper_time = 0.0f;
+    float lower_value[4] = {0};
+    float upper_value[4] = {0};
+    if (
+        !cgltf_accessor_read_float(
+            sampler->input,
+            lower,
+            &lower_time,
+            1u
+        ) ||
+        !cgltf_accessor_read_float(
+            sampler->input,
+            upper,
+            &upper_time,
+            1u
+        ) ||
+        !btbh_gpu_animation_read_value(
+            sampler,
+            lower,
+            1u,
+            component_count,
+            lower_value
+        )
+    ) {
+        return false;
+    }
+    if (
+        sampler->interpolation == cgltf_interpolation_type_step ||
+        upper_time <= lower_time
+    ) {
+        (void)memcpy(
+            value,
+            lower_value,
+            component_count * sizeof(float)
+        );
+        return true;
+    }
+    if (!btbh_gpu_animation_read_value(
+            sampler,
+            upper,
+            1u,
+            component_count,
+            upper_value
+        )) {
+        return false;
+    }
+    const float interval = upper_time - lower_time;
+    const float amount = (time - lower_time) / interval;
+    if (
+        sampler->interpolation ==
+        cgltf_interpolation_type_cubic_spline
+    ) {
+        float lower_tangent[4] = {0};
+        float upper_tangent[4] = {0};
+        if (
+            !btbh_gpu_animation_read_value(
+                sampler,
+                lower,
+                2u,
+                component_count,
+                lower_tangent
+            ) ||
+            !btbh_gpu_animation_read_value(
+                sampler,
+                upper,
+                0u,
+                component_count,
+                upper_tangent
+            )
+        ) {
+            return false;
+        }
+        const float amount2 = amount * amount;
+        const float amount3 = amount2 * amount;
+        const float h00 = 2.0f * amount3 - 3.0f * amount2 + 1.0f;
+        const float h10 = amount3 - 2.0f * amount2 + amount;
+        const float h01 = -2.0f * amount3 + 3.0f * amount2;
+        const float h11 = amount3 - amount2;
+        for (cgltf_size component = 0u;
+             component < component_count;
+             component += 1u) {
+            value[component] =
+                h00 * lower_value[component] +
+                h10 * interval * lower_tangent[component] +
+                h01 * upper_value[component] +
+                h11 * interval * upper_tangent[component];
+        }
+    } else {
+        for (cgltf_size component = 0u;
+             component < component_count;
+             component += 1u) {
+            value[component] =
+                lower_value[component] +
+                (upper_value[component] - lower_value[component]) *
+                    amount;
+        }
+    }
+    return true;
+}
+
+static void btbh_gpu_animation_normalize_quaternion(float rotation[4]) {
+    const float length_squared =
+        rotation[0] * rotation[0] +
+        rotation[1] * rotation[1] +
+        rotation[2] * rotation[2] +
+        rotation[3] * rotation[3];
+    if (length_squared <= 0.0f || !isfinite(length_squared)) {
+        rotation[0] = 0.0f;
+        rotation[1] = 0.0f;
+        rotation[2] = 0.0f;
+        rotation[3] = 1.0f;
+        return;
+    }
+    const float inverse_length = 1.0f / sqrtf(length_squared);
+    for (uint32_t component = 0u; component < 4u; component += 1u) {
+        rotation[component] *= inverse_length;
+    }
+}
+
+static void btbh_gpu_animation_multiply_matrix(
+    const float left[16],
+    const float right[16],
+    float output[16]
+) {
+    float result[16];
+    for (uint32_t column = 0u; column < 4u; column += 1u) {
+        for (uint32_t row = 0u; row < 4u; row += 1u) {
+            result[column * 4u + row] =
+                left[row] * right[column * 4u] +
+                left[4u + row] * right[column * 4u + 1u] +
+                left[8u + row] * right[column * 4u + 2u] +
+                left[12u + row] * right[column * 4u + 3u];
+        }
+    }
+    (void)memcpy(output, result, sizeof(result));
+}
+
+static bool btbh_gpu_animation_world_matrix(
+    const cgltf_data *data,
+    const float *local_matrices,
+    float *world_matrices,
+    uint8_t *states,
+    cgltf_size node_index
+) {
+    if (states[node_index] == 2u) {
+        return true;
+    }
+    if (states[node_index] == 1u) {
+        return false;
+    }
+    states[node_index] = 1u;
+    const cgltf_node *node = &data->nodes[node_index];
+    const float *local = &local_matrices[node_index * 16u];
+    float *world = &world_matrices[node_index * 16u];
+    if (node->parent == NULL) {
+        (void)memcpy(world, local, sizeof(float) * 16u);
+    } else {
+        const ptrdiff_t parent_index = node->parent - data->nodes;
+        if (
+            parent_index < 0 ||
+            (cgltf_size)parent_index >= data->nodes_count ||
+            !btbh_gpu_animation_world_matrix(
+                data,
+                local_matrices,
+                world_matrices,
+                states,
+                (cgltf_size)parent_index
+            )
+        ) {
+            return false;
+        }
+        btbh_gpu_animation_multiply_matrix(
+            &world_matrices[(cgltf_size)parent_index * 16u],
+            local,
+            world
+        );
+    }
+    states[node_index] = 2u;
+    return true;
+}
+
+uint32_t btbh_gpu_animation_library_skin_joint_count(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t skin_index
+) {
+    if (
+        library == NULL ||
+        library->data == NULL ||
+        skin_index >= library->data->skins_count ||
+        library->data->skins[skin_index].joints_count > UINT32_MAX
+    ) {
+        return 0u;
+    }
+    return (uint32_t)library->data->skins[skin_index].joints_count;
+}
+
+bool btbh_gpu_animation_library_sample_skin(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index,
+    float time,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+) {
+    if (
+        library == NULL ||
+        library->data == NULL ||
+        !isfinite(time) ||
+        animation_index >= library->data->animations_count ||
+        skin_index >= library->data->skins_count ||
+        matrices == NULL
+    ) {
+        return false;
+    }
+    const cgltf_data *data = library->data;
+    const cgltf_skin *skin = &data->skins[skin_index];
+    if (
+        skin->joints_count == 0u ||
+        skin->joints_count > matrix_capacity ||
+        data->nodes_count == 0u ||
+        data->nodes_count > SIZE_MAX / (sizeof(float) * 16u)
+    ) {
+        return false;
+    }
+    float *translations = calloc(data->nodes_count * 3u, sizeof(float));
+    float *rotations = calloc(data->nodes_count * 4u, sizeof(float));
+    float *scales = calloc(data->nodes_count * 3u, sizeof(float));
+    float *local_matrices = calloc(data->nodes_count * 16u, sizeof(float));
+    float *world_matrices = calloc(data->nodes_count * 16u, sizeof(float));
+    uint8_t *animated_nodes = calloc(data->nodes_count, sizeof(uint8_t));
+    uint8_t *states = calloc(data->nodes_count, sizeof(uint8_t));
+    if (
+        translations == NULL ||
+        rotations == NULL ||
+        scales == NULL ||
+        local_matrices == NULL ||
+        world_matrices == NULL ||
+        animated_nodes == NULL ||
+        states == NULL
+    ) {
+        free(states);
+        free(animated_nodes);
+        free(world_matrices);
+        free(local_matrices);
+        free(scales);
+        free(rotations);
+        free(translations);
+        return false;
+    }
+
+    for (cgltf_size index = 0u; index < data->nodes_count; index += 1u) {
+        const cgltf_node *node = &data->nodes[index];
+        float *translation = &translations[index * 3u];
+        float *rotation = &rotations[index * 4u];
+        float *scale = &scales[index * 3u];
+        if (node->has_translation) {
+            (void)memcpy(translation, node->translation, sizeof(float) * 3u);
+        }
+        if (node->has_rotation) {
+            (void)memcpy(rotation, node->rotation, sizeof(float) * 4u);
+        } else {
+            rotation[3] = 1.0f;
+        }
+        if (node->has_scale) {
+            (void)memcpy(scale, node->scale, sizeof(float) * 3u);
+        } else {
+            scale[0] = 1.0f;
+            scale[1] = 1.0f;
+            scale[2] = 1.0f;
+        }
+    }
+
+    const cgltf_animation *animation = &data->animations[animation_index];
+    bool valid = true;
+    for (cgltf_size index = 0u;
+         valid && index < animation->channels_count;
+         index += 1u) {
+        const cgltf_animation_channel *channel =
+            &animation->channels[index];
+        if (channel->target_node == NULL) {
+            continue;
+        }
+        const ptrdiff_t node_index = channel->target_node - data->nodes;
+        if (
+            node_index < 0 ||
+            (cgltf_size)node_index >= data->nodes_count
+        ) {
+            valid = false;
+            break;
+        }
+        float *target = NULL;
+        cgltf_size component_count = 0u;
+        switch (channel->target_path) {
+            case cgltf_animation_path_type_translation:
+                target = &translations[(cgltf_size)node_index * 3u];
+                component_count = 3u;
+                break;
+            case cgltf_animation_path_type_rotation:
+                target = &rotations[(cgltf_size)node_index * 4u];
+                component_count = 4u;
+                break;
+            case cgltf_animation_path_type_scale:
+                target = &scales[(cgltf_size)node_index * 3u];
+                component_count = 3u;
+                break;
+            case cgltf_animation_path_type_weights:
+            case cgltf_animation_path_type_invalid:
+            case cgltf_animation_path_type_max_enum:
+            default:
+                continue;
+        }
+        valid = btbh_gpu_animation_sample_value(
+            channel->sampler,
+            time,
+            component_count,
+            target
+        );
+        animated_nodes[(cgltf_size)node_index] = 1u;
+        if (
+            valid &&
+            channel->target_path == cgltf_animation_path_type_rotation
+        ) {
+            btbh_gpu_animation_normalize_quaternion(target);
+        }
+    }
+
+    for (cgltf_size index = 0u;
+         valid && index < data->nodes_count;
+         index += 1u) {
+        const cgltf_node *node = &data->nodes[index];
+        float *local = &local_matrices[index * 16u];
+        if (node->has_matrix && animated_nodes[index] == 0u) {
+            (void)memcpy(local, node->matrix, sizeof(float) * 16u);
+        } else {
+            cgltf_node sampled = *node;
+            sampled.has_matrix = 0;
+            sampled.has_translation = 1;
+            sampled.has_rotation = 1;
+            sampled.has_scale = 1;
+            (void)memcpy(
+                sampled.translation,
+                &translations[index * 3u],
+                sizeof(float) * 3u
+            );
+            (void)memcpy(
+                sampled.rotation,
+                &rotations[index * 4u],
+                sizeof(float) * 4u
+            );
+            (void)memcpy(
+                sampled.scale,
+                &scales[index * 3u],
+                sizeof(float) * 3u
+            );
+            cgltf_node_transform_local(&sampled, local);
+        }
+        valid = btbh_gpu_animation_world_matrix(
+            data,
+            local_matrices,
+            world_matrices,
+            states,
+            index
+        );
+    }
+
+    static const float identity[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+    for (cgltf_size joint_index = 0u;
+         valid && joint_index < skin->joints_count;
+         joint_index += 1u) {
+        const ptrdiff_t node_index = skin->joints[joint_index] - data->nodes;
+        float inverse_bind[16];
+        if (
+            node_index < 0 ||
+            (cgltf_size)node_index >= data->nodes_count
+        ) {
+            valid = false;
+            break;
+        }
+        if (skin->inverse_bind_matrices != NULL) {
+            valid = cgltf_accessor_read_float(
+                skin->inverse_bind_matrices,
+                joint_index,
+                inverse_bind,
+                16u
+            );
+        } else {
+            (void)memcpy(inverse_bind, identity, sizeof(identity));
+        }
+        if (valid) {
+            btbh_gpu_animation_multiply_matrix(
+                &world_matrices[(cgltf_size)node_index * 16u],
+                inverse_bind,
+                &matrices[joint_index * 16u]
+            );
+        }
+    }
+
+    free(states);
+    free(animated_nodes);
+    free(world_matrices);
+    free(local_matrices);
+    free(scales);
+    free(rotations);
+    free(translations);
+    return valid;
 }
 
 void btbh_gpu_animation_library_destroy(

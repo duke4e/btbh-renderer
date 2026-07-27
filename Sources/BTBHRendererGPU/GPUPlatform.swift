@@ -401,6 +401,11 @@ public final class GPUPlatform: GamePlatform {
                     "production_model.vert.\(extensionName)"
                 )
                 .path,
+            animatedVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_animated_model.vert.\(extensionName)"
+                )
+                .path,
             fragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_model.frag.\(extensionName)"

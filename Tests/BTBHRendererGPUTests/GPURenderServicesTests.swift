@@ -1015,6 +1015,9 @@ final class GPURenderServicesTests: XCTestCase {
             frameRatePolicy: .uncapped,
             drawableScalePolicy: .oneToOne
         ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1218,6 +1221,28 @@ final class GPURenderServicesTests: XCTestCase {
                 name: "clip.unknown.time"
             )
         )
+
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -4),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.animatedModelTransformStreams(.init(
+            model: model,
+            player: nil,
+            tree: tree,
+            positions: [.zero],
+            rotations: [.identity],
+            scales: [.one],
+            count: 1
+        )))
+        try RenderServices.scene.endFrame()
+        XCTAssertFalse(RenderServices.platform.shouldClose)
 
         RenderServices.resources.destroyModel(model)
         RenderServices.resources.destroyAnimationLibrary(library)
