@@ -158,7 +158,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         path: String,
         flags: ModelImportFlags
     ) throws -> ModelHandle {
-        trace("loadModel")
+        trace("loadModel path=\(path)")
         _ = flags
         guard let modelHandles else {
             throw GPUModelProbeError.operationFailed(
@@ -174,6 +174,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             throw error
         }
         models[handle] = resource
+        trace("loadModel.complete handle=\(handle.rawValue)")
         return handle
     }
 
