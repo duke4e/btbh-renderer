@@ -318,6 +318,10 @@ BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report
 );
+float btbh_gpu_animation_library_duration(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index
+);
 void btbh_gpu_animation_library_destroy(
     BTBHGPUAnimationLibrary *library
 );

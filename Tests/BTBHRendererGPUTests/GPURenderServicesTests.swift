@@ -345,6 +345,11 @@ final class GPURenderServicesTests: XCTestCase {
         let probe = try GPUAnimationLibraryProbe.load(path: path)
         defer { GPUAnimationLibraryProbe.destroy(probe.pointer) }
         XCTAssertGreaterThan(probe.animationCount, 0)
+        XCTAssertEqual(probe.durations.count, probe.animationCount)
+        XCTAssertTrue(probe.durations.allSatisfy {
+            $0.isFinite && $0 >= 0
+        })
+        XCTAssertTrue(probe.durations.contains(where: { $0 > 0 }))
         if ProcessInfo.processInfo.environment[
             "BTBH_GPU_MODEL_TEST_PATH"
         ] != nil {
@@ -355,6 +360,251 @@ final class GPURenderServicesTests: XCTestCase {
         )
         XCTAssertTrue(library.isValid)
         RenderServices.resources.destroyAnimationLibrary(library)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testAnimationTreeTracksValidatedClipAndSwitchState() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU animation tree test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let path = packageRoot.appendingPathComponent(
+            "external/raylib/examples/models/resources/models/gltf/robot.glb"
+        ).path
+        let model = try RenderServices.resources.loadModel(
+            path: path,
+            flags: [.meshData]
+        )
+        let library = try RenderServices.resources.loadAnimationLibrary(
+            path: path
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createAnimationTree(.init(
+                model: model,
+                library: library,
+                clips: [
+                    .init(
+                        name: "invalid",
+                        animationIndex: .max,
+                        loop: true,
+                        speed: 1
+                    )
+                ],
+                switches: [],
+                rootNode: "invalid",
+                rootBone: nil
+            ))
+        )
+        let probe = try GPUAnimationLibraryProbe.load(path: path)
+        defer { GPUAnimationLibraryProbe.destroy(probe.pointer) }
+        let clipDuration = probe.durations[0]
+        let tree = try RenderServices.resources.createAnimationTree(.init(
+            model: model,
+            library: library,
+            clips: [
+                .init(
+                    name: "idle",
+                    animationIndex: 0,
+                    loop: true,
+                    speed: 2
+                ),
+                .init(
+                    name: "once",
+                    animationIndex: 0,
+                    loop: false,
+                    speed: 1
+                )
+            ],
+            switches: [
+                .init(
+                    name: "root",
+                    inputs: ["idle", "once"],
+                    activeInput: 0,
+                    crossfadeSeconds: 0.2,
+                    synchronized: false
+                )
+            ],
+            rootNode: "root",
+            rootBone: nil
+        ))
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.speed"
+            ),
+            2
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0.1
+        )
+        let advanced = try RenderServices.resources.animationTreeParameter(
+            tree,
+            name: "clip.idle.time"
+        )
+        XCTAssertGreaterThan(advanced, 0)
+        XCTAssertThrowsError(
+            try RenderServices.resources.updateAnimationTree(
+                tree,
+                deltaSeconds: -.infinity
+            )
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.time",
+            value: 10_000
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.once.time",
+            value: 10_000
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0
+        )
+        XCTAssertLessThan(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.time"
+            ),
+            clipDuration
+        )
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.once.time"
+            ),
+            clipDuration,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.once.play"
+            ),
+            0
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.once.play",
+            value: 1
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "switch.root.activeInput",
+            value: 1
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0
+        )
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.once.time"
+            ),
+            0
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "switch.root.activeInput",
+            value: 0
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.speed",
+            value: .greatestFiniteMagnitude
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: .greatestFiniteMagnitude
+        )
+        XCTAssertTrue(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.time"
+            ).isFinite
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.speed",
+            value: 2
+        )
+        let pausedTime = try RenderServices.resources
+            .animationTreeParameter(tree, name: "clip.idle.time")
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.play",
+            value: 0
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0.1
+        )
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.time"
+            ),
+            pausedTime,
+            accuracy: 0.0001
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.setAnimationTreeParameter(
+                tree,
+                name: "switch.root.activeInput",
+                value: 2
+            )
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.unknown.time"
+            )
+        )
+
+        RenderServices.resources.destroyModel(model)
+        RenderServices.resources.destroyAnimationLibrary(library)
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "switch.root.activeInput"
+            ),
+            0
+        )
+        RenderServices.resources.destroyAnimationTree(tree)
+        XCTAssertThrowsError(
+            try RenderServices.resources.modelMetadata(model)
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.time"
+            )
+        )
         #else
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif

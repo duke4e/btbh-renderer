@@ -181,6 +181,7 @@ enum GPUAnimationLibraryProbeError: Error, Equatable {
 struct GPUAnimationLibraryProbeResource {
     let pointer: OpaquePointer
     let animationCount: Int
+    let durations: [Float]
 }
 
 @MainActor
@@ -197,9 +198,13 @@ enum GPUAnimationLibraryProbe {
                 message: GPUDeviceProbe.string(from: &report.message)
             )
         }
+        let animationCount = Int(report.animation_count)
         return .init(
             pointer: library,
-            animationCount: Int(report.animation_count)
+            animationCount: animationCount,
+            durations: (0..<animationCount).map {
+                btbh_gpu_animation_library_duration(library, UInt32($0))
+            }
         )
     }
 

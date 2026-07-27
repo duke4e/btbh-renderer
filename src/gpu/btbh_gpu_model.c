@@ -1023,6 +1023,58 @@ BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     return library;
 }
 
+float btbh_gpu_animation_library_duration(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index
+) {
+    if (
+        library == NULL ||
+        library->data == NULL ||
+        animation_index >= library->data->animations_count
+    ) {
+        return 0.0f;
+    }
+    const cgltf_animation *animation =
+        &library->data->animations[animation_index];
+    float duration = 0.0f;
+    for (cgltf_size index = 0; index < animation->samplers_count; ++index) {
+        const cgltf_accessor *input = animation->samplers[index].input;
+        if (input == NULL || input->count == 0) {
+            continue;
+        }
+        float final_time = 0.0f;
+        if (input->has_max) {
+            final_time = input->max[0];
+        } else if (!cgltf_accessor_read_float(
+            input,
+            input->count - 1,
+            &final_time,
+            1
+        )) {
+            if (input->count > SIZE_MAX / sizeof(cgltf_float)) {
+                continue;
+            }
+            cgltf_float *times = malloc(input->count * sizeof(*times));
+            if (times == NULL) {
+                continue;
+            }
+            const cgltf_size unpacked = cgltf_accessor_unpack_floats(
+                input,
+                times,
+                input->count
+            );
+            if (unpacked == input->count) {
+                final_time = times[input->count - 1];
+            }
+            free(times);
+        }
+        if (isfinite(final_time) && final_time > duration) {
+            duration = final_time;
+        }
+    }
+    return duration;
+}
+
 void btbh_gpu_animation_library_destroy(
     BTBHGPUAnimationLibrary *library
 ) {
