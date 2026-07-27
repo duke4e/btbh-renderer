@@ -1146,7 +1146,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             uniforms.emission_color_energy[2] =
                 (float)batch->emission_blue / 255.0f;
             uniforms.emission_color_energy[3] =
-                batch->emission_energy;
+                batch->unlit_enabled != 0u
+                    ? 0.0f
+                    : batch->emission_energy;
             SDL_PushGPUVertexUniformData(
                 command,
                 0u,

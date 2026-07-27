@@ -2662,6 +2662,43 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center + 1], 15)
         XCTAssertLessThan(readback.rgba8[center + 1], 80)
         XCTAssertLessThan(readback.rgba8[center + 2], 50)
+
+        descriptor.unlit = true
+        try RenderServices.resources.updateMaterial(
+            material,
+            descriptor: descriptor
+        )
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let unlitReadback = try RenderServices.canvas
+            .readbackPresentedFrame()
+        XCTAssertLessThan(unlitReadback.rgba8[center], 10)
+        XCTAssertLessThan(unlitReadback.rgba8[center + 1], 10)
+        XCTAssertLessThan(unlitReadback.rgba8[center + 2], 10)
         #else
         throw XCTSkip("The Windows Vulkan emission test runs only on Windows")
         #endif
