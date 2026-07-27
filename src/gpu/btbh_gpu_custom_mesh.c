@@ -5,17 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct BTBHGPUCustomMesh {
-    BTBHGPUWindow *owner;
-    BTBHGPUCustomMesh *previous;
-    BTBHGPUCustomMesh *next;
-    SDL_GPUBuffer *vertex_buffer;
-    SDL_GPUBuffer *index_buffer;
-    uint32_t vertex_count;
-    uint32_t index_count;
-    uint32_t vertex_byte_count;
-};
-
 enum {
     BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE =
         24u * (uint32_t) sizeof(float)

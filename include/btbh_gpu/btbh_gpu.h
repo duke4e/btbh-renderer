@@ -226,11 +226,19 @@ typedef struct BTBHGPUAnimationLibraryReport {
     char message[256];
 } BTBHGPUAnimationLibraryReport;
 
-typedef struct BTBHGPUModelInstancesBatch {
+typedef enum BTBHGPUSceneGeometryKind {
+    BTBH_GPU_SCENE_GEOMETRY_INVALID = 0,
+    BTBH_GPU_SCENE_GEOMETRY_MODEL = 1,
+    BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH = 2
+} BTBHGPUSceneGeometryKind;
+
+typedef struct BTBHGPUSceneGeometryBatch {
+    BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
+    BTBHGPUCustomMesh *custom_mesh;
     uint32_t first_instance;
     uint32_t instance_count;
-} BTBHGPUModelInstancesBatch;
+} BTBHGPUSceneGeometryBatch;
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;
@@ -380,7 +388,7 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     BTBHGPUCustomMeshReport *report
 );
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
-BTBHGPUResult btbh_gpu_window_scene_present_model_instances(
+BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
@@ -388,7 +396,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_model_instances(
     const float view_projection[16],
     const float *instances,
     uint32_t total_instance_count,
-    const BTBHGPUModelInstancesBatch *batches,
+    const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
     uint8_t clear_red,
     uint8_t clear_green,

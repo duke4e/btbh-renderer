@@ -244,6 +244,25 @@ final class GPUResourceBackend: RenderResourceBackend {
         return resource.pointer
     }
 
+    func meshPointer(_ handle: MeshHandle) throws -> OpaquePointer {
+        guard let resource = meshes[handle] else {
+            throw GPUResourceStagingError.invalidMesh(handle.rawValue)
+        }
+        return resource.storage.pointer
+    }
+
+    func materialColor(_ handle: MaterialHandle) throws -> RenderColor {
+        guard let resource = materials[handle] else {
+            throw GPUResourceStagingError.invalidMaterial(handle.rawValue)
+        }
+        switch resource.storage {
+        case .descriptor(let descriptor):
+            return descriptor.albedoColor
+        case .modelOverride(_, _, let patch):
+            return patch.albedoColor ?? .white
+        }
+    }
+
     func destroyModel(_ handle: ModelHandle) {
         if isModelReferenced(handle) {
             pendingModelDestruction.insert(handle)
@@ -1609,6 +1628,9 @@ final class GPUSceneBackend: SceneBackend {
     private enum PendingModelDraw {
         case instances(ModelInstancesDraw)
         case transformStreams(ModelTransformStreamsDraw)
+        case mesh(MeshDraw)
+        case meshInstances(MeshInstancesDraw)
+        case meshTransformStreams(MeshTransformStreamsDraw)
     }
 
     private let platform: GPUPlatform
@@ -1643,6 +1665,12 @@ final class GPUSceneBackend: SceneBackend {
             pendingModelDraws.append(.instances(modelInstances))
         case .modelTransformStreams(let streams):
             pendingModelDraws.append(.transformStreams(streams))
+        case .mesh(let mesh):
+            pendingModelDraws.append(.mesh(mesh))
+        case .meshInstances(let meshInstances):
+            pendingModelDraws.append(.meshInstances(meshInstances))
+        case .meshTransformStreams(let streams):
+            pendingModelDraws.append(.meshTransformStreams(streams))
         default:
             guard unsupportedOperation == nil else { return }
             unsupportedOperation = Self.submitOperation(draw)
@@ -1665,7 +1693,7 @@ final class GPUSceneBackend: SceneBackend {
             )
         }
         var packedInstances: [Float] = []
-        var batches: [GPUModelInstancesProbeBatch] = []
+        var batches: [GPUSceneGeometryProbeBatch] = []
         for pendingDraw in pendingModelDraws {
             switch pendingDraw {
             case .instances(let draw):
@@ -1689,7 +1717,9 @@ final class GPUSceneBackend: SceneBackend {
                     )
                 }
                 batches.append(.init(
-                    model: try resources.modelPointer(draw.model),
+                    geometry: .model(
+                        try resources.modelPointer(draw.model)
+                    ),
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -1736,7 +1766,94 @@ final class GPUSceneBackend: SceneBackend {
                     )
                 }
                 batches.append(.init(
-                    model: try resources.modelPointer(draw.model),
+                    geometry: .model(
+                        try resources.modelPointer(draw.model)
+                    ),
+                    firstInstance: firstInstance,
+                    instanceCount: draw.count
+                ))
+            case .mesh(let draw):
+                let firstInstance = packedInstances.count / 20
+                Self.append(
+                    matrix: draw.transform.matrix,
+                    color: try resources.materialColor(draw.material),
+                    to: &packedInstances
+                )
+                batches.append(.init(
+                    geometry: .customMesh(
+                        try resources.meshPointer(draw.mesh)
+                    ),
+                    firstInstance: firstInstance,
+                    instanceCount: 1
+                ))
+            case .meshInstances(let draw):
+                guard !draw.instances.isEmpty else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "GPU mesh instance draw is empty"
+                    )
+                }
+                let materialColor = try resources.materialColor(
+                    draw.material
+                )
+                let firstInstance = packedInstances.count / 20
+                for instance in draw.instances {
+                    Self.append(
+                        matrix: instance.transform.matrix,
+                        color: Self.multiply(
+                            instance.color,
+                            materialColor
+                        ),
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    geometry: .customMesh(
+                        try resources.meshPointer(draw.mesh)
+                    ),
+                    firstInstance: firstInstance,
+                    instanceCount: draw.instances.count
+                ))
+            case .meshTransformStreams(let draw):
+                guard draw.sourceStart >= 0,
+                      draw.count > 0,
+                      draw.sourceStart <= draw.positions.count,
+                      draw.count <=
+                        draw.positions.count - draw.sourceStart,
+                      draw.sourceStart <= draw.rotations.count,
+                      draw.count <=
+                        draw.rotations.count - draw.sourceStart,
+                      draw.sourceStart <= draw.scales.count,
+                      draw.count <=
+                        draw.scales.count - draw.sourceStart,
+                      draw.sourceStart <= draw.colors.count,
+                      draw.count <=
+                        draw.colors.count - draw.sourceStart else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Invalid GPU mesh transform stream range"
+                    )
+                }
+                let materialColor = try resources.materialColor(
+                    draw.material
+                )
+                let firstInstance = packedInstances.count / 20
+                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
+                    Self.append(
+                        matrix: Self.transformMatrix(
+                            position: draw.positions[index],
+                            rotation: draw.rotations[index],
+                            scale: draw.scales[index]
+                        ),
+                        color: Self.multiply(
+                            draw.colors[index],
+                            materialColor
+                        ),
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    geometry: .customMesh(
+                        try resources.meshPointer(draw.mesh)
+                    ),
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -2142,6 +2259,21 @@ final class GPUSceneBackend: SceneBackend {
                 0
             ),
             c3: .init(position.x, position.y, position.z, 1)
+        )
+    }
+
+    private static func multiply(
+        _ lhs: RenderColor,
+        _ rhs: RenderColor
+    ) -> RenderColor {
+        func component(_ lhs: UInt8, _ rhs: UInt8) -> UInt8 {
+            UInt8((Int(lhs) * Int(rhs) + 127) / 255)
+        }
+        return .init(
+            r: component(lhs.r, rhs.r),
+            g: component(lhs.g, rhs.g),
+            b: component(lhs.b, rhs.b),
+            a: component(lhs.a, rhs.a)
         )
     }
 }

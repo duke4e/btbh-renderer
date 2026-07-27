@@ -59,6 +59,17 @@ struct BTBHGPUModel {
     float maximum[3];
 };
 
+struct BTBHGPUCustomMesh {
+    BTBHGPUWindow *owner;
+    BTBHGPUCustomMesh *previous;
+    BTBHGPUCustomMesh *next;
+    SDL_GPUBuffer *vertex_buffer;
+    SDL_GPUBuffer *index_buffer;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t vertex_byte_count;
+};
+
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);

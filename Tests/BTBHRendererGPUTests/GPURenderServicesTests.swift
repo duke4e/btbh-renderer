@@ -840,15 +840,11 @@ final class GPURenderServicesTests: XCTestCase {
             ),
             environment: .default
         ))
-        RenderServices.scene.submit(.mesh(.init(
-            mesh: MeshHandle(rawValue: 1),
-            material: MaterialHandle(rawValue: 1),
-            transform: .identity
-        )))
+        RenderServices.scene.submit(.debug(.grid(slices: 10, spacing: 1)))
         XCTAssertThrowsError(try RenderServices.scene.endFrame()) {
             XCTAssertEqual(
                 $0 as? GPUBackendUnsupportedError,
-                .operation("scene.submit.mesh")
+                .operation("scene.submit.debug")
             )
         }
     }
@@ -1538,7 +1534,82 @@ final class GPURenderServicesTests: XCTestCase {
         )))
         try RenderServices.scene.endFrame()
 
+        let vertices = [
+            RenderVertex(
+                position: .init(x: -0.5, y: -0.5, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0.5, y: -0.5, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 0.5, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        let mesh = try vertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: vertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -0.5, y: -0.5, z: 0),
+                        maximum: .init(x: 0.5, y: 0.5, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        let material = try RenderServices.resources.createMaterial(.default)
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: mesh,
+            material: material,
+            transform: .identity
+        )))
+        try RenderServices.scene.endFrame()
+
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.meshInstances(.init(
+            mesh: mesh,
+            material: material,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.meshTransformStreams(.init(
+            mesh: mesh,
+            material: material,
+            positions: [.zero],
+            rotations: [.identity],
+            scales: [.one],
+            colors: [.white],
+            count: 1
+        )))
+        try RenderServices.scene.endFrame()
+
         XCTAssertFalse(RenderServices.platform.shouldClose)
+        RenderServices.resources.destroyMaterial(material)
+        RenderServices.resources.destroyMesh(mesh)
         RenderServices.resources.destroyModel(model)
         #else
         throw XCTSkip("The Windows Vulkan scene test runs only on Windows")

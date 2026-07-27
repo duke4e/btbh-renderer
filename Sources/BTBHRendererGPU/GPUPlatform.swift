@@ -366,7 +366,7 @@ public final class GPUPlatform: GamePlatform {
     func presentModelInstances(
         viewProjection: [Float],
         instances: [Float],
-        batches: [GPUModelInstancesProbeBatch],
+        batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
     ) throws {
         guard let window else {

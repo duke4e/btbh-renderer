@@ -193,8 +193,13 @@ enum GPUSceneProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
 
-struct GPUModelInstancesProbeBatch {
-    let model: OpaquePointer
+enum GPUSceneGeometryProbe {
+    case model(OpaquePointer)
+    case customMesh(OpaquePointer)
+}
+
+struct GPUSceneGeometryProbeBatch {
+    let geometry: GPUSceneGeometryProbe
     let firstInstance: Int
     let instanceCount: Int
 }
@@ -701,7 +706,7 @@ public final class GPUWindowProbe {
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
         instances: [Float],
-        batches: [GPUModelInstancesProbeBatch],
+        batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
     ) throws {
         guard let window, !isShutdown,
@@ -724,8 +729,23 @@ public final class GPUWindowProbe {
                     message: "GPU model instance batch exceeds UInt32"
                 )
             }
-            return BTBHGPUModelInstancesBatch(
-                model: batch.model,
+            let kind: BTBHGPUSceneGeometryKind
+            let model: OpaquePointer?
+            let customMesh: OpaquePointer?
+            switch batch.geometry {
+            case .model(let pointer):
+                kind = BTBH_GPU_SCENE_GEOMETRY_MODEL
+                model = pointer
+                customMesh = nil
+            case .customMesh(let pointer):
+                kind = BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH
+                model = nil
+                customMesh = pointer
+            }
+            return BTBHGPUSceneGeometryBatch(
+                kind: kind,
+                model: model,
+                custom_mesh: customMesh,
                 first_instance: UInt32(batch.firstInstance),
                 instance_count: UInt32(batch.instanceCount)
             )
@@ -736,7 +756,7 @@ public final class GPUWindowProbe {
                 viewProjection.withUnsafeBufferPointer { matrix in
                     instances.withUnsafeBufferPointer { instanceData in
                         nativeBatches.withUnsafeBufferPointer { batchData in
-                            btbh_gpu_window_scene_present_model_instances(
+                            btbh_gpu_window_scene_present_instances(
                                 window,
                                 vertexPath,
                                 fragmentPath,
