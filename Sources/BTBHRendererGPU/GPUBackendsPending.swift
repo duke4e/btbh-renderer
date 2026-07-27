@@ -1619,9 +1619,8 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     func submit(_ draw: SceneDraw) {
-        _ = draw
         if unsupportedOperation == nil {
-            unsupportedOperation = "scene.submit"
+            unsupportedOperation = Self.submitOperation(draw)
         }
     }
 
@@ -1636,20 +1635,67 @@ final class GPUSceneBackend: SceneBackend {
         _ world: RenderVec3,
         camera: RenderCamera
     ) -> RenderVec2 {
-        _ = world
-        _ = camera
-        platform.failClosed(operation: "scene.project")
-        return .zero
+        guard let geometry = cameraGeometry(camera) else {
+            return .zero
+        }
+        let relative = world - camera.position
+        let horizontal = relative.dot(geometry.right)
+        let vertical = relative.dot(geometry.up)
+        let depth = relative.dot(geometry.forward)
+        let normalizedX: Float
+        let normalizedY: Float
+        switch camera.projection {
+        case .perspective:
+            guard depth != 0 else { return .zero }
+            normalizedX =
+                horizontal / (depth * geometry.halfWidth)
+            normalizedY =
+                vertical / (depth * geometry.halfHeight)
+        case .orthographic:
+            normalizedX = horizontal / geometry.halfWidth
+            normalizedY = vertical / geometry.halfHeight
+        }
+        guard normalizedX.isFinite, normalizedY.isFinite else {
+            return .zero
+        }
+        return .init(
+            x: (normalizedX + 1) * 0.5 * Float(drawableSize.width),
+            y: (1 - normalizedY) * 0.5 * Float(drawableSize.height)
+        )
     }
 
     func unprojectRay(
         _ screen: RenderVec2,
         camera: RenderCamera
     ) -> RenderRay {
-        _ = screen
-        _ = camera
-        platform.failClosed(operation: "scene.unprojectRay")
-        return .init(origin: .zero, direction: .zero)
+        guard let geometry = cameraGeometry(camera),
+              screen.x.isFinite,
+              screen.y.isFinite else {
+            return .init(origin: camera.position, direction: .zero)
+        }
+        let normalizedX =
+            2 * screen.x / Float(drawableSize.width) - 1
+        let normalizedY =
+            1 - 2 * screen.y / Float(drawableSize.height)
+        switch camera.projection {
+        case .perspective:
+            let direction = (
+                geometry.forward +
+                geometry.right *
+                    (normalizedX * geometry.halfWidth) +
+                geometry.up *
+                    (normalizedY * geometry.halfHeight)
+            ).normalized()
+            return .init(origin: camera.position, direction: direction)
+        case .orthographic:
+            let origin =
+                camera.position +
+                geometry.right *
+                    (normalizedX * geometry.halfWidth) +
+                geometry.up *
+                    (normalizedY * geometry.halfHeight)
+            return .init(origin: origin, direction: geometry.forward)
+        }
     }
 
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool {
@@ -1777,5 +1823,78 @@ final class GPUSceneBackend: SceneBackend {
         abs(axis.x) * extents.x +
             abs(axis.y) * extents.y +
             abs(axis.z) * extents.z
+    }
+
+    private static func submitOperation(_ draw: SceneDraw) -> String {
+        switch draw {
+        case .model:
+            "scene.submit.model"
+        case .modelInstances:
+            "scene.submit.modelInstances"
+        case .modelTransformStreams:
+            "scene.submit.modelTransformStreams"
+        case .mesh:
+            "scene.submit.mesh"
+        case .meshInstances:
+            "scene.submit.meshInstances"
+        case .meshTransformStreams:
+            "scene.submit.meshTransformStreams"
+        case .animatedModel:
+            "scene.submit.animatedModel"
+        case .animatedModelInstances:
+            "scene.submit.animatedModelInstances"
+        case .animatedModelTransformStreams:
+            "scene.submit.animatedModelTransformStreams"
+        case .debug:
+            "scene.submit.debug"
+        }
+    }
+
+    private func cameraGeometry(
+        _ camera: RenderCamera
+    ) -> (
+        forward: RenderVec3,
+        right: RenderVec3,
+        up: RenderVec3,
+        halfWidth: Float,
+        halfHeight: Float
+    )? {
+        guard drawableSize.width > 0,
+              drawableSize.height > 0,
+              camera.verticalFOVDegrees.isFinite,
+              camera.verticalFOVDegrees > 0 else {
+            return nil
+        }
+        let forward = (camera.target - camera.position).normalized()
+        let right = forward.cross(camera.up).normalized()
+        let up = right.cross(forward).normalized()
+        guard forward.lengthSquared.isFinite,
+              right.lengthSquared.isFinite,
+              up.lengthSquared.isFinite,
+              forward.lengthSquared > 0,
+              right.lengthSquared > 0,
+              up.lengthSquared > 0 else {
+            return nil
+        }
+        let aspect =
+            Float(drawableSize.width) / Float(drawableSize.height)
+        let halfHeight: Float
+        switch camera.projection {
+        case .perspective:
+            guard camera.verticalFOVDegrees < 180 else { return nil }
+            halfHeight = tan(
+                camera.verticalFOVDegrees * .pi / 360
+            )
+        case .orthographic:
+            halfHeight = camera.verticalFOVDegrees * 0.5
+        }
+        let halfWidth = halfHeight * aspect
+        guard halfWidth.isFinite,
+              halfHeight.isFinite,
+              halfWidth > 0,
+              halfHeight > 0 else {
+            return nil
+        }
+        return (forward, right, up, halfWidth, halfHeight)
     }
 }

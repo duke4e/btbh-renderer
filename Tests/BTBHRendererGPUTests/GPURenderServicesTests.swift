@@ -759,6 +759,89 @@ final class GPURenderServicesTests: XCTestCase {
         try RenderServices.scene.endFrame()
     }
 
+    func testSceneProjectAndUnprojectUseDrawableCameraGeometry() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 800, height: 400)
+        )
+        let perspective = RenderCamera(
+            position: .zero,
+            target: .forward,
+            up: .up,
+            verticalFOVDegrees: 90,
+            projection: .perspective
+        )
+        let center = RenderServices.scene.project(
+            .init(x: 0, y: 0, z: 10),
+            camera: perspective
+        )
+        XCTAssertEqual(center.x, 400, accuracy: 0.001)
+        XCTAssertEqual(center.y, 200, accuracy: 0.001)
+        let centerRay = RenderServices.scene.unprojectRay(
+            center,
+            camera: perspective
+        )
+        XCTAssertEqual(centerRay.origin, .zero)
+        XCTAssertEqual(centerRay.direction.x, 0, accuracy: 0.001)
+        XCTAssertEqual(centerRay.direction.y, 0, accuracy: 0.001)
+        XCTAssertEqual(centerRay.direction.z, 1, accuracy: 0.001)
+
+        let orthographic = RenderCamera(
+            position: .zero,
+            target: .forward,
+            up: .up,
+            verticalFOVDegrees: 20,
+            projection: .orthographic
+        )
+        let edgeRay = RenderServices.scene.unprojectRay(
+            .init(x: 800, y: 200),
+            camera: orthographic
+        )
+        XCTAssertEqual(edgeRay.origin.x, -20, accuracy: 0.001)
+        XCTAssertEqual(edgeRay.origin.y, 0, accuracy: 0.001)
+        XCTAssertEqual(edgeRay.direction, .forward)
+    }
+
+    func testUnsupportedSceneSubmitReportsTheExactDrawKind() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 800, height: 400)
+        )
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .zero,
+                target: .forward,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: MeshHandle(rawValue: 1),
+            material: MaterialHandle(rawValue: 1),
+            transform: .identity
+        )))
+        XCTAssertThrowsError(try RenderServices.scene.endFrame()) {
+            XCTAssertEqual(
+                $0 as? GPUBackendUnsupportedError,
+                .operation("scene.submit.mesh")
+            )
+        }
+    }
+
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
         #if os(Windows)
         RenderServices.uninstall()
