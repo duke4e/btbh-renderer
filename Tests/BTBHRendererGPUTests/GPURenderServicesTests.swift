@@ -1132,6 +1132,19 @@ final class GPURenderServicesTests: XCTestCase {
         ))
 
         RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.init(
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255
+        )))
+        RenderServices.canvas.endFrame()
+        XCTAssertThrowsError(
+            try RenderServices.canvas.readbackPresentedFrame()
+        )
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.canvas.submit(.fillRect(.init(
             rect: .init(x: 20, y: 15, width: 80, height: 50),
@@ -1263,6 +1276,7 @@ final class GPURenderServicesTests: XCTestCase {
         let texture = try RenderServices.resources.colorTexture(of: target)
         defer { RenderServices.resources.destroyRenderTarget(target) }
 
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.pushRenderTarget(target))
         RenderServices.canvas.submit(.clear(.init(
@@ -2019,6 +2033,7 @@ final class GPURenderServicesTests: XCTestCase {
             RenderServices.resources.destroyModel(model)
         }
 
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.scene.beginFrame(.init(
@@ -2108,6 +2123,7 @@ final class GPURenderServicesTests: XCTestCase {
             RenderServices.resources.destroyModel(model)
         }
 
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.init(
             r: 255,
@@ -2213,6 +2229,7 @@ final class GPURenderServicesTests: XCTestCase {
             color: .white,
             custom: .init(x: 0, y: 0, z: 0, w: 0)
         )
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.scene.beginFrame(.init(
@@ -2393,6 +2410,7 @@ final class GPURenderServicesTests: XCTestCase {
                 tonemapWhite: 1
             )
         )
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.scene.beginFrame(frame)
@@ -2417,6 +2435,7 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center + 2], 20)
         XCTAssertLessThan(readback.rgba8[center + 2], 100)
 
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.scene.beginFrame(frame)
@@ -2531,6 +2550,7 @@ final class GPURenderServicesTests: XCTestCase {
             RenderServices.resources.destroyTexture(texture)
         }
 
+        RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.submit(.clear(.black))
         RenderServices.scene.beginFrame(.init(

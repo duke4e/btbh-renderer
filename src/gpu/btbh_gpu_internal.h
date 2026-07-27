@@ -51,6 +51,7 @@ struct BTBHGPUWindow {
     BTBHGPUSceneRuntime *scene_runtime;
     BTBHGPUCanvasRuntime *canvas_runtime;
     BTBHGPUTexture *presented_frame;
+    bool presented_frame_readback_requested;
     SDL_GPUCommandBuffer *pending_command;
     SDL_GPUTexture *pending_swapchain;
     SDL_GPUTransferBuffer *pending_scene_transfer;

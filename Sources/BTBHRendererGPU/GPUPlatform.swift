@@ -529,6 +529,10 @@ public final class GPUPlatform: GamePlatform {
         return try window.readbackPresentedFrame(size: drawableSize)
     }
 
+    func requestPresentedFrameReadback() {
+        window?.requestPresentedFrameReadback()
+    }
+
     func writePresentedFramePNG(to path: String) throws {
         let frame = try readbackPresentedFrame()
         let result = path.withCString { pathPointer in

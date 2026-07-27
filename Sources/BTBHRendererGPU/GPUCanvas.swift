@@ -30,6 +30,10 @@ final class GPUCanvas: Canvas2DBackend {
         self.frameCoordinator = frameCoordinator
     }
 
+    func requestPresentedFrameReadback() {
+        platform.requestPresentedFrameReadback()
+    }
+
     func beginFrame() {
         frameCoordinator.beginCanvasFrame()
         clearColor = .black

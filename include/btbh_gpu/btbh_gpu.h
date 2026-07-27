@@ -529,6 +529,9 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
     BTBHGPUWindow *window,
     BTBHGPUTextureReport *report
 );
+void btbh_gpu_window_request_presented_frame_readback(
+    BTBHGPUWindow *window
+);
 BTBHGPUResult btbh_gpu_window_readback_presented_frame(
     BTBHGPUWindow *window,
     uint8_t *rgba8,

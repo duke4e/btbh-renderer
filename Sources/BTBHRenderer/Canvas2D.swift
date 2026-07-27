@@ -220,10 +220,19 @@ public enum CanvasCommand: Sendable {
 
 @MainActor
 public protocol Canvas2DBackend: AnyObject {
+    /// Requests that the next presented frame remain available for readback.
+    ///
+    /// Backends may otherwise avoid retaining every presented frame. Call this
+    /// before `endFrame()`, then read or write the captured frame after it.
+    func requestPresentedFrameReadback()
     func beginFrame()
     func submit(_ command: CanvasCommand)
     func measureText(_ text: String, font: FontHandle, size: Float, spacing: Float) -> RenderVec2
     func endFrame()
     func readbackPresentedFrame() throws -> FrameReadback
     func writePresentedFramePNG(to path: String) throws
+}
+
+public extension Canvas2DBackend {
+    func requestPresentedFrameReadback() {}
 }

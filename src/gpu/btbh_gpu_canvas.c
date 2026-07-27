@@ -23,6 +23,10 @@ struct BTBHGPUCanvasRuntime {
         *solid_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
     SDL_GPUGraphicsPipeline
         *textured_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    SDL_GPUBuffer *vertex_buffer;
+    SDL_GPUTransferBuffer *upload_transfer;
+    uint32_t vertex_capacity;
+    uint32_t upload_capacity;
 };
 
 static void btbh_gpu_canvas_error(
@@ -353,6 +357,7 @@ bool btbh_gpu_window_finish_pending_frame(
     window->pending_swapchain = NULL;
     window->pending_drawable_width = 0u;
     window->pending_drawable_height = 0u;
+    window->presented_frame_readback_requested = false;
     const bool result = submit
         ? SDL_SubmitGPUCommandBuffer(command)
         : SDL_CancelGPUCommandBuffer(command);
@@ -458,6 +463,20 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
     return capture;
 }
 
+void btbh_gpu_window_request_presented_frame_readback(
+    BTBHGPUWindow *window
+) {
+    if (
+        window != NULL &&
+        window->window != NULL &&
+        window->device != NULL &&
+        window->device->gpu != NULL &&
+        window->claimed
+    ) {
+        window->presented_frame_readback_requested = true;
+    }
+}
+
 bool btbh_gpu_window_record_presented_frame(
     BTBHGPUWindow *window
 ) {
@@ -530,6 +549,71 @@ bool btbh_gpu_window_record_presented_frame(
         true
     );
     SDL_EndGPUCopyPass(copy);
+    return true;
+}
+
+static uint32_t btbh_gpu_canvas_buffer_capacity(
+    uint32_t required
+) {
+    uint32_t capacity = 256u;
+    while (capacity < required && capacity <= UINT32_MAX / 2u) {
+        capacity *= 2u;
+    }
+    return capacity >= required ? capacity : required;
+}
+
+static bool btbh_gpu_canvas_ensure_upload_buffers(
+    BTBHGPUWindow *window,
+    uint32_t byte_count
+) {
+    if (byte_count == 0u) {
+        return true;
+    }
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUBufferCreateInfo buffer_info;
+    SDL_GPUTransferBufferCreateInfo transfer_info;
+    SDL_zero(buffer_info);
+    SDL_zero(transfer_info);
+    if (
+        runtime->vertex_buffer == NULL ||
+        runtime->vertex_capacity < byte_count
+    ) {
+        if (runtime->vertex_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, runtime->vertex_buffer);
+        }
+        runtime->vertex_capacity =
+            btbh_gpu_canvas_buffer_capacity(byte_count);
+        buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        buffer_info.size = runtime->vertex_capacity;
+        runtime->vertex_buffer =
+            SDL_CreateGPUBuffer(device, &buffer_info);
+        if (runtime->vertex_buffer == NULL) {
+            runtime->vertex_capacity = 0u;
+            return false;
+        }
+    }
+    if (
+        runtime->upload_transfer == NULL ||
+        runtime->upload_capacity < byte_count
+    ) {
+        if (runtime->upload_transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(
+                device,
+                runtime->upload_transfer
+            );
+        }
+        runtime->upload_capacity =
+            btbh_gpu_canvas_buffer_capacity(byte_count);
+        transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transfer_info.size = runtime->upload_capacity;
+        runtime->upload_transfer =
+            SDL_CreateGPUTransferBuffer(device, &transfer_info);
+        if (runtime->upload_transfer == NULL) {
+            runtime->upload_capacity = 0u;
+            return false;
+        }
+    }
     return true;
 }
 
@@ -819,42 +903,25 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
 
     const uint32_t byte_count =
         vertex_count * (uint32_t)sizeof(*vertices);
-    SDL_GPUBuffer *vertex_buffer = NULL;
-    SDL_GPUTransferBuffer *transfer = NULL;
+    if (!btbh_gpu_canvas_ensure_upload_buffers(window, byte_count)) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    SDL_GPUBuffer *vertex_buffer = runtime->vertex_buffer;
+    SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
     if (byte_count != 0u) {
-        SDL_GPUBufferCreateInfo buffer_info;
-        SDL_GPUTransferBufferCreateInfo transfer_info;
-        SDL_zero(buffer_info);
-        SDL_zero(transfer_info);
-        buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-        buffer_info.size = byte_count;
-        transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transfer_info.size = byte_count;
-        vertex_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
-        transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
-        if (vertex_buffer == NULL || transfer == NULL) {
-            if (transfer != NULL) {
-                SDL_ReleaseGPUTransferBuffer(device, transfer);
-            }
-            if (vertex_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, vertex_buffer);
-            }
-            (void)btbh_gpu_window_finish_pending_frame(window, false);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return report->result;
-        }
         void *mapped = SDL_MapGPUTransferBuffer(
             device,
             transfer,
-            false
+            true
         );
         if (mapped == NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
-            SDL_ReleaseGPUBuffer(device, vertex_buffer);
             (void)btbh_gpu_window_finish_pending_frame(window, false);
             btbh_gpu_canvas_error(
                 report,
@@ -869,8 +936,6 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             window->pending_command
         );
         if (copy == NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
-            SDL_ReleaseGPUBuffer(device, vertex_buffer);
             (void)btbh_gpu_window_finish_pending_frame(window, false);
             btbh_gpu_canvas_error(
                 report,
@@ -886,7 +951,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         source.transfer_buffer = transfer;
         destination.buffer = vertex_buffer;
         destination.size = byte_count;
-        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
         SDL_EndGPUCopyPass(copy);
     }
 
@@ -929,12 +994,6 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             NULL
         );
         if (pass == NULL) {
-            if (transfer != NULL) {
-                SDL_ReleaseGPUTransferBuffer(device, transfer);
-            }
-            if (vertex_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, vertex_buffer);
-            }
             (void)btbh_gpu_window_finish_pending_frame(window, false);
             btbh_gpu_canvas_error(
                 report,
@@ -1030,12 +1089,6 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             NULL
         );
         if (screen_pass == NULL) {
-            if (transfer != NULL) {
-                SDL_ReleaseGPUTransferBuffer(device, transfer);
-            }
-            if (vertex_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, vertex_buffer);
-            }
             (void)btbh_gpu_window_finish_pending_frame(window, false);
             btbh_gpu_canvas_error(
                 report,
@@ -1050,13 +1103,10 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         window->pending_drawable_width;
     const uint32_t drawable_height =
         window->pending_drawable_height;
-    if (!btbh_gpu_window_record_presented_frame(window)) {
-        if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
-        }
-        if (vertex_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        }
+    if (
+        window->presented_frame_readback_requested &&
+        !btbh_gpu_window_record_presented_frame(window)
+    ) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_canvas_error(
             report,
@@ -1069,12 +1119,6 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         window,
         true
     );
-    if (transfer != NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-    }
-    if (vertex_buffer != NULL) {
-        SDL_ReleaseGPUBuffer(device, vertex_buffer);
-    }
     if (!submitted) {
         btbh_gpu_canvas_error(
             report,
@@ -1101,6 +1145,18 @@ void btbh_gpu_window_release_canvas(BTBHGPUWindow *window) {
             ? window->device->gpu
             : NULL;
     if (device != NULL) {
+        if (window->canvas_runtime->upload_transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(
+                device,
+                window->canvas_runtime->upload_transfer
+            );
+        }
+        if (window->canvas_runtime->vertex_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(
+                device,
+                window->canvas_runtime->vertex_buffer
+            );
+        }
         for (uint32_t index = 0u;
              index < BTBH_GPU_CANVAS_PIPELINE_COUNT;
              ++index) {

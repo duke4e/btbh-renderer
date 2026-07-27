@@ -406,6 +406,7 @@ BTBHGPUResult btbh_gpu_window_present_clear(
 
     if (window->pending_command != NULL) {
         const bool recorded =
+            !window->presented_frame_readback_requested ||
             btbh_gpu_window_record_presented_frame(window);
         const bool submitted = btbh_gpu_window_finish_pending_frame(
             window,
@@ -503,6 +504,7 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     window->pending_drawable_width = drawable_width;
     window->pending_drawable_height = drawable_height;
     const bool recorded =
+        !window->presented_frame_readback_requested ||
         btbh_gpu_window_record_presented_frame(window);
     const bool submitted = btbh_gpu_window_finish_pending_frame(
         window,

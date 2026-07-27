@@ -1289,6 +1289,11 @@ public final class GPUWindowProbe {
         )
     }
 
+    func requestPresentedFrameReadback() {
+        guard let window, !isShutdown else { return }
+        btbh_gpu_window_request_presented_frame_readback(window)
+    }
+
     func readbackPresentedFrame(
         size: PixelSize2D
     ) throws -> FrameReadback {
