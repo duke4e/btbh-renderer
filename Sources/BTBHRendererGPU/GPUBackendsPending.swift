@@ -22,9 +22,15 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
+    private let animationLibraryHandles = try? HandlePool(
+        initialCapacity: 8
+    )
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
+    private var animationLibraries: [
+        AnimationLibraryHandle: GPUAnimationLibraryProbeResource
+    ] = [:]
     private var screenShaders: [
         ScreenShaderHandle: GPUScreenShaderResource
     ] = [:]
@@ -127,8 +133,38 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createInstanceBuffer(_ descriptor: InstanceBufferDescriptor) throws -> InstanceBufferHandle { throw unsupported() }
     func uploadInstances(_ handle: InstanceBufferHandle, instances: UnsafeRawBufferPointer) throws { throw unsupported() }
     func destroyInstanceBuffer(_ handle: InstanceBufferHandle) {}
-    func loadAnimationLibrary(path: String) throws -> AnimationLibraryHandle { throw unsupported() }
-    func destroyAnimationLibrary(_ handle: AnimationLibraryHandle) {}
+    func loadAnimationLibrary(
+        path: String
+    ) throws -> AnimationLibraryHandle {
+        guard let animationLibraryHandles else {
+            throw GPUAnimationLibraryProbeError.operationFailed(
+                message: "Could not allocate the animation library handle pool"
+            )
+        }
+        let resource = try GPUAnimationLibraryProbe.load(path: path)
+        let handle: AnimationLibraryHandle
+        do {
+            handle = try animationLibraryHandles.acquire(
+                AnimationLibraryHandle.self
+            )
+        } catch {
+            GPUAnimationLibraryProbe.destroy(resource.pointer)
+            throw error
+        }
+        animationLibraries[handle] = resource
+        return handle
+    }
+
+    func destroyAnimationLibrary(_ handle: AnimationLibraryHandle) {
+        guard
+            let animationLibraryHandles,
+            let resource = animationLibraries.removeValue(forKey: handle),
+            animationLibraryHandles.release(handle)
+        else {
+            return
+        }
+        GPUAnimationLibraryProbe.destroy(resource.pointer)
+    }
     func createAnimationPlayer(_ descriptor: AnimationPlayerDescriptor) throws -> AnimationPlayerHandle { throw unsupported() }
     func updateAnimationPlayer(_ handle: AnimationPlayerHandle, deltaSeconds: Float) throws { throw unsupported() }
     func setAnimation(_ handle: AnimationPlayerHandle, name: String, loop: Bool, time: Float?) throws { throw unsupported() }
@@ -222,6 +258,10 @@ final class GPUResourceBackend: RenderResourceBackend {
     func shutdown() {
         screenShaders.removeAll()
         pendingTextureDestruction.removeAll()
+        for resource in animationLibraries.values {
+            GPUAnimationLibraryProbe.destroy(resource.pointer)
+        }
+        animationLibraries.removeAll()
         for resource in models.values {
             platform.destroyModel(resource.pointer)
         }

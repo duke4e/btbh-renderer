@@ -322,6 +322,44 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testGLBAnimationLibraryLoadsRealClipData() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let path = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_MODEL_TEST_PATH"
+        ] ?? packageRoot
+            .appendingPathComponent(
+                "external/raylib/examples/models/resources/models/gltf/robot.glb"
+            )
+            .path
+        let probe = try GPUAnimationLibraryProbe.load(path: path)
+        defer { GPUAnimationLibraryProbe.destroy(probe.pointer) }
+        XCTAssertGreaterThan(probe.animationCount, 0)
+        if ProcessInfo.processInfo.environment[
+            "BTBH_GPU_MODEL_TEST_PATH"
+        ] != nil {
+            XCTAssertGreaterThan(probe.animationCount, 24)
+        }
+        let library = try RenderServices.resources.loadAnimationLibrary(
+            path: path
+        )
+        XCTAssertTrue(library.isValid)
+        RenderServices.resources.destroyAnimationLibrary(library)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLTFModelLoadHandlesNodesSparseDataMaterialsAndUnicodePath() throws {
         #if os(Windows)
         RenderServices.uninstall()

@@ -167,6 +167,7 @@ typedef struct BTBHGPUPlatformSnapshot {
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
 typedef struct BTBHGPUModel BTBHGPUModel;
+typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
 
 typedef enum BTBHGPUTextureFilter {
     BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
@@ -200,6 +201,12 @@ typedef struct BTBHGPUModelReport {
     uint32_t material_count;
     char message[256];
 } BTBHGPUModelReport;
+
+typedef struct BTBHGPUAnimationLibraryReport {
+    BTBHGPUResult result;
+    uint32_t animation_count;
+    char message[256];
+} BTBHGPUAnimationLibraryReport;
 
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
 BTBHGPUShaderFormat btbh_gpu_backend_shader_format(BTBHGPUBackendRequest backend);
@@ -307,6 +314,13 @@ int32_t btbh_gpu_model_material_slot(
     uint32_t mesh_index
 );
 void btbh_gpu_model_destroy(BTBHGPUModel *model);
+BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
+    const char *path,
+    BTBHGPUAnimationLibraryReport *report
+);
+void btbh_gpu_animation_library_destroy(
+    BTBHGPUAnimationLibrary *library
+);
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 
 #if defined(__cplusplus)

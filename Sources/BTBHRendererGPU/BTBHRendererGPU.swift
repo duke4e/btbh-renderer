@@ -174,6 +174,40 @@ struct GPUModelProbeResource {
     let metadata: ModelMetadata
 }
 
+enum GPUAnimationLibraryProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUAnimationLibraryProbeResource {
+    let pointer: OpaquePointer
+    let animationCount: Int
+}
+
+@MainActor
+enum GPUAnimationLibraryProbe {
+    static func load(
+        path: String
+    ) throws -> GPUAnimationLibraryProbeResource {
+        var report = BTBHGPUAnimationLibraryReport()
+        let library = path.withCString { pathPointer in
+            btbh_gpu_animation_library_load(pathPointer, &report)
+        }
+        guard let library else {
+            throw GPUAnimationLibraryProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(
+            pointer: library,
+            animationCount: Int(report.animation_count)
+        )
+    }
+
+    static func destroy(_ library: OpaquePointer) {
+        btbh_gpu_animation_library_destroy(library)
+    }
+}
+
 @MainActor
 public final class GPUWindowProbe {
     public var deviceDiagnostics: GPUDeviceDiagnostics {

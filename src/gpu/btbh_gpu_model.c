@@ -55,6 +55,10 @@ struct BTBHGPUModel {
     float maximum[3];
 };
 
+struct BTBHGPUAnimationLibrary {
+    cgltf_data *data;
+};
+
 static void btbh_gpu_model_error(
     BTBHGPUModelReport *report,
     const char *message
@@ -964,4 +968,67 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window) {
         model->next = NULL;
         model = next;
     }
+}
+
+BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
+    const char *path,
+    BTBHGPUAnimationLibraryReport *report
+) {
+    if (path == NULL || report == NULL) {
+        return NULL;
+    }
+    memset(report, 0, sizeof(*report));
+    cgltf_options options = {0};
+    options.file.read = btbh_gpu_model_file_read;
+    options.file.release = btbh_gpu_model_file_release;
+    cgltf_data *data = NULL;
+    cgltf_result result = cgltf_parse_file(&options, path, &data);
+    if (result == cgltf_result_success) {
+        result = cgltf_load_buffers(&options, data, path);
+    }
+    if (result == cgltf_result_success) {
+        result = cgltf_validate(data);
+    }
+    if (
+        result != cgltf_result_success ||
+        data == NULL ||
+        data->animations_count == 0 ||
+        data->animations_count > UINT32_MAX
+    ) {
+        cgltf_free(data);
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void) snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            "Could not load glTF animation clips"
+        );
+        return NULL;
+    }
+    BTBHGPUAnimationLibrary *library = calloc(1, sizeof(*library));
+    if (library == NULL) {
+        cgltf_free(data);
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void) snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            "Could not allocate animation library"
+        );
+        return NULL;
+    }
+    library->data = data;
+    report->result = BTBH_GPU_OK;
+    report->animation_count = (uint32_t) data->animations_count;
+    return library;
+}
+
+void btbh_gpu_animation_library_destroy(
+    BTBHGPUAnimationLibrary *library
+) {
+    if (library == NULL) {
+        return;
+    }
+    cgltf_free(library->data);
+    free(library);
 }
