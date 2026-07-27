@@ -404,6 +404,29 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
+    if (window->pending_command != NULL) {
+        if (!btbh_gpu_window_finish_pending_frame(window, true)) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        if (!btbh_gpu_refresh_window_sizes(window, report)) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        report->result = BTBH_GPU_OK;
+        report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
+        report->message[0] = '\0';
+        return report->result;
+    }
+
     SDL_GPUCommandBuffer *command_buffer =
         SDL_AcquireGPUCommandBuffer(window->device->gpu);
     if (command_buffer == NULL) {
@@ -848,6 +871,10 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;
     }
+    if (window->pending_command != NULL) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+    }
+    btbh_gpu_window_release_canvas(window);
     btbh_gpu_window_release_scene(window);
     btbh_gpu_window_release_custom_meshes(window);
     btbh_gpu_window_release_instance_buffers(window);

@@ -445,6 +445,60 @@ public final class GPUPlatform: GamePlatform {
         )
     }
 
+    func presentCanvas(
+        vertices: [GPUCanvasVertexProbe],
+        batches: [GPUCanvasBatchProbe],
+        clearColor: RenderColor
+    ) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        let shaderDirectory: URL
+        if let override = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_SHADER_DIR"
+        ], !override.isEmpty {
+            shaderDirectory = URL(fileURLWithPath: override)
+        } else {
+            let executable = URL(
+                fileURLWithPath: CommandLine.arguments[0]
+            ).standardizedFileURL
+            shaderDirectory = executable
+                .deletingLastPathComponent()
+                .appendingPathComponent("GPUShaders")
+        }
+        let extensionName: String
+        let shaderFormat: BTBHGPUShaderFormat
+        switch request {
+        case .vulkan:
+            extensionName = "spv"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_SPIRV
+        case .metal:
+            extensionName = "metallib"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
+        }
+        try window.presentCanvas(
+            vertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_canvas.vert.\(extensionName)"
+                )
+                .path,
+            fragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_canvas.frag.\(extensionName)"
+                )
+                .path,
+            texturedFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_canvas_textured.frag.\(extensionName)"
+                )
+                .path,
+            shaderFormat: shaderFormat,
+            vertices: vertices,
+            batches: batches,
+            clearColor: clearColor
+        )
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)

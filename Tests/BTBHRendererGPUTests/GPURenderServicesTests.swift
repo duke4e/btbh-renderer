@@ -1093,6 +1093,106 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testCanvasFillRectPresentsWithoutFailClosing() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU canvas fill test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(x: 20, y: 15, width: 80, height: 50),
+            color: .white
+        )))
+        RenderServices.canvas.endFrame()
+
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
+        #endif
+    }
+
+    func testCanvasPresentsTextureAndFontAtlasBatches() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU textured canvas test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let texture = try RenderServices.resources.loadTexture(.init(
+            path: packageRoot
+                .appendingPathComponent("external/SDL/test/icon.png")
+                .path
+        ))
+        let font = try RenderServices.resources.loadFont(.init(
+            path: packageRoot.appendingPathComponent(
+                "external/raylib/examples/text/resources/anonymous_pro_bold.ttf"
+            ).path,
+            baseSize: 32,
+            glyphs: Array(32...126).map(UInt32.init)
+        ))
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.pushScissor(.init(
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 180
+        )))
+        RenderServices.canvas.submit(.texturedQuad(.init(
+            texture: texture,
+            source: .init(x: 0, y: 0, width: 32, height: 32),
+            destination: .init(x: 30, y: 30, width: 64, height: 64),
+            origin: .zero,
+            rotationDegrees: 15,
+            tint: .white
+        )))
+        RenderServices.canvas.submit(.text(.init(
+            text: "Vulkan HUD",
+            font: font,
+            position: .init(x: 160, y: 100),
+            size: 32,
+            spacing: 1,
+            color: .white,
+            anchor: .top
+        )))
+        RenderServices.canvas.submit(.popScissor)
+        RenderServices.canvas.endFrame()
+
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
+        #endif
+    }
+
     func testAnimationTreeTracksValidatedClipAndSwitchState() throws {
         #if os(Windows)
         RenderServices.uninstall()
@@ -1317,6 +1417,7 @@ final class GPURenderServicesTests: XCTestCase {
             )
         )
 
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(.init(
             camera: .init(
                 position: .init(x: 0, y: 0, z: -4),
@@ -1337,6 +1438,7 @@ final class GPURenderServicesTests: XCTestCase {
             count: 1
         )))
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
         XCTAssertFalse(RenderServices.platform.shouldClose)
 
         RenderServices.resources.destroyModel(model)
@@ -1628,6 +1730,7 @@ final class GPURenderServicesTests: XCTestCase {
             ),
             environment: .default
         )
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.modelInstances(.init(
             model: model,
@@ -1641,7 +1744,13 @@ final class GPURenderServicesTests: XCTestCase {
         )))
 
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(x: 8, y: 8, width: 40, height: 18),
+            color: .white
+        )))
+        RenderServices.canvas.endFrame()
 
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.modelTransformStreams(.init(
             model: model,
@@ -1653,6 +1762,7 @@ final class GPURenderServicesTests: XCTestCase {
             count: 1
         )))
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
 
         let vertices = [
             RenderVertex(
@@ -1694,6 +1804,7 @@ final class GPURenderServicesTests: XCTestCase {
             )
         }
         let material = try RenderServices.resources.createMaterial(.default)
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.mesh(.init(
             mesh: mesh,
@@ -1701,7 +1812,9 @@ final class GPURenderServicesTests: XCTestCase {
             transform: .identity
         )))
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
 
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.meshInstances(.init(
             mesh: mesh,
@@ -1714,7 +1827,9 @@ final class GPURenderServicesTests: XCTestCase {
             persistentBuffer: nil
         )))
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
 
+        RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.meshTransformStreams(.init(
             mesh: mesh,
@@ -1726,6 +1841,7 @@ final class GPURenderServicesTests: XCTestCase {
             count: 1
         )))
         try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
         RenderServices.resources.destroyMaterial(material)

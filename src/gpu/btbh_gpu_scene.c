@@ -501,6 +501,15 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
     (void)memset(report, 0, sizeof(*report));
+    if (window != NULL && window->pending_command != NULL) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene frame was not finalized by Canvas2D"
+        );
+        return report->result;
+    }
     if (window == NULL ||
         window->window == NULL ||
         window->device == NULL ||
@@ -918,25 +927,13 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
         return report->result;
     }
-    if (!SDL_SubmitGPUCommandBuffer(command)) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
-        free(bone_offsets);
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
-    }
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
-    if (bone_buffer != NULL) {
-        SDL_ReleaseGPUBuffer(device, bone_buffer);
-    }
-    SDL_ReleaseGPUBuffer(device, instance_buffer);
+    window->pending_command = command;
+    window->pending_swapchain = swapchain;
+    window->pending_scene_transfer = transfer;
+    window->pending_instance_buffer = instance_buffer;
+    window->pending_bone_buffer = bone_buffer;
+    window->pending_drawable_width = drawable_width;
+    window->pending_drawable_height = drawable_height;
     free(bone_offsets);
 
     report->result = BTBH_GPU_OK;

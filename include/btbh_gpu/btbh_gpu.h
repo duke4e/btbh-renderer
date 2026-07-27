@@ -217,6 +217,46 @@ typedef struct BTBHGPUFontGlyph {
     float v1;
 } BTBHGPUFontGlyph;
 
+typedef enum BTBHGPUCanvasBlendMode {
+    BTBH_GPU_CANVAS_BLEND_ALPHA = 0,
+    BTBH_GPU_CANVAS_BLEND_ADDITIVE = 1,
+    BTBH_GPU_CANVAS_BLEND_MULTIPLIED = 2,
+    BTBH_GPU_CANVAS_BLEND_PREMULTIPLIED_ALPHA = 3
+} BTBHGPUCanvasBlendMode;
+
+typedef struct BTBHGPUCanvasVertex {
+    float x;
+    float y;
+    float u;
+    float v;
+    float red;
+    float green;
+    float blue;
+    float alpha;
+} BTBHGPUCanvasVertex;
+
+typedef struct BTBHGPUCanvasBatch {
+    uint32_t first_vertex;
+    uint32_t vertex_count;
+    BTBHGPUTexture *texture;
+    BTBHGPUCanvasBlendMode blend_mode;
+    int32_t scissor_x;
+    int32_t scissor_y;
+    int32_t scissor_width;
+    int32_t scissor_height;
+    uint8_t scissor_enabled;
+    uint8_t reserved[3];
+} BTBHGPUCanvasBatch;
+
+typedef struct BTBHGPUCanvasReport {
+    BTBHGPUResult result;
+    uint32_t drawable_width;
+    uint32_t drawable_height;
+    uint32_t batch_count;
+    uint32_t vertex_count;
+    char message[256];
+} BTBHGPUCanvasReport;
+
 typedef struct BTBHGPUModelReport {
     BTBHGPUResult result;
     float minimum_x;
@@ -390,6 +430,22 @@ BTBHGPUResult btbh_gpu_font_glyph(
 );
 BTBHGPUTexture *btbh_gpu_font_atlas(BTBHGPUFont *font);
 void btbh_gpu_font_destroy(BTBHGPUFont *font);
+BTBHGPUResult btbh_gpu_window_canvas_present(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUCanvasReport *report
+);
 BTBHGPUModel *btbh_gpu_window_model_load(
     BTBHGPUWindow *window,
     const char *path,

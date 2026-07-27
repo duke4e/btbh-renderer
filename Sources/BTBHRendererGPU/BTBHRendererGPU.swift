@@ -214,6 +214,48 @@ enum GPUSceneProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
 
+enum GPUCanvasProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUCanvasVertexProbe {
+    let position: RenderVec2
+    let textureCoordinate: RenderVec2
+    let color: RenderColor
+
+    init(
+        position: RenderVec2,
+        textureCoordinate: RenderVec2 = .zero,
+        color: RenderColor
+    ) {
+        self.position = position
+        self.textureCoordinate = textureCoordinate
+        self.color = color
+    }
+}
+
+struct GPUCanvasBatchProbe {
+    let firstVertex: Int
+    let vertexCount: Int
+    let blendMode: CanvasBlendMode
+    let scissor: RenderRect?
+    let texture: OpaquePointer?
+
+    init(
+        firstVertex: Int,
+        vertexCount: Int,
+        blendMode: CanvasBlendMode,
+        scissor: RenderRect?,
+        texture: OpaquePointer? = nil
+    ) {
+        self.firstVertex = firstVertex
+        self.vertexCount = vertexCount
+        self.blendMode = blendMode
+        self.scissor = scissor
+        self.texture = texture
+    }
+}
+
 enum GPUSceneGeometryProbe {
     case model(OpaquePointer)
     case customMesh(OpaquePointer)
@@ -892,6 +934,109 @@ public final class GPUWindowProbe {
         }
         guard result == BTBH_GPU_OK else {
             throw GPUSceneProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+    }
+
+    func presentCanvas(
+        vertexShaderPath: String,
+        fragmentShaderPath: String,
+        texturedFragmentShaderPath: String,
+        shaderFormat: BTBHGPUShaderFormat,
+        vertices: [GPUCanvasVertexProbe],
+        batches: [GPUCanvasBatchProbe],
+        clearColor: RenderColor
+    ) throws {
+        guard let window, !isShutdown,
+              !vertices.isEmpty,
+              vertices.count <= Int(UInt32.max),
+              !batches.isEmpty,
+              batches.count <= Int(UInt32.max) else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: "Invalid GPU canvas data"
+            )
+        }
+        let nativeVertices = vertices.map {
+            BTBHGPUCanvasVertex(
+                x: $0.position.x,
+                y: $0.position.y,
+                u: $0.textureCoordinate.x,
+                v: $0.textureCoordinate.y,
+                red: Float($0.color.r) / 255,
+                green: Float($0.color.g) / 255,
+                blue: Float($0.color.b) / 255,
+                alpha: Float($0.color.a) / 255
+            )
+        }
+        let nativeBatches = try batches.map { batch in
+            guard batch.firstVertex >= 0,
+                  batch.firstVertex <= Int(UInt32.max),
+                  batch.vertexCount > 0,
+                  batch.vertexCount <= Int(UInt32.max) else {
+                throw GPUCanvasProbeError.operationFailed(
+                    message: "GPU canvas batch exceeds UInt32"
+                )
+            }
+            let nativeBlend: BTBHGPUCanvasBlendMode
+            switch batch.blendMode {
+            case .alpha:
+                nativeBlend = BTBH_GPU_CANVAS_BLEND_ALPHA
+            case .additive:
+                nativeBlend = BTBH_GPU_CANVAS_BLEND_ADDITIVE
+            case .multiplied:
+                nativeBlend = BTBH_GPU_CANVAS_BLEND_MULTIPLIED
+            case .premultipliedAlpha:
+                nativeBlend = BTBH_GPU_CANVAS_BLEND_PREMULTIPLIED_ALPHA
+            }
+            var native = BTBHGPUCanvasBatch()
+            native.first_vertex = UInt32(batch.firstVertex)
+            native.vertex_count = UInt32(batch.vertexCount)
+            native.texture = batch.texture
+            native.blend_mode = nativeBlend
+            if let scissor = batch.scissor {
+                native.scissor_x = Int32(scissor.x.rounded(.down))
+                native.scissor_y = Int32(scissor.y.rounded(.down))
+                native.scissor_width = Int32(
+                    scissor.width.rounded(.up)
+                )
+                native.scissor_height = Int32(
+                    scissor.height.rounded(.up)
+                )
+                native.scissor_enabled = 1
+            }
+            return native
+        }
+        var report = BTBHGPUCanvasReport()
+        let result = vertexShaderPath.withCString { vertexPath in
+            fragmentShaderPath.withCString { fragmentPath in
+                texturedFragmentShaderPath.withCString {
+                    texturedFragmentPath in
+                    nativeVertices.withUnsafeBufferPointer { vertexData in
+                        nativeBatches.withUnsafeBufferPointer { batchData in
+                            btbh_gpu_window_canvas_present(
+                                window,
+                                vertexPath,
+                                fragmentPath,
+                                texturedFragmentPath,
+                                shaderFormat,
+                                vertexData.baseAddress,
+                                UInt32(nativeVertices.count),
+                                batchData.baseAddress,
+                                UInt32(nativeBatches.count),
+                                clearColor.r,
+                                clearColor.g,
+                                clearColor.b,
+                                clearColor.a,
+                                &report
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard result == BTBH_GPU_OK else {
+            throw GPUCanvasProbeError.operationFailed(
                 message: GPUDeviceProbe.string(from: &report.message)
             )
         }

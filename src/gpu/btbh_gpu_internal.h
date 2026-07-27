@@ -17,6 +17,7 @@ typedef struct BTBHGPUModelPrimitive {
 } BTBHGPUModelPrimitive;
 
 typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
+typedef struct BTBHGPUCanvasRuntime BTBHGPUCanvasRuntime;
 
 struct BTBHGPUDevice {
     SDL_GPUDevice *gpu;
@@ -48,6 +49,14 @@ struct BTBHGPUWindow {
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
+    BTBHGPUCanvasRuntime *canvas_runtime;
+    SDL_GPUCommandBuffer *pending_command;
+    SDL_GPUTexture *pending_swapchain;
+    SDL_GPUTransferBuffer *pending_scene_transfer;
+    SDL_GPUBuffer *pending_instance_buffer;
+    SDL_GPUBuffer *pending_bone_buffer;
+    uint32_t pending_drawable_width;
+    uint32_t pending_drawable_height;
 };
 
 struct BTBHGPUTexture {
@@ -89,6 +98,11 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
+void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
+bool btbh_gpu_window_finish_pending_frame(
+    BTBHGPUWindow *window,
+    bool submit
+);
 uint32_t btbh_gpu_animation_library_skin_joint_count(
     const BTBHGPUAnimationLibrary *library,
     uint32_t skin_index

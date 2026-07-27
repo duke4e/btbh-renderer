@@ -584,6 +584,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_model.vert|vertex"
         "production_animated_model.vert|vertex"
         "production_model.frag|fragment"
+        "production_canvas.vert|vertex"
+        "production_canvas.frag|fragment"
+        "production_canvas_textured.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
@@ -696,6 +699,7 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
 
     add_library(btbh_gpu STATIC
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_canvas.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_contract.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_custom_mesh.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_device.c"

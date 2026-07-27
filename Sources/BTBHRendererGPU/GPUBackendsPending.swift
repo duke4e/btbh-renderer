@@ -250,6 +250,31 @@ final class GPUResourceBackend: RenderResourceBackend {
         platform.destroyFont(resource.pointer)
     }
 
+    func canvasTexture(
+        _ handle: TextureHandle
+    ) throws -> GPUTextureProbeResource {
+        guard let resource = textures[handle] else {
+            throw GPUResourceStagingError.invalidTexture(handle.rawValue)
+        }
+        return resource
+    }
+
+    func canvasFont(
+        _ handle: FontHandle
+    ) throws -> GPUFontProbeResource {
+        guard let resource = fonts[handle] else {
+            throw GPUResourceStagingError.invalidFont(handle.rawValue)
+        }
+        return resource
+    }
+
+    func canvasGlyph(
+        _ font: GPUFontProbeResource,
+        codepoint: UInt32
+    ) throws -> GPUFontGlyphProbe {
+        try platform.fontGlyph(font.pointer, codepoint: codepoint)
+    }
+
     func measureText(
         _ text: String,
         font handle: FontHandle,
