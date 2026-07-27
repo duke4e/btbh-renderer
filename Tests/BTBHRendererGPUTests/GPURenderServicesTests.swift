@@ -2115,6 +2115,31 @@ final class GPURenderServicesTests: XCTestCase {
                 indices: nil
             )
         }
+        let zeroNormalVertices = vertices.map {
+            RenderVertex(
+                position: $0.position,
+                textureCoordinate: $0.textureCoordinate,
+                normal: .zero,
+                tangent: $0.tangent,
+                color: $0.color
+            )
+        }
+        let zeroNormalMesh = try zeroNormalVertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: zeroNormalVertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
         let material = try RenderServices.resources.createMaterial(.default)
         let directional = try RenderServices.resources.createLight(.init(
             kind: .directional,
@@ -2147,13 +2172,12 @@ final class GPURenderServicesTests: XCTestCase {
             RenderServices.resources.destroyLight(fill)
             RenderServices.resources.destroyLight(directional)
             RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyMesh(zeroNormalMesh)
             RenderServices.resources.destroyMesh(mesh)
         }
 
         let ambientRed = RenderColor(r: 255, g: 0, b: 0, a: 255)
-        RenderServices.canvas.beginFrame()
-        RenderServices.canvas.submit(.clear(.black))
-        RenderServices.scene.beginFrame(.init(
+        let frame = FrameDescriptor(
             camera: .init(
                 position: .init(x: 0, y: 0, z: -3),
                 target: .zero,
@@ -2172,7 +2196,10 @@ final class GPURenderServicesTests: XCTestCase {
                 tonemap: .reinhard,
                 tonemapWhite: 1
             )
-        ))
+        )
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.mesh(.init(
             mesh: mesh,
             material: material,
@@ -2193,6 +2220,24 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(readback.rgba8[center + 1], 220)
         XCTAssertGreaterThan(readback.rgba8[center + 2], 20)
         XCTAssertLessThan(readback.rgba8[center + 2], 100)
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: zeroNormalMesh,
+            material: material,
+            transform: .identity
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let zeroNormalReadback =
+            try RenderServices.canvas.readbackPresentedFrame()
+        XCTAssertGreaterThan(zeroNormalReadback.rgba8[center], 80)
+        XCTAssertLessThan(zeroNormalReadback.rgba8[center], 180)
+        XCTAssertLessThan(zeroNormalReadback.rgba8[center + 1], 30)
+        XCTAssertLessThan(zeroNormalReadback.rgba8[center + 2], 30)
         #else
         throw XCTSkip("The Windows Vulkan scene lighting test runs only on Windows")
         #endif

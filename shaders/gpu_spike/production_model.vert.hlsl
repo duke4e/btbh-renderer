@@ -84,9 +84,14 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         secondary_directional_direction_energy.w;
     if (unlit_enabled == 0 && total_energy > 0.0f)
     {
-        const float3 world_normal = normalize(
-            mul((float3x3)instance.model, input.normal)
+        const float3 raw_world_normal =
+            mul((float3x3)instance.model, input.normal);
+        const float normal_length = max(
+            length(raw_world_normal),
+            0.00001f
         );
+        const float3 world_normal =
+            raw_world_normal / normal_length;
         float3 illumination =
             ambient_color_energy.rgb * ambient_color_energy.w;
         if (directional_direction_energy.w > 0.0f)
