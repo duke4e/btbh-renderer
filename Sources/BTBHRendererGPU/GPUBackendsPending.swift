@@ -113,6 +113,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func loadTexture(
         _ descriptor: TextureLoadDescriptor
     ) throws -> TextureHandle {
+        trace("loadTexture")
         guard let textureHandles else {
             throw GPUTextureProbeError.operationFailed(
                 message: "Could not allocate the GPU texture handle pool"
@@ -157,6 +158,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         path: String,
         flags: ModelImportFlags
     ) throws -> ModelHandle {
+        trace("loadModel")
         _ = flags
         guard let modelHandles else {
             throw GPUModelProbeError.operationFailed(
@@ -176,6 +178,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 
     func modelMetadata(_ handle: ModelHandle) throws -> ModelMetadata {
+        trace("modelMetadata")
         guard
             !pendingModelDestruction.contains(handle),
             let resource = models[handle]
@@ -210,6 +213,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createMaterial(
         _ descriptor: MaterialDescriptor
     ) throws -> MaterialHandle {
+        trace("createMaterial")
         let resource = try materialResource(descriptor)
         return try storeMaterial(resource)
     }
@@ -219,6 +223,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         materialIndex: Int,
         patch: ModelMaterialPatch
     ) throws -> MaterialHandle {
+        trace("createMaterialOverride")
         guard
             !pendingModelDestruction.contains(model),
             let modelResource = models[model]
@@ -260,6 +265,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         _ handle: MaterialHandle,
         descriptor: MaterialDescriptor
     ) throws {
+        trace("updateMaterial")
         guard let previous = materials[handle] else {
             throw GPUResourceStagingError.invalidMaterial(handle.rawValue)
         }
@@ -284,6 +290,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func loadAnimationLibrary(
         path: String
     ) throws -> AnimationLibraryHandle {
+        trace("loadAnimationLibrary")
         guard let animationLibraryHandles else {
             throw GPUAnimationLibraryProbeError.operationFailed(
                 message: "Could not allocate the animation library handle pool"
@@ -331,6 +338,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createAnimationTree(
         _ descriptor: AnimationTreeDescriptor
     ) throws -> AnimationTreeHandle {
+        trace("createAnimationTree")
         guard
             !pendingModelDestruction.contains(descriptor.model),
             models[descriptor.model] != nil
@@ -527,6 +535,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createSurfaceShader(
         _ descriptor: SurfaceShaderDescriptor
     ) throws -> SurfaceShaderHandle {
+        trace("createSurfaceShader")
         if let vertexPath = descriptor.vertexPath {
             try validateShaderAsset(vertexPath)
         }
@@ -543,6 +552,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             fragmentPath: descriptor.fragmentPath,
             parameters: descriptor.parameters
         )
+        trace("createSurfaceShader.complete")
         return handle
     }
 
@@ -551,6 +561,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         parameter: String,
         value: ShaderParameterValue
     ) throws {
+        trace("updateSurfaceShader")
         guard
             !pendingSurfaceShaderDestruction.contains(handle),
             var resource = surfaceShaders[handle]
@@ -947,6 +958,17 @@ final class GPUResourceBackend: RenderResourceBackend {
         let operation = "resources.\(function)"
         platform.failClosed(operation: operation)
         return .operation(operation)
+    }
+
+    private func trace(_ operation: String) {
+        guard ProcessInfo.processInfo.environment[
+            "BTBH_GPU_RESOURCE_TRACE"
+        ] == "1" else {
+            return
+        }
+        FileHandle.standardError.write(
+            Data("BTBH_GPU_RESOURCE_TRACE operation=\(operation)\n".utf8)
+        )
     }
 
     func shutdown() {
