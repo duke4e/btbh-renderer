@@ -501,6 +501,92 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testSkyAmbientAndLightResourcesValidateDependenciesAndStaleHandles() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU environment resource test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+
+        XCTAssertThrowsError(
+            try RenderServices.resources.createProceduralSky(.init(
+                color: .black,
+                resolution: 0
+            ))
+        )
+        let sky = try RenderServices.resources.createProceduralSky(.init(
+            color: .black,
+            resolution: 32
+        ))
+        let ambient = try RenderServices.resources.createAmbientMap(from: sky)
+        RenderServices.resources.destroyCubemap(sky)
+        XCTAssertThrowsError(
+            try RenderServices.resources.createAmbientMap(from: sky)
+        )
+        RenderServices.resources.destroyAmbientMap(ambient)
+        XCTAssertThrowsError(
+            try RenderServices.resources.createAmbientMap(from: sky)
+        )
+        let replacementSky = try RenderServices.resources
+            .createProceduralSky(.init(color: .white, resolution: 32))
+        XCTAssertNotEqual(replacementSky.rawValue, sky.rawValue)
+
+        let lightDescriptor = LightDescriptor(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 1,
+            range: 100,
+            castsShadow: true,
+            shadowSoftness: 0.25
+        )
+        let light = try RenderServices.resources.createLight(lightDescriptor)
+        try RenderServices.resources.updateLight(
+            light,
+            descriptor: lightDescriptor
+        )
+        RenderServices.resources.destroyLight(light)
+        XCTAssertThrowsError(
+            try RenderServices.resources.updateLight(
+                light,
+                descriptor: lightDescriptor
+            )
+        )
+        let invalidLight = LightDescriptor(
+            kind: .spot,
+            active: true,
+            position: .zero,
+            direction: .forward,
+            color: .white,
+            energy: .infinity,
+            range: 100,
+            castsShadow: false,
+            shadowSoftness: 0
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createLight(invalidLight)
+        )
+
+        RenderServices.resources.destroyCubemap(replacementSky)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
         #if os(Windows)
         RenderServices.uninstall()

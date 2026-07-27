@@ -18,6 +18,11 @@ enum GPUResourceStagingError: Error, Equatable {
     case invalidInstanceBuffer(UInt64)
     case invalidInstanceBufferDescriptor(String)
     case invalidInstanceUpload(String)
+    case invalidLight(UInt64)
+    case invalidLightDescriptor(String)
+    case invalidCubemap(UInt64)
+    case invalidSkyDescriptor(String)
+    case invalidAmbientMap(UInt64)
     case invalidSurfaceShader(UInt64)
     case invalidScreenShader(UInt64)
 }
@@ -80,6 +85,10 @@ private struct GPUInstanceBufferResource {
     let descriptor: InstanceBufferDescriptor
 }
 
+private struct GPUAmbientMapResource {
+    let cubemap: CubemapHandle
+}
+
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
@@ -87,6 +96,9 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let modelHandles = try? HandlePool(initialCapacity: 32)
     private let materialHandles = try? HandlePool(initialCapacity: 64)
     private let instanceBufferHandles = try? HandlePool(initialCapacity: 16)
+    private let lightHandles = try? HandlePool(initialCapacity: 16)
+    private let cubemapHandles = try? HandlePool(initialCapacity: 4)
+    private let ambientMapHandles = try? HandlePool(initialCapacity: 4)
     private let animationLibraryHandles = try? HandlePool(
         initialCapacity: 8
     )
@@ -98,6 +110,11 @@ final class GPUResourceBackend: RenderResourceBackend {
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
     private var instanceBuffers: [
         InstanceBufferHandle: GPUInstanceBufferResource
+    ] = [:]
+    private var lights: [LightHandle: LightDescriptor] = [:]
+    private var cubemaps: [CubemapHandle: ProceduralSkyDescriptor] = [:]
+    private var ambientMaps: [
+        AmbientMapHandle: GPUAmbientMapResource
     ] = [:]
     private var animationLibraries: [
         AnimationLibraryHandle: GPUAnimationLibraryProbeResource
@@ -113,6 +130,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     ] = [:]
     private var pendingTextureDestruction: Set<TextureHandle> = []
     private var pendingModelDestruction: Set<ModelHandle> = []
+    private var pendingCubemapDestruction: Set<CubemapHandle> = []
     private var pendingSurfaceShaderDestruction:
         Set<SurfaceShaderHandle> = []
     private var pendingAnimationLibraryDestruction:
@@ -597,13 +615,103 @@ final class GPUResourceBackend: RenderResourceBackend {
         collectPendingModel(tree.model)
         collectPendingAnimationLibrary(tree.library)
     }
-    func createLight(_ descriptor: LightDescriptor) throws -> LightHandle { throw unsupported() }
-    func updateLight(_ handle: LightHandle, descriptor: LightDescriptor) throws { throw unsupported() }
-    func destroyLight(_ handle: LightHandle) {}
-    func createProceduralSky(_ descriptor: ProceduralSkyDescriptor) throws -> CubemapHandle { throw unsupported() }
-    func createAmbientMap(from cubemap: CubemapHandle) throws -> AmbientMapHandle { throw unsupported() }
-    func destroyCubemap(_ handle: CubemapHandle) {}
-    func destroyAmbientMap(_ handle: AmbientMapHandle) {}
+    func createLight(_ descriptor: LightDescriptor) throws -> LightHandle {
+        trace("createLight")
+        try Self.validateLightDescriptor(descriptor)
+        guard let lightHandles else {
+            throw GPUResourceStagingError.invalidLightDescriptor(
+                "Could not allocate the GPU light handle pool"
+            )
+        }
+        let handle = try lightHandles.acquire(LightHandle.self)
+        lights[handle] = descriptor
+        return handle
+    }
+
+    func updateLight(
+        _ handle: LightHandle,
+        descriptor: LightDescriptor
+    ) throws {
+        trace("updateLight")
+        guard lights[handle] != nil else {
+            throw GPUResourceStagingError.invalidLight(handle.rawValue)
+        }
+        try Self.validateLightDescriptor(descriptor)
+        lights[handle] = descriptor
+    }
+
+    func destroyLight(_ handle: LightHandle) {
+        guard
+            let lightHandles,
+            lights.removeValue(forKey: handle) != nil,
+            lightHandles.release(handle)
+        else {
+            return
+        }
+    }
+
+    func createProceduralSky(
+        _ descriptor: ProceduralSkyDescriptor
+    ) throws -> CubemapHandle {
+        trace("createProceduralSky")
+        try Self.validateSkyDescriptor(descriptor)
+        guard let cubemapHandles else {
+            throw GPUResourceStagingError.invalidSkyDescriptor(
+                "Could not allocate the GPU cubemap handle pool"
+            )
+        }
+        let handle = try cubemapHandles.acquire(CubemapHandle.self)
+        cubemaps[handle] = descriptor
+        return handle
+    }
+
+    func createAmbientMap(
+        from cubemap: CubemapHandle
+    ) throws -> AmbientMapHandle {
+        trace("createAmbientMap")
+        guard
+            !pendingCubemapDestruction.contains(cubemap),
+            cubemaps[cubemap] != nil
+        else {
+            throw GPUResourceStagingError.invalidCubemap(cubemap.rawValue)
+        }
+        guard let ambientMapHandles else {
+            throw GPUResourceStagingError.invalidAmbientMap(0)
+        }
+        let handle = try ambientMapHandles.acquire(AmbientMapHandle.self)
+        ambientMaps[handle] = .init(cubemap: cubemap)
+        return handle
+    }
+
+    func destroyCubemap(_ handle: CubemapHandle) {
+        if ambientMaps.values.contains(where: { $0.cubemap == handle }) {
+            pendingCubemapDestruction.insert(handle)
+            return
+        }
+        destroyCubemapNow(handle)
+    }
+
+    private func destroyCubemapNow(_ handle: CubemapHandle) {
+        guard
+            let cubemapHandles,
+            cubemaps.removeValue(forKey: handle) != nil,
+            cubemapHandles.release(handle)
+        else {
+            return
+        }
+        pendingCubemapDestruction.remove(handle)
+    }
+
+    func destroyAmbientMap(_ handle: AmbientMapHandle) {
+        guard
+            let ambientMapHandles,
+            let resource = ambientMaps.removeValue(forKey: handle),
+            ambientMapHandles.release(handle)
+        else {
+            return
+        }
+        collectPendingCubemap(resource.cubemap)
+    }
     func createSurfaceShader(
         _ descriptor: SurfaceShaderDescriptor
     ) throws -> SurfaceShaderHandle {
@@ -1035,6 +1143,63 @@ final class GPUResourceBackend: RenderResourceBackend {
         return stride
     }
 
+    private static func validateLightDescriptor(
+        _ descriptor: LightDescriptor
+    ) throws {
+        guard
+            descriptor.position.x.isFinite,
+            descriptor.position.y.isFinite,
+            descriptor.position.z.isFinite,
+            descriptor.direction.x.isFinite,
+            descriptor.direction.y.isFinite,
+            descriptor.direction.z.isFinite,
+            descriptor.energy.isFinite,
+            descriptor.energy >= 0,
+            descriptor.range.isFinite,
+            descriptor.range >= 0,
+            descriptor.shadowSoftness.isFinite,
+            descriptor.shadowSoftness >= 0
+        else {
+            throw GPUResourceStagingError.invalidLightDescriptor(
+                "Light vectors and nonnegative scalar fields must be finite"
+            )
+        }
+    }
+
+    private static func validateSkyDescriptor(
+        _ descriptor: ProceduralSkyDescriptor
+    ) throws {
+        let scalars = [
+            descriptor.groundEnergy,
+            descriptor.groundHorizonCurve,
+            descriptor.skyEnergy,
+            descriptor.skyHorizonCurve,
+            descriptor.sunCurve,
+            descriptor.sunEnergy,
+            descriptor.sunSizeRadians,
+            descriptor.sunDirection.x,
+            descriptor.sunDirection.y,
+            descriptor.sunDirection.z,
+        ]
+        guard descriptor.resolution > 0,
+              descriptor.resolution <= Int(UInt16.max),
+              scalars.allSatisfy(\.isFinite) else {
+            throw GPUResourceStagingError.invalidSkyDescriptor(
+                "Sky resolution must be positive and all scalar fields finite"
+            )
+        }
+    }
+
+    private func collectPendingCubemap(_ handle: CubemapHandle) {
+        guard
+            pendingCubemapDestruction.contains(handle),
+            !ambientMaps.values.contains(where: { $0.cubemap == handle })
+        else {
+            return
+        }
+        destroyCubemapNow(handle)
+    }
+
     private func collectPendingModel(_ handle: ModelHandle) {
         guard
             pendingModelDestruction.contains(handle),
@@ -1085,6 +1250,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         materials.removeAll()
         pendingAnimationLibraryDestruction.removeAll()
         pendingModelDestruction.removeAll()
+        lights.removeAll()
+        ambientMaps.removeAll()
+        pendingCubemapDestruction.removeAll()
+        cubemaps.removeAll()
         for resource in instanceBuffers.values {
             platform.destroyInstanceBuffer(resource.storage.pointer)
         }
