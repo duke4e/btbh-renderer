@@ -1606,12 +1606,17 @@ final class GPUResourceBackend: RenderResourceBackend {
 
 @MainActor
 final class GPUSceneBackend: SceneBackend {
+    private enum PendingModelDraw {
+        case instances(ModelInstancesDraw)
+        case transformStreams(ModelTransformStreamsDraw)
+    }
+
     private let platform: GPUPlatform
     private let resources: GPUResourceBackend
     private var unsupportedOperation: String?
     private var drawableSize = PixelSize2D(width: 0, height: 0)
     private var currentFrame: FrameDescriptor?
-    private var modelInstanceDraws: [ModelInstancesDraw] = []
+    private var pendingModelDraws: [PendingModelDraw] = []
 
     init(platform: GPUPlatform, resources: GPUResourceBackend) {
         self.platform = platform
@@ -1629,13 +1634,17 @@ final class GPUSceneBackend: SceneBackend {
     func beginFrame(_ descriptor: FrameDescriptor) {
         currentFrame = descriptor
         unsupportedOperation = nil
-        modelInstanceDraws.removeAll(keepingCapacity: true)
+        pendingModelDraws.removeAll(keepingCapacity: true)
     }
 
     func submit(_ draw: SceneDraw) {
-        if case .modelInstances(let modelInstances) = draw {
-            modelInstanceDraws.append(modelInstances)
-        } else if unsupportedOperation == nil {
+        switch draw {
+        case .modelInstances(let modelInstances):
+            pendingModelDraws.append(.instances(modelInstances))
+        case .modelTransformStreams(let streams):
+            pendingModelDraws.append(.transformStreams(streams))
+        default:
+            guard unsupportedOperation == nil else { return }
             unsupportedOperation = Self.submitOperation(draw)
         }
     }
@@ -1645,7 +1654,7 @@ final class GPUSceneBackend: SceneBackend {
             platform.failClosed(operation: unsupportedOperation)
             throw GPUBackendUnsupportedError.operation(unsupportedOperation)
         }
-        guard !modelInstanceDraws.isEmpty else { return }
+        guard !pendingModelDraws.isEmpty else { return }
         guard let currentFrame,
               let viewProjection = viewProjection(
                 camera: currentFrame.camera,
@@ -1657,37 +1666,83 @@ final class GPUSceneBackend: SceneBackend {
         }
         var packedInstances: [Float] = []
         var batches: [GPUModelInstancesProbeBatch] = []
-        for draw in modelInstanceDraws {
-            guard draw.sourceStart >= 0,
-                  draw.count > 0,
-                  draw.sourceStart <= draw.instances.count,
-                  draw.count <= draw.instances.count - draw.sourceStart else {
-                throw GPUSceneProbeError.operationFailed(
-                    message: "Invalid GPU model instance range"
-                )
+        for pendingDraw in pendingModelDraws {
+            switch pendingDraw {
+            case .instances(let draw):
+                guard draw.sourceStart >= 0,
+                      draw.count > 0,
+                      draw.sourceStart <= draw.instances.count,
+                      draw.count <=
+                        draw.instances.count - draw.sourceStart else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Invalid GPU model instance range"
+                    )
+                }
+                let firstInstance = packedInstances.count / 20
+                for instance in draw.instances[
+                    draw.sourceStart..<(draw.sourceStart + draw.count)
+                ] {
+                    Self.append(
+                        matrix: instance.transform.matrix,
+                        color: instance.color,
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    model: try resources.modelPointer(draw.model),
+                    firstInstance: firstInstance,
+                    instanceCount: draw.count
+                ))
+            case .transformStreams(let draw):
+                guard draw.sourceStart >= 0,
+                      draw.count > 0,
+                      draw.sourceStart <= draw.positions.count,
+                      draw.count <=
+                        draw.positions.count - draw.sourceStart,
+                      draw.sourceStart <= draw.rotations.count,
+                      draw.count <=
+                        draw.rotations.count - draw.sourceStart,
+                      draw.sourceStart <= draw.scales.count,
+                      draw.count <=
+                        draw.scales.count - draw.sourceStart,
+                      Self.containsRange(
+                        draw.colors,
+                        start: draw.sourceStart,
+                        count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.customs,
+                        start: draw.sourceStart,
+                        count: draw.count
+                      ) else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Invalid GPU model transform stream range"
+                    )
+                }
+                if let bounds = draw.clusterBounds,
+                   !intersectsFrustum(bounds) {
+                    continue
+                }
+                let firstInstance = packedInstances.count / 20
+                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
+                    Self.append(
+                        matrix: Self.transformMatrix(
+                            position: draw.positions[index],
+                            rotation: draw.rotations[index],
+                            scale: draw.scales[index]
+                        ),
+                        color: draw.colors?[index] ?? .white,
+                        to: &packedInstances
+                    )
+                }
+                batches.append(.init(
+                    model: try resources.modelPointer(draw.model),
+                    firstInstance: firstInstance,
+                    instanceCount: draw.count
+                ))
             }
-            let firstInstance = packedInstances.count / 20
-            for instance in draw.instances[
-                draw.sourceStart..<(draw.sourceStart + draw.count)
-            ] {
-                let matrix = instance.transform.matrix
-                packedInstances.append(contentsOf: [
-                    matrix.c0.x, matrix.c0.y, matrix.c0.z, matrix.c0.w,
-                    matrix.c1.x, matrix.c1.y, matrix.c1.z, matrix.c1.w,
-                    matrix.c2.x, matrix.c2.y, matrix.c2.z, matrix.c2.w,
-                    matrix.c3.x, matrix.c3.y, matrix.c3.z, matrix.c3.w,
-                    Float(instance.color.r) / 255,
-                    Float(instance.color.g) / 255,
-                    Float(instance.color.b) / 255,
-                    Float(instance.color.a) / 255,
-                ])
-            }
-            batches.append(.init(
-                model: try resources.modelPointer(draw.model),
-                firstInstance: firstInstance,
-                instanceCount: draw.count
-            ))
         }
+        guard !batches.isEmpty else { return }
         try platform.presentModelInstances(
             viewProjection: viewProjection,
             instances: packedInstances,
@@ -1879,7 +1934,7 @@ final class GPUSceneBackend: SceneBackend {
     func shutdown() {
         unsupportedOperation = nil
         currentFrame = nil
-        modelInstanceDraws.removeAll(keepingCapacity: false)
+        pendingModelDraws.removeAll(keepingCapacity: false)
         drawableSize = .init(width: 0, height: 0)
     }
 
@@ -2025,5 +2080,68 @@ final class GPUSceneBackend: SceneBackend {
             }
         }
         return result
+    }
+
+    private static func containsRange<Element>(
+        _ values: [Element]?,
+        start: Int,
+        count: Int
+    ) -> Bool {
+        guard let values else { return true }
+        return start <= values.count && count <= values.count - start
+    }
+
+    private static func append(
+        matrix: RenderMatrix4,
+        color: RenderColor,
+        to instances: inout [Float]
+    ) {
+        instances.append(contentsOf: [
+            matrix.c0.x, matrix.c0.y, matrix.c0.z, matrix.c0.w,
+            matrix.c1.x, matrix.c1.y, matrix.c1.z, matrix.c1.w,
+            matrix.c2.x, matrix.c2.y, matrix.c2.z, matrix.c2.w,
+            matrix.c3.x, matrix.c3.y, matrix.c3.z, matrix.c3.w,
+            Float(color.r) / 255,
+            Float(color.g) / 255,
+            Float(color.b) / 255,
+            Float(color.a) / 255,
+        ])
+    }
+
+    private static func transformMatrix(
+        position: RenderVec3,
+        rotation: RenderQuaternion,
+        scale: RenderVec3
+    ) -> RenderMatrix4 {
+        let xx = rotation.x * rotation.x
+        let yy = rotation.y * rotation.y
+        let zz = rotation.z * rotation.z
+        let xy = rotation.x * rotation.y
+        let xz = rotation.x * rotation.z
+        let yz = rotation.y * rotation.z
+        let wx = rotation.w * rotation.x
+        let wy = rotation.w * rotation.y
+        let wz = rotation.w * rotation.z
+        return .init(
+            c0: .init(
+                (1 - 2 * (yy + zz)) * scale.x,
+                2 * (xy + wz) * scale.x,
+                2 * (xz - wy) * scale.x,
+                0
+            ),
+            c1: .init(
+                2 * (xy - wz) * scale.y,
+                (1 - 2 * (xx + zz)) * scale.y,
+                2 * (yz + wx) * scale.y,
+                0
+            ),
+            c2: .init(
+                2 * (xz + wy) * scale.z,
+                2 * (yz - wx) * scale.z,
+                (1 - 2 * (xx + yy)) * scale.z,
+                0
+            ),
+            c3: .init(position.x, position.y, position.z, 1)
+        )
     }
 }

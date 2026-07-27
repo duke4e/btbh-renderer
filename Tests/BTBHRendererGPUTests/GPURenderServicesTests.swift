@@ -1502,7 +1502,7 @@ final class GPURenderServicesTests: XCTestCase {
                 .path,
             flags: [.meshData]
         )
-        RenderServices.scene.beginFrame(.init(
+        let frame = FrameDescriptor(
             camera: .init(
                 position: .init(x: 0.5, y: 0.5, z: -3),
                 target: .init(x: 0.5, y: 0.5, z: 0),
@@ -1511,7 +1511,8 @@ final class GPURenderServicesTests: XCTestCase {
                 projection: .perspective
             ),
             environment: .default
-        ))
+        )
+        RenderServices.scene.beginFrame(frame)
         RenderServices.scene.submit(.modelInstances(.init(
             model: model,
             instances: [.init(
@@ -1523,6 +1524,18 @@ final class GPURenderServicesTests: XCTestCase {
             persistentBuffer: nil
         )))
 
+        try RenderServices.scene.endFrame()
+
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.modelTransformStreams(.init(
+            model: model,
+            positions: [.init(x: 0, y: 0, z: 0)],
+            rotations: [.identity],
+            scales: [.one],
+            colors: [.white],
+            sourceStart: 0,
+            count: 1
+        )))
         try RenderServices.scene.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
