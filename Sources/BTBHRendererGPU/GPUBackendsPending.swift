@@ -518,30 +518,42 @@ final class GPUResourceBackend: RenderResourceBackend {
                 materialsBySlot[override.slot] == nil,
                 override.slot >= 0,
                 override.slot < modelResource.metadata.materialCount,
-                let resource = materials[override.material],
-                case .modelOverride(
+                let resource = materials[override.material]
+            else {
+                throw GPUResourceStagingError.invalidMaterialDescriptor(
+                    "GPU model override must uniquely match a model material slot"
+                )
+            }
+            let material: GPUSceneMaterialProbe
+            switch resource.storage {
+            case .descriptor:
+                material = try sceneMaterial(override.material)
+            case .modelOverride(
                     let overrideModel,
                     let materialIndex,
                     let patch
-                ) = resource.storage,
-                overrideModel == model,
-                materialIndex == override.slot
-            else {
-                throw GPUResourceStagingError.invalidMaterialDescriptor(
-                    "GPU model override must uniquely match its model material slot"
+                ):
+                guard
+                    overrideModel == model,
+                    materialIndex == override.slot
+                else {
+                    throw GPUResourceStagingError.invalidMaterialDescriptor(
+                        "GPU model override material belongs to another model slot"
+                    )
+                }
+                let texture = try patch.albedoTexture.map {
+                    try canvasTexture($0).pointer
+                }
+                material = .init(
+                    albedoTexture: texture,
+                    albedoColor: patch.albedoColor ?? .white,
+                    blendMode: .mix,
+                    billboardMode: .disabled,
+                    transparency: .disabled,
+                    unlit: false
                 )
             }
-            let texture = try patch.albedoTexture.map {
-                try canvasTexture($0).pointer
-            }
-            materialsBySlot[override.slot] = .init(
-                albedoTexture: texture,
-                albedoColor: patch.albedoColor ?? .white,
-                blendMode: .mix,
-                billboardMode: .disabled,
-                transparency: .disabled,
-                unlit: false
-            )
+            materialsBySlot[override.slot] = material
         }
 
         return Set(modelResource.metadata.meshMaterialSlots)

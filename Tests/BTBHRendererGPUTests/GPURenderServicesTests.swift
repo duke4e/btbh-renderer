@@ -1970,7 +1970,7 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
-    func testModelInstanceMaterialOverrideColorsItsMaterialSlot() throws {
+    func testModelInstanceStandaloneMaterialOverrideColorsItsSlot() throws {
         #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
@@ -2004,26 +2004,18 @@ final class GPURenderServicesTests: XCTestCase {
             flags: [.meshData]
         )
         let metadata = try RenderServices.resources.modelMetadata(model)
-        let overrides = try (0..<metadata.materialCount).map { slot in
+        var descriptor = MaterialDescriptor.default
+        descriptor.albedoColor = .init(r: 255, g: 0, b: 0, a: 255)
+        descriptor.unlit = true
+        let material = try RenderServices.resources.createMaterial(descriptor)
+        let overrides = (0..<metadata.materialCount).map { slot in
             MaterialOverride(
                 slot: slot,
-                material: try RenderServices.resources
-                    .createMaterialOverride(
-                        from: model,
-                        materialIndex: slot,
-                        patch: .init(albedoColor: .init(
-                            r: 255,
-                            g: 0,
-                            b: 0,
-                            a: 255
-                        ))
-                    )
+                material: material
             )
         }
         defer {
-            for override in overrides {
-                RenderServices.resources.destroyMaterial(override.material)
-            }
+            RenderServices.resources.destroyMaterial(material)
             RenderServices.resources.destroyModel(model)
         }
 
