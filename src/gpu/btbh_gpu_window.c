@@ -549,7 +549,7 @@ static void btbh_gpu_platform_snapshot(
     }
 
     memset(snapshot, 0, sizeof(*snapshot));
-    snapshot->elapsed_seconds = (double) SDL_GetTicksNS() / 1000000000.0;
+    snapshot->elapsed_seconds = btbh_gpu_monotonic_elapsed_seconds();
     snapshot->delta_seconds = delta_seconds;
     snapshot->mouse_x = mouse_x;
     snapshot->mouse_y = mouse_y;
@@ -567,6 +567,10 @@ static void btbh_gpu_platform_snapshot(
             ? 1u
             : 0u;
     snapshot->cursor_visible = window->cursor_visible ? 1u : 0u;
+}
+
+double btbh_gpu_monotonic_elapsed_seconds(void) {
+    return (double) SDL_GetTicksNS() / 1000000000.0;
 }
 
 BTBHGPUResult btbh_gpu_window_poll_events(

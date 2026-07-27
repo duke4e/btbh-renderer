@@ -329,6 +329,10 @@ enum GPUAnimationLibraryProbe {
 
 @MainActor
 public final class GPUWindowProbe {
+    static var monotonicElapsedSeconds: Double {
+        btbh_gpu_monotonic_elapsed_seconds()
+    }
+
     public var deviceDiagnostics: GPUDeviceDiagnostics {
         deviceProbe.diagnostics
     }

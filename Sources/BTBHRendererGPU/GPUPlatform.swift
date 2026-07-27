@@ -148,7 +148,7 @@ public final class GPUPlatform: GamePlatform {
     }
 
     public var monotonicElapsedSeconds: Double {
-        state.elapsedSeconds
+        window == nil ? state.elapsedSeconds : GPUWindowProbe.monotonicElapsedSeconds
     }
 
     public var mousePosition: RenderVec2 {

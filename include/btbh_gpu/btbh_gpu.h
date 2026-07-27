@@ -345,6 +345,7 @@ BTBHGPUDevice *btbh_gpu_device_create(
 );
 void btbh_gpu_device_shutdown(BTBHGPUDevice *device);
 void btbh_gpu_device_destroy(BTBHGPUDevice *device);
+double btbh_gpu_monotonic_elapsed_seconds(void);
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
     BTBHGPUWindowReport *report

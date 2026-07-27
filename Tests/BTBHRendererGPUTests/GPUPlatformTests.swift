@@ -1,4 +1,5 @@
 import BTBHRenderer
+import Foundation
 import XCTest
 @testable import BTBHRendererGPU
 
@@ -28,6 +29,9 @@ final class GPUPlatformTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(firstFrame.elapsedSeconds, 0)
         XCTAssertGreaterThanOrEqual(firstFrame.deltaSeconds, 0)
         XCTAssertFalse(platform.shouldClose)
+        let timingStarted = platform.monotonicElapsedSeconds
+        Thread.sleep(forTimeInterval: 0.01)
+        XCTAssertGreaterThan(platform.monotonicElapsedSeconds, timingStarted)
         let secondFrame = platform.beginFrame()
         XCTAssertGreaterThanOrEqual(secondFrame.deltaSeconds, 0)
 
