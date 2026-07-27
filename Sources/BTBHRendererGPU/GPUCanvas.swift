@@ -5,6 +5,7 @@ import Foundation
 final class GPUCanvas: Canvas2DBackend {
     private let platform: GPUPlatform
     private let resources: GPUResourceBackend
+    private let frameCoordinator: GPUFrameCoordinator
     private var clearColor = RenderColor.black
     private var unsupportedOperation: String?
     private var frameActive = false
@@ -17,13 +18,20 @@ final class GPUCanvas: Canvas2DBackend {
     private var targetStack: [GPUTextureProbeResource?] = []
     private var currentPassFirstBatch = 0
     private var currentPassClearColor: RenderColor?
+    private var currentPassScreenClearToken: UInt64?
 
-    init(platform: GPUPlatform, resources: GPUResourceBackend) {
+    init(
+        platform: GPUPlatform,
+        resources: GPUResourceBackend,
+        frameCoordinator: GPUFrameCoordinator
+    ) {
         self.platform = platform
         self.resources = resources
+        self.frameCoordinator = frameCoordinator
     }
 
     func beginFrame() {
+        frameCoordinator.beginCanvasFrame()
         clearColor = .black
         unsupportedOperation = nil
         frameActive = true
@@ -36,6 +44,7 @@ final class GPUCanvas: Canvas2DBackend {
         targetStack.removeAll(keepingCapacity: true)
         currentPassFirstBatch = 0
         currentPassClearColor = nil
+        currentPassScreenClearToken = nil
     }
 
     func submit(_ command: CanvasCommand) {
@@ -51,6 +60,9 @@ final class GPUCanvas: Canvas2DBackend {
                 finishCurrentPass()
             }
             currentPassClearColor = color
+            currentPassScreenClearToken = currentTarget == nil
+                ? frameCoordinator.stageScreenClear(color)
+                : nil
         case .fillRect(let command):
             appendRect(command.rect, color: command.color)
         case .strokeRect(let command):
@@ -107,6 +119,7 @@ final class GPUCanvas: Canvas2DBackend {
             finishCurrentPass()
             currentTarget = previous
             currentPassClearColor = nil
+            currentPassScreenClearToken = nil
         }
     }
 
@@ -144,13 +157,31 @@ final class GPUCanvas: Canvas2DBackend {
             return
         }
         do {
+            let claimedClearToken =
+                frameCoordinator.claimedScreenClearToken
+            let presentationPasses = passes.map { pass in
+                let clearColor: RenderColor?
+                if let claimedClearToken,
+                   pass.screenClearToken == claimedClearToken {
+                    clearColor = nil
+                } else {
+                    clearColor = pass.clearColor
+                }
+                return GPUCanvasPassProbe(
+                    firstBatch: pass.firstBatch,
+                    batchCount: pass.batchCount,
+                    target: pass.target,
+                    clearColor: clearColor,
+                    screenClearToken: nil
+                )
+            }
             if passes.isEmpty {
                 try platform.presentClear(clearColor)
             } else {
                 try platform.presentCanvas(
                     vertices: vertices,
                     batches: batches,
-                    passes: passes
+                    passes: presentationPasses
                 )
             }
         } catch {
@@ -182,10 +213,12 @@ final class GPUCanvas: Canvas2DBackend {
             firstBatch: currentPassFirstBatch,
             batchCount: batchCount,
             target: currentTarget?.pointer,
-            clearColor: currentPassClearColor
+            clearColor: currentPassClearColor,
+            screenClearToken: currentPassScreenClearToken
         ))
         currentPassFirstBatch = batches.count
         currentPassClearColor = nil
+        currentPassScreenClearToken = nil
     }
 
     private func appendRect(_ rect: RenderRect, color: RenderColor) {

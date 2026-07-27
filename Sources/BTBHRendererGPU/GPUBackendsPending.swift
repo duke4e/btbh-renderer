@@ -471,6 +471,29 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
     }
 
+    func sceneMaterial(
+        _ handle: MaterialHandle
+    ) throws -> GPUSceneMaterialProbe {
+        guard let resource = materials[handle] else {
+            throw GPUResourceStagingError.invalidMaterial(handle.rawValue)
+        }
+        guard case .descriptor(let descriptor) = resource.storage else {
+            throw GPUResourceStagingError.invalidMaterialDescriptor(
+                "Custom GPU meshes require a standalone material descriptor"
+            )
+        }
+        let texture = descriptor.albedoTexture.isValid
+            ? try canvasTexture(descriptor.albedoTexture).pointer
+            : nil
+        return .init(
+            albedoTexture: texture,
+            albedoColor: descriptor.albedoColor,
+            blendMode: descriptor.blend,
+            billboardMode: descriptor.billboard,
+            transparency: descriptor.transparency
+        )
+    }
+
     func animationPose(
         model: ModelHandle,
         player: AnimationPlayerHandle?,
@@ -1901,15 +1924,21 @@ final class GPUSceneBackend: SceneBackend {
 
     private let platform: GPUPlatform
     private let resources: GPUResourceBackend
+    private let frameCoordinator: GPUFrameCoordinator
     private var unsupportedOperation: String?
     private var drawableSize = PixelSize2D(width: 0, height: 0)
     private var currentFrame: FrameDescriptor?
     private var pendingModelDraws: [PendingModelDraw] = []
     private var pendingDebugDraws: [DebugDraw] = []
 
-    init(platform: GPUPlatform, resources: GPUResourceBackend) {
+    init(
+        platform: GPUPlatform,
+        resources: GPUResourceBackend,
+        frameCoordinator: GPUFrameCoordinator
+    ) {
         self.platform = platform
         self.resources = resources
+        self.frameCoordinator = frameCoordinator
     }
 
     func initialize(drawableSize: PixelSize2D) throws {
@@ -2003,6 +2032,7 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.modelPointer(draw.model)
                     ),
                     animation: nil,
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -2053,14 +2083,16 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.modelPointer(draw.model)
                     ),
                     animation: nil,
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
             case .mesh(let draw):
+                let material = try resources.sceneMaterial(draw.material)
                 let firstInstance = packedInstances.count / 20
                 Self.append(
                     matrix: draw.transform.matrix,
-                    color: try resources.materialColor(draw.material),
+                    color: material.albedoColor,
                     to: &packedInstances
                 )
                 batches.append(.init(
@@ -2068,6 +2100,7 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.meshPointer(draw.mesh)
                     ),
                     animation: nil,
+                    material: material,
                     firstInstance: firstInstance,
                     instanceCount: 1
                 ))
@@ -2077,16 +2110,14 @@ final class GPUSceneBackend: SceneBackend {
                         message: "GPU mesh instance draw is empty"
                     )
                 }
-                let materialColor = try resources.materialColor(
-                    draw.material
-                )
+                let material = try resources.sceneMaterial(draw.material)
                 let firstInstance = packedInstances.count / 20
                 for instance in draw.instances {
                     Self.append(
                         matrix: instance.transform.matrix,
                         color: Self.multiply(
                             instance.color,
-                            materialColor
+                            material.albedoColor
                         ),
                         to: &packedInstances
                     )
@@ -2096,6 +2127,7 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.meshPointer(draw.mesh)
                     ),
                     animation: nil,
+                    material: material,
                     firstInstance: firstInstance,
                     instanceCount: draw.instances.count
                 ))
@@ -2118,9 +2150,7 @@ final class GPUSceneBackend: SceneBackend {
                         message: "Invalid GPU mesh transform stream range"
                     )
                 }
-                let materialColor = try resources.materialColor(
-                    draw.material
-                )
+                let material = try resources.sceneMaterial(draw.material)
                 let firstInstance = packedInstances.count / 20
                 for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
                     Self.append(
@@ -2131,7 +2161,7 @@ final class GPUSceneBackend: SceneBackend {
                         ),
                         color: Self.multiply(
                             draw.colors[index],
-                            materialColor
+                            material.albedoColor
                         ),
                         to: &packedInstances
                     )
@@ -2141,6 +2171,7 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.meshPointer(draw.mesh)
                     ),
                     animation: nil,
+                    material: material,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -2160,6 +2191,7 @@ final class GPUSceneBackend: SceneBackend {
                         player: draw.player,
                         tree: draw.tree
                     ),
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: 1
                 ))
@@ -2186,6 +2218,7 @@ final class GPUSceneBackend: SceneBackend {
                         player: draw.player,
                         tree: draw.tree
                     ),
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.instances.count
                 ))
@@ -2236,6 +2269,7 @@ final class GPUSceneBackend: SceneBackend {
                         player: draw.player,
                         tree: draw.tree
                     ),
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -2279,17 +2313,31 @@ final class GPUSceneBackend: SceneBackend {
                         try resources.meshPointer(mesh)
                     ),
                     animation: nil,
+                    material: nil,
                     firstInstance: firstInstance,
                     instanceCount: 1
                 ))
             }
         }
         guard !batches.isEmpty else { return }
+        let cameraForward = (
+            currentFrame.camera.target - currentFrame.camera.position
+        ).normalized()
+        let cameraRight = cameraForward
+            .cross(currentFrame.camera.up)
+            .normalized()
+        let cameraUp = cameraRight
+            .cross(cameraForward)
+            .normalized()
         try platform.presentModelInstances(
             viewProjection: viewProjection,
+            cameraRight: cameraRight,
+            cameraUp: cameraUp,
             instances: packedInstances,
             batches: batches,
-            clearColor: currentFrame.environment.backgroundColor
+            clearColor:
+                frameCoordinator.claimScreenClearForScene()
+                    ?? currentFrame.environment.backgroundColor
         )
     }
 

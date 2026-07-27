@@ -261,6 +261,7 @@ struct GPUCanvasPassProbe {
     let batchCount: Int
     let target: OpaquePointer?
     let clearColor: RenderColor?
+    let screenClearToken: UInt64?
 }
 
 enum GPUSceneGeometryProbe {
@@ -277,8 +278,17 @@ struct GPUAnimationPoseProbe {
 struct GPUSceneGeometryProbeBatch {
     let geometry: GPUSceneGeometryProbe
     let animation: GPUAnimationPoseProbe?
+    let material: GPUSceneMaterialProbe?
     let firstInstance: Int
     let instanceCount: Int
+}
+
+struct GPUSceneMaterialProbe {
+    let albedoTexture: OpaquePointer?
+    let albedoColor: RenderColor
+    let blendMode: MaterialBlendMode
+    let billboardMode: BillboardMode
+    let transparency: TransparencyMode
 }
 
 struct GPUCustomMeshProbeResource {
@@ -891,6 +901,8 @@ public final class GPUWindowProbe {
         fragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
+        cameraRight: RenderVec3,
+        cameraUp: RenderVec3,
         instances: [Float],
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
@@ -906,6 +918,16 @@ public final class GPUWindowProbe {
                 message: "Invalid GPU model instance scene data"
             )
         }
+        let cameraRightValues = [
+            cameraRight.x,
+            cameraRight.y,
+            cameraRight.z,
+        ]
+        let cameraUpValues = [
+            cameraUp.x,
+            cameraUp.y,
+            cameraUp.z,
+        ]
         let nativeBatches = try batches.map { batch in
             guard batch.firstInstance >= 0,
                   batch.firstInstance <= Int(UInt32.max),
@@ -947,7 +969,17 @@ public final class GPUWindowProbe {
                 ),
                 animation_time: batch.animation?.time ?? 0,
                 first_instance: UInt32(batch.firstInstance),
-                instance_count: UInt32(batch.instanceCount)
+                instance_count: UInt32(batch.instanceCount),
+                albedo_texture: batch.material?.albedoTexture,
+                blend_mode: Self.sceneBlendMode(
+                    batch.material?.blendMode ?? .mix
+                ),
+                billboard_mode: Self.sceneBillboardMode(
+                    batch.material?.billboardMode ?? .disabled
+                ),
+                transparency_enabled:
+                    batch.material?.transparency == .alpha ? 1 : 0,
+                reserved: 0
             )
         }
         var report = BTBHGPUSceneReport()
@@ -955,25 +987,31 @@ public final class GPUWindowProbe {
             animatedVertexShaderPath.withCString { animatedVertexPath in
                 fragmentShaderPath.withCString { fragmentPath in
                     viewProjection.withUnsafeBufferPointer { matrix in
-                        instances.withUnsafeBufferPointer { instanceData in
-                            nativeBatches.withUnsafeBufferPointer { batchData in
-                                btbh_gpu_window_scene_present_instances(
-                                    window,
-                                    vertexPath,
-                                    animatedVertexPath,
-                                    fragmentPath,
-                                    shaderFormat,
-                                    matrix.baseAddress,
-                                    instanceData.baseAddress,
-                                    UInt32(instances.count / 20),
-                                    batchData.baseAddress,
-                                    UInt32(nativeBatches.count),
-                                    clearColor.r,
-                                    clearColor.g,
-                                    clearColor.b,
-                                    clearColor.a,
-                                    &report
-                                )
+                        cameraRightValues.withUnsafeBufferPointer { right in
+                            cameraUpValues.withUnsafeBufferPointer { up in
+                                instances.withUnsafeBufferPointer { instanceData in
+                                    nativeBatches.withUnsafeBufferPointer { batchData in
+                                        btbh_gpu_window_scene_present_instances(
+                                            window,
+                                            vertexPath,
+                                            animatedVertexPath,
+                                            fragmentPath,
+                                            shaderFormat,
+                                            matrix.baseAddress,
+                                            right.baseAddress,
+                                            up.baseAddress,
+                                            instanceData.baseAddress,
+                                            UInt32(instances.count / 20),
+                                            batchData.baseAddress,
+                                            UInt32(nativeBatches.count),
+                                            clearColor.r,
+                                            clearColor.g,
+                                            clearColor.b,
+                                            clearColor.a,
+                                            &report
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -984,6 +1022,34 @@ public final class GPUWindowProbe {
             throw GPUSceneProbeError.operationFailed(
                 message: GPUDeviceProbe.string(from: &report.message)
             )
+        }
+    }
+
+    private static func sceneBlendMode(
+        _ mode: MaterialBlendMode
+    ) -> BTBHGPUSceneBlendMode {
+        switch mode {
+        case .mix:
+            BTBH_GPU_SCENE_BLEND_ALPHA
+        case .additive:
+            BTBH_GPU_SCENE_BLEND_ADDITIVE
+        case .multiplied:
+            BTBH_GPU_SCENE_BLEND_MULTIPLIED
+        case .premultipliedAlpha:
+            BTBH_GPU_SCENE_BLEND_PREMULTIPLIED_ALPHA
+        }
+    }
+
+    private static func sceneBillboardMode(
+        _ mode: BillboardMode
+    ) -> BTBHGPUSceneBillboardMode {
+        switch mode {
+        case .disabled:
+            BTBH_GPU_SCENE_BILLBOARD_DISABLED
+        case .front:
+            BTBH_GPU_SCENE_BILLBOARD_FRONT
+        case .yAxis:
+            BTBH_GPU_SCENE_BILLBOARD_Y_AXIS
         }
     }
 

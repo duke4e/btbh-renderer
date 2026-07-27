@@ -310,6 +310,20 @@ typedef enum BTBHGPUSceneGeometryKind {
     BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH = 2
 } BTBHGPUSceneGeometryKind;
 
+typedef enum BTBHGPUSceneBlendMode {
+    BTBH_GPU_SCENE_BLEND_ALPHA = 0,
+    BTBH_GPU_SCENE_BLEND_ADDITIVE = 1,
+    BTBH_GPU_SCENE_BLEND_MULTIPLIED = 2,
+    BTBH_GPU_SCENE_BLEND_PREMULTIPLIED_ALPHA = 3,
+    BTBH_GPU_SCENE_BLEND_COUNT = 4
+} BTBHGPUSceneBlendMode;
+
+typedef enum BTBHGPUSceneBillboardMode {
+    BTBH_GPU_SCENE_BILLBOARD_DISABLED = 0,
+    BTBH_GPU_SCENE_BILLBOARD_FRONT = 1,
+    BTBH_GPU_SCENE_BILLBOARD_Y_AXIS = 2
+} BTBHGPUSceneBillboardMode;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -319,6 +333,11 @@ typedef struct BTBHGPUSceneGeometryBatch {
     float animation_time;
     uint32_t first_instance;
     uint32_t instance_count;
+    BTBHGPUTexture *albedo_texture;
+    BTBHGPUSceneBlendMode blend_mode;
+    BTBHGPUSceneBillboardMode billboard_mode;
+    uint8_t transparency_enabled;
+    uint8_t reserved;
 } BTBHGPUSceneGeometryBatch;
 
 typedef struct BTBHGPUSceneReport {
@@ -529,6 +548,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const char *fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
     const float *instances,
     uint32_t total_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,

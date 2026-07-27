@@ -1,6 +1,31 @@
 import BTBHRenderer
 
 @MainActor
+final class GPUFrameCoordinator {
+    private var nextClearToken: UInt64 = 1
+    private var pendingScreenClear: (token: UInt64, color: RenderColor)?
+    private(set) var claimedScreenClearToken: UInt64?
+
+    func beginCanvasFrame() {
+        pendingScreenClear = nil
+        claimedScreenClearToken = nil
+    }
+
+    func stageScreenClear(_ color: RenderColor) -> UInt64 {
+        let token = nextClearToken
+        nextClearToken &+= 1
+        pendingScreenClear = (token, color)
+        return token
+    }
+
+    func claimScreenClearForScene() -> RenderColor? {
+        guard let pendingScreenClear else { return nil }
+        claimedScreenClearToken = pendingScreenClear.token
+        return pendingScreenClear.color
+    }
+}
+
+@MainActor
 public enum GPURenderServices {
     public static func make(
         request: GPUBackendRequest = .platformDefault,
@@ -37,12 +62,18 @@ public final class GPURenderServicesBundle: RenderBackendBundle {
             debugMode: debugMode
         )
         gpuPlatform = platform
+        let frameCoordinator = GPUFrameCoordinator()
         let resources = GPUResourceBackend(platform: platform)
         gpuResources = resources
-        gpuCanvas = GPUCanvas(platform: platform, resources: resources)
+        gpuCanvas = GPUCanvas(
+            platform: platform,
+            resources: resources,
+            frameCoordinator: frameCoordinator
+        )
         gpuScene = GPUSceneBackend(
             platform: platform,
-            resources: resources
+            resources: resources,
+            frameCoordinator: frameCoordinator
         )
     }
 
