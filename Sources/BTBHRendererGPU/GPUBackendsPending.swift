@@ -485,9 +485,15 @@ final class GPUResourceBackend: RenderResourceBackend {
         let texture = descriptor.albedoTexture.isValid
             ? try canvasTexture(descriptor.albedoTexture).pointer
             : nil
+        let emissionTexture = descriptor.emissionTexture.isValid
+            ? try canvasTexture(descriptor.emissionTexture).pointer
+            : nil
         return .init(
             albedoTexture: texture,
             albedoColor: descriptor.albedoColor,
+            emissionTexture: emissionTexture,
+            emissionColor: descriptor.emissionColor,
+            emissionEnergy: descriptor.emissionEnergy,
             blendMode: descriptor.blend,
             billboardMode: descriptor.billboard,
             depthCompare: descriptor.depthCompare,
@@ -548,6 +554,12 @@ final class GPUResourceBackend: RenderResourceBackend {
                 material = .init(
                     albedoTexture: texture,
                     albedoColor: patch.albedoColor ?? .white,
+                    emissionTexture: nil,
+                    emissionColor: patch.emissionColor ?? .white,
+                    emissionEnergy: max(
+                        patch.emissionEnergy ?? 0,
+                        patch.minimumEmissionEnergy ?? 0
+                    ),
                     blendMode: .mix,
                     billboardMode: .disabled,
                     depthCompare: .less,

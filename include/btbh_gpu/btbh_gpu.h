@@ -351,6 +351,12 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t albedo_green;
     uint8_t albedo_blue;
     uint8_t albedo_alpha;
+    BTBHGPUTexture *emission_texture;
+    uint8_t emission_red;
+    uint8_t emission_green;
+    uint8_t emission_blue;
+    uint8_t emission_alpha;
+    float emission_energy;
     BTBHGPUSceneBlendMode blend_mode;
     BTBHGPUSceneBillboardMode billboard_mode;
     BTBHGPUSceneDepthCompare depth_compare;

@@ -287,6 +287,9 @@ struct GPUSceneGeometryProbeBatch {
 struct GPUSceneMaterialProbe {
     let albedoTexture: OpaquePointer?
     let albedoColor: RenderColor
+    let emissionTexture: OpaquePointer?
+    let emissionColor: RenderColor
+    let emissionEnergy: Float
     let blendMode: MaterialBlendMode
     let billboardMode: BillboardMode
     let depthCompare: CompareFunction
@@ -1023,6 +1026,12 @@ public final class GPUWindowProbe {
                 albedo_green: batch.material?.albedoColor.g ?? 255,
                 albedo_blue: batch.material?.albedoColor.b ?? 255,
                 albedo_alpha: batch.material?.albedoColor.a ?? 255,
+                emission_texture: batch.material?.emissionTexture,
+                emission_red: batch.material?.emissionColor.r ?? 255,
+                emission_green: batch.material?.emissionColor.g ?? 255,
+                emission_blue: batch.material?.emissionColor.b ?? 255,
+                emission_alpha: batch.material?.emissionColor.a ?? 255,
+                emission_energy: batch.material?.emissionEnergy ?? 0,
                 blend_mode: Self.sceneBlendMode(
                     batch.material?.blendMode ?? .mix
                 ),

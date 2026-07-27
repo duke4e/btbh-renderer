@@ -27,6 +27,7 @@ typedef struct BTBHGPUSceneUniforms {
     uint32_t billboard_mode;
     uint32_t unlit_enabled;
     uint32_t padding;
+    float emission_color_energy[4];
 } BTBHGPUSceneUniforms;
 
 struct BTBHGPUSceneRuntime {
@@ -218,8 +219,8 @@ static bool btbh_gpu_scene_create_pipeline(
         format,
         SDL_GPU_SHADERSTAGE_FRAGMENT,
         0u,
+        2u,
         1u,
-        0u,
         report
     );
     if (fragment_shader == NULL) {
@@ -601,10 +602,15 @@ static bool btbh_gpu_scene_validate_batches(
             batch->depth_compare >= BTBH_GPU_SCENE_DEPTH_ALWAYS &&
             batch->depth_compare < BTBH_GPU_SCENE_DEPTH_COUNT &&
             batch->unlit_enabled <= 1u &&
+            isfinite(batch->emission_energy) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&
-              batch->albedo_texture->sampler != NULL));
+              batch->albedo_texture->sampler != NULL)) &&
+            (batch->emission_texture == NULL ||
+             (batch->emission_texture->owner == window &&
+              batch->emission_texture->texture != NULL &&
+              batch->emission_texture->sampler != NULL));
         const bool valid_material_slot =
             (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
                 batch->model != NULL &&
@@ -1133,11 +1139,25 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 (uint32_t)batch->billboard_mode;
             uniforms.unlit_enabled =
                 (uint32_t)batch->unlit_enabled;
+            uniforms.emission_color_energy[0] =
+                (float)batch->emission_red / 255.0f;
+            uniforms.emission_color_energy[1] =
+                (float)batch->emission_green / 255.0f;
+            uniforms.emission_color_energy[2] =
+                (float)batch->emission_blue / 255.0f;
+            uniforms.emission_color_energy[3] =
+                batch->emission_energy;
             SDL_PushGPUVertexUniformData(
                 command,
                 0u,
                 &uniforms,
                 sizeof(uniforms)
+            );
+            SDL_PushGPUFragmentUniformData(
+                command,
+                0u,
+                uniforms.emission_color_energy,
+                sizeof(uniforms.emission_color_energy)
             );
             if (animated) {
                 SDL_BindGPUGraphicsPipeline(
@@ -1173,15 +1193,21 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             BTBHGPUTexture *texture = batch->albedo_texture != NULL
                 ? batch->albedo_texture
                 : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding sampler;
-            SDL_zero(sampler);
-            sampler.texture = texture->texture;
-            sampler.sampler = texture->sampler;
+            BTBHGPUTexture *emission_texture =
+                batch->emission_texture != NULL
+                    ? batch->emission_texture
+                    : window->scene_runtime->fallback_texture;
+            SDL_GPUTextureSamplerBinding samplers[2];
+            SDL_zeroa(samplers);
+            samplers[0].texture = texture->texture;
+            samplers[0].sampler = texture->sampler;
+            samplers[1].texture = emission_texture->texture;
+            samplers[1].sampler = emission_texture->sampler;
             SDL_BindGPUFragmentSamplers(
                 pass,
                 0u,
-                &sampler,
-                1u
+                samplers,
+                2u
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
