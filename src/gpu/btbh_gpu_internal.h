@@ -33,9 +33,11 @@ struct BTBHGPUWindow {
     bool mouse_released[4];
     BTBHGPUTexture *texture_head;
     BTBHGPUModel *model_head;
+    BTBHGPUInstanceBuffer *instance_buffer_head;
 };
 
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
+void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 
 #endif

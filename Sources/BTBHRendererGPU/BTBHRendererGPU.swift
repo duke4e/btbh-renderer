@@ -174,6 +174,17 @@ struct GPUModelProbeResource {
     let metadata: ModelMetadata
 }
 
+enum GPUInstanceBufferProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUInstanceBufferProbeResource {
+    let pointer: OpaquePointer
+    let capacity: Int
+    let stride: Int
+    let byteCapacity: Int
+}
+
 enum GPUAnimationLibraryProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
@@ -529,6 +540,65 @@ public final class GPUWindowProbe {
 
     static func destroyModel(_ model: OpaquePointer) {
         btbh_gpu_model_destroy(model)
+    }
+
+    func createInstanceBuffer(
+        capacity: UInt32,
+        stride: UInt32
+    ) throws -> GPUInstanceBufferProbeResource {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "createInstanceBuffer",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUInstanceBufferReport()
+        guard let buffer = btbh_gpu_window_instance_buffer_create(
+            window,
+            capacity,
+            stride,
+            &report
+        ) else {
+            throw GPUInstanceBufferProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(
+            pointer: buffer,
+            capacity: Int(report.capacity),
+            stride: Int(report.stride),
+            byteCapacity: Int(report.byte_capacity)
+        )
+    }
+
+    func uploadInstanceBuffer(
+        _ buffer: OpaquePointer,
+        bytes: UnsafeRawBufferPointer
+    ) throws {
+        guard let baseAddress = bytes.baseAddress,
+              bytes.count > 0,
+              bytes.count <= Int(UInt32.max) else {
+            throw GPUInstanceBufferProbeError.operationFailed(
+                message: "Invalid GPU instance buffer upload bytes"
+            )
+        }
+        var report = BTBHGPUInstanceBufferReport()
+        guard btbh_gpu_instance_buffer_upload(
+            buffer,
+            0,
+            baseAddress,
+            UInt32(bytes.count),
+            &report
+        ) == BTBH_GPU_OK else {
+            throw GPUInstanceBufferProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+    }
+
+    static func destroyInstanceBuffer(_ buffer: OpaquePointer) {
+        btbh_gpu_instance_buffer_destroy(buffer)
     }
 
     public func shutdown() {

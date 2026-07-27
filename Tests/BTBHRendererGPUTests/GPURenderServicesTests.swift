@@ -387,6 +387,120 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testInstanceBuffersAllocateUploadValidateAndReleaseGPUStorage() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU instance buffer test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+
+        let semantic = try RenderServices.resources.createInstanceBuffer(.init(
+            capacity: 128,
+            stride: 0,
+            includesColor: true,
+            customFloatCount: 4
+        ))
+        XCTAssertTrue(semantic.isValid)
+
+        let raw = try RenderServices.resources.createInstanceBuffer(.init(
+            capacity: 4,
+            stride: 32,
+            includesColor: false,
+            customFloatCount: 0
+        ))
+        var records = [UInt8](repeating: 0x5A, count: 64)
+        try records.withUnsafeBytes {
+            try RenderServices.resources.uploadInstances(
+                raw,
+                instances: $0
+            )
+        }
+        records = [UInt8](repeating: 0, count: 33)
+        XCTAssertThrowsError(try records.withUnsafeBytes {
+            try RenderServices.resources.uploadInstances(
+                raw,
+                instances: $0
+            )
+        })
+        records = [UInt8](repeating: 0, count: 160)
+        XCTAssertThrowsError(try records.withUnsafeBytes {
+            try RenderServices.resources.uploadInstances(
+                raw,
+                instances: $0
+            )
+        })
+        XCTAssertThrowsError(
+            try RenderServices.resources.createInstanceBuffer(.init(
+                capacity: 0,
+                stride: 32,
+                includesColor: false,
+                customFloatCount: 0
+            ))
+        )
+
+        RenderServices.resources.destroyInstanceBuffer(raw)
+        XCTAssertThrowsError(try records.withUnsafeBytes {
+            try RenderServices.resources.uploadInstances(
+                raw,
+                instances: $0
+            )
+        })
+        RenderServices.resources.destroyInstanceBuffer(semantic)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testInstanceBufferFinishesSafelyAfterOwnerWindowCloses() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        let window = WindowDescriptor(
+            title: "BTBH GPU instance buffer owner test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        )
+        try RenderServices.platform.openWindow(window)
+        let buffer = try RenderServices.resources.createInstanceBuffer(.init(
+            capacity: 8,
+            stride: 32,
+            includesColor: false,
+            customFloatCount: 0
+        ))
+
+        RenderServices.platform.closeWindow()
+        try RenderServices.platform.openWindow(window)
+        RenderServices.resources.destroyInstanceBuffer(buffer)
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.endFrame()
+
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
         #if os(Windows)
         RenderServices.uninstall()

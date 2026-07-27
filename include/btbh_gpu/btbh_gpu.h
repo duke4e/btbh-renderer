@@ -167,6 +167,7 @@ typedef struct BTBHGPUPlatformSnapshot {
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
 typedef struct BTBHGPUModel BTBHGPUModel;
+typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
 typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
 
 typedef enum BTBHGPUTextureFilter {
@@ -201,6 +202,14 @@ typedef struct BTBHGPUModelReport {
     uint32_t material_count;
     char message[256];
 } BTBHGPUModelReport;
+
+typedef struct BTBHGPUInstanceBufferReport {
+    BTBHGPUResult result;
+    uint32_t capacity;
+    uint32_t stride;
+    uint32_t byte_capacity;
+    char message[256];
+} BTBHGPUInstanceBufferReport;
 
 typedef struct BTBHGPUAnimationLibraryReport {
     BTBHGPUResult result;
@@ -314,6 +323,20 @@ int32_t btbh_gpu_model_material_slot(
     uint32_t mesh_index
 );
 void btbh_gpu_model_destroy(BTBHGPUModel *model);
+BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(
+    BTBHGPUWindow *window,
+    uint32_t capacity,
+    uint32_t stride,
+    BTBHGPUInstanceBufferReport *report
+);
+BTBHGPUResult btbh_gpu_instance_buffer_upload(
+    BTBHGPUInstanceBuffer *buffer,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count,
+    BTBHGPUInstanceBufferReport *report
+);
+void btbh_gpu_instance_buffer_destroy(BTBHGPUInstanceBuffer *buffer);
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report

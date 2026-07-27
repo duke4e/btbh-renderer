@@ -301,6 +301,33 @@ public final class GPUPlatform: GamePlatform {
         GPUWindowProbe.destroyModel(model)
     }
 
+    func createInstanceBuffer(
+        capacity: UInt32,
+        stride: UInt32
+    ) throws -> GPUInstanceBufferProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.createInstanceBuffer(
+            capacity: capacity,
+            stride: stride
+        )
+    }
+
+    func uploadInstanceBuffer(
+        _ buffer: OpaquePointer,
+        bytes: UnsafeRawBufferPointer
+    ) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        try window.uploadInstanceBuffer(buffer, bytes: bytes)
+    }
+
+    func destroyInstanceBuffer(_ buffer: OpaquePointer) {
+        GPUWindowProbe.destroyInstanceBuffer(buffer)
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)

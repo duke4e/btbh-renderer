@@ -15,6 +15,9 @@ enum GPUResourceStagingError: Error, Equatable {
     case invalidAnimationTreeParameter(String)
     case invalidMaterial(UInt64)
     case invalidMaterialDescriptor(String)
+    case invalidInstanceBuffer(UInt64)
+    case invalidInstanceBufferDescriptor(String)
+    case invalidInstanceUpload(String)
     case invalidSurfaceShader(UInt64)
     case invalidScreenShader(UInt64)
 }
@@ -72,12 +75,18 @@ private struct GPUMaterialResource {
     let surfaceShaderDependency: SurfaceShaderHandle?
 }
 
+private struct GPUInstanceBufferResource {
+    let storage: GPUInstanceBufferProbeResource
+    let descriptor: InstanceBufferDescriptor
+}
+
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
     private let materialHandles = try? HandlePool(initialCapacity: 64)
+    private let instanceBufferHandles = try? HandlePool(initialCapacity: 16)
     private let animationLibraryHandles = try? HandlePool(
         initialCapacity: 8
     )
@@ -87,6 +96,9 @@ final class GPUResourceBackend: RenderResourceBackend {
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
+    private var instanceBuffers: [
+        InstanceBufferHandle: GPUInstanceBufferResource
+    ] = [:]
     private var animationLibraries: [
         AnimationLibraryHandle: GPUAnimationLibraryProbeResource
     ] = [:]
@@ -285,9 +297,68 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
         collectMaterialDependencies(resource)
     }
-    func createInstanceBuffer(_ descriptor: InstanceBufferDescriptor) throws -> InstanceBufferHandle { throw unsupported() }
-    func uploadInstances(_ handle: InstanceBufferHandle, instances: UnsafeRawBufferPointer) throws { throw unsupported() }
-    func destroyInstanceBuffer(_ handle: InstanceBufferHandle) {}
+    func createInstanceBuffer(
+        _ descriptor: InstanceBufferDescriptor
+    ) throws -> InstanceBufferHandle {
+        trace("createInstanceBuffer")
+        let stride = try Self.instanceBufferStride(descriptor)
+        guard let instanceBufferHandles else {
+            throw GPUResourceStagingError.invalidInstanceBufferDescriptor(
+                "Could not allocate the GPU instance buffer handle pool"
+            )
+        }
+        let storage = try platform.createInstanceBuffer(
+            capacity: UInt32(descriptor.capacity),
+            stride: UInt32(stride)
+        )
+        do {
+            let handle = try instanceBufferHandles.acquire(
+                InstanceBufferHandle.self
+            )
+            instanceBuffers[handle] = .init(
+                storage: storage,
+                descriptor: descriptor
+            )
+            return handle
+        } catch {
+            platform.destroyInstanceBuffer(storage.pointer)
+            throw error
+        }
+    }
+
+    func uploadInstances(
+        _ handle: InstanceBufferHandle,
+        instances: UnsafeRawBufferPointer
+    ) throws {
+        trace("uploadInstances")
+        guard let resource = instanceBuffers[handle] else {
+            throw GPUResourceStagingError.invalidInstanceBuffer(
+                handle.rawValue
+            )
+        }
+        guard instances.count > 0,
+              instances.count <= resource.storage.byteCapacity,
+              instances.count % resource.storage.stride == 0 else {
+            throw GPUResourceStagingError.invalidInstanceUpload(
+                "Instance upload must contain whole records within the allocated buffer"
+            )
+        }
+        try platform.uploadInstanceBuffer(
+            resource.storage.pointer,
+            bytes: instances
+        )
+    }
+
+    func destroyInstanceBuffer(_ handle: InstanceBufferHandle) {
+        guard
+            let instanceBufferHandles,
+            let resource = instanceBuffers.removeValue(forKey: handle),
+            instanceBufferHandles.release(handle)
+        else {
+            return
+        }
+        platform.destroyInstanceBuffer(resource.storage.pointer)
+    }
     func loadAnimationLibrary(
         path: String
     ) throws -> AnimationLibraryHandle {
@@ -931,6 +1002,39 @@ final class GPUResourceBackend: RenderResourceBackend {
         return (components[0], components[1], components[2])
     }
 
+    private static func instanceBufferStride(
+        _ descriptor: InstanceBufferDescriptor
+    ) throws -> Int {
+        guard descriptor.capacity > 0,
+              descriptor.capacity <= Int(UInt32.max),
+              descriptor.stride >= 0,
+              descriptor.stride <= Int(UInt32.max),
+              descriptor.customFloatCount >= 0,
+              descriptor.customFloatCount <= 4 else {
+            throw GPUResourceStagingError.invalidInstanceBufferDescriptor(
+                "Instance buffer fields must fit supported positive ranges"
+            )
+        }
+        let stride: Int
+        if descriptor.stride == 0 {
+            guard descriptor.includesColor,
+                  descriptor.customFloatCount == 4 else {
+                throw GPUResourceStagingError.invalidInstanceBufferDescriptor(
+                    "Semantic instance buffers require color and four custom floats"
+                )
+            }
+            stride = 96
+        } else {
+            stride = descriptor.stride
+        }
+        guard descriptor.capacity <= Int(UInt32.max) / stride else {
+            throw GPUResourceStagingError.invalidInstanceBufferDescriptor(
+                "Instance buffer allocation exceeds SDL_GPU limits"
+            )
+        }
+        return stride
+    }
+
     private func collectPendingModel(_ handle: ModelHandle) {
         guard
             pendingModelDestruction.contains(handle),
@@ -981,6 +1085,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         materials.removeAll()
         pendingAnimationLibraryDestruction.removeAll()
         pendingModelDestruction.removeAll()
+        for resource in instanceBuffers.values {
+            platform.destroyInstanceBuffer(resource.storage.pointer)
+        }
+        instanceBuffers.removeAll()
         for resource in animationLibraries.values {
             GPUAnimationLibraryProbe.destroy(resource.pointer)
         }
