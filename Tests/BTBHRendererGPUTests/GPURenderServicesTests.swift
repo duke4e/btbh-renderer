@@ -827,14 +827,23 @@ final class GPURenderServicesTests: XCTestCase {
         )
     }
 
-    func testUnsupportedSceneSubmitReportsTheExactDrawKind() throws {
+    func testScenePresentsDebugPrimitivesWithoutFailClosing() throws {
+        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .platformDefault,
+            request: .vulkan,
             debugMode: true
         )
         try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU debug primitive test",
+            width: 800,
+            height: 400,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
         try RenderServices.scene.initialize(
             drawableSize: .init(width: 800, height: 400)
         )
@@ -849,12 +858,23 @@ final class GPURenderServicesTests: XCTestCase {
             environment: .default
         ))
         RenderServices.scene.submit(.debug(.grid(slices: 10, spacing: 1)))
-        XCTAssertThrowsError(try RenderServices.scene.endFrame()) {
-            XCTAssertEqual(
-                $0 as? GPUBackendUnsupportedError,
-                .operation("scene.submit.debug")
-            )
-        }
+        RenderServices.scene.submit(.debug(.wireCube(
+            center: .zero,
+            size: .init(x: 2, y: 2, z: 2),
+            color: .white
+        )))
+        RenderServices.scene.submit(.debug(.sphere(
+            center: .init(x: 0, y: 1, z: 3),
+            radius: 1,
+            color: .white
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.endFrame()
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan debug primitive test runs only on Windows")
+        #endif
     }
 
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {

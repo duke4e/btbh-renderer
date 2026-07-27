@@ -1905,6 +1905,7 @@ final class GPUSceneBackend: SceneBackend {
     private var drawableSize = PixelSize2D(width: 0, height: 0)
     private var currentFrame: FrameDescriptor?
     private var pendingModelDraws: [PendingModelDraw] = []
+    private var pendingDebugDraws: [DebugDraw] = []
 
     init(platform: GPUPlatform, resources: GPUResourceBackend) {
         self.platform = platform
@@ -1923,6 +1924,7 @@ final class GPUSceneBackend: SceneBackend {
         currentFrame = descriptor
         unsupportedOperation = nil
         pendingModelDraws.removeAll(keepingCapacity: true)
+        pendingDebugDraws.removeAll(keepingCapacity: true)
     }
 
     func submit(_ draw: SceneDraw) {
@@ -1947,6 +1949,8 @@ final class GPUSceneBackend: SceneBackend {
             pendingModelDraws.append(
                 .animatedTransformStreams(streams)
             )
+        case .debug(let debug):
+            pendingDebugDraws.append(debug)
         default:
             guard unsupportedOperation == nil else { return }
             unsupportedOperation = Self.submitOperation(draw)
@@ -1958,7 +1962,9 @@ final class GPUSceneBackend: SceneBackend {
             platform.failClosed(operation: unsupportedOperation)
             throw GPUBackendUnsupportedError.operation(unsupportedOperation)
         }
-        guard !pendingModelDraws.isEmpty else { return }
+        guard !pendingModelDraws.isEmpty || !pendingDebugDraws.isEmpty else {
+            return
+        }
         guard let currentFrame,
               let viewProjection = viewProjection(
                 camera: currentFrame.camera,
@@ -2235,6 +2241,49 @@ final class GPUSceneBackend: SceneBackend {
                 ))
             }
         }
+        var transientDebugMesh: MeshHandle?
+        defer {
+            if let transientDebugMesh {
+                resources.destroyMesh(transientDebugMesh)
+            }
+        }
+        if !pendingDebugDraws.isEmpty {
+            let debugVertices = Self.debugVertices(
+                pendingDebugDraws,
+                camera: currentFrame.camera
+            )
+            if !debugVertices.isEmpty {
+                let bounds = Self.bounds(of: debugVertices)
+                let mesh = try debugVertices.withUnsafeBytes {
+                    try resources.createMesh(
+                        .init(
+                            topology: .triangles,
+                            storage: .immutable,
+                            vertexCount: debugVertices.count,
+                            indexCount: 0,
+                            bounds: bounds
+                        ),
+                        vertices: $0,
+                        indices: nil
+                    )
+                }
+                transientDebugMesh = mesh
+                let firstInstance = packedInstances.count / 20
+                Self.append(
+                    matrix: .identity,
+                    color: .white,
+                    to: &packedInstances
+                )
+                batches.append(.init(
+                    geometry: .customMesh(
+                        try resources.meshPointer(mesh)
+                    ),
+                    animation: nil,
+                    firstInstance: firstInstance,
+                    instanceCount: 1
+                ))
+            }
+        }
         guard !batches.isEmpty else { return }
         try platform.presentModelInstances(
             viewProjection: viewProjection,
@@ -2242,6 +2291,255 @@ final class GPUSceneBackend: SceneBackend {
             batches: batches,
             clearColor: currentFrame.environment.backgroundColor
         )
+    }
+
+    private static func debugVertices(
+        _ draws: [DebugDraw],
+        camera: RenderCamera
+    ) -> [RenderVertex] {
+        var vertices: [RenderVertex] = []
+        for draw in draws {
+            switch draw {
+            case .line(let start, let end, let color):
+                appendDebugLine(
+                    start: start,
+                    end: end,
+                    color: color,
+                    camera: camera,
+                    to: &vertices
+                )
+            case .grid(let slices, let spacing):
+                guard slices > 0, spacing > 0, spacing.isFinite else {
+                    continue
+                }
+                let half = Float(slices) * spacing * 0.5
+                let color = RenderColor(
+                    r: 160,
+                    g: 160,
+                    b: 160,
+                    a: 255
+                )
+                for index in 0...slices {
+                    let offset = -half + Float(index) * spacing
+                    appendDebugLine(
+                        start: .init(x: -half, y: 0, z: offset),
+                        end: .init(x: half, y: 0, z: offset),
+                        color: color,
+                        camera: camera,
+                        to: &vertices
+                    )
+                    appendDebugLine(
+                        start: .init(x: offset, y: 0, z: -half),
+                        end: .init(x: offset, y: 0, z: half),
+                        color: color,
+                        camera: camera,
+                        to: &vertices
+                    )
+                }
+            case .plane(let center, let size, let color):
+                let halfX = size.x * 0.5
+                let halfZ = size.y * 0.5
+                appendDebugQuad(
+                    [
+                        .init(
+                            x: center.x - halfX,
+                            y: center.y,
+                            z: center.z - halfZ
+                        ),
+                        .init(
+                            x: center.x + halfX,
+                            y: center.y,
+                            z: center.z - halfZ
+                        ),
+                        .init(
+                            x: center.x + halfX,
+                            y: center.y,
+                            z: center.z + halfZ
+                        ),
+                        .init(
+                            x: center.x - halfX,
+                            y: center.y,
+                            z: center.z + halfZ
+                        )
+                    ],
+                    color: color,
+                    to: &vertices
+                )
+            case .sphere(let center, let radius, let color):
+                guard radius > 0, radius.isFinite else { continue }
+                let segments = 24
+                for axis in 0..<3 {
+                    for index in 0..<segments {
+                        let first = Float(index) * 2 * .pi /
+                            Float(segments)
+                        let second = Float(index + 1) * 2 * .pi /
+                            Float(segments)
+                        appendDebugLine(
+                            start: debugCirclePoint(
+                                center: center,
+                                radius: radius,
+                                radians: first,
+                                axis: axis
+                            ),
+                            end: debugCirclePoint(
+                                center: center,
+                                radius: radius,
+                                radians: second,
+                                axis: axis
+                            ),
+                            color: color,
+                            camera: camera,
+                            to: &vertices
+                        )
+                    }
+                }
+            case .bounds(let bounds, let color):
+                appendDebugBox(
+                    minimum: bounds.minimum,
+                    maximum: bounds.maximum,
+                    color: color,
+                    camera: camera,
+                    to: &vertices
+                )
+            case .wireCube(let center, let size, let color):
+                let half = size * 0.5
+                appendDebugBox(
+                    minimum: center - half,
+                    maximum: center + half,
+                    color: color,
+                    camera: camera,
+                    to: &vertices
+                )
+            }
+        }
+        return vertices
+    }
+
+    private static func appendDebugLine(
+        start: RenderVec3,
+        end: RenderVec3,
+        color: RenderColor,
+        camera: RenderCamera,
+        to vertices: inout [RenderVertex]
+    ) {
+        let direction = end - start
+        guard direction.lengthSquared > 0,
+              direction.lengthSquared.isFinite else {
+            return
+        }
+        let midpoint = (start + end) * 0.5
+        var side = direction.cross(camera.position - midpoint)
+        if side.lengthSquared < 0.000_001 {
+            side = direction.cross(.up)
+        }
+        if side.lengthSquared < 0.000_001 {
+            side = direction.cross(.right)
+        }
+        guard side.lengthSquared > 0 else { return }
+        side = side.normalized() * 0.015
+        appendDebugQuad(
+            [start - side, start + side, end + side, end - side],
+            color: color,
+            to: &vertices
+        )
+    }
+
+    private static func appendDebugQuad(
+        _ points: [RenderVec3],
+        color: RenderColor,
+        to vertices: inout [RenderVertex]
+    ) {
+        guard points.count == 4 else { return }
+        for index in [0, 1, 2, 0, 2, 3] {
+            vertices.append(debugVertex(points[index], color: color))
+        }
+    }
+
+    private static func appendDebugBox(
+        minimum: RenderVec3,
+        maximum: RenderVec3,
+        color: RenderColor,
+        camera: RenderCamera,
+        to vertices: inout [RenderVertex]
+    ) {
+        let corners = [
+            RenderVec3(x: minimum.x, y: minimum.y, z: minimum.z),
+            RenderVec3(x: maximum.x, y: minimum.y, z: minimum.z),
+            RenderVec3(x: maximum.x, y: maximum.y, z: minimum.z),
+            RenderVec3(x: minimum.x, y: maximum.y, z: minimum.z),
+            RenderVec3(x: minimum.x, y: minimum.y, z: maximum.z),
+            RenderVec3(x: maximum.x, y: minimum.y, z: maximum.z),
+            RenderVec3(x: maximum.x, y: maximum.y, z: maximum.z),
+            RenderVec3(x: minimum.x, y: maximum.y, z: maximum.z)
+        ]
+        for (first, second) in [
+            (0, 1), (1, 2), (2, 3), (3, 0),
+            (4, 5), (5, 6), (6, 7), (7, 4),
+            (0, 4), (1, 5), (2, 6), (3, 7)
+        ] {
+            appendDebugLine(
+                start: corners[first],
+                end: corners[second],
+                color: color,
+                camera: camera,
+                to: &vertices
+            )
+        }
+    }
+
+    private static func debugCirclePoint(
+        center: RenderVec3,
+        radius: Float,
+        radians: Float,
+        axis: Int
+    ) -> RenderVec3 {
+        let first = cos(radians) * radius
+        let second = sin(radians) * radius
+        switch axis {
+        case 0:
+            return center + .init(x: 0, y: first, z: second)
+        case 1:
+            return center + .init(x: first, y: 0, z: second)
+        default:
+            return center + .init(x: first, y: second, z: 0)
+        }
+    }
+
+    private static func debugVertex(
+        _ position: RenderVec3,
+        color: RenderColor
+    ) -> RenderVertex {
+        .init(
+            position: position,
+            textureCoordinate: .zero,
+            normal: .up,
+            tangent: .init(x: 1, y: 0, z: 0, w: 1),
+            color: color
+        )
+    }
+
+    private static func bounds(
+        of vertices: [RenderVertex]
+    ) -> RenderBounds3 {
+        var minimum = RenderVec3(
+            x: .greatestFiniteMagnitude,
+            y: .greatestFiniteMagnitude,
+            z: .greatestFiniteMagnitude
+        )
+        var maximum = RenderVec3(
+            x: -.greatestFiniteMagnitude,
+            y: -.greatestFiniteMagnitude,
+            z: -.greatestFiniteMagnitude
+        )
+        for vertex in vertices {
+            minimum.x = min(minimum.x, vertex.position.x)
+            minimum.y = min(minimum.y, vertex.position.y)
+            minimum.z = min(minimum.z, vertex.position.z)
+            maximum.x = max(maximum.x, vertex.position.x)
+            maximum.y = max(maximum.y, vertex.position.y)
+            maximum.z = max(maximum.z, vertex.position.z)
+        }
+        return .init(minimum: minimum, maximum: maximum)
     }
 
     func project(
