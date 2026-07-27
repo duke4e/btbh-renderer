@@ -38,8 +38,14 @@ struct BTBHGPUSceneRuntime {
     ][BTBH_GPU_SCENE_DEPTH_COUNT];
     BTBHGPUTexture *fallback_texture;
     SDL_GPUTexture *depth_texture;
+    SDL_GPUBuffer *instance_buffer;
+    SDL_GPUBuffer *bone_buffer;
+    SDL_GPUTransferBuffer *upload_transfer;
     uint32_t depth_width;
     uint32_t depth_height;
+    uint32_t instance_capacity;
+    uint32_t bone_capacity;
+    uint32_t upload_capacity;
 };
 
 static void btbh_gpu_scene_error(
@@ -479,6 +485,92 @@ static bool btbh_gpu_scene_ensure_depth(
     return true;
 }
 
+static uint32_t btbh_gpu_scene_buffer_capacity(
+    uint32_t required
+) {
+    uint32_t capacity = 256u;
+    while (capacity < required && capacity <= UINT32_MAX / 2u) {
+        capacity *= 2u;
+    }
+    return capacity >= required ? capacity : required;
+}
+
+static bool btbh_gpu_scene_ensure_upload_buffers(
+    BTBHGPUWindow *window,
+    uint32_t instance_bytes,
+    uint32_t bone_bytes,
+    uint32_t transfer_bytes
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUBufferCreateInfo buffer_info;
+    SDL_GPUTransferBufferCreateInfo transfer_info;
+    SDL_zero(buffer_info);
+    SDL_zero(transfer_info);
+    buffer_info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    if (
+        runtime->instance_buffer == NULL ||
+        runtime->instance_capacity < instance_bytes
+    ) {
+        if (runtime->instance_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, runtime->instance_buffer);
+        }
+        runtime->instance_capacity =
+            btbh_gpu_scene_buffer_capacity(instance_bytes);
+        buffer_info.size = runtime->instance_capacity;
+        runtime->instance_buffer =
+            SDL_CreateGPUBuffer(device, &buffer_info);
+        if (runtime->instance_buffer == NULL) {
+            runtime->instance_capacity = 0u;
+            return false;
+        }
+    }
+    if (
+        bone_bytes > 0u &&
+        (
+            runtime->bone_buffer == NULL ||
+            runtime->bone_capacity < bone_bytes
+        )
+    ) {
+        if (runtime->bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, runtime->bone_buffer);
+        }
+        runtime->bone_capacity =
+            btbh_gpu_scene_buffer_capacity(bone_bytes);
+        buffer_info.size = runtime->bone_capacity;
+        runtime->bone_buffer = SDL_CreateGPUBuffer(
+            device,
+            &buffer_info
+        );
+        if (runtime->bone_buffer == NULL) {
+            runtime->bone_capacity = 0u;
+            return false;
+        }
+    }
+    if (
+        runtime->upload_transfer == NULL ||
+        runtime->upload_capacity < transfer_bytes
+    ) {
+        if (runtime->upload_transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(
+                device,
+                runtime->upload_transfer
+            );
+        }
+        runtime->upload_capacity =
+            btbh_gpu_scene_buffer_capacity(transfer_bytes);
+        transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transfer_info.size = runtime->upload_capacity;
+        runtime->upload_transfer =
+            SDL_CreateGPUTransferBuffer(device, &transfer_info);
+        if (runtime->upload_transfer == NULL) {
+            runtime->upload_capacity = 0u;
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool btbh_gpu_scene_validate_batches(
     BTBHGPUWindow *window,
     uint32_t total_instance_count,
@@ -801,42 +893,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
     const uint32_t transfer_bytes = instance_bytes + bone_bytes;
-    SDL_GPUBufferCreateInfo buffer_info;
-    SDL_GPUTransferBufferCreateInfo transfer_info;
-    SDL_zero(buffer_info);
-    SDL_zero(transfer_info);
-    buffer_info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
-    buffer_info.size = instance_bytes;
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = instance_bytes;
-    SDL_GPUBuffer *instance_buffer = SDL_CreateGPUBuffer(
-        device,
-        &buffer_info
-    );
-    SDL_GPUBuffer *bone_buffer = NULL;
-    if (bone_bytes > 0u) {
-        buffer_info.size = bone_bytes;
-        bone_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
-    }
-    transfer_info.size = transfer_bytes;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
-        device,
-        &transfer_info
-    );
-    if (
-        instance_buffer == NULL ||
-        (bone_bytes > 0u && bone_buffer == NULL) ||
-        transfer == NULL
-    ) {
-        if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
-        }
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        if (instance_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, instance_buffer);
-        }
+    if (!btbh_gpu_scene_ensure_upload_buffers(
+            window,
+            instance_bytes,
+            bone_bytes,
+            transfer_bytes
+        )) {
         free(bone_matrices);
         free(bone_offsets);
         btbh_gpu_scene_error(
@@ -846,13 +908,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
         return report->result;
     }
-    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUBuffer *instance_buffer = runtime->instance_buffer;
+    SDL_GPUBuffer *bone_buffer = bone_bytes > 0u
+        ? runtime->bone_buffer
+        : NULL;
+    SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
+    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
     if (mapped == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_matrices);
         free(bone_offsets);
         btbh_gpu_scene_error(
@@ -876,11 +939,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
 
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
     if (command == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_offsets);
         btbh_gpu_scene_error(
             report,
@@ -892,11 +950,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
     if (copy == NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_offsets);
         btbh_gpu_scene_error(
             report,
@@ -912,12 +965,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     source.transfer_buffer = transfer;
     destination.buffer = instance_buffer;
     destination.size = instance_bytes;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     if (bone_buffer != NULL) {
         source.offset = instance_bytes;
         destination.buffer = bone_buffer;
         destination.size = bone_bytes;
-        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     }
     SDL_EndGPUCopyPass(copy);
 
@@ -948,11 +1001,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             );
         }
         (void)SDL_CancelGPUCommandBuffer(command);
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_offsets);
         return report->result;
     }
@@ -984,11 +1032,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     );
     if (pass == NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_offsets);
         btbh_gpu_scene_error(
             report,
@@ -1198,11 +1241,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     SDL_EndGPURenderPass(pass);
     if (geometry_cursor != prepared_geometry_count) {
         (void)SDL_CancelGPUCommandBuffer(command);
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        if (bone_buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, bone_buffer);
-        }
-        SDL_ReleaseGPUBuffer(device, instance_buffer);
         free(bone_offsets);
         btbh_gpu_scene_error(
             report,
@@ -1213,9 +1251,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     }
     window->pending_command = command;
     window->pending_swapchain = swapchain;
-    window->pending_scene_transfer = transfer;
-    window->pending_instance_buffer = instance_buffer;
-    window->pending_bone_buffer = bone_buffer;
     window->pending_drawable_width = drawable_width;
     window->pending_drawable_height = drawable_height;
     free(bone_offsets);
@@ -1239,6 +1274,24 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             ? window->device->gpu
             : NULL;
     if (device != NULL) {
+        if (window->scene_runtime->upload_transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(
+                device,
+                window->scene_runtime->upload_transfer
+            );
+        }
+        if (window->scene_runtime->bone_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(
+                device,
+                window->scene_runtime->bone_buffer
+            );
+        }
+        if (window->scene_runtime->instance_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(
+                device,
+                window->scene_runtime->instance_buffer
+            );
+        }
         if (window->scene_runtime->depth_texture != NULL) {
             SDL_ReleaseGPUTexture(
                 device,
