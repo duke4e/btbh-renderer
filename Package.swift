@@ -21,11 +21,18 @@ var rendererTargets: [Target] = [
             .headerSearchPath("../../include"),
             .headerSearchPath("../../src/gpu"),
             .headerSearchPath("../../external/SDL/include"),
-            .headerSearchPath("../../external/raylib/src/external")
+            .headerSearchPath("../../external/raylib/src/external"),
+            .headerSearchPath("assimp-config"),
+            .headerSearchPath("../../external/assimp/include"),
+            .define("ASSIMP_DLL", .when(platforms: [.windows]))
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),
             .linkedLibrary("SDL3", .when(platforms: [.macOS])),
+            .linkedLibrary(
+                "assimp-vc143-mt",
+                .when(platforms: [.windows])
+            ),
             .linkedLibrary("winmm", .when(platforms: [.windows])),
             .linkedLibrary("kernel32", .when(platforms: [.windows])),
             .linkedLibrary("gdi32", .when(platforms: [.windows])),

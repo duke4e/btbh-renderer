@@ -15,6 +15,18 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
+#if defined(_WIN32)
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wignored-attributes"
+#endif
+#include <assimp/cimport.h>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+#endif
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
 #if defined(_MSC_VER)
@@ -765,6 +777,312 @@ static uint32_t btbh_gpu_model_primitive_count(
     return count;
 }
 
+#if defined(_WIN32)
+static uint32_t btbh_gpu_model_assimp_primitive_count(
+    const struct aiScene *scene
+) {
+    uint32_t count = 0;
+    for (
+        unsigned int index = 0;
+        index < scene->mNumMeshes;
+        index += 1u
+    ) {
+        const struct aiMesh *mesh = scene->mMeshes[index];
+        if (
+            mesh != NULL &&
+            mesh->mVertices != NULL &&
+            mesh->mNumVertices > 0u &&
+            mesh->mNumFaces > 0u &&
+            (mesh->mPrimitiveTypes & aiPrimitiveType_TRIANGLE) != 0u &&
+            count < UINT32_MAX
+        ) {
+            count += 1u;
+        }
+    }
+    return count;
+}
+
+static bool btbh_gpu_model_decode_assimp_vertices(
+    BTBHGPUModel *model,
+    const struct aiMesh *mesh,
+    BTBHGPUModelPrimitive *destination
+) {
+    if (
+        mesh->mNumVertices == 0u ||
+        mesh->mNumVertices >
+            UINT32_MAX / (uint32_t) sizeof(BTBHGPUModelVertex)
+    ) {
+        return false;
+    }
+    const uint32_t vertex_count = (uint32_t) mesh->mNumVertices;
+    const uint32_t vertex_size =
+        vertex_count * (uint32_t) sizeof(BTBHGPUModelVertex);
+    BTBHGPUModelVertex *vertices = calloc(
+        vertex_count,
+        sizeof(*vertices)
+    );
+    if (vertices == NULL) {
+        return false;
+    }
+
+    for (uint32_t index = 0; index < vertex_count; index += 1u) {
+        BTBHGPUModelVertex *vertex = &vertices[index];
+        const struct aiVector3D *position = &mesh->mVertices[index];
+        vertex->position[0] = position->x;
+        vertex->position[1] = position->y;
+        vertex->position[2] = position->z;
+        vertex->normal[1] = 1.0f;
+        vertex->tangent[0] = 1.0f;
+        vertex->tangent[3] = 1.0f;
+        vertex->color[0] = 1.0f;
+        vertex->color[1] = 1.0f;
+        vertex->color[2] = 1.0f;
+        vertex->color[3] = 1.0f;
+        vertex->weights[0] = 1.0f;
+
+        if (mesh->mNormals != NULL) {
+            vertex->normal[0] = mesh->mNormals[index].x;
+            vertex->normal[1] = mesh->mNormals[index].y;
+            vertex->normal[2] = mesh->mNormals[index].z;
+        }
+        if (mesh->mTextureCoords[0] != NULL) {
+            vertex->texture_coordinate[0] =
+                mesh->mTextureCoords[0][index].x;
+            vertex->texture_coordinate[1] =
+                mesh->mTextureCoords[0][index].y;
+        }
+        if (mesh->mTangents != NULL) {
+            vertex->tangent[0] = mesh->mTangents[index].x;
+            vertex->tangent[1] = mesh->mTangents[index].y;
+            vertex->tangent[2] = mesh->mTangents[index].z;
+            if (
+                mesh->mNormals != NULL &&
+                mesh->mBitangents != NULL
+            ) {
+                const float cross_x =
+                    vertex->normal[1] * vertex->tangent[2] -
+                    vertex->normal[2] * vertex->tangent[1];
+                const float cross_y =
+                    vertex->normal[2] * vertex->tangent[0] -
+                    vertex->normal[0] * vertex->tangent[2];
+                const float cross_z =
+                    vertex->normal[0] * vertex->tangent[1] -
+                    vertex->normal[1] * vertex->tangent[0];
+                const struct aiVector3D *bitangent =
+                    &mesh->mBitangents[index];
+                const float handedness =
+                    cross_x * bitangent->x +
+                    cross_y * bitangent->y +
+                    cross_z * bitangent->z;
+                vertex->tangent[3] =
+                    handedness < 0.0f ? -1.0f : 1.0f;
+            }
+        }
+        if (mesh->mColors[0] != NULL) {
+            vertex->color[0] = mesh->mColors[0][index].r;
+            vertex->color[1] = mesh->mColors[0][index].g;
+            vertex->color[2] = mesh->mColors[0][index].b;
+            vertex->color[3] = mesh->mColors[0][index].a;
+        }
+        btbh_gpu_model_include_position(model, vertex->position);
+    }
+
+    destination->vertex_buffer = btbh_gpu_model_upload_buffer(
+        model->owner->device->gpu,
+        SDL_GPU_BUFFERUSAGE_VERTEX,
+        vertices,
+        vertex_size
+    );
+    free(vertices);
+    if (destination->vertex_buffer == NULL) {
+        return false;
+    }
+    destination->vertex_count = vertex_count;
+    return true;
+}
+
+static bool btbh_gpu_model_decode_assimp_indices(
+    BTBHGPUModel *model,
+    const struct aiMesh *mesh,
+    BTBHGPUModelPrimitive *destination
+) {
+    if (
+        mesh->mNumFaces == 0u ||
+        mesh->mNumFaces > UINT32_MAX / 3u ||
+        mesh->mNumFaces * 3u >
+            UINT32_MAX / (uint32_t) sizeof(uint32_t)
+    ) {
+        return false;
+    }
+    const uint32_t index_count = (uint32_t) mesh->mNumFaces * 3u;
+    const uint32_t index_size =
+        index_count * (uint32_t) sizeof(uint32_t);
+    uint32_t *indices = malloc(index_size);
+    if (indices == NULL) {
+        return false;
+    }
+    bool valid = true;
+    for (
+        uint32_t face_index = 0;
+        valid && face_index < (uint32_t) mesh->mNumFaces;
+        face_index += 1u
+    ) {
+        const struct aiFace *face = &mesh->mFaces[face_index];
+        valid =
+            face->mNumIndices == 3u &&
+            face->mIndices != NULL;
+        for (
+            uint32_t corner = 0;
+            valid && corner < 3u;
+            corner += 1u
+        ) {
+            const unsigned int source_index = face->mIndices[corner];
+            valid = source_index < destination->vertex_count;
+            if (valid) {
+                indices[face_index * 3u + corner] =
+                    (uint32_t) source_index;
+            }
+        }
+    }
+    if (valid) {
+        destination->index_buffer = btbh_gpu_model_upload_buffer(
+            model->owner->device->gpu,
+            SDL_GPU_BUFFERUSAGE_INDEX,
+            indices,
+            index_size
+        );
+        valid = destination->index_buffer != NULL;
+    }
+    free(indices);
+    if (!valid) {
+        return false;
+    }
+    destination->index_count = index_count;
+    return true;
+}
+
+static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
+    BTBHGPUWindow *window,
+    const char *path,
+    BTBHGPUModelReport *report
+) {
+    const unsigned int import_flags =
+        aiProcess_Triangulate |
+        aiProcess_JoinIdenticalVertices |
+        aiProcess_GenSmoothNormals |
+        aiProcess_CalcTangentSpace |
+        aiProcess_PreTransformVertices |
+        aiProcess_SortByPType |
+        aiProcess_ImproveCacheLocality;
+    const struct aiScene *scene = aiImportFile(path, import_flags);
+    if (scene == NULL) {
+        btbh_gpu_model_error(report, aiGetErrorString());
+        return NULL;
+    }
+
+    const uint32_t primitive_count =
+        btbh_gpu_model_assimp_primitive_count(scene);
+    if (primitive_count == 0u) {
+        aiReleaseImport(scene);
+        btbh_gpu_model_error(
+            report,
+            "Assimp model contains no triangle meshes"
+        );
+        return NULL;
+    }
+
+    BTBHGPUModel *model = calloc(1, sizeof(*model));
+    if (model == NULL) {
+        aiReleaseImport(scene);
+        btbh_gpu_model_error(report, "Could not allocate GPU model resource");
+        return NULL;
+    }
+    model->primitives = calloc(
+        primitive_count,
+        sizeof(*model->primitives)
+    );
+    if (model->primitives == NULL) {
+        aiReleaseImport(scene);
+        free(model);
+        btbh_gpu_model_error(report, "Could not allocate GPU model meshes");
+        return NULL;
+    }
+    model->owner = window;
+    model->next = window->model_head;
+    if (window->model_head != NULL) {
+        window->model_head->previous = model;
+    }
+    window->model_head = model;
+    model->primitive_count = primitive_count;
+    model->material_count = scene->mNumMaterials > 0u
+        ? (uint32_t) scene->mNumMaterials
+        : 1u;
+    for (uint32_t axis = 0; axis < 3u; axis += 1u) {
+        model->minimum[axis] = FLT_MAX;
+        model->maximum[axis] = -FLT_MAX;
+    }
+
+    uint32_t output_index = 0u;
+    bool valid = true;
+    for (
+        unsigned int mesh_index = 0;
+        valid && mesh_index < scene->mNumMeshes;
+        mesh_index += 1u
+    ) {
+        const struct aiMesh *mesh = scene->mMeshes[mesh_index];
+        if (
+            mesh == NULL ||
+            mesh->mVertices == NULL ||
+        mesh->mNumVertices == 0u ||
+        mesh->mNumFaces == 0u ||
+        mesh->mFaces == NULL ||
+        (mesh->mPrimitiveTypes & aiPrimitiveType_TRIANGLE) == 0u
+        ) {
+            continue;
+        }
+        BTBHGPUModelPrimitive *destination =
+            &model->primitives[output_index];
+        destination->material_slot =
+            mesh->mMaterialIndex < model->material_count
+                ? (int32_t) mesh->mMaterialIndex
+                : 0;
+        valid =
+            btbh_gpu_model_decode_assimp_vertices(
+                model,
+                mesh,
+                destination
+            ) &&
+            btbh_gpu_model_decode_assimp_indices(
+                model,
+                mesh,
+                destination
+            );
+        output_index += 1u;
+    }
+    aiReleaseImport(scene);
+
+    if (!valid || output_index != primitive_count) {
+        btbh_gpu_model_error(
+            report,
+            "Could not upload Assimp model meshes"
+        );
+        btbh_gpu_model_destroy(model);
+        return NULL;
+    }
+
+    report->result = BTBH_GPU_OK;
+    report->minimum_x = model->minimum[0];
+    report->minimum_y = model->minimum[1];
+    report->minimum_z = model->minimum[2];
+    report->maximum_x = model->maximum[0];
+    report->maximum_y = model->maximum[1];
+    report->maximum_z = model->maximum[2];
+    report->mesh_count = model->primitive_count;
+    report->material_count = model->material_count;
+    return model;
+}
+#endif
+
 BTBHGPUModel *btbh_gpu_window_model_load(
     BTBHGPUWindow *window,
     const char *path,
@@ -796,8 +1114,16 @@ BTBHGPUModel *btbh_gpu_window_model_load(
     }
     if (result != cgltf_result_success || data == NULL) {
         cgltf_free(data);
+#if defined(_WIN32)
+        return btbh_gpu_window_model_load_assimp(
+            window,
+            path,
+            report
+        );
+#else
         btbh_gpu_model_error(report, "Could not parse glTF model");
         return NULL;
+#endif
     }
 
     if (data->materials_count >= UINT32_MAX) {

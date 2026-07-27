@@ -443,6 +443,56 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testOBJModelLoadUploadsAssimpMeshAndReportsMetadata() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU Assimp OBJ upload test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelPath = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_OBJ_TEST_PATH"
+        ] ?? packageRoot.appendingPathComponent(
+                "external/raylib/examples/models/resources/models/obj/cube.obj"
+            ).path
+        let model = try RenderServices.resources.loadModel(
+            path: modelPath,
+            flags: [.meshData, .highQuality]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+
+        XCTAssertTrue(model.isValid)
+        XCTAssertGreaterThan(metadata.meshCount, 0)
+        XCTAssertGreaterThan(metadata.materialCount, 0)
+        XCTAssertEqual(metadata.meshMaterialSlots.count, metadata.meshCount)
+        XCTAssertTrue(metadata.meshMaterialSlots.allSatisfy {
+            $0 >= 0 && $0 < metadata.materialCount
+        })
+        XCTAssertLessThan(metadata.bounds.minimum.x, metadata.bounds.maximum.x)
+        XCTAssertLessThan(metadata.bounds.minimum.y, metadata.bounds.maximum.y)
+        XCTAssertLessThan(metadata.bounds.minimum.z, metadata.bounds.maximum.z)
+
+        RenderServices.resources.destroyModel(model)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLBAnimationLibraryLoadsRealClipData() throws {
         #if os(Windows)
         RenderServices.uninstall()

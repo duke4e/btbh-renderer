@@ -712,6 +712,14 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
     target_compile_definitions(btbh_gpu PRIVATE SDL_MAIN_HANDLED)
     target_link_libraries(btbh_gpu PRIVATE SDL3::SDL3-static)
+    if(WIN32)
+        target_include_directories(
+            btbh_gpu
+            PRIVATE
+                "${R3D_ASSIMP_INC}"
+        )
+        target_link_libraries(btbh_gpu PRIVATE ${R3D_ASSIMP_LIB})
+    endif()
     set_property(TARGET btbh_gpu PROPERTY C_STANDARD 11)
     if(MSVC)
         target_compile_options(btbh_gpu PRIVATE /W4 /WX)
