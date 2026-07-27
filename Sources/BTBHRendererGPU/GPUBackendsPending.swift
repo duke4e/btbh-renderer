@@ -8,6 +8,7 @@ public enum GPUBackendUnsupportedError: Error, Equatable {
 enum GPUResourceStagingError: Error, Equatable {
     case missingAsset(String)
     case invalidTexture(UInt64)
+    case invalidRenderTarget(UInt64)
     case invalidFont(UInt64)
     case invalidFontDescriptor(String)
     case invalidModel(UInt64)
@@ -104,11 +105,16 @@ private struct GPUAmbientMapResource {
     let cubemap: CubemapHandle
 }
 
+private struct GPURenderTargetResource {
+    let colorTexture: TextureHandle
+}
+
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
     private let fontHandles = try? HandlePool(initialCapacity: 16)
+    private let renderTargetHandles = try? HandlePool(initialCapacity: 8)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
     private let meshHandles = try? HandlePool(initialCapacity: 32)
     private let materialHandles = try? HandlePool(initialCapacity: 64)
@@ -124,6 +130,9 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var fonts: [FontHandle: GPUFontProbeResource] = [:]
+    private var renderTargets: [
+        RenderTargetHandle: GPURenderTargetResource
+    ] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
     private var meshes: [MeshHandle: GPUCustomMeshResource] = [:]
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
@@ -339,9 +348,65 @@ final class GPUResourceBackend: RenderResourceBackend {
         return .init(x: maximumWidth, y: height)
     }
 
-    func createRenderTarget(_ descriptor: RenderTargetDescriptor) throws -> RenderTargetHandle { throw unsupported() }
-    func colorTexture(of target: RenderTargetHandle) throws -> TextureHandle { throw unsupported() }
-    func destroyRenderTarget(_ handle: RenderTargetHandle) {}
+    func createRenderTarget(
+        _ descriptor: RenderTargetDescriptor
+    ) throws -> RenderTargetHandle {
+        guard descriptor.colorFormat == .rgba8,
+              !descriptor.hasDepth,
+              let renderTargetHandles,
+              let textureHandles else {
+            throw GPUResourceStagingError.invalidRenderTarget(0)
+        }
+        let resource = try platform.createRenderTarget(
+            size: descriptor.size,
+            filter: descriptor.filter
+        )
+        let texture: TextureHandle
+        do {
+            texture = try textureHandles.acquire(TextureHandle.self)
+            textures[texture] = resource
+        } catch {
+            platform.destroyTexture(resource.pointer)
+            throw error
+        }
+        do {
+            let target = try renderTargetHandles.acquire(
+                RenderTargetHandle.self
+            )
+            renderTargets[target] = .init(colorTexture: texture)
+            return target
+        } catch {
+            destroyTextureNow(texture)
+            throw error
+        }
+    }
+
+    func colorTexture(
+        of target: RenderTargetHandle
+    ) throws -> TextureHandle {
+        guard let resource = renderTargets[target] else {
+            throw GPUResourceStagingError.invalidRenderTarget(
+                target.rawValue
+            )
+        }
+        return resource.colorTexture
+    }
+
+    func canvasRenderTarget(
+        _ target: RenderTargetHandle
+    ) throws -> GPUTextureProbeResource {
+        let texture = try colorTexture(of: target)
+        return try canvasTexture(texture)
+    }
+
+    func destroyRenderTarget(_ handle: RenderTargetHandle) {
+        guard let renderTargetHandles,
+              let resource = renderTargets.removeValue(forKey: handle),
+              renderTargetHandles.release(handle) else {
+            return
+        }
+        destroyTexture(resource.colorTexture)
+    }
     func loadModel(
         path: String,
         flags: ModelImportFlags
@@ -1737,6 +1802,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         ambientMaps.removeAll()
         pendingCubemapDestruction.removeAll()
         cubemaps.removeAll()
+        renderTargets.removeAll()
         for resource in meshes.values {
             platform.destroyCustomMesh(resource.storage.pointer)
         }

@@ -10,8 +10,13 @@ final class GPUCanvas: Canvas2DBackend {
     private var frameActive = false
     private var vertices: [GPUCanvasVertexProbe] = []
     private var batches: [GPUCanvasBatchProbe] = []
+    private var passes: [GPUCanvasPassProbe] = []
     private var blendMode = CanvasBlendMode.alpha
     private var scissors: [RenderRect] = []
+    private var currentTarget: GPUTextureProbeResource?
+    private var targetStack: [GPUTextureProbeResource?] = []
+    private var currentPassFirstBatch = 0
+    private var currentPassClearColor: RenderColor?
 
     init(platform: GPUPlatform, resources: GPUResourceBackend) {
         self.platform = platform
@@ -24,8 +29,13 @@ final class GPUCanvas: Canvas2DBackend {
         frameActive = true
         vertices.removeAll(keepingCapacity: true)
         batches.removeAll(keepingCapacity: true)
+        passes.removeAll(keepingCapacity: true)
         blendMode = .alpha
         scissors.removeAll(keepingCapacity: true)
+        currentTarget = nil
+        targetStack.removeAll(keepingCapacity: true)
+        currentPassFirstBatch = 0
+        currentPassClearColor = nil
     }
 
     func submit(_ command: CanvasCommand) {
@@ -36,6 +46,11 @@ final class GPUCanvas: Canvas2DBackend {
         switch command {
         case .clear(let color):
             clearColor = color
+            if batches.count > currentPassFirstBatch ||
+                currentPassClearColor != nil {
+                finishCurrentPass()
+            }
+            currentPassClearColor = color
         case .fillRect(let command):
             appendRect(command.rect, color: command.color)
         case .strokeRect(let command):
@@ -74,10 +89,24 @@ final class GPUCanvas: Canvas2DBackend {
             }
         case .setBlendMode(let mode):
             blendMode = mode
-        case .pushRenderTarget:
-            reject("canvas.pushRenderTarget")
+        case .pushRenderTarget(let target):
+            do {
+                let resource = try resources.canvasRenderTarget(target)
+                finishCurrentPass()
+                targetStack.append(currentTarget)
+                currentTarget = resource
+                currentPassClearColor = nil
+            } catch {
+                reject("canvas.pushRenderTarget")
+            }
         case .popRenderTarget:
-            reject("canvas.popRenderTarget")
+            guard let previous = targetStack.popLast() else {
+                reject("canvas.popRenderTarget")
+                return
+            }
+            finishCurrentPass()
+            currentTarget = previous
+            currentPassClearColor = nil
         }
     }
 
@@ -106,18 +135,22 @@ final class GPUCanvas: Canvas2DBackend {
             return
         }
         frameActive = false
+        finishCurrentPass()
+        if !targetStack.isEmpty || currentTarget != nil {
+            reject("canvas.unbalancedRenderTarget")
+        }
         if let unsupportedOperation {
             platform.failClosed(operation: unsupportedOperation)
             return
         }
         do {
-            if vertices.isEmpty {
+            if passes.isEmpty {
                 try platform.presentClear(clearColor)
             } else {
                 try platform.presentCanvas(
                     vertices: vertices,
                     batches: batches,
-                    clearColor: clearColor
+                    passes: passes
                 )
             }
         } catch {
@@ -137,6 +170,22 @@ final class GPUCanvas: Canvas2DBackend {
         if unsupportedOperation == nil {
             unsupportedOperation = operation
         }
+    }
+
+    private func finishCurrentPass() {
+        let batchCount = batches.count - currentPassFirstBatch
+        guard batchCount > 0 || currentPassClearColor != nil else {
+            currentPassFirstBatch = batches.count
+            return
+        }
+        passes.append(.init(
+            firstBatch: currentPassFirstBatch,
+            batchCount: batchCount,
+            target: currentTarget?.pointer,
+            clearColor: currentPassClearColor
+        ))
+        currentPassFirstBatch = batches.count
+        currentPassClearColor = nil
     }
 
     private func appendRect(_ rect: RenderRect, color: RenderColor) {

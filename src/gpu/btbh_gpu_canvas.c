@@ -314,6 +314,33 @@ static bool btbh_gpu_canvas_validate_batches(
     return true;
 }
 
+static bool btbh_gpu_canvas_validate_passes(
+    const BTBHGPUWindow *window,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    uint32_t batch_count
+) {
+    uint32_t expected_first_batch = 0u;
+    for (uint32_t index = 0u; index < pass_count; ++index) {
+        const BTBHGPUCanvasPass *pass = &passes[index];
+        if (
+            pass->first_batch != expected_first_batch ||
+            pass->batch_count > batch_count - expected_first_batch ||
+            (pass->target != NULL &&
+             (pass->target->owner != window ||
+              pass->target->format !=
+                SDL_GetGPUSwapchainTextureFormat(
+                    window->device->gpu,
+                    window->window
+                )))
+        ) {
+            return false;
+        }
+        expected_first_batch += pass->batch_count;
+    }
+    return expected_first_batch == batch_count;
+}
+
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
@@ -704,10 +731,8 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t vertex_count,
     const BTBHGPUCanvasBatch *batches,
     uint32_t batch_count,
-    uint8_t clear_red,
-    uint8_t clear_green,
-    uint8_t clear_blue,
-    uint8_t clear_alpha,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
     BTBHGPUCanvasReport *report
 ) {
     if (report == NULL) {
@@ -725,16 +750,22 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         textured_fragment_shader_path == NULL ||
         btbh_gpu_canvas_shader_format(shader_format) ==
             SDL_GPU_SHADERFORMAT_INVALID ||
-        vertices == NULL ||
-        vertex_count == 0u ||
-        batches == NULL ||
-        batch_count == 0u ||
+        (vertex_count != 0u && vertices == NULL) ||
+        (batch_count != 0u && batches == NULL) ||
+        passes == NULL ||
+        pass_count == 0u ||
         (uint64_t)vertex_count * sizeof(*vertices) > UINT32_MAX ||
         !btbh_gpu_canvas_validate_batches(
             window,
             batches,
             batch_count,
             vertex_count
+        ) ||
+        !btbh_gpu_canvas_validate_passes(
+            window,
+            passes,
+            pass_count,
+            batch_count
         )
     ) {
         btbh_gpu_canvas_error(
@@ -788,23 +819,238 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
 
     const uint32_t byte_count =
         vertex_count * (uint32_t)sizeof(*vertices);
-    SDL_GPUBufferCreateInfo buffer_info;
-    SDL_GPUTransferBufferCreateInfo transfer_info;
-    SDL_zero(buffer_info);
-    SDL_zero(transfer_info);
-    buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
-    buffer_info.size = byte_count;
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = byte_count;
-    SDL_GPUBuffer *vertex_buffer = SDL_CreateGPUBuffer(
-        device,
-        &buffer_info
-    );
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
-        device,
-        &transfer_info
-    );
-    if (vertex_buffer == NULL || transfer == NULL) {
+    SDL_GPUBuffer *vertex_buffer = NULL;
+    SDL_GPUTransferBuffer *transfer = NULL;
+    if (byte_count != 0u) {
+        SDL_GPUBufferCreateInfo buffer_info;
+        SDL_GPUTransferBufferCreateInfo transfer_info;
+        SDL_zero(buffer_info);
+        SDL_zero(transfer_info);
+        buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+        buffer_info.size = byte_count;
+        transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transfer_info.size = byte_count;
+        vertex_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+        transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+        if (vertex_buffer == NULL || transfer == NULL) {
+            if (transfer != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, transfer);
+            }
+            if (vertex_buffer != NULL) {
+                SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            }
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        void *mapped = SDL_MapGPUTransferBuffer(
+            device,
+            transfer,
+            false
+        );
+        if (mapped == NULL) {
+            SDL_ReleaseGPUTransferBuffer(device, transfer);
+            SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        (void)memcpy(mapped, vertices, byte_count);
+        SDL_UnmapGPUTransferBuffer(device, transfer);
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
+            window->pending_command
+        );
+        if (copy == NULL) {
+            SDL_ReleaseGPUTransferBuffer(device, transfer);
+            SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        SDL_GPUTransferBufferLocation source;
+        SDL_GPUBufferRegion destination;
+        SDL_zero(source);
+        SDL_zero(destination);
+        source.transfer_buffer = transfer;
+        destination.buffer = vertex_buffer;
+        destination.size = byte_count;
+        SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+        SDL_EndGPUCopyPass(copy);
+    }
+
+    bool screen_touched = had_scene;
+    for (uint32_t pass_index = 0u;
+         pass_index < pass_count;
+         ++pass_index) {
+        const BTBHGPUCanvasPass *canvas_pass = &passes[pass_index];
+        const bool is_screen = canvas_pass->target == NULL;
+        SDL_GPUTexture *target_texture = is_screen
+            ? window->pending_swapchain
+            : canvas_pass->target->texture;
+        const uint32_t target_width = is_screen
+            ? window->pending_drawable_width
+            : canvas_pass->target->width;
+        const uint32_t target_height = is_screen
+            ? window->pending_drawable_height
+            : canvas_pass->target->height;
+        SDL_GPUColorTargetInfo color_target;
+        SDL_zero(color_target);
+        color_target.texture = target_texture;
+        color_target.load_op =
+            canvas_pass->clear_enabled != 0u ||
+            (is_screen && !screen_touched)
+                ? SDL_GPU_LOADOP_CLEAR
+                : SDL_GPU_LOADOP_LOAD;
+        color_target.store_op = SDL_GPU_STOREOP_STORE;
+        color_target.clear_color.r =
+            (float)canvas_pass->clear_red / 255.0f;
+        color_target.clear_color.g =
+            (float)canvas_pass->clear_green / 255.0f;
+        color_target.clear_color.b =
+            (float)canvas_pass->clear_blue / 255.0f;
+        color_target.clear_color.a =
+            (float)canvas_pass->clear_alpha / 255.0f;
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
+            window->pending_command,
+            &color_target,
+            1u,
+            NULL
+        );
+        if (pass == NULL) {
+            if (transfer != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, transfer);
+            }
+            if (vertex_buffer != NULL) {
+                SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            }
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        const float uniforms[4] = {
+            (float)target_width,
+            (float)target_height,
+            0.0f,
+            0.0f
+        };
+        SDL_PushGPUVertexUniformData(
+            window->pending_command,
+            0u,
+            uniforms,
+            sizeof(uniforms)
+        );
+        if (canvas_pass->batch_count != 0u) {
+            SDL_GPUBufferBinding binding;
+            SDL_zero(binding);
+            binding.buffer = vertex_buffer;
+            SDL_BindGPUVertexBuffers(pass, 0u, &binding, 1u);
+        }
+        const uint32_t last_batch =
+            canvas_pass->first_batch + canvas_pass->batch_count;
+        for (uint32_t index = canvas_pass->first_batch;
+             index < last_batch;
+             ++index) {
+            const BTBHGPUCanvasBatch *batch = &batches[index];
+            if (batch->texture != NULL) {
+                SDL_BindGPUGraphicsPipeline(
+                    pass,
+                    window->canvas_runtime
+                        ->textured_pipelines[batch->blend_mode]
+                );
+                SDL_GPUTextureSamplerBinding sampler;
+                SDL_zero(sampler);
+                sampler.texture = batch->texture->texture;
+                sampler.sampler = batch->texture->sampler;
+                SDL_BindGPUFragmentSamplers(
+                    pass,
+                    0u,
+                    &sampler,
+                    1u
+                );
+            } else {
+                SDL_BindGPUGraphicsPipeline(
+                    pass,
+                    window->canvas_runtime
+                        ->solid_pipelines[batch->blend_mode]
+                );
+            }
+            SDL_Rect scissor;
+            if (batch->scissor_enabled != 0u) {
+                scissor.x = batch->scissor_x;
+                scissor.y = batch->scissor_y;
+                scissor.w = batch->scissor_width;
+                scissor.h = batch->scissor_height;
+            } else {
+                scissor.x = 0;
+                scissor.y = 0;
+                scissor.w = (int)target_width;
+                scissor.h = (int)target_height;
+            }
+            SDL_SetGPUScissor(pass, &scissor);
+            SDL_DrawGPUPrimitives(
+                pass,
+                batch->vertex_count,
+                1u,
+                batch->first_vertex,
+                0u
+            );
+        }
+        SDL_EndGPURenderPass(pass);
+        if (is_screen) {
+            screen_touched = true;
+        }
+    }
+    if (!screen_touched) {
+        SDL_GPUColorTargetInfo screen_target;
+        SDL_zero(screen_target);
+        screen_target.texture = window->pending_swapchain;
+        screen_target.load_op = SDL_GPU_LOADOP_CLEAR;
+        screen_target.store_op = SDL_GPU_STOREOP_STORE;
+        screen_target.clear_color.a = 1.0f;
+        SDL_GPURenderPass *screen_pass = SDL_BeginGPURenderPass(
+            window->pending_command,
+            &screen_target,
+            1u,
+            NULL
+        );
+        if (screen_pass == NULL) {
+            if (transfer != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, transfer);
+            }
+            if (vertex_buffer != NULL) {
+                SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            }
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        SDL_EndGPURenderPass(screen_pass);
+    }
+    const uint32_t drawable_width =
+        window->pending_drawable_width;
+    const uint32_t drawable_height =
+        window->pending_drawable_height;
+    if (!btbh_gpu_window_record_presented_frame(window)) {
         if (transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(device, transfer);
         }
@@ -819,157 +1065,16 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         );
         return report->result;
     }
-    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
-    if (mapped == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
-    }
-    (void)memcpy(mapped, vertices, byte_count);
-    SDL_UnmapGPUTransferBuffer(device, transfer);
-
-    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
-        window->pending_command
-    );
-    if (copy == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
-    }
-    SDL_GPUTransferBufferLocation source;
-    SDL_GPUBufferRegion destination;
-    SDL_zero(source);
-    SDL_zero(destination);
-    source.transfer_buffer = transfer;
-    destination.buffer = vertex_buffer;
-    destination.size = byte_count;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy);
-
-    SDL_GPUColorTargetInfo color_target;
-    SDL_zero(color_target);
-    color_target.texture = window->pending_swapchain;
-    color_target.load_op = had_scene
-        ? SDL_GPU_LOADOP_LOAD
-        : SDL_GPU_LOADOP_CLEAR;
-    color_target.store_op = SDL_GPU_STOREOP_STORE;
-    color_target.clear_color.r = (float)clear_red / 255.0f;
-    color_target.clear_color.g = (float)clear_green / 255.0f;
-    color_target.clear_color.b = (float)clear_blue / 255.0f;
-    color_target.clear_color.a = (float)clear_alpha / 255.0f;
-    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
-        window->pending_command,
-        &color_target,
-        1u,
-        NULL
-    );
-    if (pass == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
-    }
-    const float uniforms[4] = {
-        (float)window->pending_drawable_width,
-        (float)window->pending_drawable_height,
-        0.0f,
-        0.0f
-    };
-    SDL_PushGPUVertexUniformData(
-        window->pending_command,
-        0u,
-        uniforms,
-        sizeof(uniforms)
-    );
-    SDL_GPUBufferBinding binding;
-    SDL_zero(binding);
-    binding.buffer = vertex_buffer;
-    SDL_BindGPUVertexBuffers(pass, 0u, &binding, 1u);
-    for (uint32_t index = 0u; index < batch_count; ++index) {
-        const BTBHGPUCanvasBatch *batch = &batches[index];
-        if (batch->texture != NULL) {
-            SDL_BindGPUGraphicsPipeline(
-                pass,
-                window->canvas_runtime
-                    ->textured_pipelines[batch->blend_mode]
-            );
-            SDL_GPUTextureSamplerBinding sampler;
-            SDL_zero(sampler);
-            sampler.texture = batch->texture->texture;
-            sampler.sampler = batch->texture->sampler;
-            SDL_BindGPUFragmentSamplers(
-                pass,
-                0u,
-                &sampler,
-                1u
-            );
-        } else {
-            SDL_BindGPUGraphicsPipeline(
-                pass,
-                window->canvas_runtime
-                    ->solid_pipelines[batch->blend_mode]
-            );
-        }
-        SDL_Rect scissor;
-        if (batch->scissor_enabled != 0u) {
-            scissor.x = batch->scissor_x;
-            scissor.y = batch->scissor_y;
-            scissor.w = batch->scissor_width;
-            scissor.h = batch->scissor_height;
-        } else {
-            scissor.x = 0;
-            scissor.y = 0;
-            scissor.w = (int)window->pending_drawable_width;
-            scissor.h = (int)window->pending_drawable_height;
-        }
-        SDL_SetGPUScissor(pass, &scissor);
-        SDL_DrawGPUPrimitives(
-            pass,
-            batch->vertex_count,
-            1u,
-            batch->first_vertex,
-            0u
-        );
-    }
-    SDL_EndGPURenderPass(pass);
-    const uint32_t drawable_width =
-        window->pending_drawable_width;
-    const uint32_t drawable_height =
-        window->pending_drawable_height;
-    if (!btbh_gpu_window_record_presented_frame(window)) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
-    }
     const bool submitted = btbh_gpu_window_finish_pending_frame(
         window,
         true
     );
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
-    SDL_ReleaseGPUBuffer(device, vertex_buffer);
+    if (transfer != NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+    }
+    if (vertex_buffer != NULL) {
+        SDL_ReleaseGPUBuffer(device, vertex_buffer);
+    }
     if (!submitted) {
         btbh_gpu_canvas_error(
             report,

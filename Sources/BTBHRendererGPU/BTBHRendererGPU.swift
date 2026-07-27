@@ -256,6 +256,13 @@ struct GPUCanvasBatchProbe {
     }
 }
 
+struct GPUCanvasPassProbe {
+    let firstBatch: Int
+    let batchCount: Int
+    let target: OpaquePointer?
+    let clearColor: RenderColor?
+}
+
 enum GPUSceneGeometryProbe {
     case model(OpaquePointer)
     case customMesh(OpaquePointer)
@@ -585,6 +592,43 @@ public final class GPUWindowProbe {
 
     static func destroyTexture(_ texture: OpaquePointer) {
         btbh_gpu_texture_destroy(texture)
+    }
+
+    func createRenderTarget(
+        size: PixelSize2D,
+        filter: TextureFilter
+    ) throws -> GPUTextureProbeResource {
+        guard let window, !isShutdown,
+              size.width > 0,
+              size.height > 0,
+              size.width <= Int(UInt32.max),
+              size.height <= Int(UInt32.max) else {
+            throw GPUTextureProbeError.operationFailed(
+                message: "Invalid GPU render-target descriptor"
+            )
+        }
+        let nativeFilter: BTBHGPUTextureFilter
+        switch filter {
+        case .nearest:
+            nativeFilter = BTBH_GPU_TEXTURE_FILTER_NEAREST
+        case .bilinear:
+            nativeFilter = BTBH_GPU_TEXTURE_FILTER_LINEAR
+        case .trilinear:
+            nativeFilter = BTBH_GPU_TEXTURE_FILTER_TRILINEAR
+        }
+        var report = BTBHGPUTextureReport()
+        guard let texture = btbh_gpu_window_render_target_create(
+            window,
+            UInt32(size.width),
+            UInt32(size.height),
+            nativeFilter,
+            &report
+        ) else {
+            throw GPUTextureProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(pointer: texture, size: size, mipCount: 1)
     }
 
     func loadFont(
@@ -946,13 +990,13 @@ public final class GPUWindowProbe {
         shaderFormat: BTBHGPUShaderFormat,
         vertices: [GPUCanvasVertexProbe],
         batches: [GPUCanvasBatchProbe],
-        clearColor: RenderColor
+        passes: [GPUCanvasPassProbe]
     ) throws {
         guard let window, !isShutdown,
-              !vertices.isEmpty,
               vertices.count <= Int(UInt32.max),
-              !batches.isEmpty,
-              batches.count <= Int(UInt32.max) else {
+              batches.count <= Int(UInt32.max),
+              !passes.isEmpty,
+              passes.count <= Int(UInt32.max) else {
             throw GPUCanvasProbeError.operationFailed(
                 message: "Invalid GPU canvas data"
             )
@@ -1007,6 +1051,28 @@ public final class GPUWindowProbe {
             }
             return native
         }
+        let nativePasses = try passes.map { pass in
+            guard pass.firstBatch >= 0,
+                  pass.firstBatch <= Int(UInt32.max),
+                  pass.batchCount >= 0,
+                  pass.batchCount <= Int(UInt32.max) else {
+                throw GPUCanvasProbeError.operationFailed(
+                    message: "GPU canvas pass exceeds UInt32"
+                )
+            }
+            var native = BTBHGPUCanvasPass()
+            native.first_batch = UInt32(pass.firstBatch)
+            native.batch_count = UInt32(pass.batchCount)
+            native.target = pass.target
+            if let clear = pass.clearColor {
+                native.clear_enabled = 1
+                native.clear_red = clear.r
+                native.clear_green = clear.g
+                native.clear_blue = clear.b
+                native.clear_alpha = clear.a
+            }
+            return native
+        }
         var report = BTBHGPUCanvasReport()
         let result = vertexShaderPath.withCString { vertexPath in
             fragmentShaderPath.withCString { fragmentPath in
@@ -1014,22 +1080,23 @@ public final class GPUWindowProbe {
                     texturedFragmentPath in
                     nativeVertices.withUnsafeBufferPointer { vertexData in
                         nativeBatches.withUnsafeBufferPointer { batchData in
-                            btbh_gpu_window_canvas_present(
-                                window,
-                                vertexPath,
-                                fragmentPath,
-                                texturedFragmentPath,
-                                shaderFormat,
-                                vertexData.baseAddress,
-                                UInt32(nativeVertices.count),
-                                batchData.baseAddress,
-                                UInt32(nativeBatches.count),
-                                clearColor.r,
-                                clearColor.g,
-                                clearColor.b,
-                                clearColor.a,
-                                &report
-                            )
+                            nativePasses.withUnsafeBufferPointer {
+                                passData in
+                                btbh_gpu_window_canvas_present(
+                                    window,
+                                    vertexPath,
+                                    fragmentPath,
+                                    texturedFragmentPath,
+                                    shaderFormat,
+                                    vertexData.baseAddress,
+                                    UInt32(nativeVertices.count),
+                                    batchData.baseAddress,
+                                    UInt32(nativeBatches.count),
+                                    passData.baseAddress,
+                                    UInt32(nativePasses.count),
+                                    &report
+                                )
+                            }
                         }
                     }
                 }

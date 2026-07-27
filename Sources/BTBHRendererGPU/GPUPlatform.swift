@@ -291,6 +291,16 @@ public final class GPUPlatform: GamePlatform {
         GPUWindowProbe.destroyTexture(texture)
     }
 
+    func createRenderTarget(
+        size: PixelSize2D,
+        filter: TextureFilter
+    ) throws -> GPUTextureProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.createRenderTarget(size: size, filter: filter)
+    }
+
     func loadFont(
         path: String,
         baseSize: UInt32,
@@ -448,7 +458,7 @@ public final class GPUPlatform: GamePlatform {
     func presentCanvas(
         vertices: [GPUCanvasVertexProbe],
         batches: [GPUCanvasBatchProbe],
-        clearColor: RenderColor
+        passes: [GPUCanvasPassProbe]
     ) throws {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
@@ -495,7 +505,7 @@ public final class GPUPlatform: GamePlatform {
             shaderFormat: shaderFormat,
             vertices: vertices,
             batches: batches,
-            clearColor: clearColor
+            passes: passes
         )
     }
 

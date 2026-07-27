@@ -1217,6 +1217,73 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testCanvasRendersOffscreenTargetBackToPresentedFrame() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU render target test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let target = try RenderServices.resources.createRenderTarget(.init(
+            size: .init(width: 64, height: 64),
+            colorFormat: .rgba8,
+            hasDepth: false,
+            filter: .nearest
+        ))
+        let texture = try RenderServices.resources.colorTexture(of: target)
+        defer { RenderServices.resources.destroyRenderTarget(target) }
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.pushRenderTarget(target))
+        RenderServices.canvas.submit(.clear(.init(
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255
+        )))
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(x: 16, y: 16, width: 32, height: 32),
+            color: .white
+        )))
+        RenderServices.canvas.submit(.popRenderTarget)
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.texturedQuad(.init(
+            texture: texture,
+            source: .init(x: 0, y: 0, width: 64, height: 64),
+            destination: .init(x: 20, y: 20, width: 64, height: 64),
+            origin: .zero,
+            rotationDegrees: 0,
+            tint: .white
+        )))
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let redOffset = (25 * 320 + 25) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[redOffset..<(redOffset + 4)]),
+            [255, 0, 0, 255]
+        )
+        let whiteOffset = (50 * 320 + 50) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[whiteOffset..<(whiteOffset + 4)]),
+            [255, 255, 255, 255]
+        )
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan render-target test runs only on Windows")
+        #endif
+    }
+
     func testAnimationTreeTracksValidatedClipAndSwitchState() throws {
         #if os(Windows)
         RenderServices.uninstall()

@@ -248,6 +248,18 @@ typedef struct BTBHGPUCanvasBatch {
     uint8_t reserved[3];
 } BTBHGPUCanvasBatch;
 
+typedef struct BTBHGPUCanvasPass {
+    uint32_t first_batch;
+    uint32_t batch_count;
+    BTBHGPUTexture *target;
+    uint8_t clear_enabled;
+    uint8_t clear_red;
+    uint8_t clear_green;
+    uint8_t clear_blue;
+    uint8_t clear_alpha;
+    uint8_t reserved[3];
+} BTBHGPUCanvasPass;
+
 typedef struct BTBHGPUCanvasReport {
     BTBHGPUResult result;
     uint32_t drawable_width;
@@ -414,6 +426,13 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report
 );
+BTBHGPUTexture *btbh_gpu_window_render_target_create(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureReport *report
+);
 void btbh_gpu_texture_destroy(BTBHGPUTexture *texture);
 BTBHGPUFont *btbh_gpu_window_font_load(
     BTBHGPUWindow *window,
@@ -440,10 +459,8 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t vertex_count,
     const BTBHGPUCanvasBatch *batches,
     uint32_t batch_count,
-    uint8_t clear_red,
-    uint8_t clear_green,
-    uint8_t clear_blue,
-    uint8_t clear_alpha,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
     BTBHGPUCanvasReport *report
 );
 BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(

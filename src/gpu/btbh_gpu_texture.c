@@ -223,6 +223,40 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
     return resource;
 }
 
+BTBHGPUTexture *btbh_gpu_window_render_target_create(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureReport *report
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        report == NULL
+    ) {
+        return NULL;
+    }
+    const SDL_GPUTextureFormat format =
+        SDL_GetGPUSwapchainTextureFormat(
+            window->device->gpu,
+            window->window
+        );
+    return btbh_gpu_window_texture_create_empty(
+        window,
+        width,
+        height,
+        format,
+        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+            SDL_GPU_TEXTUREUSAGE_SAMPLER,
+        filter,
+        BTBH_GPU_TEXTURE_WRAP_CLAMP,
+        report
+    );
+}
+
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     BTBHGPUWindow *window,
     const uint8_t *pixels,
