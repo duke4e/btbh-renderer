@@ -24,6 +24,12 @@ private struct GPUScreenShaderResource {
     var parameters: [String: ShaderParameterValue]
 }
 
+private struct GPUSurfaceShaderResource {
+    let vertexPath: String?
+    let fragmentPath: String
+    var parameters: [String: ShaderParameterValue]
+}
+
 private struct GPUAnimationClipState {
     let animationIndex: Int
     let loop: Bool
@@ -76,6 +82,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         initialCapacity: 8
     )
     private let animationTreeHandles = try? HandlePool(initialCapacity: 16)
+    private let surfaceShaderHandles = try? HandlePool(initialCapacity: 8)
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
@@ -86,11 +93,16 @@ final class GPUResourceBackend: RenderResourceBackend {
     private var animationTrees: [
         AnimationTreeHandle: GPUAnimationTreeResource
     ] = [:]
+    private var surfaceShaders: [
+        SurfaceShaderHandle: GPUSurfaceShaderResource
+    ] = [:]
     private var screenShaders: [
         ScreenShaderHandle: GPUScreenShaderResource
     ] = [:]
     private var pendingTextureDestruction: Set<TextureHandle> = []
     private var pendingModelDestruction: Set<ModelHandle> = []
+    private var pendingSurfaceShaderDestruction:
+        Set<SurfaceShaderHandle> = []
     private var pendingAnimationLibraryDestruction:
         Set<AnimationLibraryHandle> = []
 
@@ -512,9 +524,71 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createAmbientMap(from cubemap: CubemapHandle) throws -> AmbientMapHandle { throw unsupported() }
     func destroyCubemap(_ handle: CubemapHandle) {}
     func destroyAmbientMap(_ handle: AmbientMapHandle) {}
-    func createSurfaceShader(_ descriptor: SurfaceShaderDescriptor) throws -> SurfaceShaderHandle { throw unsupported() }
-    func updateSurfaceShader(_ handle: SurfaceShaderHandle, parameter: String, value: ShaderParameterValue) throws { throw unsupported() }
-    func destroySurfaceShader(_ handle: SurfaceShaderHandle) {}
+    func createSurfaceShader(
+        _ descriptor: SurfaceShaderDescriptor
+    ) throws -> SurfaceShaderHandle {
+        if let vertexPath = descriptor.vertexPath {
+            try validateShaderAsset(vertexPath)
+        }
+        try validateShaderAsset(descriptor.fragmentPath)
+        try validateTextureDependencies(descriptor.parameters)
+        guard let surfaceShaderHandles else {
+            throw GPUResourceStagingError.invalidSurfaceShader(0)
+        }
+        let handle = try surfaceShaderHandles.acquire(
+            SurfaceShaderHandle.self
+        )
+        surfaceShaders[handle] = .init(
+            vertexPath: descriptor.vertexPath,
+            fragmentPath: descriptor.fragmentPath,
+            parameters: descriptor.parameters
+        )
+        return handle
+    }
+
+    func updateSurfaceShader(
+        _ handle: SurfaceShaderHandle,
+        parameter: String,
+        value: ShaderParameterValue
+    ) throws {
+        guard
+            !pendingSurfaceShaderDestruction.contains(handle),
+            var resource = surfaceShaders[handle]
+        else {
+            throw GPUResourceStagingError.invalidSurfaceShader(
+                handle.rawValue
+            )
+        }
+        try validateTextureDependencies([parameter: value])
+        let oldDependencies = Self.textureDependencies(
+            in: resource.parameters
+        )
+        resource.parameters[parameter] = value
+        surfaceShaders[handle] = resource
+        collectPendingTextures(oldDependencies)
+    }
+
+    func destroySurfaceShader(_ handle: SurfaceShaderHandle) {
+        if isSurfaceShaderReferenced(handle) {
+            pendingSurfaceShaderDestruction.insert(handle)
+            return
+        }
+        destroySurfaceShaderNow(handle)
+    }
+
+    private func destroySurfaceShaderNow(_ handle: SurfaceShaderHandle) {
+        guard
+            let surfaceShaderHandles,
+            let resource = surfaceShaders.removeValue(forKey: handle),
+            surfaceShaderHandles.release(handle)
+        else {
+            return
+        }
+        pendingSurfaceShaderDestruction.remove(handle)
+        collectPendingTextures(
+            Self.textureDependencies(in: resource.parameters)
+        )
+    }
     func createScreenShader(
         _ descriptor: ScreenShaderDescriptor
     ) throws -> ScreenShaderHandle {
@@ -703,7 +777,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         {
             throw GPUResourceStagingError.invalidTexture(handle.rawValue)
         }
-        if let surfaceShader {
+        if let surfaceShader,
+            pendingSurfaceShaderDestruction.contains(surfaceShader) ||
+            surfaceShaders[surfaceShader] == nil
+        {
             throw GPUResourceStagingError.invalidSurfaceShader(
                 surfaceShader.rawValue
             )
@@ -717,6 +794,9 @@ final class GPUResourceBackend: RenderResourceBackend {
             collectPendingModel(model)
         }
         collectPendingTextures(resource.textureDependencies)
+        if let surfaceShader = resource.surfaceShaderDependency {
+            collectPendingSurfaceShader(surfaceShader)
+        }
     }
 
     private func isModelReferenced(_ handle: ModelHandle) -> Bool {
@@ -729,8 +809,18 @@ final class GPUResourceBackend: RenderResourceBackend {
     private func isTextureReferenced(_ handle: TextureHandle) -> Bool {
         screenShaders.values.contains(where: {
             Self.textureDependencies(in: $0.parameters).contains(handle)
+        }) || surfaceShaders.values.contains(where: {
+            Self.textureDependencies(in: $0.parameters).contains(handle)
         }) || materials.values.contains(where: {
             $0.textureDependencies.contains(handle)
+        })
+    }
+
+    private func isSurfaceShaderReferenced(
+        _ handle: SurfaceShaderHandle
+    ) -> Bool {
+        materials.values.contains(where: {
+            $0.surfaceShaderDependency == handle
         })
     }
 
@@ -861,7 +951,9 @@ final class GPUResourceBackend: RenderResourceBackend {
 
     func shutdown() {
         screenShaders.removeAll()
+        surfaceShaders.removeAll()
         pendingTextureDestruction.removeAll()
+        pendingSurfaceShaderDestruction.removeAll()
         animationTrees.removeAll()
         materials.removeAll()
         pendingAnimationLibraryDestruction.removeAll()
@@ -890,6 +982,31 @@ final class GPUResourceBackend: RenderResourceBackend {
         {
             throw GPUResourceStagingError.invalidTexture(handle.rawValue)
         }
+    }
+
+    private func validateShaderAsset(_ path: String) throws {
+        var isDirectory: ObjCBool = false
+        guard
+            FileManager.default.fileExists(
+                atPath: path,
+                isDirectory: &isDirectory
+            ),
+            !isDirectory.boolValue
+        else {
+            throw GPUResourceStagingError.missingAsset(path)
+        }
+    }
+
+    private func collectPendingSurfaceShader(
+        _ handle: SurfaceShaderHandle
+    ) {
+        guard
+            pendingSurfaceShaderDestruction.contains(handle),
+            !isSurfaceShaderReferenced(handle)
+        else {
+            return
+        }
+        destroySurfaceShaderNow(handle)
     }
 
     private func collectPendingTextures(

@@ -266,6 +266,127 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testSurfaceShaderStagesPathsParametersAndDependencyLifetimes() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU staged surface shader test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let vertexPath = packageRoot
+            .appendingPathComponent("shaders/scene/scene.vert")
+            .path
+        let fragmentPath = packageRoot
+            .appendingPathComponent("shaders/scene/forward.frag")
+            .path
+        let texturePath = packageRoot
+            .appendingPathComponent("external/SDL/test/icon.png")
+            .path
+
+        XCTAssertThrowsError(
+            try RenderServices.resources.createSurfaceShader(.init(
+                vertexPath: nil,
+                fragmentPath: packageRoot
+                    .appendingPathComponent("missing-surface.frag")
+                    .path,
+                parameters: [:]
+            ))
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createSurfaceShader(.init(
+                vertexPath: packageRoot
+                    .appendingPathComponent("missing-surface.vert")
+                    .path,
+                fragmentPath: fragmentPath,
+                parameters: [:]
+            ))
+        )
+
+        let texture = try RenderServices.resources.loadTexture(.init(
+            path: texturePath
+        ))
+        let shader = try RenderServices.resources.createSurfaceShader(.init(
+            vertexPath: vertexPath,
+            fragmentPath: fragmentPath,
+            parameters: [
+                "u_texture": .texture(texture),
+                "roughness": .float(0.5),
+            ]
+        ))
+        XCTAssertTrue(shader.isValid)
+
+        var descriptor = MaterialDescriptor.default
+        descriptor.surfaceShader = shader
+        let material = try RenderServices.resources.createMaterial(descriptor)
+        RenderServices.resources.destroyTexture(texture)
+        RenderServices.resources.destroySurfaceShader(shader)
+        XCTAssertThrowsError(
+            try RenderServices.resources.updateSurfaceShader(
+                shader,
+                parameter: "roughness",
+                value: .float(0.8)
+            )
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createMaterial(descriptor)
+        )
+
+        try RenderServices.resources.updateMaterial(
+            material,
+            descriptor: .default
+        )
+        let replacementTexture = try RenderServices.resources.loadTexture(
+            .init(path: texturePath)
+        )
+        XCTAssertNotEqual(replacementTexture.rawValue, texture.rawValue)
+        let replacementShader = try RenderServices.resources
+            .createSurfaceShader(.init(
+                vertexPath: nil,
+                fragmentPath: fragmentPath,
+                parameters: ["u_texture": .texture(replacementTexture)]
+            ))
+        XCTAssertNotEqual(replacementShader.rawValue, shader.rawValue)
+
+        RenderServices.resources.destroyTexture(replacementTexture)
+        try RenderServices.resources.updateSurfaceShader(
+            replacementShader,
+            parameter: "u_texture",
+            value: .float(1)
+        )
+        let finalTexture = try RenderServices.resources.loadTexture(
+            .init(path: texturePath)
+        )
+        XCTAssertNotEqual(finalTexture.rawValue, replacementTexture.rawValue)
+        RenderServices.resources.destroySurfaceShader(replacementShader)
+        XCTAssertThrowsError(
+            try RenderServices.resources.updateSurfaceShader(
+                replacementShader,
+                parameter: "u_texture",
+                value: .float(0)
+            )
+        )
+        RenderServices.resources.destroyMaterial(material)
+        RenderServices.resources.destroyTexture(finalTexture)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
         #if os(Windows)
         RenderServices.uninstall()
