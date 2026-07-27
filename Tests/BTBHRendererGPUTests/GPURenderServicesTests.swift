@@ -1848,6 +1848,41 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testExternalModelTextureLoadsRelativeToGLTF() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU external texture test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/external-texture-triangle.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        RenderServices.resources.destroyModel(model)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testModelInstancesPresentsLoadedGeometryWithoutFailClosing() throws {
         #if os(Windows)
         RenderServices.uninstall()
