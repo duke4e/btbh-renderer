@@ -37,11 +37,12 @@ public final class GPURenderServicesBundle: RenderBackendBundle {
             debugMode: debugMode
         )
         gpuPlatform = platform
-        gpuCanvas = GPUCanvas(platform: platform)
-        gpuResources = GPUResourceBackend(platform: platform)
+        let resources = GPUResourceBackend(platform: platform)
+        gpuResources = resources
+        gpuCanvas = GPUCanvas(platform: platform, resources: resources)
         gpuScene = GPUSceneBackend(
             platform: platform,
-            resources: gpuResources
+            resources: resources
         )
     }
 

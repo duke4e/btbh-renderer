@@ -166,6 +166,7 @@ typedef struct BTBHGPUPlatformSnapshot {
 
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
+typedef struct BTBHGPUFont BTBHGPUFont;
 typedef struct BTBHGPUModel BTBHGPUModel;
 typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
 typedef struct BTBHGPUCustomMesh BTBHGPUCustomMesh;
@@ -190,6 +191,31 @@ typedef struct BTBHGPUTextureReport {
     uint32_t mip_count;
     char message[256];
 } BTBHGPUTextureReport;
+
+typedef struct BTBHGPUFontReport {
+    BTBHGPUResult result;
+    uint32_t base_size;
+    uint32_t glyph_count;
+    uint32_t atlas_width;
+    uint32_t atlas_height;
+    float ascent;
+    float descent;
+    float line_gap;
+    char message[256];
+} BTBHGPUFontReport;
+
+typedef struct BTBHGPUFontGlyph {
+    uint32_t codepoint;
+    float advance;
+    float offset_x;
+    float offset_y;
+    float width;
+    float height;
+    float u0;
+    float v0;
+    float u1;
+    float v1;
+} BTBHGPUFontGlyph;
 
 typedef struct BTBHGPUModelReport {
     BTBHGPUResult result;
@@ -349,6 +375,21 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUTextureReport *report
 );
 void btbh_gpu_texture_destroy(BTBHGPUTexture *texture);
+BTBHGPUFont *btbh_gpu_window_font_load(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint32_t base_size,
+    const uint32_t *glyphs,
+    uint32_t glyph_count,
+    BTBHGPUFontReport *report
+);
+BTBHGPUResult btbh_gpu_font_glyph(
+    const BTBHGPUFont *font,
+    uint32_t codepoint,
+    BTBHGPUFontGlyph *glyph
+);
+BTBHGPUTexture *btbh_gpu_font_atlas(BTBHGPUFont *font);
+void btbh_gpu_font_destroy(BTBHGPUFont *font);
 BTBHGPUModel *btbh_gpu_window_model_load(
     BTBHGPUWindow *window,
     const char *path,

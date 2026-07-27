@@ -165,6 +165,27 @@ struct GPUTextureProbeResource {
     let mipCount: Int
 }
 
+enum GPUFontProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUFontGlyphProbe {
+    let advance: Float
+    let offset: RenderVec2
+    let size: RenderVec2
+    let uvMinimum: RenderVec2
+    let uvMaximum: RenderVec2
+}
+
+struct GPUFontProbeResource {
+    let pointer: OpaquePointer
+    let atlasTexture: OpaquePointer
+    let baseSize: Int
+    let ascent: Float
+    let descent: Float
+    let lineGap: Float
+}
+
 enum GPUModelProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
@@ -522,6 +543,73 @@ public final class GPUWindowProbe {
 
     static func destroyTexture(_ texture: OpaquePointer) {
         btbh_gpu_texture_destroy(texture)
+    }
+
+    func loadFont(
+        path: String,
+        baseSize: UInt32,
+        glyphs: [UInt32]
+    ) throws -> GPUFontProbeResource {
+        guard let window, !isShutdown, !glyphs.isEmpty else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "loadFont",
+                stage: -1,
+                message: "Invalid GPU font load request"
+            )
+        }
+        var report = BTBHGPUFontReport()
+        let font = path.withCString { pathPointer in
+            glyphs.withUnsafeBufferPointer { glyphBuffer in
+                btbh_gpu_window_font_load(
+                    window,
+                    pathPointer,
+                    baseSize,
+                    glyphBuffer.baseAddress,
+                    UInt32(glyphs.count),
+                    &report
+                )
+            }
+        }
+        guard let font, let atlas = btbh_gpu_font_atlas(font) else {
+            throw GPUFontProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(
+            pointer: font,
+            atlasTexture: atlas,
+            baseSize: Int(report.base_size),
+            ascent: report.ascent,
+            descent: report.descent,
+            lineGap: report.line_gap
+        )
+    }
+
+    static func fontGlyph(
+        _ font: OpaquePointer,
+        codepoint: UInt32
+    ) throws -> GPUFontGlyphProbe {
+        var glyph = BTBHGPUFontGlyph()
+        guard btbh_gpu_font_glyph(
+            font,
+            codepoint,
+            &glyph
+        ) == BTBH_GPU_OK else {
+            throw GPUFontProbeError.operationFailed(
+                message: "Font does not contain codepoint \(codepoint)"
+            )
+        }
+        return .init(
+            advance: glyph.advance,
+            offset: .init(x: glyph.offset_x, y: glyph.offset_y),
+            size: .init(x: glyph.width, y: glyph.height),
+            uvMinimum: .init(x: glyph.u0, y: glyph.v0),
+            uvMaximum: .init(x: glyph.u1, y: glyph.v1)
+        )
+    }
+
+    static func destroyFont(_ font: OpaquePointer) {
+        btbh_gpu_font_destroy(font)
     }
 
     func loadModel(path: String) throws -> GPUModelProbeResource {

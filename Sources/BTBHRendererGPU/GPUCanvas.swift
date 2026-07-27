@@ -3,12 +3,14 @@ import BTBHRenderer
 @MainActor
 final class GPUCanvas: Canvas2DBackend {
     private let platform: GPUPlatform
+    private let resources: GPUResourceBackend
     private var clearColor = RenderColor.black
     private var unsupportedOperation: String?
     private var frameActive = false
 
-    init(platform: GPUPlatform) {
+    init(platform: GPUPlatform, resources: GPUResourceBackend) {
         self.platform = platform
+        self.resources = resources
     }
 
     func beginFrame() {
@@ -64,12 +66,17 @@ final class GPUCanvas: Canvas2DBackend {
         size: Float,
         spacing: Float
     ) -> RenderVec2 {
-        _ = text
-        _ = font
-        _ = size
-        _ = spacing
-        reject("canvas.measureText")
-        return .zero
+        do {
+            return try resources.measureText(
+                text,
+                font: font,
+                size: size,
+                spacing: spacing
+            )
+        } catch {
+            platform.failClosed(operation: "canvas.measureText")
+            return .zero
+        }
     }
 
     func endFrame() {

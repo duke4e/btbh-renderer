@@ -8,6 +8,8 @@ public enum GPUBackendUnsupportedError: Error, Equatable {
 enum GPUResourceStagingError: Error, Equatable {
     case missingAsset(String)
     case invalidTexture(UInt64)
+    case invalidFont(UInt64)
+    case invalidFontDescriptor(String)
     case invalidModel(UInt64)
     case invalidMesh(UInt64)
     case invalidMeshDescriptor(String)
@@ -106,6 +108,7 @@ private struct GPUAmbientMapResource {
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
+    private let fontHandles = try? HandlePool(initialCapacity: 16)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
     private let meshHandles = try? HandlePool(initialCapacity: 32)
     private let materialHandles = try? HandlePool(initialCapacity: 64)
@@ -120,6 +123,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let surfaceShaderHandles = try? HandlePool(initialCapacity: 8)
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
+    private var fonts: [FontHandle: GPUFontProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
     private var meshes: [MeshHandle: GPUCustomMeshResource] = [:]
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
@@ -194,8 +198,103 @@ final class GPUResourceBackend: RenderResourceBackend {
         platform.destroyTexture(resource.pointer)
         pendingTextureDestruction.remove(handle)
     }
-    func loadFont(_ descriptor: FontDescriptor) throws -> FontHandle { throw unsupported() }
-    func destroyFont(_ handle: FontHandle) {}
+    func loadFont(_ descriptor: FontDescriptor) throws -> FontHandle {
+        trace("loadFont")
+        guard descriptor.baseSize > 0,
+              descriptor.baseSize <= Int(UInt32.max) else {
+            throw GPUResourceStagingError.invalidFontDescriptor(
+                "Font base size must fit a positive UInt32"
+            )
+        }
+        guard let fontHandles else {
+            throw GPUResourceStagingError.invalidFontDescriptor(
+                "Could not allocate the font handle pool"
+            )
+        }
+        var glyphs = descriptor.glyphs.isEmpty
+            ? Array(UInt32(32)...UInt32(255))
+            : descriptor.glyphs
+        if !glyphs.contains(63) {
+            glyphs.append(63)
+        }
+        var seen = Set<UInt32>()
+        glyphs = glyphs.filter {
+            $0 <= 0x10ffff && seen.insert($0).inserted
+        }
+        guard !glyphs.isEmpty else {
+            throw GPUResourceStagingError.invalidFontDescriptor(
+                "Font requires at least one valid Unicode scalar"
+            )
+        }
+        let resource = try platform.loadFont(
+            path: descriptor.path,
+            baseSize: UInt32(descriptor.baseSize),
+            glyphs: glyphs
+        )
+        do {
+            let handle = try fontHandles.acquire(FontHandle.self)
+            fonts[handle] = resource
+            return handle
+        } catch {
+            platform.destroyFont(resource.pointer)
+            throw error
+        }
+    }
+
+    func destroyFont(_ handle: FontHandle) {
+        guard let fontHandles,
+              let resource = fonts.removeValue(forKey: handle),
+              fontHandles.release(handle) else {
+            return
+        }
+        platform.destroyFont(resource.pointer)
+    }
+
+    func measureText(
+        _ text: String,
+        font handle: FontHandle,
+        size: Float,
+        spacing: Float
+    ) throws -> RenderVec2 {
+        guard let resource = fonts[handle] else {
+            throw GPUResourceStagingError.invalidFont(handle.rawValue)
+        }
+        guard size > 0, size.isFinite, spacing.isFinite else {
+            throw GPUResourceStagingError.invalidFontDescriptor(
+                "Text size must be positive and text metrics must be finite"
+            )
+        }
+        let scale = size / Float(resource.baseSize)
+        var maximumWidth: Float = 0
+        var lineWidth: Float = 0
+        var glyphCount = 0
+        var lineCount = 1
+        for scalar in text.unicodeScalars {
+            if scalar.value == 10 {
+                maximumWidth = max(maximumWidth, lineWidth)
+                lineWidth = 0
+                glyphCount = 0
+                lineCount += 1
+                continue
+            }
+            let glyph = try platform.fontGlyph(
+                resource.pointer,
+                codepoint: scalar.value
+            )
+            if glyphCount > 0 {
+                lineWidth += spacing
+            }
+            lineWidth += glyph.advance * scale
+            glyphCount += 1
+        }
+        maximumWidth = max(maximumWidth, lineWidth)
+        let lineAdvance = size + resource.lineGap * scale
+        let height = text.isEmpty
+            ? 0
+            : size + Float(lineCount - 1) * lineAdvance
+        return .init(x: maximumWidth, y: height)
+    }
+
     func createRenderTarget(_ descriptor: RenderTargetDescriptor) throws -> RenderTargetHandle { throw unsupported() }
     func colorTexture(of target: RenderTargetHandle) throws -> TextureHandle { throw unsupported() }
     func destroyRenderTarget(_ handle: RenderTargetHandle) {}
@@ -1614,6 +1713,10 @@ final class GPUResourceBackend: RenderResourceBackend {
             platform.destroyTexture(resource.pointer)
         }
         textures.removeAll()
+        for resource in fonts.values {
+            platform.destroyFont(resource.pointer)
+        }
+        fonts.removeAll()
     }
 
     private func validateTextureDependencies(

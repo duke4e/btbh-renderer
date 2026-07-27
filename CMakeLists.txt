@@ -699,6 +699,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_contract.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_custom_mesh.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_device.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_font.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_frame.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_instance_buffer.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_model.c"

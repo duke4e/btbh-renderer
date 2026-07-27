@@ -43,10 +43,22 @@ struct BTBHGPUWindow {
     bool mouse_pressed[4];
     bool mouse_released[4];
     BTBHGPUTexture *texture_head;
+    BTBHGPUFont *font_head;
     BTBHGPUModel *model_head;
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
+};
+
+struct BTBHGPUTexture {
+    BTBHGPUWindow *owner;
+    BTBHGPUTexture *previous;
+    BTBHGPUTexture *next;
+    SDL_GPUTexture *texture;
+    SDL_GPUSampler *sampler;
+    uint32_t width;
+    uint32_t height;
+    uint32_t mip_count;
 };
 
 struct BTBHGPUModel {
@@ -72,6 +84,7 @@ struct BTBHGPUCustomMesh {
 };
 
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
+void btbh_gpu_window_release_fonts(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
@@ -87,6 +100,15 @@ bool btbh_gpu_animation_library_sample_skin(
     uint32_t skin_index,
     float *matrices,
     uint32_t matrix_capacity
+);
+BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
 );
 
 #endif

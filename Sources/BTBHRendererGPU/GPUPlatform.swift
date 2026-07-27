@@ -291,6 +291,32 @@ public final class GPUPlatform: GamePlatform {
         GPUWindowProbe.destroyTexture(texture)
     }
 
+    func loadFont(
+        path: String,
+        baseSize: UInt32,
+        glyphs: [UInt32]
+    ) throws -> GPUFontProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.loadFont(
+            path: path,
+            baseSize: baseSize,
+            glyphs: glyphs
+        )
+    }
+
+    func destroyFont(_ font: OpaquePointer) {
+        GPUWindowProbe.destroyFont(font)
+    }
+
+    func fontGlyph(
+        _ font: OpaquePointer,
+        codepoint: UInt32
+    ) throws -> GPUFontGlyphProbe {
+        try GPUWindowProbe.fontGlyph(font, codepoint: codepoint)
+    }
+
     func loadModel(path: String) throws -> GPUModelProbeResource {
         guard let window else {
             throw GPUPlatformError.windowNotOpen

@@ -187,12 +187,20 @@ final class GPURenderServicesTests: XCTestCase {
         ))
         XCTAssertTrue(retainedTexture.isValid)
 
-        XCTAssertThrowsError(try RenderServices.resources.loadFont(
-            .init(path: "not-yet-supported.ttf", baseSize: 16, glyphs: [65])
+        XCTAssertThrowsError(try RenderServices.resources.createTexture(
+            .init(
+                size: .init(width: 1, height: 1),
+                mipCount: 1,
+                format: .rgba8,
+                usage: .sampled,
+                filter: .bilinear,
+                wrap: .clamp
+            ),
+            bytes: nil
         )) { error in
             XCTAssertEqual(
                 error as? GPUBackendUnsupportedError,
-                .operation("resources.loadFont(_:)")
+                .operation("resources.createTexture(_:bytes:)")
             )
         }
         XCTAssertTrue(RenderServices.platform.shouldClose)
@@ -995,6 +1003,93 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.resources.destroyAnimationLibrary(library)
         #else
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testFontLoadRasterizesARealTTFAtlasAndReleasesIt() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU font atlas test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let font = try RenderServices.resources.loadFont(.init(
+            path: packageRoot.appendingPathComponent(
+                "external/raylib/examples/text/resources/anonymous_pro_bold.ttf"
+            ).path,
+            baseSize: 32,
+            glyphs: Array(32...126).map(UInt32.init)
+        ))
+        XCTAssertTrue(font.isValid)
+        RenderServices.resources.destroyFont(font)
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan font test runs only on Windows")
+        #endif
+    }
+
+    func testCanvasMeasuresTextFromRasterizedGlyphMetrics() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU text measurement test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let font = try RenderServices.resources.loadFont(.init(
+            path: packageRoot.appendingPathComponent(
+                "external/raylib/examples/text/resources/anonymous_pro_bold.ttf"
+            ).path,
+            baseSize: 32,
+            glyphs: Array(32...126).map(UInt32.init)
+        ))
+
+        let normal = RenderServices.canvas.measureText(
+            "HUD",
+            font: font,
+            size: 32,
+            spacing: 2
+        )
+        let doubled = RenderServices.canvas.measureText(
+            "HUD",
+            font: font,
+            size: 64,
+            spacing: 4
+        )
+
+        XCTAssertGreaterThan(normal.x, 0)
+        XCTAssertEqual(normal.y, 32, accuracy: 0.01)
+        XCTAssertEqual(doubled.x, normal.x * 2, accuracy: 0.01)
+        XCTAssertEqual(doubled.y, normal.y * 2, accuracy: 0.01)
+        #else
+        throw XCTSkip("The Windows Vulkan font test runs only on Windows")
         #endif
     }
 
