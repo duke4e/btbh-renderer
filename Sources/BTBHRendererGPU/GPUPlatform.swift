@@ -499,6 +499,39 @@ public final class GPUPlatform: GamePlatform {
         )
     }
 
+    func capturePendingSceneTexture() throws -> GPUTextureProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.capturePendingSceneTexture()
+    }
+
+    func readbackPresentedFrame() throws -> FrameReadback {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.readbackPresentedFrame(size: drawableSize)
+    }
+
+    func writePresentedFramePNG(to path: String) throws {
+        let frame = try readbackPresentedFrame()
+        let result = path.withCString { pathPointer in
+            frame.rgba8.withUnsafeBufferPointer { bytes in
+                btbh_gpu_write_png_rgba8(
+                    pathPointer,
+                    UInt32(frame.size.width),
+                    UInt32(frame.size.height),
+                    bytes.baseAddress
+                )
+            }
+        }
+        guard result == BTBH_GPU_OK else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: "Could not write GPU presented frame PNG"
+            )
+        }
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)

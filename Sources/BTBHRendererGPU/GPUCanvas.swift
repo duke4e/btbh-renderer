@@ -126,16 +126,11 @@ final class GPUCanvas: Canvas2DBackend {
     }
 
     func readbackPresentedFrame() throws -> FrameReadback {
-        throw GPUBackendUnsupportedError.operation(
-            "canvas.readbackPresentedFrame"
-        )
+        try platform.readbackPresentedFrame()
     }
 
     func writePresentedFramePNG(to path: String) throws {
-        _ = path
-        throw GPUBackendUnsupportedError.operation(
-            "canvas.writePresentedFramePNG"
-        )
+        try platform.writePresentedFramePNG(to: path)
     }
 
     private func reject(_ operation: String) {

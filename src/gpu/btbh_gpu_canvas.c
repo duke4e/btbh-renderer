@@ -5,6 +5,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#if defined(_MSC_VER)
+#pragma warning(push, 0)
+#endif
+#include "stb_image_write.h"
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 #define BTBH_GPU_CANVAS_VERTEX_STRIDE 32u
 #define BTBH_GPU_CANVAS_PIPELINE_COUNT 4u
 
@@ -349,6 +359,341 @@ bool btbh_gpu_window_finish_pending_frame(
     return result;
 }
 
+BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
+    BTBHGPUWindow *window,
+    BTBHGPUTextureReport *report
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->pending_command == NULL ||
+        window->pending_swapchain == NULL ||
+        window->pending_drawable_width == 0u ||
+        window->pending_drawable_height == 0u ||
+        report == NULL
+    ) {
+        return NULL;
+    }
+    BTBHGPUTexture *capture = btbh_gpu_window_texture_create_empty(
+        window,
+        window->pending_drawable_width,
+        window->pending_drawable_height,
+        SDL_GetGPUSwapchainTextureFormat(
+            window->device->gpu,
+            window->window
+        ),
+        SDL_GPU_TEXTUREUSAGE_SAMPLER |
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+        BTBH_GPU_TEXTURE_FILTER_LINEAR,
+        BTBH_GPU_TEXTURE_WRAP_CLAMP,
+        report
+    );
+    if (capture == NULL) {
+        return NULL;
+    }
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
+        window->pending_command
+    );
+    if (copy == NULL) {
+        btbh_gpu_texture_destroy(capture);
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void)snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            SDL_GetError()
+        );
+        return NULL;
+    }
+    SDL_GPUTextureLocation source;
+    SDL_GPUTextureLocation destination;
+    SDL_zero(source);
+    SDL_zero(destination);
+    source.texture = window->pending_swapchain;
+    destination.texture = capture->texture;
+    SDL_CopyGPUTextureToTexture(
+        copy,
+        &source,
+        &destination,
+        window->pending_drawable_width,
+        window->pending_drawable_height,
+        1u,
+        false
+    );
+    SDL_EndGPUCopyPass(copy);
+    report->result = BTBH_GPU_OK;
+    report->width = capture->width;
+    report->height = capture->height;
+    report->mip_count = 1u;
+    report->message[0] = '\0';
+    return capture;
+}
+
+bool btbh_gpu_window_record_presented_frame(
+    BTBHGPUWindow *window
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->pending_command == NULL ||
+        window->pending_swapchain == NULL ||
+        window->pending_drawable_width == 0u ||
+        window->pending_drawable_height == 0u
+    ) {
+        return false;
+    }
+    const SDL_GPUTextureFormat format =
+        SDL_GetGPUSwapchainTextureFormat(
+            window->device->gpu,
+            window->window
+        );
+    if (
+        window->presented_frame != NULL &&
+        (
+            window->presented_frame->width !=
+                window->pending_drawable_width ||
+            window->presented_frame->height !=
+                window->pending_drawable_height ||
+            window->presented_frame->format != format
+        )
+    ) {
+        btbh_gpu_texture_destroy(window->presented_frame);
+        window->presented_frame = NULL;
+    }
+    if (window->presented_frame == NULL) {
+        BTBHGPUTextureReport report;
+        window->presented_frame = btbh_gpu_window_texture_create_empty(
+            window,
+            window->pending_drawable_width,
+            window->pending_drawable_height,
+            format,
+            SDL_GPU_TEXTUREUSAGE_SAMPLER |
+                SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+            BTBH_GPU_TEXTURE_FILTER_LINEAR,
+            BTBH_GPU_TEXTURE_WRAP_CLAMP,
+            &report
+        );
+        if (window->presented_frame == NULL) {
+            return false;
+        }
+    }
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
+        window->pending_command
+    );
+    if (copy == NULL) {
+        return false;
+    }
+    SDL_GPUTextureLocation source;
+    SDL_GPUTextureLocation destination;
+    SDL_zero(source);
+    SDL_zero(destination);
+    source.texture = window->pending_swapchain;
+    destination.texture = window->presented_frame->texture;
+    SDL_CopyGPUTextureToTexture(
+        copy,
+        &source,
+        &destination,
+        window->pending_drawable_width,
+        window->pending_drawable_height,
+        1u,
+        true
+    );
+    SDL_EndGPUCopyPass(copy);
+    return true;
+}
+
+BTBHGPUResult btbh_gpu_window_readback_presented_frame(
+    BTBHGPUWindow *window,
+    uint8_t *rgba8,
+    uint32_t byte_capacity,
+    BTBHGPUCanvasReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->presented_frame == NULL ||
+        rgba8 == NULL
+    ) {
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "No presented GPU frame is available"
+        );
+        return report->result;
+    }
+    BTBHGPUTexture *frame = window->presented_frame;
+    const uint64_t row_bytes = (uint64_t)frame->width * UINT64_C(4);
+    const uint64_t output_bytes =
+        row_bytes * (uint64_t)frame->height;
+    const uint64_t row_pitch = (row_bytes + UINT64_C(255)) &
+        ~UINT64_C(255);
+    const uint64_t transfer_bytes =
+        row_pitch * (uint64_t)frame->height;
+    if (
+        output_bytes > byte_capacity ||
+        transfer_bytes > UINT32_MAX ||
+        row_pitch / UINT64_C(4) > UINT32_MAX
+    ) {
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Presented GPU frame readback buffer is too small"
+        );
+        return report->result;
+    }
+
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUTransferBufferCreateInfo transfer_info;
+    SDL_zero(transfer_info);
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    transfer_info.size = (uint32_t)transfer_bytes;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
+        device,
+        &transfer_info
+    );
+    SDL_GPUCommandBuffer *command =
+        SDL_AcquireGPUCommandBuffer(device);
+    if (transfer == NULL || command == NULL) {
+        if (command != NULL) {
+            (void)SDL_CancelGPUCommandBuffer(command);
+        }
+        if (transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(device, transfer);
+        }
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    if (copy == NULL) {
+        (void)SDL_CancelGPUCommandBuffer(command);
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    SDL_GPUTextureRegion source;
+    SDL_GPUTextureTransferInfo destination;
+    SDL_zero(source);
+    SDL_zero(destination);
+    source.texture = frame->texture;
+    source.w = frame->width;
+    source.h = frame->height;
+    source.d = 1u;
+    destination.transfer_buffer = transfer;
+    destination.pixels_per_row = (uint32_t)(row_pitch / UINT64_C(4));
+    destination.rows_per_layer = frame->height;
+    SDL_DownloadFromGPUTexture(copy, &source, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence *fence =
+        SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    if (
+        fence == NULL ||
+        !SDL_WaitForGPUFences(device, true, &fence, 1u)
+    ) {
+        if (fence != NULL) {
+            SDL_ReleaseGPUFence(device, fence);
+        }
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    SDL_ReleaseGPUFence(device, fence);
+    const uint8_t *mapped = (const uint8_t *)
+        SDL_MapGPUTransferBuffer(device, transfer, false);
+    if (mapped == NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    const bool bgra =
+        frame->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+        frame->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+    for (uint32_t y = 0u; y < frame->height; ++y) {
+        const uint8_t *source_row =
+            mapped + (size_t)y * (size_t)row_pitch;
+        uint8_t *destination_row =
+            rgba8 + (size_t)y * (size_t)row_bytes;
+        if (!bgra) {
+            (void)memcpy(
+                destination_row,
+                source_row,
+                (size_t)row_bytes
+            );
+            continue;
+        }
+        for (uint32_t x = 0u; x < frame->width; ++x) {
+            destination_row[x * 4u] = source_row[x * 4u + 2u];
+            destination_row[x * 4u + 1u] =
+                source_row[x * 4u + 1u];
+            destination_row[x * 4u + 2u] = source_row[x * 4u];
+            destination_row[x * 4u + 3u] =
+                source_row[x * 4u + 3u];
+        }
+    }
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    report->result = BTBH_GPU_OK;
+    report->drawable_width = frame->width;
+    report->drawable_height = frame->height;
+    report->vertex_count = (uint32_t)output_bytes;
+    report->message[0] = '\0';
+    return report->result;
+}
+
+BTBHGPUResult btbh_gpu_write_png_rgba8(
+    const char *path,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *rgba8
+) {
+    if (
+        path == NULL ||
+        path[0] == '\0' ||
+        width == 0u ||
+        height == 0u ||
+        width > (uint32_t)INT32_MAX ||
+        height > (uint32_t)INT32_MAX ||
+        width > (uint32_t)(INT32_MAX / 4) ||
+        rgba8 == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    return stbi_write_png(
+        path,
+        (int)width,
+        (int)height,
+        4,
+        rgba8,
+        (int)(width * 4u)
+    ) != 0
+        ? BTBH_GPU_OK
+        : BTBH_GPU_PLATFORM_FAILURE;
+}
+
 BTBHGPUResult btbh_gpu_window_canvas_present(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -608,6 +953,17 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         window->pending_drawable_width;
     const uint32_t drawable_height =
         window->pending_drawable_height;
+    if (!btbh_gpu_window_record_presented_frame(window)) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        SDL_ReleaseGPUBuffer(device, vertex_buffer);
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
     const bool submitted = btbh_gpu_window_finish_pending_frame(
         window,
         true

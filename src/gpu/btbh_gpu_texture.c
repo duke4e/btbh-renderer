@@ -134,6 +134,95 @@ static SDL_GPUSamplerAddressMode btbh_gpu_sampler_address(
     }
 }
 
+BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    SDL_GPUTextureFormat format,
+    SDL_GPUTextureUsageFlags usage,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+) {
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->device->shutdown ||
+        !window->claimed ||
+        width == 0u ||
+        height == 0u ||
+        format == SDL_GPU_TEXTUREFORMAT_INVALID ||
+        usage == 0u ||
+        report == NULL
+    ) {
+        return NULL;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    BTBHGPUTexture *resource = calloc(1, sizeof(*resource));
+    if (resource == NULL) {
+        btbh_gpu_texture_error(
+            report,
+            "Could not allocate texture resource"
+        );
+        return NULL;
+    }
+    resource->owner = window;
+    resource->next = window->texture_head;
+    if (window->texture_head != NULL) {
+        window->texture_head->previous = resource;
+    }
+    window->texture_head = resource;
+    resource->width = width;
+    resource->height = height;
+    resource->mip_count = 1u;
+    resource->format = format;
+
+    SDL_GPUTextureCreateInfo texture_info;
+    SDL_zero(texture_info);
+    texture_info.type = SDL_GPU_TEXTURETYPE_2D;
+    texture_info.format = format;
+    texture_info.usage = usage;
+    texture_info.width = width;
+    texture_info.height = height;
+    texture_info.layer_count_or_depth = 1u;
+    texture_info.num_levels = 1u;
+    texture_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    resource->texture = SDL_CreateGPUTexture(
+        window->device->gpu,
+        &texture_info
+    );
+
+    SDL_GPUSamplerCreateInfo sampler_info;
+    SDL_zero(sampler_info);
+    sampler_info.min_filter = btbh_gpu_sampler_filter(filter);
+    sampler_info.mag_filter = btbh_gpu_sampler_filter(filter);
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    sampler_info.address_mode_u = btbh_gpu_sampler_address(wrap);
+    sampler_info.address_mode_v = btbh_gpu_sampler_address(wrap);
+    sampler_info.address_mode_w = btbh_gpu_sampler_address(wrap);
+    resource->sampler = SDL_CreateGPUSampler(
+        window->device->gpu,
+        &sampler_info
+    );
+    if (resource->texture == NULL || resource->sampler == NULL) {
+        btbh_gpu_texture_error(report, SDL_GetError());
+        btbh_gpu_texture_unlink(resource);
+        btbh_gpu_texture_release_handles(
+            resource,
+            window->device->gpu
+        );
+        free(resource);
+        return NULL;
+    }
+    report->result = BTBH_GPU_OK;
+    report->width = width;
+    report->height = height;
+    report->mip_count = 1u;
+    report->message[0] = '\0';
+    return resource;
+}
+
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     BTBHGPUWindow *window,
     const uint8_t *pixels,
@@ -177,6 +266,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     resource->width = width;
     resource->height = height;
     resource->mip_count = 1u;
+    resource->format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 
     SDL_GPUTextureCreateInfo texture_info = {0};
     texture_info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -354,6 +444,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     resource->mip_count = generate_mipmaps != 0
         ? btbh_gpu_texture_mip_count(resource->width, resource->height)
         : 1u;
+    resource->format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
 
     SDL_GPUTextureCreateInfo texture_info = {0};
     texture_info.type = SDL_GPU_TEXTURETYPE_2D;

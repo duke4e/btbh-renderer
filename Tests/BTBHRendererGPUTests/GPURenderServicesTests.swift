@@ -1119,6 +1119,30 @@ final class GPURenderServicesTests: XCTestCase {
         )))
         RenderServices.canvas.endFrame()
 
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        XCTAssertEqual(readback.size, .init(width: 320, height: 180))
+        XCTAssertEqual(readback.rgba8.count, 320 * 180 * 4)
+        let backgroundOffset = 0
+        XCTAssertEqual(
+            Array(readback.rgba8[backgroundOffset..<(backgroundOffset + 4)]),
+            [0, 0, 0, 255]
+        )
+        let fillOffset = (20 * 320 + 30) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[fillOffset..<(fillOffset + 4)]),
+            [255, 255, 255, 255]
+        )
+        let pngURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "btbh-gpu-\(UUID().uuidString).png"
+            )
+        defer { try? FileManager.default.removeItem(at: pngURL) }
+        try RenderServices.canvas.writePresentedFramePNG(to: pngURL.path)
+        let png = try Data(contentsOf: pngURL)
+        XCTAssertEqual(
+            Array(png.prefix(8)),
+            [137, 80, 78, 71, 13, 10, 26, 10]
+        )
         XCTAssertFalse(RenderServices.platform.shouldClose)
         #else
         throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
@@ -1744,11 +1768,18 @@ final class GPURenderServicesTests: XCTestCase {
         )))
 
         try RenderServices.scene.endFrame()
-        RenderServices.canvas.submit(.fillRect(.init(
-            rect: .init(x: 8, y: 8, width: 40, height: 18),
-            color: .white
+        let capturedWorld = try RenderServices.scene
+            .captureWorldFrameTexture()
+        RenderServices.canvas.submit(.texturedQuad(.init(
+            texture: capturedWorld,
+            source: .init(x: 0, y: 0, width: 320, height: 180),
+            destination: .init(x: 8, y: 8, width: 80, height: 45),
+            origin: .zero,
+            rotationDegrees: 0,
+            tint: .white
         )))
         RenderServices.canvas.endFrame()
+        RenderServices.resources.destroyTexture(capturedWorld)
 
         RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)

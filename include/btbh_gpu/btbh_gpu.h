@@ -446,6 +446,22 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint8_t clear_alpha,
     BTBHGPUCanvasReport *report
 );
+BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
+    BTBHGPUWindow *window,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUResult btbh_gpu_window_readback_presented_frame(
+    BTBHGPUWindow *window,
+    uint8_t *rgba8,
+    uint32_t byte_capacity,
+    BTBHGPUCanvasReport *report
+);
+BTBHGPUResult btbh_gpu_write_png_rgba8(
+    const char *path,
+    uint32_t width,
+    uint32_t height,
+    const uint8_t *rgba8
+);
 BTBHGPUModel *btbh_gpu_window_model_load(
     BTBHGPUWindow *window,
     const char *path,

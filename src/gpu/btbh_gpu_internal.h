@@ -50,6 +50,7 @@ struct BTBHGPUWindow {
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
     BTBHGPUCanvasRuntime *canvas_runtime;
+    BTBHGPUTexture *presented_frame;
     SDL_GPUCommandBuffer *pending_command;
     SDL_GPUTexture *pending_swapchain;
     SDL_GPUTransferBuffer *pending_scene_transfer;
@@ -65,6 +66,7 @@ struct BTBHGPUTexture {
     BTBHGPUTexture *next;
     SDL_GPUTexture *texture;
     SDL_GPUSampler *sampler;
+    SDL_GPUTextureFormat format;
     uint32_t width;
     uint32_t height;
     uint32_t mip_count;
@@ -103,6 +105,9 @@ bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
 );
+bool btbh_gpu_window_record_presented_frame(
+    BTBHGPUWindow *window
+);
 uint32_t btbh_gpu_animation_library_skin_joint_count(
     const BTBHGPUAnimationLibrary *library,
     uint32_t skin_index
@@ -120,6 +125,16 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     const uint8_t *pixels,
     uint32_t width,
     uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    SDL_GPUTextureFormat format,
+    SDL_GPUTextureUsageFlags usage,
     BTBHGPUTextureFilter filter,
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report

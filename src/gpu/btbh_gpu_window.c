@@ -405,7 +405,13 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     }
 
     if (window->pending_command != NULL) {
-        if (!btbh_gpu_window_finish_pending_frame(window, true)) {
+        const bool recorded =
+            btbh_gpu_window_record_presented_frame(window);
+        const bool submitted = btbh_gpu_window_finish_pending_frame(
+            window,
+            recorded
+        );
+        if (!recorded || !submitted) {
             btbh_gpu_set_window_error(
                 report,
                 BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
@@ -439,12 +445,14 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     }
 
     SDL_GPUTexture *swapchain_texture = NULL;
+    uint32_t drawable_width = 0u;
+    uint32_t drawable_height = 0u;
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(
         command_buffer,
         window->window,
         &swapchain_texture,
-        NULL,
-        NULL
+        &drawable_width,
+        &drawable_height
     )) {
         btbh_gpu_set_window_error(
             report,
@@ -490,7 +498,17 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     }
     SDL_EndGPURenderPass(render_pass);
 
-    if (!SDL_SubmitGPUCommandBuffer(command_buffer)) {
+    window->pending_command = command_buffer;
+    window->pending_swapchain = swapchain_texture;
+    window->pending_drawable_width = drawable_width;
+    window->pending_drawable_height = drawable_height;
+    const bool recorded =
+        btbh_gpu_window_record_presented_frame(window);
+    const bool submitted = btbh_gpu_window_finish_pending_frame(
+        window,
+        recorded
+    );
+    if (!recorded || !submitted) {
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,

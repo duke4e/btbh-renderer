@@ -1042,6 +1042,82 @@ public final class GPUWindowProbe {
         }
     }
 
+    func capturePendingSceneTexture() throws -> GPUTextureProbeResource {
+        guard let window, !isShutdown else {
+            throw GPUTextureProbeError.operationFailed(
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUTextureReport()
+        guard let texture =
+            btbh_gpu_window_capture_pending_scene_texture(
+                window,
+                &report
+            ) else {
+            throw GPUTextureProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(
+            pointer: texture,
+            size: .init(
+                width: Int(report.width),
+                height: Int(report.height)
+            ),
+            mipCount: Int(report.mip_count)
+        )
+    }
+
+    func readbackPresentedFrame(
+        size: PixelSize2D
+    ) throws -> FrameReadback {
+        guard let window, !isShutdown,
+              size.width > 0,
+              size.height > 0,
+              size.width <= Int(UInt32.max),
+              size.height <= Int(UInt32.max),
+              size.width <= Int.max / size.height,
+              size.width * size.height <= Int.max / 4 else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: "Invalid GPU presented-frame readback size"
+            )
+        }
+        var bytes = [UInt8](
+            repeating: 0,
+            count: size.width * size.height * 4
+        )
+        guard bytes.count <= Int(UInt32.max) else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: "GPU presented-frame readback exceeds UInt32"
+            )
+        }
+        let byteCapacity = UInt32(bytes.count)
+        var report = BTBHGPUCanvasReport()
+        let result = bytes.withUnsafeMutableBufferPointer {
+            btbh_gpu_window_readback_presented_frame(
+                window,
+                $0.baseAddress,
+                byteCapacity,
+                &report
+            )
+        }
+        guard result == BTBH_GPU_OK else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        let actualSize = PixelSize2D(
+            width: Int(report.drawable_width),
+            height: Int(report.drawable_height)
+        )
+        guard actualSize == size else {
+            throw GPUCanvasProbeError.operationFailed(
+                message: "GPU presented-frame size changed during readback"
+            )
+        }
+        return .init(size: actualSize, rgba8: bytes)
+    }
+
     public func shutdown() {
         if let window {
             btbh_gpu_window_destroy(window)

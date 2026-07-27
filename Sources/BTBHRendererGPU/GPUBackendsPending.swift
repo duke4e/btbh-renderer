@@ -259,6 +259,25 @@ final class GPUResourceBackend: RenderResourceBackend {
         return resource
     }
 
+    func adoptTexture(
+        _ resource: GPUTextureProbeResource
+    ) throws -> TextureHandle {
+        guard let textureHandles else {
+            platform.destroyTexture(resource.pointer)
+            throw GPUTextureProbeError.operationFailed(
+                message: "Could not allocate the GPU texture handle pool"
+            )
+        }
+        do {
+            let handle = try textureHandles.acquire(TextureHandle.self)
+            textures[handle] = resource
+            return handle
+        } catch {
+            platform.destroyTexture(resource.pointer)
+            throw error
+        }
+    }
+
     func canvasFont(
         _ handle: FontHandle
     ) throws -> GPUFontProbeResource {
@@ -2334,8 +2353,8 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     func captureWorldFrameTexture() throws -> TextureHandle {
-        throw GPUBackendUnsupportedError.operation(
-            "scene.captureWorldFrameTexture"
+        try resources.adoptTexture(
+            try platform.capturePendingSceneTexture()
         )
     }
 
