@@ -2134,6 +2134,17 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     func endFrame() throws {
+        do {
+            try endFrameImpl()
+        } catch {
+            FileHandle.standardError.write(
+                Data("BTBH_GPU_SCENE_FAILED error=\(error)\n".utf8)
+            )
+            throw error
+        }
+    }
+
+    private func endFrameImpl() throws {
         guard !pendingModelDraws.isEmpty || !pendingDebugDraws.isEmpty else {
             return
         }
