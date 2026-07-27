@@ -950,6 +950,9 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
     const unsigned int import_flags =
         aiProcess_Triangulate |
         aiProcess_JoinIdenticalVertices |
+        aiProcess_GenUVCoords |
+        aiProcess_FlipUVs |
+        aiProcess_RemoveRedundantMaterials |
         aiProcess_GenSmoothNormals |
         aiProcess_CalcTangentSpace |
         aiProcess_PreTransformVertices |

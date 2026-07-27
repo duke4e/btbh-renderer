@@ -2055,6 +2055,100 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testImportedModelFlipsVerticalTextureCoordinateLikeLegacyImporter() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU model UV orientation test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/vertical-uv-flip.obj"
+                )
+                .path,
+            flags: [.meshData, .highQuality]
+        )
+        let texture = try RenderServices.resources.loadTexture(.init(
+            path: packageRoot
+                .appendingPathComponent("external/SDL/test/icon.png")
+                .path,
+            filter: .nearest
+        ))
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        var descriptor = MaterialDescriptor.default
+        descriptor.albedoTexture = texture
+        descriptor.unlit = true
+        let material = try RenderServices.resources.createMaterial(descriptor)
+        let overrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: material)
+        }
+        defer {
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyTexture(texture)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.init(
+            r: 255,
+            g: 0,
+            b: 255,
+            a: 255
+        )))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertLessThan(readback.rgba8[center], 30)
+        XCTAssertLessThan(readback.rgba8[center + 1], 30)
+        XCTAssertLessThan(readback.rgba8[center + 2], 30)
+        #else
+        throw XCTSkip("The Windows Vulkan model UV test runs only on Windows")
+        #endif
+    }
+
     func testLitMeshUsesFrameAmbientAndDirectionalLight() throws {
         #if os(Windows)
         RenderServices.uninstall()
