@@ -403,6 +403,7 @@ public final class GPUPlatform: GamePlatform {
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
+        lighting: GPUSceneLightingProbe,
         instances: [Float],
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
@@ -453,6 +454,7 @@ public final class GPUPlatform: GamePlatform {
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,
+            lighting: lighting,
             instances: instances,
             batches: batches,
             clearColor: clearColor

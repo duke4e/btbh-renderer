@@ -11,9 +11,16 @@ cbuffer SceneUniforms : register(b0, space1)
     float4x4 view_projection;
     float4 camera_right;
     float4 camera_up;
+    float4 material_color;
+    float4 ambient_color_energy;
+    float4 directional_direction_energy;
+    float4 directional_color;
+    float4 secondary_directional_direction_energy;
+    float4 secondary_directional_color;
     uint bone_offset;
     uint billboard_mode;
-    uint2 scene_padding;
+    uint unlit_enabled;
+    uint scene_padding;
 };
 
 struct VertexInput
@@ -21,6 +28,7 @@ struct VertexInput
     float3 position : TEXCOORD0;
     float4 color : TEXCOORD1;
     float2 texture_coordinate : TEXCOORD2;
+    float3 normal : TEXCOORD3;
 };
 
 struct VertexOutput
@@ -69,7 +77,60 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     }
     VertexOutput output;
     output.position = mul(view_projection, world_position);
-    output.color = input.color * instance.color;
+    float3 light_factor = 1.0f;
+    const float total_energy =
+        ambient_color_energy.w +
+        directional_direction_energy.w +
+        secondary_directional_direction_energy.w;
+    if (unlit_enabled == 0 && total_energy > 0.0f)
+    {
+        const float3 world_normal = normalize(
+            mul((float3x3)instance.model, input.normal)
+        );
+        float3 illumination =
+            ambient_color_energy.rgb * ambient_color_energy.w;
+        if (directional_direction_energy.w > 0.0f)
+        {
+            const float direction_length = max(
+                length(directional_direction_energy.xyz),
+                0.00001f
+            );
+            const float3 surface_to_light =
+                -directional_direction_energy.xyz / direction_length;
+            const float diffuse = max(
+                dot(world_normal, surface_to_light),
+                0.0f
+            );
+            illumination +=
+                directional_color.rgb *
+                directional_direction_energy.w *
+                diffuse;
+        }
+        if (secondary_directional_direction_energy.w > 0.0f)
+        {
+            const float direction_length = max(
+                length(secondary_directional_direction_energy.xyz),
+                0.00001f
+            );
+            const float3 surface_to_light =
+                -secondary_directional_direction_energy.xyz /
+                direction_length;
+            const float diffuse = max(
+                dot(world_normal, surface_to_light),
+                0.0f
+            );
+            illumination +=
+                secondary_directional_color.rgb *
+                secondary_directional_direction_energy.w *
+                diffuse;
+        }
+        light_factor = illumination / (1.0f + illumination);
+    }
+    output.color =
+        input.color *
+        instance.color *
+        material_color *
+        float4(light_factor, 1.0f);
     output.texture_coordinate = input.texture_coordinate;
     return output;
 }

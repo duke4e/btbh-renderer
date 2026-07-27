@@ -279,6 +279,7 @@ struct GPUSceneGeometryProbeBatch {
     let geometry: GPUSceneGeometryProbe
     let animation: GPUAnimationPoseProbe?
     let material: GPUSceneMaterialProbe?
+    let materialSlot: Int?
     let firstInstance: Int
     let instanceCount: Int
 }
@@ -289,6 +290,18 @@ struct GPUSceneMaterialProbe {
     let blendMode: MaterialBlendMode
     let billboardMode: BillboardMode
     let transparency: TransparencyMode
+    let unlit: Bool
+}
+
+struct GPUSceneLightingProbe {
+    let ambientColor: RenderColor
+    let ambientEnergy: Float
+    let directionalDirection: RenderVec3
+    let directionalColor: RenderColor
+    let directionalEnergy: Float
+    let secondaryDirectionalDirection: RenderVec3
+    let secondaryDirectionalColor: RenderColor
+    let secondaryDirectionalEnergy: Float
 }
 
 struct GPUCustomMeshProbeResource {
@@ -903,6 +916,7 @@ public final class GPUWindowProbe {
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
+        lighting: GPUSceneLightingProbe,
         instances: [Float],
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
@@ -928,11 +942,43 @@ public final class GPUWindowProbe {
             cameraUp.y,
             cameraUp.z,
         ]
+        var nativeLighting = BTBHGPUSceneLighting(
+            ambient_red: Float(lighting.ambientColor.r) / 255,
+            ambient_green: Float(lighting.ambientColor.g) / 255,
+            ambient_blue: Float(lighting.ambientColor.b) / 255,
+            ambient_energy: lighting.ambientEnergy,
+            directional_x: lighting.directionalDirection.x,
+            directional_y: lighting.directionalDirection.y,
+            directional_z: lighting.directionalDirection.z,
+            directional_energy: lighting.directionalEnergy,
+            directional_red: Float(lighting.directionalColor.r) / 255,
+            directional_green: Float(lighting.directionalColor.g) / 255,
+            directional_blue: Float(lighting.directionalColor.b) / 255,
+            secondary_directional_energy:
+                lighting.secondaryDirectionalEnergy,
+            secondary_directional_x:
+                lighting.secondaryDirectionalDirection.x,
+            secondary_directional_y:
+                lighting.secondaryDirectionalDirection.y,
+            secondary_directional_z:
+                lighting.secondaryDirectionalDirection.z,
+            reserved: 0,
+            secondary_directional_red:
+                Float(lighting.secondaryDirectionalColor.r) / 255,
+            secondary_directional_green:
+                Float(lighting.secondaryDirectionalColor.g) / 255,
+            secondary_directional_blue:
+                Float(lighting.secondaryDirectionalColor.b) / 255,
+            secondary_reserved: 0
+        )
         let nativeBatches = try batches.map { batch in
             guard batch.firstInstance >= 0,
                   batch.firstInstance <= Int(UInt32.max),
                   batch.instanceCount > 0,
-                  batch.instanceCount <= Int(UInt32.max) else {
+                  batch.instanceCount <= Int(UInt32.max),
+                  batch.materialSlot == nil ||
+                    (batch.materialSlot! >= 0 &&
+                     batch.materialSlot! <= Int(Int32.max)) else {
                 throw GPUSceneProbeError.operationFailed(
                     message: "GPU model instance batch exceeds UInt32"
                 )
@@ -968,9 +1014,14 @@ public final class GPUWindowProbe {
                     batch.animation?.animationIndex ?? 0
                 ),
                 animation_time: batch.animation?.time ?? 0,
+                material_slot: Int32(batch.materialSlot ?? -1),
                 first_instance: UInt32(batch.firstInstance),
                 instance_count: UInt32(batch.instanceCount),
                 albedo_texture: batch.material?.albedoTexture,
+                albedo_red: batch.material?.albedoColor.r ?? 255,
+                albedo_green: batch.material?.albedoColor.g ?? 255,
+                albedo_blue: batch.material?.albedoColor.b ?? 255,
+                albedo_alpha: batch.material?.albedoColor.a ?? 255,
                 blend_mode: Self.sceneBlendMode(
                     batch.material?.blendMode ?? .mix
                 ),
@@ -979,6 +1030,11 @@ public final class GPUWindowProbe {
                 ),
                 transparency_enabled:
                     batch.material?.transparency == .alpha ? 1 : 0,
+                unlit_enabled:
+                    batch.material?.unlit == true ||
+                    (batch.material == nil &&
+                     kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
+                        ? 1 : 0,
                 reserved: 0
             )
         }
@@ -1000,6 +1056,7 @@ public final class GPUWindowProbe {
                                             matrix.baseAddress,
                                             right.baseAddress,
                                             up.baseAddress,
+                                            &nativeLighting,
                                             instanceData.baseAddress,
                                             UInt32(instances.count / 20),
                                             batchData.baseAddress,

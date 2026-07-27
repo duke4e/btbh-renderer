@@ -7,6 +7,7 @@
 #include <string.h>
 
 #define BTBH_GPU_MODEL_VERTEX_STRIDE 96u
+#define BTBH_GPU_MODEL_NORMAL_OFFSET 12u
 #define BTBH_GPU_MODEL_COLOR_OFFSET 48u
 #define BTBH_GPU_MODEL_JOINTS_OFFSET 64u
 #define BTBH_GPU_MODEL_WEIGHTS_OFFSET 80u
@@ -16,9 +17,16 @@ typedef struct BTBHGPUSceneUniforms {
     float view_projection[16];
     float camera_right[4];
     float camera_up[4];
+    float material_color[4];
+    float ambient_color_energy[4];
+    float directional_direction_energy[4];
+    float directional_color[4];
+    float secondary_directional_direction_energy[4];
+    float secondary_directional_color[4];
     uint32_t bone_offset;
     uint32_t billboard_mode;
-    uint32_t padding[2];
+    uint32_t unlit_enabled;
+    uint32_t padding;
 } BTBHGPUSceneUniforms;
 
 struct BTBHGPUSceneRuntime {
@@ -191,7 +199,7 @@ static bool btbh_gpu_scene_create_pipeline(
 
     SDL_GPUColorTargetDescription color_target;
     SDL_GPUVertexBufferDescription vertex_buffer;
-    SDL_GPUVertexAttribute attributes[5];
+    SDL_GPUVertexAttribute attributes[6];
     SDL_GPUGraphicsPipelineCreateInfo info;
     SDL_zero(color_target);
     SDL_zero(vertex_buffer);
@@ -222,19 +230,23 @@ static bool btbh_gpu_scene_create_pipeline(
     attributes[2].offset = 24u;
     attributes[3].location = 3u;
     attributes[3].buffer_slot = 0u;
-    attributes[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[3].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
+    attributes[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    attributes[3].offset = BTBH_GPU_MODEL_NORMAL_OFFSET;
     attributes[4].location = 4u;
     attributes[4].buffer_slot = 0u;
     attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[4].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
+    attributes[4].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
+    attributes[5].location = 5u;
+    attributes[5].buffer_slot = 0u;
+    attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[5].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
 
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 3u;
+    info.vertex_input_state.num_vertex_attributes = 4u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -290,7 +302,7 @@ static bool btbh_gpu_scene_create_pipeline(
         return false;
     }
     info.vertex_shader = animated_vertex_shader;
-    info.vertex_input_state.num_vertex_attributes = 5u;
+    info.vertex_input_state.num_vertex_attributes = 6u;
     for (uint32_t mode = 0u;
          mode < BTBH_GPU_SCENE_BLEND_COUNT;
          mode += 1u) {
@@ -451,13 +463,23 @@ static bool btbh_gpu_scene_validate_batches(
             batch->billboard_mode >=
                 BTBH_GPU_SCENE_BILLBOARD_DISABLED &&
             batch->billboard_mode <= BTBH_GPU_SCENE_BILLBOARD_Y_AXIS &&
+            batch->unlit_enabled <= 1u &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&
               batch->albedo_texture->sampler != NULL));
+        const bool valid_material_slot =
+            (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
+                batch->model != NULL &&
+                (batch->material_slot < 0 ||
+                 (uint32_t)batch->material_slot <
+                    batch->model->material_count)) ||
+            (batch->kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH &&
+                batch->material_slot < 0);
         if (!valid_geometry ||
             !valid_animation ||
             !valid_material ||
+            !valid_material_slot ||
             batch->instance_count == 0u ||
             batch->first_instance > total_instance_count ||
             batch->instance_count >
@@ -602,6 +624,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
+    const BTBHGPUSceneLighting *lighting,
     const float *instances,
     uint32_t total_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -636,6 +659,28 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         view_projection == NULL ||
         camera_right == NULL ||
         camera_up == NULL ||
+        lighting == NULL ||
+        !isfinite(lighting->ambient_red) ||
+        !isfinite(lighting->ambient_green) ||
+        !isfinite(lighting->ambient_blue) ||
+        !isfinite(lighting->ambient_energy) ||
+        lighting->ambient_energy < 0.0f ||
+        !isfinite(lighting->directional_x) ||
+        !isfinite(lighting->directional_y) ||
+        !isfinite(lighting->directional_z) ||
+        !isfinite(lighting->directional_energy) ||
+        lighting->directional_energy < 0.0f ||
+        !isfinite(lighting->directional_red) ||
+        !isfinite(lighting->directional_green) ||
+        !isfinite(lighting->directional_blue) ||
+        !isfinite(lighting->secondary_directional_x) ||
+        !isfinite(lighting->secondary_directional_y) ||
+        !isfinite(lighting->secondary_directional_z) ||
+        !isfinite(lighting->secondary_directional_energy) ||
+        lighting->secondary_directional_energy < 0.0f ||
+        !isfinite(lighting->secondary_directional_red) ||
+        !isfinite(lighting->secondary_directional_green) ||
+        !isfinite(lighting->secondary_directional_blue) ||
         instances == NULL ||
         total_instance_count == 0u ||
         batches == NULL ||
@@ -907,6 +952,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
         return report->result;
     }
+    uint32_t geometry_cursor = 0u;
     uint32_t primitive_draw_count = 0u;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
@@ -918,9 +964,18 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 : 1u;
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
-             ++geometry_index) {
+            ++geometry_index) {
             const uint32_t bone_offset =
-                bone_offsets[primitive_draw_count];
+                bone_offsets[geometry_cursor];
+            geometry_cursor += 1u;
+            if (
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
+                batch->material_slot >= 0 &&
+                batch->model->primitives[geometry_index].material_slot !=
+                    batch->material_slot
+            ) {
+                continue;
+            }
             const bool animated = bone_offset != UINT32_MAX;
             BTBHGPUSceneUniforms uniforms;
             (void)memset(&uniforms, 0, sizeof(uniforms));
@@ -939,9 +994,57 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 camera_up,
                 sizeof(float) * 3u
             );
+            uniforms.material_color[0] =
+                (float)batch->albedo_red / 255.0f;
+            uniforms.material_color[1] =
+                (float)batch->albedo_green / 255.0f;
+            uniforms.material_color[2] =
+                (float)batch->albedo_blue / 255.0f;
+            uniforms.material_color[3] =
+                (float)batch->albedo_alpha / 255.0f;
+            uniforms.ambient_color_energy[0] =
+                lighting->ambient_red;
+            uniforms.ambient_color_energy[1] =
+                lighting->ambient_green;
+            uniforms.ambient_color_energy[2] =
+                lighting->ambient_blue;
+            uniforms.ambient_color_energy[3] =
+                lighting->ambient_energy;
+            uniforms.directional_direction_energy[0] =
+                lighting->directional_x;
+            uniforms.directional_direction_energy[1] =
+                lighting->directional_y;
+            uniforms.directional_direction_energy[2] =
+                lighting->directional_z;
+            uniforms.directional_direction_energy[3] =
+                lighting->directional_energy;
+            uniforms.directional_color[0] =
+                lighting->directional_red;
+            uniforms.directional_color[1] =
+                lighting->directional_green;
+            uniforms.directional_color[2] =
+                lighting->directional_blue;
+            uniforms.directional_color[3] = 1.0f;
+            uniforms.secondary_directional_direction_energy[0] =
+                lighting->secondary_directional_x;
+            uniforms.secondary_directional_direction_energy[1] =
+                lighting->secondary_directional_y;
+            uniforms.secondary_directional_direction_energy[2] =
+                lighting->secondary_directional_z;
+            uniforms.secondary_directional_direction_energy[3] =
+                lighting->secondary_directional_energy;
+            uniforms.secondary_directional_color[0] =
+                lighting->secondary_directional_red;
+            uniforms.secondary_directional_color[1] =
+                lighting->secondary_directional_green;
+            uniforms.secondary_directional_color[2] =
+                lighting->secondary_directional_blue;
+            uniforms.secondary_directional_color[3] = 1.0f;
             uniforms.bone_offset = animated ? bone_offset : 0u;
             uniforms.billboard_mode =
                 (uint32_t)batch->billboard_mode;
+            uniforms.unlit_enabled =
+                (uint32_t)batch->unlit_enabled;
             SDL_PushGPUVertexUniformData(
                 command,
                 0u,
@@ -1048,7 +1151,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         }
     }
     SDL_EndGPURenderPass(pass);
-    if (primitive_draw_count != prepared_geometry_count) {
+    if (geometry_cursor != prepared_geometry_count) {
         (void)SDL_CancelGPUCommandBuffer(command);
         SDL_ReleaseGPUTransferBuffer(device, transfer);
         if (bone_buffer != NULL) {

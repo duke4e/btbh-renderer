@@ -331,14 +331,43 @@ typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUAnimationLibrary *animation_library;
     uint32_t animation_index;
     float animation_time;
+    int32_t material_slot;
     uint32_t first_instance;
     uint32_t instance_count;
     BTBHGPUTexture *albedo_texture;
+    uint8_t albedo_red;
+    uint8_t albedo_green;
+    uint8_t albedo_blue;
+    uint8_t albedo_alpha;
     BTBHGPUSceneBlendMode blend_mode;
     BTBHGPUSceneBillboardMode billboard_mode;
     uint8_t transparency_enabled;
+    uint8_t unlit_enabled;
     uint8_t reserved;
 } BTBHGPUSceneGeometryBatch;
+
+typedef struct BTBHGPUSceneLighting {
+    float ambient_red;
+    float ambient_green;
+    float ambient_blue;
+    float ambient_energy;
+    float directional_x;
+    float directional_y;
+    float directional_z;
+    float directional_energy;
+    float directional_red;
+    float directional_green;
+    float directional_blue;
+    float secondary_directional_energy;
+    float secondary_directional_x;
+    float secondary_directional_y;
+    float secondary_directional_z;
+    float reserved;
+    float secondary_directional_red;
+    float secondary_directional_green;
+    float secondary_directional_blue;
+    float secondary_reserved;
+} BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;
@@ -550,6 +579,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
+    const BTBHGPUSceneLighting *lighting,
     const float *instances,
     uint32_t total_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,

@@ -1970,6 +1970,242 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testModelInstanceMaterialOverrideColorsItsMaterialSlot() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU model material override render test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        let overrides = try (0..<metadata.materialCount).map { slot in
+            MaterialOverride(
+                slot: slot,
+                material: try RenderServices.resources
+                    .createMaterialOverride(
+                        from: model,
+                        materialIndex: slot,
+                        patch: .init(albedoColor: .init(
+                            r: 255,
+                            g: 0,
+                            b: 0,
+                            a: 255
+                        ))
+                    )
+            )
+        }
+        defer {
+            for override in overrides {
+                RenderServices.resources.destroyMaterial(override.material)
+            }
+            RenderServices.resources.destroyModel(model)
+        }
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 200)
+        XCTAssertLessThan(readback.rgba8[center + 1], 80)
+        XCTAssertLessThan(readback.rgba8[center + 2], 80)
+        #else
+        throw XCTSkip("The Windows Vulkan material override test runs only on Windows")
+        #endif
+    }
+
+    func testLitMeshUsesFrameAmbientAndDirectionalLight() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU scene lighting render test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let vertices = [
+            RenderVertex(
+                position: .init(x: -1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        let mesh = try vertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: vertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        let material = try RenderServices.resources.createMaterial(.default)
+        let directional = try RenderServices.resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .forward,
+            color: .init(r: 0, g: 255, b: 0, a: 255),
+            energy: 2,
+            range: 100,
+            castsShadow: false,
+            shadowSoftness: 0
+        ))
+        let fill = try RenderServices.resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .forward,
+            color: .init(r: 0, g: 0, b: 255, a: 255),
+            energy: 0.25,
+            range: 100,
+            castsShadow: false,
+            shadowSoftness: 0
+        ))
+        let sky = try RenderServices.resources.createProceduralSky(.init(
+            color: .init(r: 40, g: 80, b: 120, a: 255),
+            resolution: 32
+        ))
+        defer {
+            RenderServices.resources.destroyCubemap(sky)
+            RenderServices.resources.destroyLight(fill)
+            RenderServices.resources.destroyLight(directional)
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyMesh(mesh)
+        }
+
+        let ambientRed = RenderColor(r: 255, g: 0, b: 0, a: 255)
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .white,
+                backgroundEnergy: 0.5,
+                ambientColor: ambientRed,
+                ambientEnergy: 1,
+                ambientMap: .invalid,
+                skyCubemap: sky,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1
+            )
+        ))
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: mesh,
+            material: material,
+            transform: .identity
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        XCTAssertEqual(readback.rgba8[0], 20, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[1], 40, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[2], 60, accuracy: 2)
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 80)
+        XCTAssertLessThan(readback.rgba8[center], 180)
+        XCTAssertGreaterThan(readback.rgba8[center + 1], 120)
+        XCTAssertLessThan(readback.rgba8[center + 1], 220)
+        XCTAssertGreaterThan(readback.rgba8[center + 2], 20)
+        XCTAssertLessThan(readback.rgba8[center + 2], 100)
+        #else
+        throw XCTSkip("The Windows Vulkan scene lighting test runs only on Windows")
+        #endif
+    }
+
     func testSceneMeshSamplesItsMaterialAlbedoTexture() throws {
         #if os(Windows)
         RenderServices.uninstall()
