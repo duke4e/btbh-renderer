@@ -13,6 +13,9 @@ enum GPUResourceStagingError: Error, Equatable {
     case invalidAnimationTree(UInt64)
     case invalidAnimationTreeDescriptor(String)
     case invalidAnimationTreeParameter(String)
+    case invalidMaterial(UInt64)
+    case invalidMaterialDescriptor(String)
+    case invalidSurfaceShader(UInt64)
     case invalidScreenShader(UInt64)
 }
 
@@ -47,11 +50,28 @@ private struct GPUAnimationTreeResource {
     var switches: [String: GPUAnimationSwitchState]
 }
 
+private enum GPUMaterialStorage {
+    case descriptor(MaterialDescriptor)
+    case modelOverride(
+        model: ModelHandle,
+        materialIndex: Int,
+        patch: ModelMaterialPatch
+    )
+}
+
+private struct GPUMaterialResource {
+    var storage: GPUMaterialStorage
+    let modelDependency: ModelHandle?
+    let textureDependencies: Set<TextureHandle>
+    let surfaceShaderDependency: SurfaceShaderHandle?
+}
+
 @MainActor
 final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
+    private let materialHandles = try? HandlePool(initialCapacity: 64)
     private let animationLibraryHandles = try? HandlePool(
         initialCapacity: 8
     )
@@ -59,6 +79,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
+    private var materials: [MaterialHandle: GPUMaterialResource] = [:]
     private var animationLibraries: [
         AnimationLibraryHandle: GPUAnimationLibraryProbeResource
     ] = [:]
@@ -98,9 +119,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createTexture(_ descriptor: TextureDescriptor, bytes: UnsafeRawBufferPointer?) throws -> TextureHandle { throw unsupported() }
     func updateTexture(_ handle: TextureHandle, bytes: UnsafeRawBufferPointer) throws { throw unsupported() }
     func destroyTexture(_ handle: TextureHandle) {
-        if screenShaders.values.contains(where: {
-            Self.textureDependencies(in: $0.parameters).contains(handle)
-        }) {
+        if isTextureReferenced(handle) {
             pendingTextureDestruction.insert(handle)
             return
         }
@@ -155,7 +174,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 
     func destroyModel(_ handle: ModelHandle) {
-        if animationTrees.values.contains(where: { $0.model == handle }) {
+        if isModelReferenced(handle) {
             pendingModelDestruction.insert(handle)
             return
         }
@@ -176,9 +195,77 @@ final class GPUResourceBackend: RenderResourceBackend {
     func createMesh(_ descriptor: MeshDescriptor, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws -> MeshHandle { throw unsupported() }
     func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws { throw unsupported() }
     func destroyMesh(_ handle: MeshHandle) {}
-    func createMaterial(_ descriptor: MaterialDescriptor) throws -> MaterialHandle { throw unsupported() }
-    func updateMaterial(_ handle: MaterialHandle, descriptor: MaterialDescriptor) throws { throw unsupported() }
-    func destroyMaterial(_ handle: MaterialHandle) {}
+    func createMaterial(
+        _ descriptor: MaterialDescriptor
+    ) throws -> MaterialHandle {
+        let resource = try materialResource(descriptor)
+        return try storeMaterial(resource)
+    }
+
+    func createMaterialOverride(
+        from model: ModelHandle,
+        materialIndex: Int,
+        patch: ModelMaterialPatch
+    ) throws -> MaterialHandle {
+        guard
+            !pendingModelDestruction.contains(model),
+            let modelResource = models[model]
+        else {
+            throw GPUResourceStagingError.invalidModel(model.rawValue)
+        }
+        guard
+            materialIndex >= 0,
+            materialIndex < modelResource.metadata.materialCount
+        else {
+            throw GPUResourceStagingError.invalidMaterialDescriptor(
+                "Model material index \(materialIndex) is outside 0..<\(modelResource.metadata.materialCount)"
+            )
+        }
+        let textureDependencies = Set(
+            [
+                patch.albedoTexture,
+                patch.normalTexture,
+                patch.ormTexture,
+            ].compactMap { $0 }
+        )
+        try validateMaterialDependencies(
+            textures: textureDependencies,
+            surfaceShader: patch.surfaceShader
+        )
+        return try storeMaterial(.init(
+            storage: .modelOverride(
+                model: model,
+                materialIndex: materialIndex,
+                patch: patch
+            ),
+            modelDependency: model,
+            textureDependencies: textureDependencies,
+            surfaceShaderDependency: patch.surfaceShader
+        ))
+    }
+
+    func updateMaterial(
+        _ handle: MaterialHandle,
+        descriptor: MaterialDescriptor
+    ) throws {
+        guard let previous = materials[handle] else {
+            throw GPUResourceStagingError.invalidMaterial(handle.rawValue)
+        }
+        let replacement = try materialResource(descriptor)
+        materials[handle] = replacement
+        collectMaterialDependencies(previous)
+    }
+
+    func destroyMaterial(_ handle: MaterialHandle) {
+        guard
+            let materialHandles,
+            let resource = materials.removeValue(forKey: handle),
+            materialHandles.release(handle)
+        else {
+            return
+        }
+        collectMaterialDependencies(resource)
+    }
     func createInstanceBuffer(_ descriptor: InstanceBufferDescriptor) throws -> InstanceBufferHandle { throw unsupported() }
     func uploadInstances(_ handle: InstanceBufferHandle, instances: UnsafeRawBufferPointer) throws { throw unsupported() }
     func destroyInstanceBuffer(_ handle: InstanceBufferHandle) {}
@@ -566,6 +653,87 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
     }
 
+    private func materialResource(
+        _ descriptor: MaterialDescriptor
+    ) throws -> GPUMaterialResource {
+        let textureDependencies = Set(
+            [
+                descriptor.albedoTexture,
+                descriptor.emissionTexture,
+                descriptor.normalTexture,
+                descriptor.ormTexture,
+            ].filter(\.isValid)
+        )
+        let surfaceShader = descriptor.surfaceShader.isValid
+            ? descriptor.surfaceShader
+            : nil
+        try validateMaterialDependencies(
+            textures: textureDependencies,
+            surfaceShader: surfaceShader
+        )
+        return .init(
+            storage: .descriptor(descriptor),
+            modelDependency: nil,
+            textureDependencies: textureDependencies,
+            surfaceShaderDependency: surfaceShader
+        )
+    }
+
+    private func storeMaterial(
+        _ resource: GPUMaterialResource
+    ) throws -> MaterialHandle {
+        guard let materialHandles else {
+            throw GPUResourceStagingError.invalidMaterialDescriptor(
+                "Could not allocate the material handle pool"
+            )
+        }
+        let handle = try materialHandles.acquire(MaterialHandle.self)
+        materials[handle] = resource
+        return handle
+    }
+
+    private func validateMaterialDependencies(
+        textures textureHandles: Set<TextureHandle>,
+        surfaceShader: SurfaceShaderHandle?
+    ) throws {
+        for handle in textureHandles
+        where
+            pendingTextureDestruction.contains(handle) ||
+            textures[handle] == nil
+        {
+            throw GPUResourceStagingError.invalidTexture(handle.rawValue)
+        }
+        if let surfaceShader {
+            throw GPUResourceStagingError.invalidSurfaceShader(
+                surfaceShader.rawValue
+            )
+        }
+    }
+
+    private func collectMaterialDependencies(
+        _ resource: GPUMaterialResource
+    ) {
+        if let model = resource.modelDependency {
+            collectPendingModel(model)
+        }
+        collectPendingTextures(resource.textureDependencies)
+    }
+
+    private func isModelReferenced(_ handle: ModelHandle) -> Bool {
+        animationTrees.values.contains(where: { $0.model == handle }) ||
+            materials.values.contains(where: {
+                $0.modelDependency == handle
+            })
+    }
+
+    private func isTextureReferenced(_ handle: TextureHandle) -> Bool {
+        screenShaders.values.contains(where: {
+            Self.textureDependencies(in: $0.parameters).contains(handle)
+        }) || materials.values.contains(where: {
+            $0.textureDependencies.contains(handle)
+        })
+    }
+
     private func validateAnimationTreeDescriptor(
         _ descriptor: AnimationTreeDescriptor,
         animationCount: Int
@@ -664,7 +832,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     private func collectPendingModel(_ handle: ModelHandle) {
         guard
             pendingModelDestruction.contains(handle),
-            !animationTrees.values.contains(where: { $0.model == handle })
+            !isModelReferenced(handle)
         else {
             return
         }
@@ -695,6 +863,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         screenShaders.removeAll()
         pendingTextureDestruction.removeAll()
         animationTrees.removeAll()
+        materials.removeAll()
         pendingAnimationLibraryDestruction.removeAll()
         pendingModelDestruction.removeAll()
         for resource in animationLibraries.values {
@@ -715,7 +884,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         _ parameters: [String: ShaderParameterValue]
     ) throws {
         for handle in Self.textureDependencies(in: parameters)
-        where textures[handle] == nil {
+        where
+            pendingTextureDestruction.contains(handle) ||
+            textures[handle] == nil
+        {
             throw GPUResourceStagingError.invalidTexture(handle.rawValue)
         }
     }
@@ -725,9 +897,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     ) {
         for handle in candidates
         where pendingTextureDestruction.contains(handle) &&
-            !screenShaders.values.contains(where: {
-                Self.textureDependencies(in: $0.parameters).contains(handle)
-            }) {
+            !isTextureReferenced(handle) {
             destroyTextureNow(handle)
         }
     }

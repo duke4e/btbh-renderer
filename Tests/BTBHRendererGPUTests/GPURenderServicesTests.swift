@@ -610,6 +610,113 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testModelMaterialOverrideStagesPatchAndPinsModelLifetime() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU material override test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let path = packageRoot.appendingPathComponent(
+            "external/raylib/examples/models/resources/models/gltf/robot.glb"
+        ).path
+        let model = try RenderServices.resources.loadModel(
+            path: path,
+            flags: [.meshData]
+        )
+        let materialCount = try RenderServices.resources
+            .modelMetadata(model).materialCount
+        XCTAssertGreaterThan(materialCount, 0)
+        XCTAssertThrowsError(
+            try RenderServices.resources.createMaterialOverride(
+                from: model,
+                materialIndex: materialCount,
+                patch: .identity
+            )
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createMaterialOverride(
+                from: model,
+                materialIndex: 0,
+                patch: .init(albedoTexture: .invalid)
+            )
+        )
+        let material = try RenderServices.resources.createMaterialOverride(
+            from: model,
+            materialIndex: 0,
+            patch: .init(stencilReference: 1)
+        )
+        XCTAssertTrue(material.isValid)
+        RenderServices.resources.destroyModel(model)
+        XCTAssertThrowsError(
+            try RenderServices.resources.modelMetadata(model)
+        )
+        RenderServices.resources.destroyMaterial(material)
+
+        let replacementModel = try RenderServices.resources.loadModel(
+            path: path,
+            flags: [.meshData]
+        )
+        XCTAssertNotEqual(replacementModel.rawValue, model.rawValue)
+        RenderServices.resources.destroyModel(replacementModel)
+
+        let standalone = try RenderServices.resources.createMaterial(.default)
+        XCTAssertTrue(standalone.isValid)
+        try RenderServices.resources.updateMaterial(
+            standalone,
+            descriptor: .default
+        )
+        RenderServices.resources.destroyMaterial(standalone)
+
+        let texturePath = packageRoot
+            .appendingPathComponent("external/SDL/test/icon.png")
+            .path
+        let texture = try RenderServices.resources.loadTexture(.init(
+            path: texturePath
+        ))
+        var texturedDescriptor = MaterialDescriptor.default
+        texturedDescriptor.albedoTexture = texture
+        let textured = try RenderServices.resources.createMaterial(
+            texturedDescriptor
+        )
+        RenderServices.resources.destroyTexture(texture)
+        XCTAssertThrowsError(
+            try RenderServices.resources.createScreenShader(.init(
+                fragmentPath: packageRoot
+                    .appendingPathComponent("shaders/post/output.frag")
+                    .path,
+                parameters: ["u_texture": .texture(texture)]
+            ))
+        )
+        try RenderServices.resources.updateMaterial(
+            textured,
+            descriptor: .default
+        )
+        let replacementTexture = try RenderServices.resources.loadTexture(
+            .init(path: texturePath)
+        )
+        XCTAssertNotEqual(replacementTexture.rawValue, texture.rawValue)
+        RenderServices.resources.destroyMaterial(textured)
+        RenderServices.resources.destroyTexture(replacementTexture)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testGLTFModelLoadHandlesNodesSparseDataMaterialsAndUnicodePath() throws {
         #if os(Windows)
         RenderServices.uninstall()
