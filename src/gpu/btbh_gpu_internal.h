@@ -34,10 +34,12 @@ struct BTBHGPUWindow {
     BTBHGPUTexture *texture_head;
     BTBHGPUModel *model_head;
     BTBHGPUInstanceBuffer *instance_buffer_head;
+    BTBHGPUCustomMesh *custom_mesh_head;
 };
 
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
+void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 
 #endif

@@ -328,6 +328,40 @@ public final class GPUPlatform: GamePlatform {
         GPUWindowProbe.destroyInstanceBuffer(buffer)
     }
 
+    func createCustomMesh(
+        vertices: UnsafeRawBufferPointer,
+        vertexCount: UInt32,
+        indices: UnsafeBufferPointer<UInt32>?
+    ) throws -> GPUCustomMeshProbeResource {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        return try window.createCustomMesh(
+            vertices: vertices,
+            vertexCount: vertexCount,
+            indices: indices
+        )
+    }
+
+    func updateCustomMesh(
+        _ mesh: OpaquePointer,
+        vertices: UnsafeRawBufferPointer,
+        indices: UnsafeBufferPointer<UInt32>?
+    ) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        try window.updateCustomMesh(
+            mesh,
+            vertices: vertices,
+            indices: indices
+        )
+    }
+
+    func destroyCustomMesh(_ mesh: OpaquePointer) {
+        GPUWindowProbe.destroyCustomMesh(mesh)
+    }
+
     func failClosed(operation: String) {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)

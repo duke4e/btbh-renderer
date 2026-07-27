@@ -587,6 +587,178 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testCustomMeshUploadsUpdatesValidatesAndReleasesGPUStorage() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU custom mesh test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let descriptor = MeshDescriptor(
+            topology: .triangles,
+            storage: .streamed,
+            vertexCount: 3,
+            indexCount: 3,
+            bounds: .init(
+                minimum: .init(x: -1, y: -1, z: 0),
+                maximum: .init(x: 1, y: 1, z: 0)
+            )
+        )
+        var vertices = [
+            RenderVertex(
+                position: .init(x: -1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 1, y: -1, z: 0),
+                textureCoordinate: .init(x: 1, y: 0),
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 1, z: 0),
+                textureCoordinate: .init(x: 0.5, y: 1),
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        var indices: [UInt32] = [0, 1, 2]
+        let mesh = try vertices.withUnsafeBytes { vertexBytes in
+            try indices.withUnsafeBytes { indexBytes in
+                try RenderServices.resources.createMesh(
+                    descriptor,
+                    vertices: vertexBytes,
+                    indices: indexBytes
+                )
+            }
+        }
+        vertices[0].position.x = -0.5
+        try vertices.withUnsafeBytes { vertexBytes in
+            try indices.withUnsafeBytes { indexBytes in
+                try RenderServices.resources.updateMesh(
+                    mesh,
+                    vertices: vertexBytes,
+                    indices: indexBytes
+                )
+            }
+        }
+        vertices.append(RenderVertex(
+            position: .init(x: 1, y: 1, z: 0),
+            textureCoordinate: .one,
+            normal: .backward,
+            tangent: .init(x: 1, y: 0, z: 0, w: 1),
+            color: .white
+        ))
+        indices = [0, 1, 2, 2, 1, 3]
+        try vertices.withUnsafeBytes { vertexBytes in
+            try indices.withUnsafeBytes { indexBytes in
+                try RenderServices.resources.updateMesh(
+                    mesh,
+                    vertices: vertexBytes,
+                    indices: indexBytes
+                )
+            }
+        }
+        indices[5] = 4
+        XCTAssertThrowsError(try vertices.withUnsafeBytes { vertexBytes in
+            try indices.withUnsafeBytes { indexBytes in
+                try RenderServices.resources.updateMesh(
+                    mesh,
+                    vertices: vertexBytes,
+                    indices: indexBytes
+                )
+            }
+        })
+        RenderServices.resources.destroyMesh(mesh)
+        XCTAssertThrowsError(try vertices.withUnsafeBytes { vertexBytes in
+            try RenderServices.resources.updateMesh(
+                mesh,
+                vertices: vertexBytes,
+                indices: nil
+            )
+        })
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        indices[5] = 3
+        let resizedDescriptor = MeshDescriptor(
+            topology: .triangles,
+            storage: .streamed,
+            vertexCount: 4,
+            indexCount: 6,
+            bounds: descriptor.bounds
+        )
+        let detachedMesh = try vertices.withUnsafeBytes { vertexBytes in
+            try indices.withUnsafeBytes { indexBytes in
+                try RenderServices.resources.createMesh(
+                    resizedDescriptor,
+                    vertices: vertexBytes,
+                    indices: indexBytes
+                )
+            }
+        }
+        RenderServices.platform.closeWindow()
+        RenderServices.resources.destroyMesh(detachedMesh)
+        XCTAssertTrue(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testSceneFrustumQueryUsesCurrentCameraWithoutFailClosing() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 1920, height: 1080)
+        )
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .zero,
+                target: .forward,
+                up: .up,
+                verticalFOVDegrees: 90,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+
+        XCTAssertTrue(RenderServices.scene.intersectsFrustum(.init(
+            minimum: .init(x: -1, y: -1, z: 9),
+            maximum: .init(x: 1, y: 1, z: 11)
+        )))
+        XCTAssertFalse(RenderServices.scene.intersectsFrustum(.init(
+            minimum: .init(x: 99, y: -1, z: 9),
+            maximum: .init(x: 101, y: 1, z: 11)
+        )))
+        XCTAssertFalse(RenderServices.scene.intersectsFrustum(.init(
+            minimum: .init(x: -1, y: -1, z: -11),
+            maximum: .init(x: 1, y: 1, z: -9)
+        )))
+        XCTAssertTrue(RenderServices.scene.intersectsFrustum(.init(
+            minimum: .init(x: -1, y: -1, z: 9_999),
+            maximum: .init(x: 1, y: 1, z: 10_001)
+        )))
+        try RenderServices.scene.endFrame()
+    }
+
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
         #if os(Windows)
         RenderServices.uninstall()

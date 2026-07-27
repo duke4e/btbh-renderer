@@ -168,6 +168,7 @@ typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
 typedef struct BTBHGPUModel BTBHGPUModel;
 typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
+typedef struct BTBHGPUCustomMesh BTBHGPUCustomMesh;
 typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
 
 typedef enum BTBHGPUTextureFilter {
@@ -210,6 +211,14 @@ typedef struct BTBHGPUInstanceBufferReport {
     uint32_t byte_capacity;
     char message[256];
 } BTBHGPUInstanceBufferReport;
+
+typedef struct BTBHGPUCustomMeshReport {
+    BTBHGPUResult result;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t vertex_byte_count;
+    char message[256];
+} BTBHGPUCustomMeshReport;
 
 typedef struct BTBHGPUAnimationLibraryReport {
     BTBHGPUResult result;
@@ -337,6 +346,24 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     BTBHGPUInstanceBufferReport *report
 );
 void btbh_gpu_instance_buffer_destroy(BTBHGPUInstanceBuffer *buffer);
+BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
+    BTBHGPUWindow *window,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t vertex_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    BTBHGPUCustomMeshReport *report
+);
+BTBHGPUResult btbh_gpu_custom_mesh_update(
+    BTBHGPUCustomMesh *mesh,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    BTBHGPUCustomMeshReport *report
+);
+void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report

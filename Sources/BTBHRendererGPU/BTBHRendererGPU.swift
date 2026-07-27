@@ -185,6 +185,17 @@ struct GPUInstanceBufferProbeResource {
     let byteCapacity: Int
 }
 
+enum GPUCustomMeshProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUCustomMeshProbeResource {
+    let pointer: OpaquePointer
+    let vertexCount: Int
+    let indexCount: Int
+    let vertexByteCount: Int
+}
+
 enum GPUAnimationLibraryProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
@@ -599,6 +610,79 @@ public final class GPUWindowProbe {
 
     static func destroyInstanceBuffer(_ buffer: OpaquePointer) {
         btbh_gpu_instance_buffer_destroy(buffer)
+    }
+
+    func createCustomMesh(
+        vertices: UnsafeRawBufferPointer,
+        vertexCount: UInt32,
+        indices: UnsafeBufferPointer<UInt32>?
+    ) throws -> GPUCustomMeshProbeResource {
+        guard let window, !isShutdown,
+              let vertexBaseAddress = vertices.baseAddress,
+              vertices.count > 0,
+              vertices.count <= Int(UInt32.max) else {
+            throw GPUCustomMeshProbeError.operationFailed(
+                message: "Invalid GPU custom mesh upload bytes"
+            )
+        }
+        let indexCount = indices?.count ?? 0
+        guard indexCount <= Int(UInt32.max) else {
+            throw GPUCustomMeshProbeError.operationFailed(
+                message: "GPU custom mesh index count exceeds UInt32"
+            )
+        }
+        var report = BTBHGPUCustomMeshReport()
+        guard let mesh = btbh_gpu_window_custom_mesh_create(
+            window,
+            vertexBaseAddress,
+            UInt32(vertices.count),
+            vertexCount,
+            indices?.baseAddress,
+            UInt32(indexCount),
+            &report
+        ) else {
+            throw GPUCustomMeshProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+        return .init(
+            pointer: mesh,
+            vertexCount: Int(report.vertex_count),
+            indexCount: Int(report.index_count),
+            vertexByteCount: Int(report.vertex_byte_count)
+        )
+    }
+
+    func updateCustomMesh(
+        _ mesh: OpaquePointer,
+        vertices: UnsafeRawBufferPointer,
+        indices: UnsafeBufferPointer<UInt32>?
+    ) throws {
+        guard let vertexBaseAddress = vertices.baseAddress,
+              vertices.count > 0,
+              vertices.count <= Int(UInt32.max),
+              (indices?.count ?? 0) <= Int(UInt32.max) else {
+            throw GPUCustomMeshProbeError.operationFailed(
+                message: "Invalid GPU custom mesh update bytes"
+            )
+        }
+        var report = BTBHGPUCustomMeshReport()
+        guard btbh_gpu_custom_mesh_update(
+            mesh,
+            vertexBaseAddress,
+            UInt32(vertices.count),
+            indices?.baseAddress,
+            UInt32(indices?.count ?? 0),
+            &report
+        ) == BTBH_GPU_OK else {
+            throw GPUCustomMeshProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+    }
+
+    static func destroyCustomMesh(_ mesh: OpaquePointer) {
+        btbh_gpu_custom_mesh_destroy(mesh)
     }
 
     public func shutdown() {

@@ -9,6 +9,9 @@ enum GPUResourceStagingError: Error, Equatable {
     case missingAsset(String)
     case invalidTexture(UInt64)
     case invalidModel(UInt64)
+    case invalidMesh(UInt64)
+    case invalidMeshDescriptor(String)
+    case invalidMeshUpload(String)
     case invalidAnimationLibrary(UInt64)
     case invalidAnimationTree(UInt64)
     case invalidAnimationTreeDescriptor(String)
@@ -85,6 +88,16 @@ private struct GPUInstanceBufferResource {
     let descriptor: InstanceBufferDescriptor
 }
 
+private struct GPUCustomMeshResource {
+    let storage: GPUCustomMeshProbeResource
+    let descriptor: MeshDescriptor
+}
+
+private struct GPUCustomMeshUpload {
+    let packedVertices: [Float]
+    let indices: [UInt32]
+}
+
 private struct GPUAmbientMapResource {
     let cubemap: CubemapHandle
 }
@@ -94,6 +107,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let platform: GPUPlatform
     private let textureHandles = try? HandlePool(initialCapacity: 64)
     private let modelHandles = try? HandlePool(initialCapacity: 32)
+    private let meshHandles = try? HandlePool(initialCapacity: 32)
     private let materialHandles = try? HandlePool(initialCapacity: 64)
     private let instanceBufferHandles = try? HandlePool(initialCapacity: 16)
     private let lightHandles = try? HandlePool(initialCapacity: 16)
@@ -107,6 +121,7 @@ final class GPUResourceBackend: RenderResourceBackend {
     private let screenShaderHandles = try? HandlePool(initialCapacity: 8)
     private var textures: [TextureHandle: GPUTextureProbeResource] = [:]
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
+    private var meshes: [MeshHandle: GPUCustomMeshResource] = [:]
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
     private var instanceBuffers: [
         InstanceBufferHandle: GPUInstanceBufferResource
@@ -238,9 +253,128 @@ final class GPUResourceBackend: RenderResourceBackend {
         platform.destroyModel(resource.pointer)
         pendingModelDestruction.remove(handle)
     }
-    func createMesh(_ descriptor: MeshDescriptor, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws -> MeshHandle { throw unsupported() }
-    func updateMesh(_ handle: MeshHandle, vertices: UnsafeRawBufferPointer, indices: UnsafeRawBufferPointer?) throws { throw unsupported() }
-    func destroyMesh(_ handle: MeshHandle) {}
+    func createMesh(
+        _ descriptor: MeshDescriptor,
+        vertices: UnsafeRawBufferPointer,
+        indices: UnsafeRawBufferPointer?
+    ) throws -> MeshHandle {
+        trace("createMesh")
+        guard let meshHandles else {
+            throw GPUResourceStagingError.invalidMeshDescriptor(
+                "Could not allocate the GPU mesh handle pool"
+            )
+        }
+        let upload = try Self.meshUpload(
+            descriptor,
+            vertices: vertices,
+            indices: indices
+        )
+        let storage = try upload.packedVertices.withUnsafeBytes {
+            vertexBytes in
+            if upload.indices.isEmpty {
+                return try platform.createCustomMesh(
+                    vertices: vertexBytes,
+                    vertexCount: UInt32(descriptor.vertexCount),
+                    indices: nil
+                )
+            }
+            return try upload.indices.withUnsafeBufferPointer {
+                indexBuffer in
+                try platform.createCustomMesh(
+                    vertices: vertexBytes,
+                    vertexCount: UInt32(descriptor.vertexCount),
+                    indices: indexBuffer
+                )
+            }
+        }
+        do {
+            let handle = try meshHandles.acquire(MeshHandle.self)
+            meshes[handle] = .init(
+                storage: storage,
+                descriptor: descriptor
+            )
+            return handle
+        } catch {
+            platform.destroyCustomMesh(storage.pointer)
+            throw error
+        }
+    }
+
+    func updateMesh(
+        _ handle: MeshHandle,
+        vertices: UnsafeRawBufferPointer,
+        indices: UnsafeRawBufferPointer?
+    ) throws {
+        trace("updateMesh")
+        guard let resource = meshes[handle] else {
+            throw GPUResourceStagingError.invalidMesh(handle.rawValue)
+        }
+        guard case .streamed = resource.descriptor.storage else {
+            throw GPUResourceStagingError.invalidMeshUpload(
+                "Only streamed meshes can be updated"
+            )
+        }
+        guard vertices.count % MemoryLayout<RenderVertex>.stride == 0,
+              (indices?.count ?? 0) % MemoryLayout<UInt32>.stride == 0 else {
+            throw GPUResourceStagingError.invalidMeshUpload(
+                "Mesh updates must contain whole vertices and indices"
+            )
+        }
+        let updatedDescriptor = MeshDescriptor(
+            topology: resource.descriptor.topology,
+            storage: resource.descriptor.storage,
+            vertexCount:
+                vertices.count / MemoryLayout<RenderVertex>.stride,
+            indexCount:
+                (indices?.count ?? 0) / MemoryLayout<UInt32>.stride,
+            bounds: resource.descriptor.bounds
+        )
+        let upload = try Self.meshUpload(
+            updatedDescriptor,
+            vertices: vertices,
+            indices: indices
+        )
+        try upload.packedVertices.withUnsafeBytes { vertexBytes in
+            if upload.indices.isEmpty {
+                try platform.updateCustomMesh(
+                    resource.storage.pointer,
+                    vertices: vertexBytes,
+                    indices: nil
+                )
+            } else {
+                try upload.indices.withUnsafeBufferPointer {
+                    indexBuffer in
+                    try platform.updateCustomMesh(
+                        resource.storage.pointer,
+                        vertices: vertexBytes,
+                        indices: indexBuffer
+                    )
+                }
+            }
+        }
+        meshes[handle] = .init(
+            storage: .init(
+                pointer: resource.storage.pointer,
+                vertexCount: updatedDescriptor.vertexCount,
+                indexCount: updatedDescriptor.indexCount,
+                vertexByteCount:
+                    upload.packedVertices.count *
+                    MemoryLayout<Float>.stride
+            ),
+            descriptor: updatedDescriptor
+        )
+    }
+
+    func destroyMesh(_ handle: MeshHandle) {
+        guard
+            let meshHandles,
+            let resource = meshes.removeValue(forKey: handle),
+            meshHandles.release(handle)
+        else {
+            return
+        }
+        platform.destroyCustomMesh(resource.storage.pointer)
+    }
     func createMaterial(
         _ descriptor: MaterialDescriptor
     ) throws -> MaterialHandle {
@@ -1143,6 +1277,133 @@ final class GPUResourceBackend: RenderResourceBackend {
         return stride
     }
 
+    private static func meshUpload(
+        _ descriptor: MeshDescriptor,
+        vertices: UnsafeRawBufferPointer,
+        indices: UnsafeRawBufferPointer?
+    ) throws -> GPUCustomMeshUpload {
+        guard descriptor.vertexCount > 0,
+              descriptor.vertexCount <=
+                  Int(UInt32.max) / (24 * MemoryLayout<Float>.stride),
+              descriptor.indexCount >= 0,
+              descriptor.indexCount <=
+                  Int(UInt32.max) / MemoryLayout<UInt32>.stride else {
+            throw GPUResourceStagingError.invalidMeshDescriptor(
+                "Mesh GPU buffer sizes must fit supported UInt32 ranges"
+            )
+        }
+        let (vertexByteCount, vertexByteOverflow) =
+            descriptor.vertexCount.multipliedReportingOverflow(
+                by: MemoryLayout<RenderVertex>.stride
+            )
+        let (indexByteCount, indexByteOverflow) =
+            descriptor.indexCount.multipliedReportingOverflow(
+                by: MemoryLayout<UInt32>.stride
+            )
+        guard !vertexByteOverflow,
+              !indexByteOverflow,
+              vertices.count == vertexByteCount,
+              (indices?.count ?? 0) == indexByteCount else {
+            throw GPUResourceStagingError.invalidMeshUpload(
+                "Mesh upload byte counts do not match its descriptor"
+            )
+        }
+
+        var vertexValues = Array(
+            repeating: RenderVertex(
+                position: .zero,
+                textureCoordinate: .zero,
+                normal: .zero,
+                tangent: .init(x: 0, y: 0, z: 0, w: 0),
+                color: .init(r: 0, g: 0, b: 0, a: 0)
+            ),
+            count: descriptor.vertexCount
+        )
+        vertexValues.withUnsafeMutableBytes {
+            $0.copyBytes(from: vertices)
+        }
+        let bounds = descriptor.bounds
+        let boundsScalars = [
+            bounds.minimum.x,
+            bounds.minimum.y,
+            bounds.minimum.z,
+            bounds.maximum.x,
+            bounds.maximum.y,
+            bounds.maximum.z,
+        ]
+        guard boundsScalars.allSatisfy(\.isFinite),
+              bounds.minimum.x <= bounds.maximum.x,
+              bounds.minimum.y <= bounds.maximum.y,
+              bounds.minimum.z <= bounds.maximum.z else {
+            throw GPUResourceStagingError.invalidMeshDescriptor(
+                "Mesh bounds must be finite and ordered"
+            )
+        }
+
+        var packedVertices: [Float] = []
+        packedVertices.reserveCapacity(descriptor.vertexCount * 24)
+        for vertex in vertexValues {
+            let scalars = [
+                vertex.position.x,
+                vertex.position.y,
+                vertex.position.z,
+                vertex.normal.x,
+                vertex.normal.y,
+                vertex.normal.z,
+                vertex.textureCoordinate.x,
+                vertex.textureCoordinate.y,
+                vertex.tangent.x,
+                vertex.tangent.y,
+                vertex.tangent.z,
+                vertex.tangent.w,
+            ]
+            guard scalars.allSatisfy(\.isFinite) else {
+                throw GPUResourceStagingError.invalidMeshUpload(
+                    "Mesh vertex vectors must contain only finite values"
+                )
+            }
+            packedVertices.append(contentsOf: scalars)
+            packedVertices.append(contentsOf: [
+                Float(vertex.color.r) / 255,
+                Float(vertex.color.g) / 255,
+                Float(vertex.color.b) / 255,
+                Float(vertex.color.a) / 255,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ])
+        }
+
+        let indexValues: [UInt32]
+        if descriptor.indexCount == 0 {
+            indexValues = []
+        } else if let indices {
+            var values = Array(
+                repeating: UInt32(0),
+                count: descriptor.indexCount
+            )
+            values.withUnsafeMutableBytes {
+                $0.copyBytes(from: indices)
+            }
+            indexValues = values
+        } else {
+            throw GPUResourceStagingError.invalidMeshUpload(
+                "Indexed mesh upload is missing its index bytes"
+            )
+        }
+        guard indexValues.count == descriptor.indexCount,
+              indexValues.allSatisfy({
+                  $0 < UInt32(descriptor.vertexCount)
+              }) else {
+            throw GPUResourceStagingError.invalidMeshUpload(
+                "Mesh indices must reference existing vertices"
+            )
+        }
+        return .init(
+            packedVertices: packedVertices,
+            indices: indexValues
+        )
+    }
+
     private static func validateLightDescriptor(
         _ descriptor: LightDescriptor
     ) throws {
@@ -1254,6 +1515,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         ambientMaps.removeAll()
         pendingCubemapDestruction.removeAll()
         cubemaps.removeAll()
+        for resource in meshes.values {
+            platform.destroyCustomMesh(resource.storage.pointer)
+        }
+        meshes.removeAll()
         for resource in instanceBuffers.values {
             platform.destroyInstanceBuffer(resource.storage.pointer)
         }
@@ -1333,21 +1598,23 @@ final class GPUResourceBackend: RenderResourceBackend {
 final class GPUSceneBackend: SceneBackend {
     private let platform: GPUPlatform
     private var unsupportedOperation: String?
+    private var drawableSize = PixelSize2D(width: 0, height: 0)
+    private var currentFrame: FrameDescriptor?
 
     init(platform: GPUPlatform) {
         self.platform = platform
     }
 
     func initialize(drawableSize: PixelSize2D) throws {
-        _ = drawableSize
+        self.drawableSize = drawableSize
     }
 
     func resize(drawableSize: PixelSize2D) throws {
-        _ = drawableSize
+        self.drawableSize = drawableSize
     }
 
     func beginFrame(_ descriptor: FrameDescriptor) {
-        _ = descriptor
+        currentFrame = descriptor
         unsupportedOperation = nil
     }
 
@@ -1386,9 +1653,103 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool {
-        _ = bounds
-        platform.failClosed(operation: "scene.intersectsFrustum")
-        return false
+        let minimum = bounds.minimum
+        let maximum = bounds.maximum
+        let boundsScalars = [
+            minimum.x, minimum.y, minimum.z,
+            maximum.x, maximum.y, maximum.z,
+        ]
+        guard boundsScalars.allSatisfy(\.isFinite),
+              minimum.x <= maximum.x,
+              minimum.y <= maximum.y,
+              minimum.z <= maximum.z else {
+            return false
+        }
+        guard let frame = currentFrame,
+              drawableSize.width > 0,
+              drawableSize.height > 0 else {
+            return true
+        }
+
+        let camera = frame.camera
+        let forward = (camera.target - camera.position).normalized()
+        let right = forward.cross(camera.up).normalized()
+        let correctedUp = right.cross(forward).normalized()
+        guard forward.lengthSquared.isFinite,
+              right.lengthSquared.isFinite,
+              correctedUp.lengthSquared.isFinite,
+              forward.lengthSquared > 0,
+              right.lengthSquared > 0,
+              correctedUp.lengthSquared > 0 else {
+            return true
+        }
+
+        let center = (minimum + maximum) * 0.5
+        let extents = (maximum - minimum) * 0.5
+        let relativeCenter = center - camera.position
+        let centerDepth = relativeCenter.dot(forward)
+        let centerRight = relativeCenter.dot(right)
+        let centerUp = relativeCenter.dot(correctedUp)
+        let depthRadius = Self.projectedRadius(extents, on: forward)
+        let rightRadius = Self.projectedRadius(extents, on: right)
+        let upRadius = Self.projectedRadius(extents, on: correctedUp)
+        guard centerDepth + depthRadius >= 0 else {
+            return false
+        }
+
+        let viewportWidth =
+            Float(drawableSize.width) * frame.viewport.width
+        let viewportHeight =
+            Float(drawableSize.height) * frame.viewport.height
+        guard viewportWidth.isFinite,
+              viewportHeight.isFinite,
+              viewportWidth > 0,
+              viewportHeight > 0,
+              camera.verticalFOVDegrees.isFinite,
+              camera.verticalFOVDegrees > 0 else {
+            return true
+        }
+        let aspect = viewportWidth / viewportHeight
+        switch camera.projection {
+        case .perspective:
+            guard camera.verticalFOVDegrees < 180 else {
+                return true
+            }
+            let verticalTangent = tan(
+                camera.verticalFOVDegrees * .pi / 360
+            )
+            let horizontalTangent = verticalTangent * aspect
+            guard verticalTangent.isFinite,
+                  horizontalTangent.isFinite,
+                  verticalTangent > 0,
+                  horizontalTangent > 0 else {
+                return true
+            }
+            let horizontalPlaneRadius =
+                depthRadius * horizontalTangent + rightRadius
+            if centerDepth * horizontalTangent - centerRight
+                + horizontalPlaneRadius < 0 ||
+                centerDepth * horizontalTangent + centerRight
+                + horizontalPlaneRadius < 0 {
+                return false
+            }
+            let verticalPlaneRadius =
+                depthRadius * verticalTangent + upRadius
+            if centerDepth * verticalTangent - centerUp
+                + verticalPlaneRadius < 0 ||
+                centerDepth * verticalTangent + centerUp
+                + verticalPlaneRadius < 0 {
+                return false
+            }
+        case .orthographic:
+            let halfHeight = camera.verticalFOVDegrees * 0.5
+            let halfWidth = halfHeight * aspect
+            guard abs(centerRight) <= halfWidth + rightRadius,
+                  abs(centerUp) <= halfHeight + upRadius else {
+                return false
+            }
+        }
+        return true
     }
 
     func readbackWorldFrame() throws -> FrameReadback {
@@ -1405,5 +1766,16 @@ final class GPUSceneBackend: SceneBackend {
 
     func shutdown() {
         unsupportedOperation = nil
+        currentFrame = nil
+        drawableSize = .init(width: 0, height: 0)
+    }
+
+    private static func projectedRadius(
+        _ extents: RenderVec3,
+        on axis: RenderVec3
+    ) -> Float {
+        abs(axis.x) * extents.x +
+            abs(axis.y) * extents.y +
+            abs(axis.z) * extents.z
     }
 }

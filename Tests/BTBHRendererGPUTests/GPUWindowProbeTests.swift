@@ -3,6 +3,45 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testCustomMeshCABIRejectsMismatchedLayoutAndIndices() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH custom mesh ABI validation",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packedVertices = [Float](repeating: 0, count: 24 * 3)
+        var validIndices: [UInt32] = [0, 1, 2]
+        XCTAssertThrowsError(try packedVertices.withUnsafeBytes {
+            vertexBytes in
+            try validIndices.withUnsafeBufferPointer { indexBuffer in
+                try probe.createCustomMesh(
+                    vertices: vertexBytes,
+                    vertexCount: 4,
+                    indices: indexBuffer
+                )
+            }
+        })
+        validIndices[2] = 3
+        XCTAssertThrowsError(try packedVertices.withUnsafeBytes {
+            vertexBytes in
+            try validIndices.withUnsafeBufferPointer { indexBuffer in
+                try probe.createCustomMesh(
+                    vertices: vertexBytes,
+                    vertexCount: 3,
+                    indices: indexBuffer
+                )
+            }
+        })
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testWindowsProbePresentsResizesAndRestoresARealVulkanWindow() throws {
         #if os(Windows)
         let probe = try GPUWindowProbe(
