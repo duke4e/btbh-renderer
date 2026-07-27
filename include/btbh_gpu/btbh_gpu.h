@@ -226,6 +226,22 @@ typedef struct BTBHGPUAnimationLibraryReport {
     char message[256];
 } BTBHGPUAnimationLibraryReport;
 
+typedef struct BTBHGPUModelInstancesBatch {
+    BTBHGPUModel *model;
+    uint32_t first_instance;
+    uint32_t instance_count;
+} BTBHGPUModelInstancesBatch;
+
+typedef struct BTBHGPUSceneReport {
+    BTBHGPUResult result;
+    uint32_t drawable_width;
+    uint32_t drawable_height;
+    uint32_t batch_count;
+    uint32_t primitive_draw_count;
+    uint32_t instance_count;
+    char message[256];
+} BTBHGPUSceneReport;
+
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
 BTBHGPUShaderFormat btbh_gpu_backend_shader_format(BTBHGPUBackendRequest backend);
 BTBHGPUResult btbh_gpu_validate_capabilities(
@@ -364,6 +380,22 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     BTBHGPUCustomMeshReport *report
 );
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
+BTBHGPUResult btbh_gpu_window_scene_present_model_instances(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const float view_projection[16],
+    const float *instances,
+    uint32_t total_instance_count,
+    const BTBHGPUModelInstancesBatch *batches,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+);
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report

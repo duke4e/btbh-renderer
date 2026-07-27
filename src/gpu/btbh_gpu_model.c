@@ -48,25 +48,6 @@ typedef struct BTBHGPUFloatAttribute {
     uint32_t component_count;
 } BTBHGPUFloatAttribute;
 
-typedef struct BTBHGPUModelPrimitive {
-    SDL_GPUBuffer *vertex_buffer;
-    SDL_GPUBuffer *index_buffer;
-    uint32_t vertex_count;
-    uint32_t index_count;
-    int32_t material_slot;
-} BTBHGPUModelPrimitive;
-
-struct BTBHGPUModel {
-    BTBHGPUWindow *owner;
-    BTBHGPUModel *previous;
-    BTBHGPUModel *next;
-    BTBHGPUModelPrimitive *primitives;
-    uint32_t primitive_count;
-    uint32_t material_count;
-    float minimum[3];
-    float maximum[3];
-};
-
 struct BTBHGPUAnimationLibrary {
     cgltf_data *data;
 };

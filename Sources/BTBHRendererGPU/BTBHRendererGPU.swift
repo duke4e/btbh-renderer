@@ -189,6 +189,16 @@ enum GPUCustomMeshProbeError: Error, Equatable {
     case operationFailed(message: String)
 }
 
+enum GPUSceneProbeError: Error, Equatable {
+    case operationFailed(message: String)
+}
+
+struct GPUModelInstancesProbeBatch {
+    let model: OpaquePointer
+    let firstInstance: Int
+    let instanceCount: Int
+}
+
 struct GPUCustomMeshProbeResource {
     let pointer: OpaquePointer
     let vertexCount: Int
@@ -683,6 +693,75 @@ public final class GPUWindowProbe {
 
     static func destroyCustomMesh(_ mesh: OpaquePointer) {
         btbh_gpu_custom_mesh_destroy(mesh)
+    }
+
+    func presentModelInstances(
+        vertexShaderPath: String,
+        fragmentShaderPath: String,
+        shaderFormat: BTBHGPUShaderFormat,
+        viewProjection: [Float],
+        instances: [Float],
+        batches: [GPUModelInstancesProbeBatch],
+        clearColor: RenderColor
+    ) throws {
+        guard let window, !isShutdown,
+              viewProjection.count == 16,
+              !instances.isEmpty,
+              instances.count.isMultiple(of: 20),
+              instances.count / 20 <= Int(UInt32.max),
+              !batches.isEmpty,
+              batches.count <= Int(UInt32.max) else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Invalid GPU model instance scene data"
+            )
+        }
+        let nativeBatches = try batches.map { batch in
+            guard batch.firstInstance >= 0,
+                  batch.firstInstance <= Int(UInt32.max),
+                  batch.instanceCount > 0,
+                  batch.instanceCount <= Int(UInt32.max) else {
+                throw GPUSceneProbeError.operationFailed(
+                    message: "GPU model instance batch exceeds UInt32"
+                )
+            }
+            return BTBHGPUModelInstancesBatch(
+                model: batch.model,
+                first_instance: UInt32(batch.firstInstance),
+                instance_count: UInt32(batch.instanceCount)
+            )
+        }
+        var report = BTBHGPUSceneReport()
+        let result = vertexShaderPath.withCString { vertexPath in
+            fragmentShaderPath.withCString { fragmentPath in
+                viewProjection.withUnsafeBufferPointer { matrix in
+                    instances.withUnsafeBufferPointer { instanceData in
+                        nativeBatches.withUnsafeBufferPointer { batchData in
+                            btbh_gpu_window_scene_present_model_instances(
+                                window,
+                                vertexPath,
+                                fragmentPath,
+                                shaderFormat,
+                                matrix.baseAddress,
+                                instanceData.baseAddress,
+                                UInt32(instances.count / 20),
+                                batchData.baseAddress,
+                                UInt32(nativeBatches.count),
+                                clearColor.r,
+                                clearColor.g,
+                                clearColor.b,
+                                clearColor.a,
+                                &report
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard result == BTBH_GPU_OK else {
+            throw GPUSceneProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
     }
 
     public func shutdown() {

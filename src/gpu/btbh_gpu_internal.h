@@ -7,6 +7,16 @@
 
 #include <stdbool.h>
 
+typedef struct BTBHGPUModelPrimitive {
+    SDL_GPUBuffer *vertex_buffer;
+    SDL_GPUBuffer *index_buffer;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    int32_t material_slot;
+} BTBHGPUModelPrimitive;
+
+typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
+
 struct BTBHGPUDevice {
     SDL_GPUDevice *gpu;
     bool owns_video_subsystem;
@@ -35,11 +45,24 @@ struct BTBHGPUWindow {
     BTBHGPUModel *model_head;
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
+    BTBHGPUSceneRuntime *scene_runtime;
+};
+
+struct BTBHGPUModel {
+    BTBHGPUWindow *owner;
+    BTBHGPUModel *previous;
+    BTBHGPUModel *next;
+    BTBHGPUModelPrimitive *primitives;
+    uint32_t primitive_count;
+    uint32_t material_count;
+    float minimum[3];
+    float maximum[3];
 };
 
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
+void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
 
 #endif

@@ -39,7 +39,10 @@ public final class GPURenderServicesBundle: RenderBackendBundle {
         gpuPlatform = platform
         gpuCanvas = GPUCanvas(platform: platform)
         gpuResources = GPUResourceBackend(platform: platform)
-        gpuScene = GPUSceneBackend(platform: platform)
+        gpuScene = GPUSceneBackend(
+            platform: platform,
+            resources: gpuResources
+        )
     }
 
     public func shutdownRenderer() {

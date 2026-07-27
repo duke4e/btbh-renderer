@@ -1,4 +1,5 @@
 import BTBHRenderer
+import BTBHRendererGPUCore
 import Foundation
 
 public enum GPUPlatformError: Error, Equatable {
@@ -360,6 +361,57 @@ public final class GPUPlatform: GamePlatform {
 
     func destroyCustomMesh(_ mesh: OpaquePointer) {
         GPUWindowProbe.destroyCustomMesh(mesh)
+    }
+
+    func presentModelInstances(
+        viewProjection: [Float],
+        instances: [Float],
+        batches: [GPUModelInstancesProbeBatch],
+        clearColor: RenderColor
+    ) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        let shaderDirectory: URL
+        if let override = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_SHADER_DIR"
+        ], !override.isEmpty {
+            shaderDirectory = URL(fileURLWithPath: override)
+        } else {
+            let executable = URL(
+                fileURLWithPath: CommandLine.arguments[0]
+            ).standardizedFileURL
+            shaderDirectory = executable
+                .deletingLastPathComponent()
+                .appendingPathComponent("GPUShaders")
+        }
+        let extensionName: String
+        let shaderFormat: BTBHGPUShaderFormat
+        switch request {
+        case .vulkan:
+            extensionName = "spv"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_SPIRV
+        case .metal:
+            extensionName = "metallib"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
+        }
+        try window.presentModelInstances(
+            vertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_model.vert.\(extensionName)"
+                )
+                .path,
+            fragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_model.frag.\(extensionName)"
+                )
+                .path,
+            shaderFormat: shaderFormat,
+            viewProjection: viewProjection,
+            instances: instances,
+            batches: batches,
+            clearColor: clearColor
+        )
     }
 
     func failClosed(operation: String) {

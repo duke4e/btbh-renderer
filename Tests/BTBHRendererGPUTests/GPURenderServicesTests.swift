@@ -1468,4 +1468,67 @@ final class GPURenderServicesTests: XCTestCase {
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif
     }
+
+    func testModelInstancesPresentsLoadedGeometryWithoutFailClosing() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU model instances scene test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: [],
+            persistentBuffer: nil
+        )))
+
+        try RenderServices.scene.endFrame()
+
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        RenderServices.resources.destroyModel(model)
+        #else
+        throw XCTSkip("The Windows Vulkan scene test runs only on Windows")
+        #endif
+    }
 }

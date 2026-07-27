@@ -234,6 +234,16 @@ final class GPUResourceBackend: RenderResourceBackend {
         return resource.metadata
     }
 
+    func modelPointer(_ handle: ModelHandle) throws -> OpaquePointer {
+        guard
+            !pendingModelDestruction.contains(handle),
+            let resource = models[handle]
+        else {
+            throw GPUResourceStagingError.invalidModel(handle.rawValue)
+        }
+        return resource.pointer
+    }
+
     func destroyModel(_ handle: ModelHandle) {
         if isModelReferenced(handle) {
             pendingModelDestruction.insert(handle)
@@ -1597,12 +1607,15 @@ final class GPUResourceBackend: RenderResourceBackend {
 @MainActor
 final class GPUSceneBackend: SceneBackend {
     private let platform: GPUPlatform
+    private let resources: GPUResourceBackend
     private var unsupportedOperation: String?
     private var drawableSize = PixelSize2D(width: 0, height: 0)
     private var currentFrame: FrameDescriptor?
+    private var modelInstanceDraws: [ModelInstancesDraw] = []
 
-    init(platform: GPUPlatform) {
+    init(platform: GPUPlatform, resources: GPUResourceBackend) {
         self.platform = platform
+        self.resources = resources
     }
 
     func initialize(drawableSize: PixelSize2D) throws {
@@ -1616,10 +1629,13 @@ final class GPUSceneBackend: SceneBackend {
     func beginFrame(_ descriptor: FrameDescriptor) {
         currentFrame = descriptor
         unsupportedOperation = nil
+        modelInstanceDraws.removeAll(keepingCapacity: true)
     }
 
     func submit(_ draw: SceneDraw) {
-        if unsupportedOperation == nil {
+        if case .modelInstances(let modelInstances) = draw {
+            modelInstanceDraws.append(modelInstances)
+        } else if unsupportedOperation == nil {
             unsupportedOperation = Self.submitOperation(draw)
         }
     }
@@ -1629,6 +1645,55 @@ final class GPUSceneBackend: SceneBackend {
             platform.failClosed(operation: unsupportedOperation)
             throw GPUBackendUnsupportedError.operation(unsupportedOperation)
         }
+        guard !modelInstanceDraws.isEmpty else { return }
+        guard let currentFrame,
+              let viewProjection = viewProjection(
+                camera: currentFrame.camera,
+                viewport: currentFrame.viewport
+              ) else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Invalid GPU scene camera"
+            )
+        }
+        var packedInstances: [Float] = []
+        var batches: [GPUModelInstancesProbeBatch] = []
+        for draw in modelInstanceDraws {
+            guard draw.sourceStart >= 0,
+                  draw.count > 0,
+                  draw.sourceStart <= draw.instances.count,
+                  draw.count <= draw.instances.count - draw.sourceStart else {
+                throw GPUSceneProbeError.operationFailed(
+                    message: "Invalid GPU model instance range"
+                )
+            }
+            let firstInstance = packedInstances.count / 20
+            for instance in draw.instances[
+                draw.sourceStart..<(draw.sourceStart + draw.count)
+            ] {
+                let matrix = instance.transform.matrix
+                packedInstances.append(contentsOf: [
+                    matrix.c0.x, matrix.c0.y, matrix.c0.z, matrix.c0.w,
+                    matrix.c1.x, matrix.c1.y, matrix.c1.z, matrix.c1.w,
+                    matrix.c2.x, matrix.c2.y, matrix.c2.z, matrix.c2.w,
+                    matrix.c3.x, matrix.c3.y, matrix.c3.z, matrix.c3.w,
+                    Float(instance.color.r) / 255,
+                    Float(instance.color.g) / 255,
+                    Float(instance.color.b) / 255,
+                    Float(instance.color.a) / 255,
+                ])
+            }
+            batches.append(.init(
+                model: try resources.modelPointer(draw.model),
+                firstInstance: firstInstance,
+                instanceCount: draw.count
+            ))
+        }
+        try platform.presentModelInstances(
+            viewProjection: viewProjection,
+            instances: packedInstances,
+            batches: batches,
+            clearColor: currentFrame.environment.backgroundColor
+        )
     }
 
     func project(
@@ -1814,6 +1879,7 @@ final class GPUSceneBackend: SceneBackend {
     func shutdown() {
         unsupportedOperation = nil
         currentFrame = nil
+        modelInstanceDraws.removeAll(keepingCapacity: false)
         drawableSize = .init(width: 0, height: 0)
     }
 
@@ -1897,5 +1963,67 @@ final class GPUSceneBackend: SceneBackend {
             return nil
         }
         return (forward, right, up, halfWidth, halfHeight)
+    }
+
+    private func viewProjection(
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> [Float]? {
+        guard let geometry = cameraGeometry(camera) else { return nil }
+        let width = Float(drawableSize.width) * viewport.width
+        let height = Float(drawableSize.height) * viewport.height
+        guard width.isFinite, height.isFinite, width > 0, height > 0 else {
+            return nil
+        }
+        let position = camera.position
+        let view: [Float] = [
+            geometry.right.x, geometry.up.x, geometry.forward.x, 0,
+            geometry.right.y, geometry.up.y, geometry.forward.y, 0,
+            geometry.right.z, geometry.up.z, geometry.forward.z, 0,
+            -position.dot(geometry.right),
+            -position.dot(geometry.up),
+            -position.dot(geometry.forward),
+            1,
+        ]
+        let near: Float = 0.01
+        let far: Float = 1_000_000
+        let depthScale = far / (far - near)
+        let depthBias = -near * depthScale
+        let projection: [Float]
+        switch camera.projection {
+        case .perspective:
+            let inverseHalfHeight = 1 / geometry.halfHeight
+            projection = [
+                inverseHalfHeight / (width / height), 0, 0, 0,
+                0, inverseHalfHeight, 0, 0,
+                0, 0, depthScale, 1,
+                0, 0, depthBias, 0,
+            ]
+        case .orthographic:
+            projection = [
+                1 / geometry.halfWidth, 0, 0, 0,
+                0, 1 / geometry.halfHeight, 0, 0,
+                0, 0, 1 / (far - near), 0,
+                0, 0, -near / (far - near), 1,
+            ]
+        }
+        return Self.multiply(projection, view)
+    }
+
+    private static func multiply(
+        _ lhs: [Float],
+        _ rhs: [Float]
+    ) -> [Float] {
+        var result = Array(repeating: Float.zero, count: 16)
+        for column in 0..<4 {
+            for row in 0..<4 {
+                result[column * 4 + row] =
+                    lhs[row] * rhs[column * 4] +
+                    lhs[4 + row] * rhs[column * 4 + 1] +
+                    lhs[8 + row] * rhs[column * 4 + 2] +
+                    lhs[12 + row] * rhs[column * 4 + 3]
+            }
+        }
+        return result
     }
 }

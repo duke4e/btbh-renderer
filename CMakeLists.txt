@@ -581,6 +581,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "phase2_lighting.vert|vertex"
         "phase2_lighting.frag|fragment"
         "phase2_transparent.frag|fragment"
+        "production_model.vert|vertex"
+        "production_model.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
@@ -701,6 +703,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_model.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_phase2_runtime.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_resources.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_scene.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_spike_scene.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_texture.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_vertical_smoke.c"
