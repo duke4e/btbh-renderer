@@ -1671,7 +1671,7 @@ final class GPUSceneBackend: SceneBackend {
         guard let geometry = cameraGeometry(camera),
               screen.x.isFinite,
               screen.y.isFinite else {
-            return .init(origin: camera.position, direction: .zero)
+            return .init(origin: .zero, direction: .zero)
         }
         let normalizedX =
             2 * screen.x / Float(drawableSize.width) - 1
@@ -1693,7 +1693,8 @@ final class GPUSceneBackend: SceneBackend {
                 geometry.right *
                     (normalizedX * geometry.halfWidth) +
                 geometry.up *
-                    (normalizedY * geometry.halfHeight)
+                    (normalizedY * geometry.halfHeight) +
+                geometry.forward * 0.01
             return .init(origin: origin, direction: geometry.forward)
         }
     }

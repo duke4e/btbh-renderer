@@ -805,7 +805,18 @@ final class GPURenderServicesTests: XCTestCase {
         )
         XCTAssertEqual(edgeRay.origin.x, -20, accuracy: 0.001)
         XCTAssertEqual(edgeRay.origin.y, 0, accuracy: 0.001)
+        XCTAssertEqual(edgeRay.origin.z, 0.01, accuracy: 0.001)
         XCTAssertEqual(edgeRay.direction, .forward)
+        try RenderServices.scene.resize(
+            drawableSize: .init(width: 0, height: 0)
+        )
+        XCTAssertEqual(
+            RenderServices.scene.unprojectRay(
+                .init(x: .infinity, y: 0),
+                camera: perspective
+            ),
+            .init(origin: .zero, direction: .zero)
+        )
     }
 
     func testUnsupportedSceneSubmitReportsTheExactDrawKind() throws {
