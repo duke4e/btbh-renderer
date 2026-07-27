@@ -633,6 +633,17 @@ static bool btbh_gpu_scene_validate_batches(
     return true;
 }
 
+static bool btbh_gpu_scene_batch_uses_geometry(
+    const BTBHGPUSceneGeometryBatch *batch,
+    uint32_t geometry_index
+) {
+    return
+        batch->kind != BTBH_GPU_SCENE_GEOMETRY_MODEL ||
+        batch->material_slot < 0 ||
+        batch->model->primitives[geometry_index].material_slot ==
+            batch->material_slot;
+}
+
 static bool btbh_gpu_scene_prepare_bones(
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
@@ -651,18 +662,22 @@ static bool btbh_gpu_scene_prepare_bones(
             batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
                 ? batch->model->primitive_count
                 : 1u;
-        if (
-            batch_geometry_count > UINT32_MAX - total_geometry_count
-        ) {
-            return false;
-        }
-        total_geometry_count += batch_geometry_count;
-        if (batch->animation_library == NULL) {
-            continue;
-        }
         for (uint32_t primitive_index = 0u;
              primitive_index < batch_geometry_count;
              primitive_index += 1u) {
+            if (!btbh_gpu_scene_batch_uses_geometry(
+                    batch,
+                    primitive_index
+                )) {
+                continue;
+            }
+            if (total_geometry_count == UINT32_MAX) {
+                return false;
+            }
+            total_geometry_count += 1u;
+            if (batch->animation_library == NULL) {
+                continue;
+            }
             const int32_t skin_index =
                 batch->model->primitives[primitive_index].skin_index;
             if (skin_index < 0) {
@@ -721,6 +736,12 @@ static bool btbh_gpu_scene_prepare_bones(
         for (uint32_t primitive_index = 0u;
              valid && primitive_index < batch_geometry_count;
              primitive_index += 1u) {
+            if (!btbh_gpu_scene_batch_uses_geometry(
+                    batch,
+                    primitive_index
+                )) {
+                continue;
+            }
             offsets[geometry_index] = UINT32_MAX;
             if (batch->animation_library != NULL) {
                 const int32_t skin_index =
@@ -1059,17 +1080,15 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
             ++geometry_index) {
+            if (!btbh_gpu_scene_batch_uses_geometry(
+                    batch,
+                    geometry_index
+                )) {
+                continue;
+            }
             const uint32_t bone_offset =
                 bone_offsets[geometry_cursor];
             geometry_cursor += 1u;
-            if (
-                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
-                batch->material_slot >= 0 &&
-                batch->model->primitives[geometry_index].material_slot !=
-                    batch->material_slot
-            ) {
-                continue;
-            }
             const bool animated = bone_offset != UINT32_MAX;
             BTBHGPUSceneUniforms uniforms;
             (void)memset(&uniforms, 0, sizeof(uniforms));
@@ -1288,6 +1307,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     report->drawable_height = drawable_height;
     report->batch_count = batch_count;
     report->primitive_draw_count = primitive_draw_count;
+    report->prepared_geometry_count = prepared_geometry_count;
     report->instance_count = total_instance_count;
     report->message[0] = '\0';
     return report->result;

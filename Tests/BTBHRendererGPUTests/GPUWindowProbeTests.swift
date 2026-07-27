@@ -1,4 +1,5 @@
 import XCTest
+import BTBHRendererGPUCore
 @testable import BTBHRendererGPU
 
 @preconcurrency @MainActor
@@ -74,6 +75,117 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(probe.isShutdown)
         #else
         throw XCTSkip("The Windows Vulkan window probe runs only on Windows")
+        #endif
+    }
+
+    func testMaterialSlotBatchesPrepareOnlyDrawnModelPrimitives() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH material-slot preparation test",
+            width: 320,
+            height: 180,
+            hidden: false,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/instanced-transformed-default-material.gltf"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+        let shaderDirectory = packageRoot
+            .appendingPathComponent(
+                "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
+            )
+        let instances: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+            1, 1, 1, 1,
+        ]
+        let batches = [0, 1].map { slot in
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(model.pointer),
+                animation: nil,
+                material: model.materials[slot],
+                materialSlot: slot,
+                firstInstance: 0,
+                instanceCount: 1
+            )
+        }
+        let report = try probe.presentModelInstances(
+            vertexShaderPath: shaderDirectory
+                .appendingPathComponent("production_model.vert.spv")
+                .path,
+            animatedVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_animated_model.vert.spv"
+                )
+                .path,
+            fragmentShaderPath: shaderDirectory
+                .appendingPathComponent("production_model.frag.spv")
+                .path,
+            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            viewProjection: [
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1,
+            ],
+            cameraRight: .right,
+            cameraUp: .up,
+            lighting: .init(
+                ambientColor: .white,
+                ambientEnergy: 1,
+                directionalDirection: .down,
+                directionalColor: .white,
+                directionalEnergy: 0,
+                secondaryDirectionalDirection: .down,
+                secondaryDirectionalColor: .white,
+                secondaryDirectionalEnergy: 0
+            ),
+            instances: instances,
+            batches: batches,
+            clearColor: .black
+        )
+        XCTAssertEqual(report.primitiveDrawCount, 4)
+        XCTAssertEqual(report.preparedGeometryCount, 4)
+        try probe.presentCanvas(
+            vertexShaderPath: shaderDirectory
+                .appendingPathComponent("production_canvas.vert.spv")
+                .path,
+            fragmentShaderPath: shaderDirectory
+                .appendingPathComponent("production_canvas.frag.spv")
+                .path,
+            texturedFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_canvas_textured.frag.spv"
+                )
+                .path,
+            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            vertices: [],
+            batches: [],
+            passes: [
+                .init(
+                    firstBatch: 0,
+                    batchCount: 0,
+                    target: nil,
+                    clearColor: nil,
+                    screenClearToken: nil
+                ),
+            ]
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
         #endif
     }
 }

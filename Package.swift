@@ -62,7 +62,10 @@ if ProcessInfo.processInfo.environment["BTBH_ENABLE_GPU_TESTS"] == "1" {
     rendererTargets.append(
         .testTarget(
             name: "BTBHRendererGPUTests",
-            dependencies: ["BTBHRendererGPU"],
+            dependencies: [
+                "BTBHRendererGPU",
+                "BTBHRendererGPUCore",
+            ],
             path: "Tests/BTBHRendererGPUTests"
         )
     )

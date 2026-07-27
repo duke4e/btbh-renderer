@@ -434,7 +434,7 @@ public final class GPUPlatform: GamePlatform {
             extensionName = "metallib"
             shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
         }
-        try window.presentModelInstances(
+        _ = try window.presentModelInstances(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_model.vert.\(extensionName)"

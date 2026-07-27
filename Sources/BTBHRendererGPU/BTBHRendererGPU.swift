@@ -309,6 +309,14 @@ struct GPUSceneLightingProbe {
     let secondaryDirectionalEnergy: Float
 }
 
+struct GPUScenePresentationProbeReport {
+    let drawableSize: PixelSize2D
+    let batchCount: Int
+    let primitiveDrawCount: Int
+    let preparedGeometryCount: Int
+    let instanceCount: Int
+}
+
 struct GPUCustomMeshProbeResource {
     let pointer: OpaquePointer
     let vertexCount: Int
@@ -962,7 +970,7 @@ public final class GPUWindowProbe {
         instances: [Float],
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
-    ) throws {
+    ) throws -> GPUScenePresentationProbeReport {
         guard let window, !isShutdown,
               viewProjection.count == 16,
               !instances.isEmpty,
@@ -1131,6 +1139,16 @@ public final class GPUWindowProbe {
                 message: GPUDeviceProbe.string(from: &report.message)
             )
         }
+        return .init(
+            drawableSize: .init(
+                width: Int(report.drawable_width),
+                height: Int(report.drawable_height)
+            ),
+            batchCount: Int(report.batch_count),
+            primitiveDrawCount: Int(report.primitive_draw_count),
+            preparedGeometryCount: Int(report.prepared_geometry_count),
+            instanceCount: Int(report.instance_count)
+        )
     }
 
     private static func sceneBlendMode(

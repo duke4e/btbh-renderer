@@ -410,6 +410,7 @@ typedef struct BTBHGPUSceneReport {
     uint32_t drawable_height;
     uint32_t batch_count;
     uint32_t primitive_draw_count;
+    uint32_t prepared_geometry_count;
     uint32_t instance_count;
     char message[256];
 } BTBHGPUSceneReport;
