@@ -289,6 +289,7 @@ struct GPUSceneMaterialProbe {
     let albedoColor: RenderColor
     let blendMode: MaterialBlendMode
     let billboardMode: BillboardMode
+    let depthCompare: CompareFunction
     let transparency: TransparencyMode
     let unlit: Bool
 }
@@ -1028,6 +1029,9 @@ public final class GPUWindowProbe {
                 billboard_mode: Self.sceneBillboardMode(
                     batch.material?.billboardMode ?? .disabled
                 ),
+                depth_compare: Self.sceneDepthCompare(
+                    batch.material?.depthCompare ?? .less
+                ),
                 transparency_enabled:
                     batch.material?.transparency == .alpha ? 1 : 0,
                 unlit_enabled:
@@ -1107,6 +1111,29 @@ public final class GPUWindowProbe {
             BTBH_GPU_SCENE_BILLBOARD_FRONT
         case .yAxis:
             BTBH_GPU_SCENE_BILLBOARD_Y_AXIS
+        }
+    }
+
+    private static func sceneDepthCompare(
+        _ compare: CompareFunction
+    ) -> BTBHGPUSceneDepthCompare {
+        switch compare {
+        case .always:
+            BTBH_GPU_SCENE_DEPTH_ALWAYS
+        case .lessEqual:
+            BTBH_GPU_SCENE_DEPTH_LESS_EQUAL
+        case .greater:
+            BTBH_GPU_SCENE_DEPTH_GREATER
+        case .notEqual:
+            BTBH_GPU_SCENE_DEPTH_NOT_EQUAL
+        case .less:
+            BTBH_GPU_SCENE_DEPTH_LESS
+        case .equal:
+            BTBH_GPU_SCENE_DEPTH_EQUAL
+        case .greaterEqual:
+            BTBH_GPU_SCENE_DEPTH_GREATER_EQUAL
+        case .never:
+            BTBH_GPU_SCENE_DEPTH_NEVER
         }
     }
 

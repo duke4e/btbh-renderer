@@ -490,6 +490,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             albedoColor: descriptor.albedoColor,
             blendMode: descriptor.blend,
             billboardMode: descriptor.billboard,
+            depthCompare: descriptor.depthCompare,
             transparency: descriptor.transparency,
             unlit: descriptor.unlit
         )
@@ -549,6 +550,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                     albedoColor: patch.albedoColor ?? .white,
                     blendMode: .mix,
                     billboardMode: .disabled,
+                    depthCompare: .less,
                     transparency: .disabled,
                     unlit: false
                 )

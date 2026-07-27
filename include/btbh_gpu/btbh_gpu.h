@@ -324,6 +324,18 @@ typedef enum BTBHGPUSceneBillboardMode {
     BTBH_GPU_SCENE_BILLBOARD_Y_AXIS = 2
 } BTBHGPUSceneBillboardMode;
 
+typedef enum BTBHGPUSceneDepthCompare {
+    BTBH_GPU_SCENE_DEPTH_ALWAYS = 0,
+    BTBH_GPU_SCENE_DEPTH_LESS_EQUAL = 1,
+    BTBH_GPU_SCENE_DEPTH_GREATER = 2,
+    BTBH_GPU_SCENE_DEPTH_NOT_EQUAL = 3,
+    BTBH_GPU_SCENE_DEPTH_LESS = 4,
+    BTBH_GPU_SCENE_DEPTH_EQUAL = 5,
+    BTBH_GPU_SCENE_DEPTH_GREATER_EQUAL = 6,
+    BTBH_GPU_SCENE_DEPTH_NEVER = 7,
+    BTBH_GPU_SCENE_DEPTH_COUNT = 8
+} BTBHGPUSceneDepthCompare;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -341,6 +353,7 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t albedo_alpha;
     BTBHGPUSceneBlendMode blend_mode;
     BTBHGPUSceneBillboardMode billboard_mode;
+    BTBHGPUSceneDepthCompare depth_compare;
     uint8_t transparency_enabled;
     uint8_t unlit_enabled;
     uint8_t reserved;

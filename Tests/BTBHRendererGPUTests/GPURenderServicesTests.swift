@@ -2149,6 +2149,108 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testModelMaterialDepthCompareGreaterDoesNotCoverEqualDepth() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU model depth compare test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        var baseDescriptor = MaterialDescriptor.default
+        baseDescriptor.albedoColor = .init(r: 255, g: 0, b: 0, a: 255)
+        baseDescriptor.unlit = true
+        let baseMaterial = try RenderServices.resources.createMaterial(
+            baseDescriptor
+        )
+        var overlayDescriptor = MaterialDescriptor.default
+        overlayDescriptor.albedoColor = .init(r: 0, g: 255, b: 0, a: 255)
+        overlayDescriptor.depthCompare = .greater
+        overlayDescriptor.unlit = true
+        let overlayMaterial = try RenderServices.resources.createMaterial(
+            overlayDescriptor
+        )
+        let baseOverrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: baseMaterial)
+        }
+        let overlayOverrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: overlayMaterial)
+        }
+        defer {
+            RenderServices.resources.destroyMaterial(overlayMaterial)
+            RenderServices.resources.destroyMaterial(baseMaterial)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        let instance = RenderInstance(
+            transform: .identity,
+            color: .white,
+            custom: .init(x: 0, y: 0, z: 0, w: 0)
+        )
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [instance],
+            overrides: baseOverrides,
+            persistentBuffer: nil
+        )))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [instance],
+            overrides: overlayOverrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 200)
+        XCTAssertLessThan(readback.rgba8[center + 1], 80)
+        XCTAssertLessThan(readback.rgba8[center + 2], 80)
+        #else
+        throw XCTSkip("The Windows Vulkan material depth test runs only on Windows")
+        #endif
+    }
+
     func testLitMeshUsesFrameAmbientAndDirectionalLight() throws {
         #if os(Windows)
         RenderServices.uninstall()

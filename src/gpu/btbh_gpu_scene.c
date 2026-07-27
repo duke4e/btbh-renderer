@@ -32,10 +32,10 @@ typedef struct BTBHGPUSceneUniforms {
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
-    ];
+    ][BTBH_GPU_SCENE_DEPTH_COUNT];
     SDL_GPUGraphicsPipeline *animated_model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
-    ];
+    ][BTBH_GPU_SCENE_DEPTH_COUNT];
     BTBHGPUTexture *fallback_texture;
     SDL_GPUTexture *depth_texture;
     uint32_t depth_width;
@@ -152,6 +152,30 @@ static void btbh_gpu_scene_blend_state(
     }
 }
 
+static SDL_GPUCompareOp btbh_gpu_scene_depth_compare(
+    BTBHGPUSceneDepthCompare compare
+) {
+    switch (compare) {
+        case BTBH_GPU_SCENE_DEPTH_ALWAYS:
+            return SDL_GPU_COMPAREOP_ALWAYS;
+        case BTBH_GPU_SCENE_DEPTH_LESS_EQUAL:
+            return SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        case BTBH_GPU_SCENE_DEPTH_GREATER:
+            return SDL_GPU_COMPAREOP_GREATER;
+        case BTBH_GPU_SCENE_DEPTH_NOT_EQUAL:
+            return SDL_GPU_COMPAREOP_NOT_EQUAL;
+        case BTBH_GPU_SCENE_DEPTH_EQUAL:
+            return SDL_GPU_COMPAREOP_EQUAL;
+        case BTBH_GPU_SCENE_DEPTH_GREATER_EQUAL:
+            return SDL_GPU_COMPAREOP_GREATER_OR_EQUAL;
+        case BTBH_GPU_SCENE_DEPTH_NEVER:
+            return SDL_GPU_COMPAREOP_NEVER;
+        case BTBH_GPU_SCENE_DEPTH_LESS:
+        default:
+            return SDL_GPU_COMPAREOP_LESS;
+    }
+}
+
 static bool btbh_gpu_scene_create_pipeline(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -252,7 +276,6 @@ static bool btbh_gpu_scene_create_pipeline(
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
     info.depth_stencil_state.enable_depth_test = true;
     info.depth_stencil_state.enable_depth_write = true;
     info.target_info.color_target_descriptions = &color_target;
@@ -268,16 +291,27 @@ static bool btbh_gpu_scene_create_pipeline(
             &color_target.blend_state
         );
         color_target.blend_state.color_write_mask = 0x0fu;
-        window->scene_runtime->model_pipelines[mode] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
-        if (window->scene_runtime->model_pipelines[mode] == NULL) {
-            break;
+        for (uint32_t depth = 0u;
+             depth < BTBH_GPU_SCENE_DEPTH_COUNT;
+             depth += 1u) {
+            info.depth_stencil_state.compare_op =
+                btbh_gpu_scene_depth_compare(
+                    (BTBHGPUSceneDepthCompare)depth
+                );
+            window->scene_runtime->model_pipelines[mode][depth] =
+                SDL_CreateGPUGraphicsPipeline(device, &info);
+            if (
+                window->scene_runtime
+                    ->model_pipelines[mode][depth] == NULL
+            ) {
+                break;
+            }
         }
     }
     SDL_ReleaseGPUShader(device, vertex_shader);
     if (window->scene_runtime->model_pipelines[
             BTBH_GPU_SCENE_BLEND_COUNT - 1u
-        ] == NULL) {
+        ][BTBH_GPU_SCENE_DEPTH_COUNT - 1u] == NULL) {
         SDL_ReleaseGPUShader(device, fragment_shader);
         btbh_gpu_scene_error(
             report,
@@ -311,20 +345,29 @@ static bool btbh_gpu_scene_create_pipeline(
             &color_target.blend_state
         );
         color_target.blend_state.color_write_mask = 0x0fu;
-        window->scene_runtime->animated_model_pipelines[mode] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
-        if (
-            window->scene_runtime->animated_model_pipelines[mode] ==
-                NULL
-        ) {
-            break;
+        for (uint32_t depth = 0u;
+             depth < BTBH_GPU_SCENE_DEPTH_COUNT;
+             depth += 1u) {
+            info.depth_stencil_state.compare_op =
+                btbh_gpu_scene_depth_compare(
+                    (BTBHGPUSceneDepthCompare)depth
+                );
+            window->scene_runtime
+                ->animated_model_pipelines[mode][depth] =
+                    SDL_CreateGPUGraphicsPipeline(device, &info);
+            if (
+                window->scene_runtime
+                    ->animated_model_pipelines[mode][depth] == NULL
+            ) {
+                break;
+            }
         }
     }
     SDL_ReleaseGPUShader(device, animated_vertex_shader);
     SDL_ReleaseGPUShader(device, fragment_shader);
     if (window->scene_runtime->animated_model_pipelines[
             BTBH_GPU_SCENE_BLEND_COUNT - 1u
-        ] == NULL) {
+        ][BTBH_GPU_SCENE_DEPTH_COUNT - 1u] == NULL) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -463,6 +506,8 @@ static bool btbh_gpu_scene_validate_batches(
             batch->billboard_mode >=
                 BTBH_GPU_SCENE_BILLBOARD_DISABLED &&
             batch->billboard_mode <= BTBH_GPU_SCENE_BILLBOARD_Y_AXIS &&
+            batch->depth_compare >= BTBH_GPU_SCENE_DEPTH_ALWAYS &&
+            batch->depth_compare < BTBH_GPU_SCENE_DEPTH_COUNT &&
             batch->unlit_enabled <= 1u &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
@@ -1056,7 +1101,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                     pass,
                     window->scene_runtime->animated_model_pipelines[
                         batch->blend_mode
-                    ]
+                    ][batch->depth_compare]
                 );
                 SDL_GPUBuffer *storage_buffers[2] = {
                     instance_buffer,
@@ -1073,7 +1118,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                     pass,
                     window->scene_runtime->model_pipelines[
                         batch->blend_mode
-                    ]
+                    ][batch->depth_compare]
                 );
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
@@ -1203,21 +1248,29 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
         for (uint32_t mode = 0u;
              mode < BTBH_GPU_SCENE_BLEND_COUNT;
              mode += 1u) {
-            if (window->scene_runtime->model_pipelines[mode] != NULL) {
-                SDL_ReleaseGPUGraphicsPipeline(
-                    device,
-                    window->scene_runtime->model_pipelines[mode]
-                );
-            }
-            if (
-                window->scene_runtime
-                    ->animated_model_pipelines[mode] != NULL
-            ) {
-                SDL_ReleaseGPUGraphicsPipeline(
-                    device,
+            for (uint32_t depth = 0u;
+                 depth < BTBH_GPU_SCENE_DEPTH_COUNT;
+                 depth += 1u) {
+                if (
                     window->scene_runtime
-                        ->animated_model_pipelines[mode]
-                );
+                        ->model_pipelines[mode][depth] != NULL
+                ) {
+                    SDL_ReleaseGPUGraphicsPipeline(
+                        device,
+                        window->scene_runtime
+                            ->model_pipelines[mode][depth]
+                    );
+                }
+                if (
+                    window->scene_runtime
+                        ->animated_model_pipelines[mode][depth] != NULL
+                ) {
+                    SDL_ReleaseGPUGraphicsPipeline(
+                        device,
+                        window->scene_runtime
+                            ->animated_model_pipelines[mode][depth]
+                    );
+                }
             }
         }
     }
