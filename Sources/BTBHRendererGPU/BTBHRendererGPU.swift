@@ -193,6 +193,7 @@ enum GPUModelProbeError: Error, Equatable {
 struct GPUModelProbeResource {
     let pointer: OpaquePointer
     let metadata: ModelMetadata
+    let materials: [GPUSceneMaterialProbe]
 }
 
 enum GPUInstanceBufferProbeError: Error, Equatable {
@@ -754,6 +755,42 @@ public final class GPUWindowProbe {
         let slots = (0..<meshCount).map {
             Int(btbh_gpu_model_material_slot(model, UInt32($0)))
         }
+        let materials = try (0..<Int(report.material_count)).map {
+            index in
+            var info = BTBHGPUModelMaterialInfo()
+            guard btbh_gpu_model_material_info(
+                model,
+                UInt32(index),
+                &info
+            ) == BTBH_GPU_OK else {
+                btbh_gpu_model_destroy(model)
+                throw GPUModelProbeError.operationFailed(
+                    message: "Could not query imported material \(index)"
+                )
+            }
+            return GPUSceneMaterialProbe(
+                albedoTexture: info.albedo_texture,
+                albedoColor: .init(
+                    r: info.albedo_red,
+                    g: info.albedo_green,
+                    b: info.albedo_blue,
+                    a: info.albedo_alpha
+                ),
+                emissionTexture: info.emission_texture,
+                emissionColor: .init(
+                    r: info.emission_red,
+                    g: info.emission_green,
+                    b: info.emission_blue,
+                    a: info.emission_alpha
+                ),
+                emissionEnergy: info.emission_energy,
+                blendMode: .mix,
+                billboardMode: .disabled,
+                depthCompare: .less,
+                transparency: .disabled,
+                unlit: info.unlit_enabled != 0
+            )
+        }
         return GPUModelProbeResource(
             pointer: model,
             metadata: .init(
@@ -772,7 +809,8 @@ public final class GPUWindowProbe {
                 meshCount: meshCount,
                 materialCount: Int(report.material_count),
                 meshMaterialSlots: slots
-            )
+            ),
+            materials: materials
         )
     }
 

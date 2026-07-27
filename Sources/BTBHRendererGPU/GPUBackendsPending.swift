@@ -515,8 +515,15 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             throw GPUResourceStagingError.invalidModel(model.rawValue)
         }
+        let usedSlots = Set(modelResource.metadata.meshMaterialSlots)
+            .sorted()
         guard !overrides.isEmpty else {
-            return [(materialSlot: nil, material: nil)]
+            return usedSlots.map { slot in
+                (
+                    materialSlot: Optional(slot),
+                    material: modelResource.materials[slot]
+                )
+            }
         }
 
         var materialsBySlot: [Int: GPUSceneMaterialProbe] = [:]
@@ -551,31 +558,36 @@ final class GPUResourceBackend: RenderResourceBackend {
                 let texture = try patch.albedoTexture.map {
                     try canvasTexture($0).pointer
                 }
+                let base = modelResource.materials[override.slot]
                 material = .init(
-                    albedoTexture: texture,
-                    albedoColor: patch.albedoColor ?? .white,
-                    emissionTexture: nil,
-                    emissionColor: patch.emissionColor ?? .white,
+                    albedoTexture: texture ?? base.albedoTexture,
+                    albedoColor:
+                        patch.albedoColor ?? base.albedoColor,
+                    emissionTexture: patch.clearEmissionTexture
+                        ? nil
+                        : base.emissionTexture,
+                    emissionColor:
+                        patch.emissionColor ?? base.emissionColor,
                     emissionEnergy: max(
-                        patch.emissionEnergy ?? 0,
-                        patch.minimumEmissionEnergy ?? 0
+                        patch.emissionEnergy ?? base.emissionEnergy,
+                        patch.minimumEmissionEnergy ?? -.infinity
                     ),
-                    blendMode: .mix,
-                    billboardMode: .disabled,
-                    depthCompare: .less,
-                    transparency: .disabled,
-                    unlit: false
+                    blendMode: base.blendMode,
+                    billboardMode: base.billboardMode,
+                    depthCompare: base.depthCompare,
+                    transparency: base.transparency,
+                    unlit: base.unlit
                 )
             }
             materialsBySlot[override.slot] = material
         }
 
-        return Set(modelResource.metadata.meshMaterialSlots)
-            .sorted()
-            .map { slot in
+        return usedSlots.map { slot in
                 (
                     materialSlot: Optional(slot),
-                    material: materialsBySlot[slot]
+                    material:
+                        materialsBySlot[slot] ??
+                        modelResource.materials[slot]
                 )
             }
     }

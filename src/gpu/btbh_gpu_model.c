@@ -130,6 +130,127 @@ static void btbh_gpu_model_file_release(
     }
 }
 
+static uint8_t btbh_gpu_model_color_channel(float value) {
+    const float clamped = fmaxf(0.0f, fminf(1.0f, value));
+    return (uint8_t)lroundf(clamped * 255.0f);
+}
+
+static void btbh_gpu_model_material_default(
+    BTBHGPUModelMaterialInfo *material
+) {
+    (void)memset(material, 0, sizeof(*material));
+    material->albedo_red = 255u;
+    material->albedo_green = 255u;
+    material->albedo_blue = 255u;
+    material->albedo_alpha = 255u;
+    material->emission_red = 255u;
+    material->emission_green = 255u;
+    material->emission_blue = 255u;
+    material->emission_alpha = 255u;
+}
+
+static BTBHGPUTexture *btbh_gpu_model_load_embedded_texture(
+    BTBHGPUWindow *window,
+    const cgltf_texture_view *view
+) {
+    if (
+        view == NULL ||
+        view->texture == NULL ||
+        view->texture->image == NULL ||
+        view->texture->image->buffer_view == NULL
+    ) {
+        return NULL;
+    }
+    const cgltf_buffer_view *buffer_view =
+        view->texture->image->buffer_view;
+    if (
+        buffer_view->buffer == NULL ||
+        buffer_view->buffer->data == NULL ||
+        buffer_view->offset > buffer_view->buffer->size ||
+        buffer_view->size >
+            buffer_view->buffer->size - buffer_view->offset
+    ) {
+        return NULL;
+    }
+    const uint8_t *encoded =
+        (const uint8_t *)buffer_view->buffer->data +
+        buffer_view->offset;
+    BTBHGPUTextureReport report;
+    return btbh_gpu_window_texture_load_memory(
+        window,
+        encoded,
+        (size_t)buffer_view->size,
+        BTBH_GPU_TEXTURE_FILTER_LINEAR,
+        BTBH_GPU_TEXTURE_WRAP_REPEAT,
+        &report
+    );
+}
+
+static bool btbh_gpu_model_load_gltf_materials(
+    BTBHGPUModel *model,
+    const cgltf_data *data
+) {
+    model->materials = calloc(
+        model->material_count,
+        sizeof(*model->materials)
+    );
+    if (model->materials == NULL) {
+        return false;
+    }
+    for (
+        uint32_t index = 0u;
+        index < model->material_count;
+        index += 1u
+    ) {
+        btbh_gpu_model_material_default(&model->materials[index]);
+    }
+    for (
+        cgltf_size source_index = 0u;
+        source_index < data->materials_count;
+        source_index += 1u
+    ) {
+        const cgltf_material *source =
+            &data->materials[source_index];
+        BTBHGPUModelMaterialInfo *destination =
+            &model->materials[source_index + 1u];
+        if (source->has_pbr_metallic_roughness) {
+            const cgltf_float *factor = source
+                ->pbr_metallic_roughness.base_color_factor;
+            destination->albedo_red =
+                btbh_gpu_model_color_channel(factor[0]);
+            destination->albedo_green =
+                btbh_gpu_model_color_channel(factor[1]);
+            destination->albedo_blue =
+                btbh_gpu_model_color_channel(factor[2]);
+            destination->albedo_alpha =
+                btbh_gpu_model_color_channel(factor[3]);
+            destination->albedo_texture =
+                btbh_gpu_model_load_embedded_texture(
+                    model->owner,
+                    &source->pbr_metallic_roughness
+                        .base_color_texture
+                );
+        }
+        destination->emission_red =
+            btbh_gpu_model_color_channel(source->emissive_factor[0]);
+        destination->emission_green =
+            btbh_gpu_model_color_channel(source->emissive_factor[1]);
+        destination->emission_blue =
+            btbh_gpu_model_color_channel(source->emissive_factor[2]);
+        destination->emission_energy =
+            source->has_emissive_strength
+                ? source->emissive_strength.emissive_strength
+                : 1.0f;
+        destination->emission_texture =
+            btbh_gpu_model_load_embedded_texture(
+                model->owner,
+                &source->emissive_texture
+            );
+        destination->unlit_enabled = source->unlit ? 1u : 0u;
+    }
+    return true;
+}
+
 static void btbh_gpu_model_unlink(BTBHGPUModel *model) {
     BTBHGPUWindow *owner = model->owner;
     if (owner == NULL) {
@@ -152,6 +273,24 @@ static void btbh_gpu_model_release_handles(
     BTBHGPUModel *model,
     SDL_GPUDevice *device
 ) {
+    if (model->materials != NULL) {
+        for (
+            uint32_t index = 0u;
+            index < model->material_count;
+            index += 1u
+        ) {
+            BTBHGPUModelMaterialInfo *material =
+                &model->materials[index];
+            if (material->albedo_texture != NULL) {
+                btbh_gpu_texture_destroy(material->albedo_texture);
+                material->albedo_texture = NULL;
+            }
+            if (material->emission_texture != NULL) {
+                btbh_gpu_texture_destroy(material->emission_texture);
+                material->emission_texture = NULL;
+            }
+        }
+    }
     if (model->primitives == NULL) {
         return;
     }
@@ -1001,6 +1140,28 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
     model->material_count = scene->mNumMaterials > 0u
         ? (uint32_t) scene->mNumMaterials
         : 1u;
+    model->materials = calloc(
+        model->material_count,
+        sizeof(*model->materials)
+    );
+    if (model->materials == NULL) {
+        aiReleaseImport(scene);
+        btbh_gpu_model_error(
+            report,
+            "Could not allocate GPU model materials"
+        );
+        btbh_gpu_model_destroy(model);
+        return NULL;
+    }
+    for (
+        uint32_t material_index = 0u;
+        material_index < model->material_count;
+        material_index += 1u
+    ) {
+        btbh_gpu_model_material_default(
+            &model->materials[material_index]
+        );
+    }
     for (uint32_t axis = 0; axis < 3u; axis += 1u) {
         model->minimum[axis] = FLT_MAX;
         model->maximum[axis] = -FLT_MAX;
@@ -1151,6 +1312,15 @@ BTBHGPUModel *btbh_gpu_window_model_load(
     window->model_head = model;
     model->primitive_count = primitive_count;
     model->material_count = (uint32_t) data->materials_count + 1u;
+    if (!btbh_gpu_model_load_gltf_materials(model, data)) {
+        cgltf_free(data);
+        btbh_gpu_model_error(
+            report,
+            "Could not allocate GPU model materials"
+        );
+        btbh_gpu_model_destroy(model);
+        return NULL;
+    }
     for (uint32_t axis = 0; axis < 3u; axis += 1u) {
         model->minimum[axis] = FLT_MAX;
         model->maximum[axis] = -FLT_MAX;
@@ -1255,6 +1425,23 @@ int32_t btbh_gpu_model_material_slot(
     return model->primitives[mesh_index].material_slot;
 }
 
+BTBHGPUResult btbh_gpu_model_material_info(
+    const BTBHGPUModel *model,
+    uint32_t material_index,
+    BTBHGPUModelMaterialInfo *info
+) {
+    if (
+        model == NULL ||
+        model->materials == NULL ||
+        material_index >= model->material_count ||
+        info == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    *info = model->materials[material_index];
+    return BTBH_GPU_OK;
+}
+
 void btbh_gpu_model_destroy(BTBHGPUModel *model) {
     if (model == NULL) {
         return;
@@ -1270,6 +1457,7 @@ void btbh_gpu_model_destroy(BTBHGPUModel *model) {
     btbh_gpu_model_release_handles(model, device);
     btbh_gpu_model_unlink(model);
     free(model->primitives);
+    free(model->materials);
     free(model);
 }
 

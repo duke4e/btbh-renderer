@@ -282,6 +282,22 @@ typedef struct BTBHGPUModelReport {
     char message[256];
 } BTBHGPUModelReport;
 
+typedef struct BTBHGPUModelMaterialInfo {
+    BTBHGPUTexture *albedo_texture;
+    uint8_t albedo_red;
+    uint8_t albedo_green;
+    uint8_t albedo_blue;
+    uint8_t albedo_alpha;
+    BTBHGPUTexture *emission_texture;
+    uint8_t emission_red;
+    uint8_t emission_green;
+    uint8_t emission_blue;
+    uint8_t emission_alpha;
+    float emission_energy;
+    uint8_t unlit_enabled;
+    uint8_t reserved[3];
+} BTBHGPUModelMaterialInfo;
+
 typedef struct BTBHGPUInstanceBufferReport {
     BTBHGPUResult result;
     uint32_t capacity;
@@ -558,6 +574,11 @@ BTBHGPUModel *btbh_gpu_window_model_load(
 int32_t btbh_gpu_model_material_slot(
     const BTBHGPUModel *model,
     uint32_t mesh_index
+);
+BTBHGPUResult btbh_gpu_model_material_info(
+    const BTBHGPUModel *model,
+    uint32_t material_index,
+    BTBHGPUModelMaterialInfo *info
 );
 void btbh_gpu_model_destroy(BTBHGPUModel *model);
 BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(

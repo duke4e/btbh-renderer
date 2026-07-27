@@ -78,6 +78,7 @@ struct BTBHGPUModel {
     BTBHGPUModel *previous;
     BTBHGPUModel *next;
     BTBHGPUModelPrimitive *primitives;
+    BTBHGPUModelMaterialInfo *materials;
     uint32_t primitive_count;
     uint32_t material_count;
     float minimum[3];
@@ -126,6 +127,14 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     const uint8_t *pixels,
     uint32_t width,
     uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUTexture *btbh_gpu_window_texture_load_memory(
+    BTBHGPUWindow *window,
+    const uint8_t *encoded,
+    size_t encoded_size,
     BTBHGPUTextureFilter filter,
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report

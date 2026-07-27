@@ -400,6 +400,51 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     return resource;
 }
 
+BTBHGPUTexture *btbh_gpu_window_texture_load_memory(
+    BTBHGPUWindow *window,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+) {
+    if (
+        encoded == NULL ||
+        encoded_size == 0u ||
+        encoded_size > (size_t)INT_MAX ||
+        report == NULL
+    ) {
+        return NULL;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    stbi_uc *pixels = stbi_load_from_memory(
+        encoded,
+        (int)encoded_size,
+        &width,
+        &height,
+        &channels,
+        4
+    );
+    if (pixels == NULL || width <= 0 || height <= 0) {
+        btbh_gpu_texture_error(report, stbi_failure_reason());
+        stbi_image_free(pixels);
+        return NULL;
+    }
+    BTBHGPUTexture *texture = btbh_gpu_window_texture_create_rgba8(
+        window,
+        pixels,
+        (uint32_t)width,
+        (uint32_t)height,
+        filter,
+        wrap,
+        report
+    );
+    stbi_image_free(pixels);
+    return texture;
+}
+
 BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUWindow *window,
     const char *path,
