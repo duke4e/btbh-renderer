@@ -285,6 +285,41 @@ struct GPUSceneGeometryProbeBatch {
     let instanceCount: Int
 }
 
+final class GPUSceneSubmissionScratch {
+    var packedInstances: [Float] = []
+    var batches: [GPUSceneGeometryProbeBatch] = []
+
+    func reset() {
+        packedInstances.removeAll(keepingCapacity: true)
+        batches.removeAll(keepingCapacity: true)
+    }
+
+    func release() {
+        packedInstances = []
+        batches = []
+    }
+
+    func takePackedInstances() -> [Float] {
+        var result: [Float] = []
+        swap(&result, &packedInstances)
+        return result
+    }
+
+    func takeBatches() -> [GPUSceneGeometryProbeBatch] {
+        var result: [GPUSceneGeometryProbeBatch] = []
+        swap(&result, &batches)
+        return result
+    }
+
+    func reclaim(
+        packedInstances: inout [Float],
+        batches: inout [GPUSceneGeometryProbeBatch]
+    ) {
+        swap(&self.packedInstances, &packedInstances)
+        swap(&self.batches, &batches)
+    }
+}
+
 struct GPUSceneMaterialProbe {
     let albedoTexture: OpaquePointer?
     let albedoColor: RenderColor
@@ -377,6 +412,9 @@ public final class GPUWindowProbe {
 
     private let deviceProbe: GPUDeviceProbe
     private var window: OpaquePointer?
+    private var nativeSceneBatches: [BTBHGPUSceneGeometryBatch] = []
+    private var sceneCameraRightValues: [Float] = [0, 0, 0]
+    private var sceneCameraUpValues: [Float] = [0, 0, 0]
 
     public init(
         request: GPUBackendRequest = .platformDefault,
@@ -982,16 +1020,12 @@ public final class GPUWindowProbe {
                 message: "Invalid GPU model instance scene data"
             )
         }
-        let cameraRightValues = [
-            cameraRight.x,
-            cameraRight.y,
-            cameraRight.z,
-        ]
-        let cameraUpValues = [
-            cameraUp.x,
-            cameraUp.y,
-            cameraUp.z,
-        ]
+        sceneCameraRightValues[0] = cameraRight.x
+        sceneCameraRightValues[1] = cameraRight.y
+        sceneCameraRightValues[2] = cameraRight.z
+        sceneCameraUpValues[0] = cameraUp.x
+        sceneCameraUpValues[1] = cameraUp.y
+        sceneCameraUpValues[2] = cameraUp.z
         var nativeLighting = BTBHGPUSceneLighting(
             ambient_red: Float(lighting.ambientColor.r) / 255,
             ambient_green: Float(lighting.ambientColor.g) / 255,
@@ -1021,7 +1055,9 @@ public final class GPUWindowProbe {
                 Float(lighting.secondaryDirectionalColor.b) / 255,
             secondary_reserved: 0
         )
-        let nativeBatches = try batches.map { batch in
+        nativeSceneBatches.removeAll(keepingCapacity: true)
+        nativeSceneBatches.reserveCapacity(batches.count)
+        for batch in batches {
             guard batch.firstInstance >= 0,
                   batch.firstInstance <= Int(UInt32.max),
                   batch.instanceCount > 0,
@@ -1055,7 +1091,7 @@ public final class GPUWindowProbe {
                     )
                 }
             }
-            return BTBHGPUSceneGeometryBatch(
+            nativeSceneBatches.append(BTBHGPUSceneGeometryBatch(
                 kind: kind,
                 model: model,
                 custom_mesh: customMesh,
@@ -1095,17 +1131,17 @@ public final class GPUWindowProbe {
                      kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
                         ? 1 : 0,
                 reserved: 0
-            )
+            ))
         }
         var report = BTBHGPUSceneReport()
         let result = vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
                 fragmentShaderPath.withCString { fragmentPath in
                     viewProjection.withUnsafeBufferPointer { matrix in
-                        cameraRightValues.withUnsafeBufferPointer { right in
-                            cameraUpValues.withUnsafeBufferPointer { up in
+                        sceneCameraRightValues.withUnsafeBufferPointer { right in
+                            sceneCameraUpValues.withUnsafeBufferPointer { up in
                                 instances.withUnsafeBufferPointer { instanceData in
-                                    nativeBatches.withUnsafeBufferPointer { batchData in
+                                    nativeSceneBatches.withUnsafeBufferPointer { batchData in
                                         btbh_gpu_window_scene_present_instances(
                                             window,
                                             vertexPath,
@@ -1119,7 +1155,7 @@ public final class GPUWindowProbe {
                                             instanceData.baseAddress,
                                             UInt32(instances.count / 20),
                                             batchData.baseAddress,
-                                            UInt32(nativeBatches.count),
+                                            UInt32(nativeSceneBatches.count),
                                             clearColor.r,
                                             clearColor.g,
                                             clearColor.b,
@@ -1414,6 +1450,7 @@ public final class GPUWindowProbe {
             btbh_gpu_window_destroy(window)
             self.window = nil
         }
+        nativeSceneBatches = []
         deviceProbe.shutdown()
         isShutdown = true
     }

@@ -5,6 +5,46 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPURenderServicesTests: XCTestCase {
+    func testSceneSubmissionScratchRetainsWarmCapacityAcrossFrames() {
+        let scratch = GPUSceneSubmissionScratch()
+        scratch.packedInstances.reserveCapacity(80)
+        scratch.batches.reserveCapacity(8)
+        scratch.packedInstances.append(contentsOf: repeatElement(0, count: 80))
+        scratch.batches.append(.init(
+            geometry: .customMesh(OpaquePointer(bitPattern: 1)!),
+            animation: nil,
+            material: nil,
+            materialSlot: nil,
+            firstInstance: 0,
+            instanceCount: 1
+        ))
+
+        let instanceCapacity = scratch.packedInstances.capacity
+        let batchCapacity = scratch.batches.capacity
+        var packedInstances = scratch.takePackedInstances()
+        var batches = scratch.takeBatches()
+        XCTAssertTrue(scratch.packedInstances.isEmpty)
+        XCTAssertTrue(scratch.batches.isEmpty)
+        scratch.reclaim(
+            packedInstances: &packedInstances,
+            batches: &batches
+        )
+        scratch.reset()
+
+        XCTAssertTrue(scratch.packedInstances.isEmpty)
+        XCTAssertTrue(scratch.batches.isEmpty)
+        XCTAssertGreaterThanOrEqual(
+            scratch.packedInstances.capacity,
+            instanceCapacity
+        )
+        XCTAssertGreaterThanOrEqual(scratch.batches.capacity, batchCapacity)
+
+        scratch.release()
+
+        XCTAssertEqual(scratch.packedInstances.capacity, 0)
+        XCTAssertEqual(scratch.batches.capacity, 0)
+    }
+
     func testBundleInstallsPresentsClearAndShutsDownExactlyOnce() throws {
         #if os(Windows)
         RenderServices.uninstall()

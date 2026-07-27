@@ -2117,6 +2117,7 @@ final class GPUSceneBackend: SceneBackend {
     private var currentFrame: FrameDescriptor?
     private var pendingModelDraws: [PendingModelDraw] = []
     private var pendingDebugDraws: [DebugDraw] = []
+    private let submissionScratch = GPUSceneSubmissionScratch()
 
     init(
         platform: GPUPlatform,
@@ -2140,6 +2141,7 @@ final class GPUSceneBackend: SceneBackend {
         currentFrame = descriptor
         pendingModelDraws.removeAll(keepingCapacity: true)
         pendingDebugDraws.removeAll(keepingCapacity: true)
+        submissionScratch.reset()
     }
 
     func submit(_ draw: SceneDraw) {
@@ -2195,8 +2197,14 @@ final class GPUSceneBackend: SceneBackend {
                 message: "Invalid GPU scene camera"
             )
         }
-        var packedInstances: [Float] = []
-        var batches: [GPUSceneGeometryProbeBatch] = []
+        var packedInstances = submissionScratch.takePackedInstances()
+        var batches = submissionScratch.takeBatches()
+        defer {
+            submissionScratch.reclaim(
+                packedInstances: &packedInstances,
+                batches: &batches
+            )
+        }
         for pendingDraw in pendingModelDraws {
             switch pendingDraw {
             case .model(let draw):
@@ -3005,6 +3013,8 @@ final class GPUSceneBackend: SceneBackend {
     func shutdown() {
         currentFrame = nil
         pendingModelDraws.removeAll(keepingCapacity: false)
+        pendingDebugDraws.removeAll(keepingCapacity: false)
+        submissionScratch.release()
         drawableSize = .init(width: 0, height: 0)
     }
 
