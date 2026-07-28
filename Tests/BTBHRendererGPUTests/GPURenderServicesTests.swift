@@ -632,12 +632,6 @@ final class GPURenderServicesTests: XCTestCase {
                 custom: .init(x: 5, y: 6, z: 7, w: 8)
             ),
         ]
-        try instances.withUnsafeBytes {
-            try RenderServices.resources.uploadInstances(
-                buffer,
-                instances: $0
-            )
-        }
         let frame = FrameDescriptor(
             camera: .init(
                 position: .init(x: 0.5, y: 0.5, z: -3),
@@ -661,10 +655,14 @@ final class GPURenderServicesTests: XCTestCase {
         try RenderServices.scene.endFrame()
 
         let scene = try XCTUnwrap(bundle.scene as? GPUSceneBackend)
+        let resources = try XCTUnwrap(
+            bundle.resources as? GPUResourceBackend
+        )
         let report = try XCTUnwrap(scene.lastPresentationReport)
         XCTAssertEqual(report.instanceCount, 2)
         XCTAssertEqual(report.transientInstanceCount, 0)
         XCTAssertGreaterThan(report.persistentBatchCount, 0)
+        XCTAssertEqual(resources.semanticInstanceUploadCount, 1)
 
         RenderServices.canvas.endFrame()
 
@@ -692,6 +690,56 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(mixedReport.instanceCount, 3)
         XCTAssertEqual(mixedReport.transientInstanceCount, 1)
         XCTAssertGreaterThan(mixedReport.persistentBatchCount, 0)
+        XCTAssertEqual(resources.semanticInstanceUploadCount, 1)
+
+        RenderServices.canvas.endFrame()
+
+        var updatedInstances = instances
+        updatedInstances[0] = .init(
+            transform: .identity,
+            color: .init(r: 255, g: 0, b: 0, a: 255),
+            custom: .init(x: 9, y: 10, z: 11, w: 12)
+        )
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: updatedInstances,
+            overrides: [],
+            persistentBuffer: buffer,
+            sourceStart: 0,
+            count: 2
+        )))
+        try RenderServices.scene.endFrame()
+
+        let updatedReport = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(updatedReport.instanceCount, 2)
+        XCTAssertEqual(updatedReport.transientInstanceCount, 0)
+        XCTAssertGreaterThan(updatedReport.persistentBatchCount, 0)
+        XCTAssertEqual(resources.semanticInstanceUploadCount, 2)
+
+        RenderServices.canvas.endFrame()
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: updatedInstances,
+            overrides: [],
+            persistentBuffer: buffer,
+            sourceStart: 0,
+            count: 2
+        )))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            sourceStart: 0,
+            count: 2
+        )))
+        XCTAssertThrowsError(try RenderServices.scene.endFrame())
+        XCTAssertEqual(resources.semanticInstanceUploadCount, 2)
 
         RenderServices.canvas.endFrame()
         RenderServices.resources.destroyInstanceBuffer(buffer)

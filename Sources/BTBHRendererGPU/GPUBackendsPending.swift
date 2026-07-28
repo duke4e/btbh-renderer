@@ -86,9 +86,18 @@ private struct GPUMaterialResource {
     let surfaceShaderDependency: SurfaceShaderHandle?
 }
 
-fileprivate struct GPUInstanceBufferResource {
+fileprivate final class GPUInstanceBufferResource {
     let storage: GPUInstanceBufferProbeResource
     let descriptor: InstanceBufferDescriptor
+    var semanticInstances: [RenderInstance] = []
+
+    init(
+        storage: GPUInstanceBufferProbeResource,
+        descriptor: InstanceBufferDescriptor
+    ) {
+        self.storage = storage
+        self.descriptor = descriptor
+    }
 }
 
 enum GPUInstanceRecordPacking {
@@ -177,6 +186,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         InstanceBufferHandle: GPUInstanceBufferResource
     ] = [:]
     private var semanticInstanceUploadScratch: [Float] = []
+    private(set) var semanticInstanceUploadCount = 0
     private var lights: [LightHandle: LightDescriptor] = [:]
     private var cubemaps: [CubemapHandle: ProceduralSkyDescriptor] = [:]
     private var ambientMaps: [
@@ -1018,30 +1028,21 @@ final class GPUResourceBackend: RenderResourceBackend {
                     "Semantic instance upload must contain aligned RenderInstance records"
                 )
             }
-            semanticInstanceUploadScratch.removeAll(keepingCapacity: true)
-            semanticInstanceUploadScratch.reserveCapacity(
-                instances.count / recordStride *
-                    GPUInstanceRecordPacking.floatCount
-            )
+            var semanticInstances: [RenderInstance] = []
+            semanticInstances.reserveCapacity(instances.count / recordStride)
             for offset in stride(
                 from: 0,
                 to: instances.count,
                 by: recordStride
             ) {
-                GPUInstanceRecordPacking.append(
+                semanticInstances.append(
                     instances.load(
                         fromByteOffset: offset,
                         as: RenderInstance.self
-                    ),
-                    to: &semanticInstanceUploadScratch
+                    )
                 )
             }
-            try semanticInstanceUploadScratch.withUnsafeBytes {
-                try platform.uploadInstanceBuffer(
-                    resource.storage.pointer,
-                    bytes: $0
-                )
-            }
+            try uploadSemanticInstances(semanticInstances, to: resource)
         } else {
             guard instances.count <= resource.storage.byteCapacity,
                   instances.count % resource.storage.stride == 0 else {
@@ -1057,14 +1058,64 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 
     fileprivate func instanceBufferResource(
-        _ handle: InstanceBufferHandle
+        _ handle: InstanceBufferHandle,
+        semanticInstances: [RenderInstance]
     ) throws -> GPUInstanceBufferResource {
         guard let resource = instanceBuffers[handle] else {
             throw GPUResourceStagingError.invalidInstanceBuffer(
                 handle.rawValue
             )
         }
+        guard resource.descriptor.stride == 0,
+              resource.descriptor.includesColor,
+              resource.descriptor.customFloatCount == 4,
+              !semanticInstances.isEmpty,
+              semanticInstances.count <= resource.descriptor.capacity else {
+            throw GPUResourceStagingError.invalidInstanceUpload(
+                "Persistent scene instances require a semantic buffer within capacity"
+            )
+        }
+        if Self.sharesStorage(
+            semanticInstances,
+            resource.semanticInstances
+        ) || semanticInstances == resource.semanticInstances {
+            return resource
+        }
+        try uploadSemanticInstances(semanticInstances, to: resource)
         return resource
+    }
+
+    private func uploadSemanticInstances(
+        _ instances: [RenderInstance],
+        to resource: GPUInstanceBufferResource
+    ) throws {
+        semanticInstanceUploadScratch.removeAll(keepingCapacity: true)
+        semanticInstanceUploadScratch.reserveCapacity(
+            instances.count * GPUInstanceRecordPacking.floatCount
+        )
+        for instance in instances {
+            GPUInstanceRecordPacking.append(
+                instance,
+                to: &semanticInstanceUploadScratch
+            )
+        }
+        try semanticInstanceUploadScratch.withUnsafeBytes {
+            try platform.uploadInstanceBuffer(
+                resource.storage.pointer,
+                bytes: $0
+            )
+        }
+        resource.semanticInstances = instances
+        semanticInstanceUploadCount += 1
+    }
+
+    private static func sharesStorage<T>(_ lhs: [T], _ rhs: [T]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return lhs.withUnsafeBufferPointer { lhsBuffer in
+            rhs.withUnsafeBufferPointer { rhsBuffer in
+                lhsBuffer.baseAddress == rhsBuffer.baseAddress
+            }
+        }
     }
 
     func destroyInstanceBuffer(_ handle: InstanceBufferHandle) {
@@ -2294,6 +2345,7 @@ final class GPUSceneBackend: SceneBackend {
                 message: "Invalid GPU scene camera"
             )
         }
+        try validatePersistentInstanceReuse()
         var packedInstances = submissionScratch.takePackedInstances()
         var batches = submissionScratch.takeBatches()
         var logicalInstanceCount = 0
@@ -2326,10 +2378,12 @@ final class GPUSceneBackend: SceneBackend {
                 logicalInstanceCount += 1
             case .instances(let draw):
                 let persistentResource = try draw.persistentBuffer.map {
-                    try resources.instanceBufferResource($0)
+                    try resources.instanceBufferResource(
+                        $0,
+                        semanticInstances: draw.instances
+                    )
                 }
-                let availableCount = persistentResource?.storage.capacity ??
-                    draw.instances.count
+                let availableCount = draw.instances.count
                 guard draw.sourceStart >= 0,
                       draw.count > 0,
                       draw.sourceStart <= availableCount,
@@ -2449,7 +2503,10 @@ final class GPUSceneBackend: SceneBackend {
                 }
                 let material = try resources.sceneMaterial(draw.material)
                 let persistentResource = try draw.persistentBuffer.map {
-                    try resources.instanceBufferResource($0)
+                    try resources.instanceBufferResource(
+                        $0,
+                        semanticInstances: draw.instances
+                    )
                 }
                 guard persistentResource == nil ||
                         draw.instances.count <=
@@ -3307,6 +3364,46 @@ final class GPUSceneBackend: SceneBackend {
     ) -> Bool {
         guard let values else { return true }
         return start <= values.count && count <= values.count - start
+    }
+
+    private func validatePersistentInstanceReuse() throws {
+        var snapshots: [InstanceBufferHandle: [RenderInstance]] = [:]
+        for pendingDraw in pendingModelDraws {
+            let persistent: (
+                handle: InstanceBufferHandle?,
+                instances: [RenderInstance]
+            )
+            switch pendingDraw {
+            case .instances(let draw):
+                persistent = (draw.persistentBuffer, draw.instances)
+            case .meshInstances(let draw):
+                persistent = (draw.persistentBuffer, draw.instances)
+            default:
+                continue
+            }
+            guard let handle = persistent.handle else { continue }
+            if let existing = snapshots[handle] {
+                guard Self.sharesStorage(
+                    existing,
+                    persistent.instances
+                ) || existing == persistent.instances else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Persistent GPU instance buffer data changed within one frame"
+                    )
+                }
+            } else {
+                snapshots[handle] = persistent.instances
+            }
+        }
+    }
+
+    private static func sharesStorage<T>(_ lhs: [T], _ rhs: [T]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return lhs.withUnsafeBufferPointer { lhsBuffer in
+            rhs.withUnsafeBufferPointer { rhsBuffer in
+                lhsBuffer.baseAddress == rhsBuffer.baseAddress
+            }
+        }
     }
 
     private static func transformMatrix(
