@@ -20,6 +20,15 @@
 #ifndef BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH
 #error "BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_VERTEX_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH must be defined"
+#endif
 
 static int require_text(const char *path, const char *needle)
 {
@@ -88,6 +97,22 @@ int main(void)
         !require_text(
             BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH,
             "\"location\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 4"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 6"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 4"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD4\""
         )) {
         return 1;
     }

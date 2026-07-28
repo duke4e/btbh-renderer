@@ -274,7 +274,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .appendingPathComponent(
                 "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
             )
-        let present = {
+        let present = { (cameraPosition: RenderVec3) in
             try probe.presentModelInstances(
                 vertexShaderPath: shaderDirectory
                     .appendingPathComponent("production_model.vert.spv")
@@ -296,6 +296,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 ],
                 cameraRight: .right,
                 cameraUp: .up,
+                cameraPosition: cameraPosition,
                 lighting: .init(
                     ambientColor: .white,
                     ambientEnergy: 1,
@@ -335,19 +336,25 @@ final class GPUWindowProbeTests: XCTestCase {
                 BTBH_GPU_OK
             )
         }
-        XCTAssertThrowsError(try present())
+        let validCameraPosition = RenderVec3(x: 0, y: 0, z: -3)
+        XCTAssertThrowsError(try present(validCameraPosition))
         try records[0..<24].withUnsafeBytes {
             try probe.uploadInstanceBuffer(buffer.pointer, bytes: $0)
         }
-        XCTAssertThrowsError(try present())
+        XCTAssertThrowsError(try present(validCameraPosition))
         try records.withUnsafeBytes {
             try probe.uploadInstanceBuffer(buffer.pointer, bytes: $0)
         }
-        let report = try present()
+        let report = try present(validCameraPosition)
 
         XCTAssertEqual(report.instanceCount, 2)
         XCTAssertEqual(report.transientInstanceCount, 0)
         XCTAssertEqual(report.persistentBatchCount, 1)
+        XCTAssertThrowsError(try present(.init(
+            x: .nan,
+            y: 0,
+            z: -3
+        )))
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")
@@ -479,6 +486,7 @@ final class GPUWindowProbeTests: XCTestCase {
             ],
             cameraRight: .right,
             cameraUp: .up,
+            cameraPosition: .init(x: 0, y: 0, z: -3),
             lighting: .init(
                 ambientColor: .white,
                 ambientEnergy: 1,

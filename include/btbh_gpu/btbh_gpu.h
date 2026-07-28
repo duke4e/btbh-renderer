@@ -692,6 +692,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
+    const float camera_position[3],
     const BTBHGPUSceneLighting *lighting,
     const float *instances,
     uint32_t transient_instance_count,

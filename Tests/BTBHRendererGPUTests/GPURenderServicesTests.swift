@@ -2739,12 +2739,9 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(readback.rgba8[2], 60, accuracy: 2)
         let center = ((readback.size.height / 2) * readback.size.width
             + readback.size.width / 2) * 4
-        XCTAssertGreaterThan(readback.rgba8[center], 80)
-        XCTAssertLessThan(readback.rgba8[center], 180)
-        XCTAssertGreaterThan(readback.rgba8[center + 1], 120)
-        XCTAssertLessThan(readback.rgba8[center + 1], 220)
-        XCTAssertGreaterThan(readback.rgba8[center + 2], 20)
-        XCTAssertLessThan(readback.rgba8[center + 2], 100)
+        XCTAssertEqual(readback.rgba8[center], 128, accuracy: 8)
+        XCTAssertEqual(readback.rgba8[center + 1], 100, accuracy: 8)
+        XCTAssertEqual(readback.rgba8[center + 2], 19, accuracy: 5)
 
         RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
@@ -2766,6 +2763,279 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 2], 30)
         #else
         throw XCTSkip("The Windows Vulkan scene lighting test runs only on Windows")
+        #endif
+    }
+
+    func testDirectPBRUsesNormalRoughnessAndMetalnessMaps() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU direct PBR material test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btbh-direct-pbr-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+        func writePPM(_ name: String, rgb: [UInt8]) throws -> String {
+            let url = temporaryDirectory.appendingPathComponent(name)
+            var bytes = Data("P6\n1 1\n255\n".utf8)
+            bytes.append(contentsOf: rgb)
+            try bytes.write(to: url)
+            return url.path
+        }
+        let neutralNormal = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("normal-neutral.ppm", rgb: [128, 128, 255]),
+            filter: .nearest
+        ))
+        let tiltedNormal = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("normal-tilted.ppm", rgb: [255, 128, 128]),
+            filter: .nearest
+        ))
+        let roughDielectric = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("orm-rough.ppm", rgb: [255, 255, 0]),
+            filter: .nearest
+        ))
+        let smoothMetal = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("orm-metal.ppm", rgb: [255, 32, 255]),
+            filter: .nearest
+        ))
+        defer {
+            RenderServices.resources.destroyTexture(smoothMetal)
+            RenderServices.resources.destroyTexture(roughDielectric)
+            RenderServices.resources.destroyTexture(tiltedNormal)
+            RenderServices.resources.destroyTexture(neutralNormal)
+        }
+
+        let vertices = [
+            RenderVertex(
+                position: .init(x: -1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        let mesh = try vertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: vertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        let slantedNormal =
+            RenderVec3(x: 1, y: 0, z: -1).normalized()
+        let slantedVertices = vertices.map {
+            RenderVertex(
+                position: $0.position,
+                textureCoordinate: $0.textureCoordinate,
+                normal: slantedNormal,
+                tangent: $0.tangent,
+                color: $0.color
+            )
+        }
+        let slantedMesh = try slantedVertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: slantedVertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        defer {
+            RenderServices.resources.destroyMesh(slantedMesh)
+            RenderServices.resources.destroyMesh(mesh)
+        }
+
+        func makeMaterial(
+            normal: TextureHandle,
+            orm: TextureHandle
+        ) throws -> MaterialHandle {
+            var descriptor = MaterialDescriptor.default
+            descriptor.normalTexture = normal
+            descriptor.ormTexture = orm
+            descriptor.normalScale = 1
+            descriptor.occlusion = 1
+            descriptor.roughness = 1
+            descriptor.metalness = 1
+            return try RenderServices.resources.createMaterial(descriptor)
+        }
+        let neutralRough = try makeMaterial(
+            normal: neutralNormal,
+            orm: roughDielectric
+        )
+        let tiltedRough = try makeMaterial(
+            normal: tiltedNormal,
+            orm: roughDielectric
+        )
+        let neutralMetal = try makeMaterial(
+            normal: neutralNormal,
+            orm: smoothMetal
+        )
+        defer {
+            RenderServices.resources.destroyMaterial(neutralMetal)
+            RenderServices.resources.destroyMaterial(tiltedRough)
+            RenderServices.resources.destroyMaterial(neutralRough)
+        }
+
+        let directional = try RenderServices.resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .forward,
+            color: .white,
+            energy: 3,
+            range: 100,
+            castsShadow: false,
+            shadowSoftness: 0
+        ))
+        defer { RenderServices.resources.destroyLight(directional) }
+        let frame = FrameDescriptor(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .white,
+                ambientEnergy: 0.05,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1
+            )
+        )
+        func centerRGB(
+            _ material: MaterialHandle,
+            mesh renderMesh: MeshHandle,
+            transform: RenderTransform
+        ) throws -> [UInt8] {
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(frame)
+            RenderServices.scene.submit(.mesh(.init(
+                mesh: renderMesh,
+                material: material,
+                transform: transform
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.endFrame()
+            let readback =
+                try RenderServices.canvas.readbackPresentedFrame()
+            let center = (
+                (readback.size.height / 2) * readback.size.width +
+                readback.size.width / 2
+            ) * 4
+            return Array(readback.rgba8[center..<(center + 3)])
+        }
+        let neutralRoughRGB = try centerRGB(
+            neutralRough,
+            mesh: mesh,
+            transform: .identity
+        )
+        let tiltedRoughRGB = try centerRGB(
+            tiltedRough,
+            mesh: mesh,
+            transform: .identity
+        )
+        let neutralMetalRGB = try centerRGB(
+            neutralMetal,
+            mesh: mesh,
+            transform: .identity
+        )
+        let slantedIdentityRGB = try centerRGB(
+            neutralRough,
+            mesh: slantedMesh,
+            transform: .identity
+        )
+        let slantedScaledRGB = try centerRGB(
+            neutralRough,
+            mesh: slantedMesh,
+            transform: .init(
+                matrix: .scale(.init(x: 3, y: 1, z: 1))
+            )
+        )
+        let neutralRoughLuma = neutralRoughRGB.reduce(0) { $0 + Int($1) }
+        let tiltedRoughLuma = tiltedRoughRGB.reduce(0) { $0 + Int($1) }
+        let neutralMetalLuma = neutralMetalRGB.reduce(0) { $0 + Int($1) }
+        let slantedIdentityLuma =
+            slantedIdentityRGB.reduce(0) { $0 + Int($1) }
+        let slantedScaledLuma =
+            slantedScaledRGB.reduce(0) { $0 + Int($1) }
+
+        XCTAssertGreaterThan(
+            neutralRoughLuma,
+            tiltedRoughLuma + 60,
+            "normal map must rotate the direct-light response"
+        )
+        XCTAssertNotEqual(
+            neutralMetalLuma,
+            neutralRoughLuma,
+            "roughness/metalness map must change the specular response"
+        )
+        XCTAssertGreaterThan(
+            slantedScaledLuma,
+            slantedIdentityLuma + 30,
+            "non-uniform scale must use inverse-transpose normals"
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan direct PBR test runs only on Windows")
         #endif
     }
 

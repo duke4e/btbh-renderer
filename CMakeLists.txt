@@ -817,6 +817,9 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_INTERVAL_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_interval.comp.json"
             BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_lighting.frag.json"
             BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/phase2_transparent.frag.json"
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.vert.json"
+            BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_model.vert.json"
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
     )
     add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
     add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)

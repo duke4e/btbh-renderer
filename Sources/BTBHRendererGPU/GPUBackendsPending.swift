@@ -2790,6 +2790,7 @@ final class GPUSceneBackend: SceneBackend {
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,
+            cameraPosition: currentFrame.camera.position,
             lighting: lighting,
             instances: packedInstances,
             logicalInstanceCount: logicalInstanceCount,

@@ -8,6 +8,7 @@
 
 #define BTBH_GPU_MODEL_VERTEX_STRIDE 96u
 #define BTBH_GPU_MODEL_NORMAL_OFFSET 12u
+#define BTBH_GPU_MODEL_TANGENT_OFFSET 32u
 #define BTBH_GPU_MODEL_COLOR_OFFSET 48u
 #define BTBH_GPU_MODEL_JOINTS_OFFSET 64u
 #define BTBH_GPU_MODEL_WEIGHTS_OFFSET 80u
@@ -17,6 +18,7 @@ typedef struct BTBHGPUSceneUniforms {
     float view_projection[16];
     float camera_right[4];
     float camera_up[4];
+    float camera_position[4];
     float material_color[4];
     float ambient_color_energy[4];
     float directional_direction_energy[4];
@@ -30,6 +32,19 @@ typedef struct BTBHGPUSceneUniforms {
     float emission_color_energy[4];
 } BTBHGPUSceneUniforms;
 
+typedef struct BTBHGPUSceneFragmentUniforms {
+    float camera_position[4];
+    float ambient_color_energy[4];
+    float directional_direction_energy[4];
+    float directional_color[4];
+    float secondary_directional_direction_energy[4];
+    float secondary_directional_color[4];
+    float material_factors[4];
+    float emission_color_energy[4];
+    uint32_t unlit_enabled;
+    uint32_t padding[3];
+} BTBHGPUSceneFragmentUniforms;
+
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
@@ -38,6 +53,7 @@ struct BTBHGPUSceneRuntime {
         BTBH_GPU_SCENE_BLEND_COUNT
     ][BTBH_GPU_SCENE_DEPTH_COUNT];
     BTBHGPUTexture *fallback_texture;
+    BTBHGPUTexture *normal_fallback_texture;
     SDL_GPUTexture *depth_texture;
     SDL_GPUBuffer *instance_buffer;
     SDL_GPUBuffer *bone_buffer;
@@ -219,7 +235,7 @@ static bool btbh_gpu_scene_create_pipeline(
         format,
         SDL_GPU_SHADERSTAGE_FRAGMENT,
         0u,
-        2u,
+        4u,
         1u,
         report
     );
@@ -230,7 +246,7 @@ static bool btbh_gpu_scene_create_pipeline(
 
     SDL_GPUColorTargetDescription color_target;
     SDL_GPUVertexBufferDescription vertex_buffer;
-    SDL_GPUVertexAttribute attributes[6];
+    SDL_GPUVertexAttribute attributes[7];
     SDL_GPUGraphicsPipelineCreateInfo info;
     SDL_zero(color_target);
     SDL_zero(vertex_buffer);
@@ -266,18 +282,14 @@ static bool btbh_gpu_scene_create_pipeline(
     attributes[4].location = 4u;
     attributes[4].buffer_slot = 0u;
     attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[4].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
-    attributes[5].location = 5u;
-    attributes[5].buffer_slot = 0u;
-    attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[5].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
+    attributes[4].offset = BTBH_GPU_MODEL_TANGENT_OFFSET;
 
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 4u;
+    info.vertex_input_state.num_vertex_attributes = 5u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -342,8 +354,20 @@ static bool btbh_gpu_scene_create_pipeline(
         SDL_ReleaseGPUShader(device, fragment_shader);
         return false;
     }
+    attributes[4].location = 4u;
+    attributes[4].buffer_slot = 0u;
+    attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[4].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
+    attributes[5].location = 5u;
+    attributes[5].buffer_slot = 0u;
+    attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[5].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
+    attributes[6].location = 6u;
+    attributes[6].buffer_slot = 0u;
+    attributes[6].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[6].offset = BTBH_GPU_MODEL_TANGENT_OFFSET;
     info.vertex_shader = animated_vertex_shader;
-    info.vertex_input_state.num_vertex_attributes = 6u;
+    info.vertex_input_state.num_vertex_attributes = 7u;
     for (uint32_t mode = 0u;
          mode < BTBH_GPU_SCENE_BLEND_COUNT;
          mode += 1u) {
@@ -432,6 +456,26 @@ static bool btbh_gpu_scene_ensure_runtime(
             &texture_report
         );
     if (window->scene_runtime->fallback_texture == NULL) {
+        btbh_gpu_scene_error(
+            report,
+            texture_report.result,
+            texture_report.message
+        );
+        btbh_gpu_window_release_scene(window);
+        return false;
+    }
+    const uint8_t normal_pixel[4] = {128u, 128u, 255u, 255u};
+    window->scene_runtime->normal_fallback_texture =
+        btbh_gpu_window_texture_create_rgba8(
+            window,
+            normal_pixel,
+            1u,
+            1u,
+            BTBH_GPU_TEXTURE_FILTER_NEAREST,
+            BTBH_GPU_TEXTURE_WRAP_CLAMP,
+            &texture_report
+        );
+    if (window->scene_runtime->normal_fallback_texture == NULL) {
         btbh_gpu_scene_error(
             report,
             texture_report.result,
@@ -816,6 +860,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
+    const float camera_position[3],
     const BTBHGPUSceneLighting *lighting,
     const float *instances,
     uint32_t transient_instance_count,
@@ -852,6 +897,10 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         view_projection == NULL ||
         camera_right == NULL ||
         camera_up == NULL ||
+        camera_position == NULL ||
+        !isfinite(camera_position[0]) ||
+        !isfinite(camera_position[1]) ||
+        !isfinite(camera_position[2]) ||
         lighting == NULL ||
         !isfinite(lighting->ambient_red) ||
         !isfinite(lighting->ambient_green) ||
@@ -1150,6 +1199,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 camera_up,
                 sizeof(float) * 3u
             );
+            (void)memcpy(
+                uniforms.camera_position,
+                camera_position,
+                sizeof(float) * 3u
+            );
             uniforms.material_color[0] =
                 (float)batch->albedo_red / 255.0f;
             uniforms.material_color[1] =
@@ -1217,11 +1271,66 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 &uniforms,
                 sizeof(uniforms)
             );
+            BTBHGPUSceneFragmentUniforms fragment_uniforms;
+            (void)memset(
+                &fragment_uniforms,
+                0,
+                sizeof(fragment_uniforms)
+            );
+            (void)memcpy(
+                fragment_uniforms.camera_position,
+                camera_position,
+                sizeof(float) * 3u
+            );
+            (void)memcpy(
+                fragment_uniforms.ambient_color_energy,
+                uniforms.ambient_color_energy,
+                sizeof(fragment_uniforms.ambient_color_energy)
+            );
+            (void)memcpy(
+                fragment_uniforms.directional_direction_energy,
+                uniforms.directional_direction_energy,
+                sizeof(fragment_uniforms.directional_direction_energy)
+            );
+            (void)memcpy(
+                fragment_uniforms.directional_color,
+                uniforms.directional_color,
+                sizeof(fragment_uniforms.directional_color)
+            );
+            (void)memcpy(
+                fragment_uniforms
+                    .secondary_directional_direction_energy,
+                uniforms.secondary_directional_direction_energy,
+                sizeof(
+                    fragment_uniforms
+                        .secondary_directional_direction_energy
+                )
+            );
+            (void)memcpy(
+                fragment_uniforms.secondary_directional_color,
+                uniforms.secondary_directional_color,
+                sizeof(fragment_uniforms.secondary_directional_color)
+            );
+            fragment_uniforms.material_factors[0] =
+                batch->normal_scale;
+            fragment_uniforms.material_factors[1] =
+                batch->occlusion;
+            fragment_uniforms.material_factors[2] =
+                batch->roughness;
+            fragment_uniforms.material_factors[3] =
+                batch->metalness;
+            (void)memcpy(
+                fragment_uniforms.emission_color_energy,
+                uniforms.emission_color_energy,
+                sizeof(fragment_uniforms.emission_color_energy)
+            );
+            fragment_uniforms.unlit_enabled =
+                uniforms.unlit_enabled;
             SDL_PushGPUFragmentUniformData(
                 command,
                 0u,
-                uniforms.emission_color_energy,
-                sizeof(uniforms.emission_color_energy)
+                &fragment_uniforms,
+                sizeof(fragment_uniforms)
             );
             if (animated) {
                 SDL_BindGPUGraphicsPipeline(
@@ -1261,17 +1370,29 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 batch->emission_texture != NULL
                     ? batch->emission_texture
                     : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[2];
+            BTBHGPUTexture *normal_texture =
+                batch->normal_texture != NULL
+                    ? batch->normal_texture
+                    : window->scene_runtime->normal_fallback_texture;
+            BTBHGPUTexture *orm_texture =
+                batch->orm_texture != NULL
+                    ? batch->orm_texture
+                    : window->scene_runtime->fallback_texture;
+            SDL_GPUTextureSamplerBinding samplers[4];
             SDL_zeroa(samplers);
             samplers[0].texture = texture->texture;
             samplers[0].sampler = texture->sampler;
             samplers[1].texture = emission_texture->texture;
             samplers[1].sampler = emission_texture->sampler;
+            samplers[2].texture = normal_texture->texture;
+            samplers[2].sampler = normal_texture->sampler;
+            samplers[3].texture = orm_texture->texture;
+            samplers[3].sampler = orm_texture->sampler;
             SDL_BindGPUFragmentSamplers(
                 pass,
                 0u,
                 samplers,
-                2u
+                4u
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -1429,6 +1550,11 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     if (window->scene_runtime->fallback_texture != NULL) {
         btbh_gpu_texture_destroy(
             window->scene_runtime->fallback_texture
+        );
+    }
+    if (window->scene_runtime->normal_fallback_texture != NULL) {
+        btbh_gpu_texture_destroy(
+            window->scene_runtime->normal_fallback_texture
         );
     }
     free(window->scene_runtime);

@@ -449,6 +449,7 @@ public final class GPUWindowProbe {
     private var nativeSceneBatches: [BTBHGPUSceneGeometryBatch] = []
     private var sceneCameraRightValues: [Float] = [0, 0, 0]
     private var sceneCameraUpValues: [Float] = [0, 0, 0]
+    private var sceneCameraPositionValues: [Float] = [0, 0, 0]
     private var nativeFrameTelemetrySamples =
         [BTBHGPUFrameTelemetrySample](
             repeating: .init(),
@@ -1155,6 +1156,7 @@ public final class GPUWindowProbe {
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
+        cameraPosition: RenderVec3,
         lighting: GPUSceneLightingProbe,
         instances: [Float],
         logicalInstanceCount: Int? = nil,
@@ -1170,6 +1172,9 @@ public final class GPUWindowProbe {
               transientInstanceCount <= Int(UInt32.max),
               resolvedLogicalInstanceCount > 0,
               resolvedLogicalInstanceCount <= Int(UInt32.max),
+              cameraPosition.x.isFinite,
+              cameraPosition.y.isFinite,
+              cameraPosition.z.isFinite,
               !batches.isEmpty,
               batches.count <= Int(UInt32.max) else {
             throw GPUSceneProbeError.operationFailed(
@@ -1182,6 +1187,9 @@ public final class GPUWindowProbe {
         sceneCameraUpValues[0] = cameraUp.x
         sceneCameraUpValues[1] = cameraUp.y
         sceneCameraUpValues[2] = cameraUp.z
+        sceneCameraPositionValues[0] = cameraPosition.x
+        sceneCameraPositionValues[1] = cameraPosition.y
+        sceneCameraPositionValues[2] = cameraPosition.z
         var nativeLighting = BTBHGPUSceneLighting(
             ambient_red: Float(lighting.ambientColor.r) / 255,
             ambient_green: Float(lighting.ambientColor.g) / 255,
@@ -1303,31 +1311,35 @@ public final class GPUWindowProbe {
                     viewProjection.withUnsafeBufferPointer { matrix in
                         sceneCameraRightValues.withUnsafeBufferPointer { right in
                             sceneCameraUpValues.withUnsafeBufferPointer { up in
-                                instances.withUnsafeBufferPointer { instanceData in
-                                    nativeSceneBatches.withUnsafeBufferPointer { batchData in
-                                        btbh_gpu_window_scene_present_instances(
-                                            window,
-                                            vertexPath,
-                                            animatedVertexPath,
-                                            fragmentPath,
-                                            shaderFormat,
-                                            matrix.baseAddress,
-                                            right.baseAddress,
-                                            up.baseAddress,
-                                            &nativeLighting,
-                                            instanceData.baseAddress,
-                                            UInt32(transientInstanceCount),
-                                            UInt32(
-                                                resolvedLogicalInstanceCount
-                                            ),
-                                            batchData.baseAddress,
-                                            UInt32(nativeSceneBatches.count),
-                                            clearColor.r,
-                                            clearColor.g,
-                                            clearColor.b,
-                                            clearColor.a,
-                                            &report
-                                        )
+                                sceneCameraPositionValues
+                                    .withUnsafeBufferPointer { position in
+                                    instances.withUnsafeBufferPointer { instanceData in
+                                        nativeSceneBatches.withUnsafeBufferPointer { batchData in
+                                            btbh_gpu_window_scene_present_instances(
+                                                window,
+                                                vertexPath,
+                                                animatedVertexPath,
+                                                fragmentPath,
+                                                shaderFormat,
+                                                matrix.baseAddress,
+                                                right.baseAddress,
+                                                up.baseAddress,
+                                                position.baseAddress,
+                                                &nativeLighting,
+                                                instanceData.baseAddress,
+                                                UInt32(transientInstanceCount),
+                                                UInt32(
+                                                    resolvedLogicalInstanceCount
+                                                ),
+                                                batchData.baseAddress,
+                                                UInt32(nativeSceneBatches.count),
+                                                clearColor.r,
+                                                clearColor.g,
+                                                clearColor.b,
+                                                clearColor.a,
+                                                &report
+                                            )
+                                        }
                                     }
                                 }
                             }
