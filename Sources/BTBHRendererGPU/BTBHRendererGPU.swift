@@ -281,8 +281,27 @@ struct GPUSceneGeometryProbeBatch {
     let animation: GPUAnimationPoseProbe?
     let material: GPUSceneMaterialProbe?
     let materialSlot: Int?
+    let instanceBuffer: OpaquePointer?
     let firstInstance: Int
     let instanceCount: Int
+
+    init(
+        geometry: GPUSceneGeometryProbe,
+        animation: GPUAnimationPoseProbe?,
+        material: GPUSceneMaterialProbe?,
+        materialSlot: Int?,
+        instanceBuffer: OpaquePointer? = nil,
+        firstInstance: Int,
+        instanceCount: Int
+    ) {
+        self.geometry = geometry
+        self.animation = animation
+        self.material = material
+        self.materialSlot = materialSlot
+        self.instanceBuffer = instanceBuffer
+        self.firstInstance = firstInstance
+        self.instanceCount = instanceCount
+    }
 }
 
 final class GPUSceneSubmissionScratch {
@@ -350,6 +369,8 @@ struct GPUScenePresentationProbeReport {
     let primitiveDrawCount: Int
     let preparedGeometryCount: Int
     let instanceCount: Int
+    let transientInstanceCount: Int
+    let persistentBatchCount: Int
 }
 
 struct GPUFrameTelemetrySample: Equatable {
@@ -1104,14 +1125,19 @@ public final class GPUWindowProbe {
         cameraUp: RenderVec3,
         lighting: GPUSceneLightingProbe,
         instances: [Float],
+        logicalInstanceCount: Int? = nil,
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
     ) throws -> GPUScenePresentationProbeReport {
+        let transientInstanceCount = instances.count / 24
+        let resolvedLogicalInstanceCount =
+            logicalInstanceCount ?? transientInstanceCount
         guard let window, !isShutdown,
               viewProjection.count == 16,
-              !instances.isEmpty,
-              instances.count.isMultiple(of: 20),
-              instances.count / 20 <= Int(UInt32.max),
+              instances.count.isMultiple(of: 24),
+              transientInstanceCount <= Int(UInt32.max),
+              resolvedLogicalInstanceCount > 0,
+              resolvedLogicalInstanceCount <= Int(UInt32.max),
               !batches.isEmpty,
               batches.count <= Int(UInt32.max) else {
             throw GPUSceneProbeError.operationFailed(
@@ -1199,6 +1225,7 @@ public final class GPUWindowProbe {
                 ),
                 animation_time: batch.animation?.time ?? 0,
                 material_slot: Int32(batch.materialSlot ?? -1),
+                instance_buffer: batch.instanceBuffer,
                 first_instance: UInt32(batch.firstInstance),
                 instance_count: UInt32(batch.instanceCount),
                 albedo_texture: batch.material?.albedoTexture,
@@ -1251,7 +1278,10 @@ public final class GPUWindowProbe {
                                             up.baseAddress,
                                             &nativeLighting,
                                             instanceData.baseAddress,
-                                            UInt32(instances.count / 20),
+                                            UInt32(transientInstanceCount),
+                                            UInt32(
+                                                resolvedLogicalInstanceCount
+                                            ),
                                             batchData.baseAddress,
                                             UInt32(nativeSceneBatches.count),
                                             clearColor.r,
@@ -1281,7 +1311,11 @@ public final class GPUWindowProbe {
             batchCount: Int(report.batch_count),
             primitiveDrawCount: Int(report.primitive_draw_count),
             preparedGeometryCount: Int(report.prepared_geometry_count),
-            instanceCount: Int(report.instance_count)
+            instanceCount: Int(report.instance_count),
+            transientInstanceCount: Int(
+                report.transient_instance_count
+            ),
+            persistentBatchCount: Int(report.persistent_batch_count)
         )
     }
 

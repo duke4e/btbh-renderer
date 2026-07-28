@@ -100,6 +100,17 @@ struct BTBHGPUModel {
     float maximum[3];
 };
 
+struct BTBHGPUInstanceBuffer {
+    BTBHGPUWindow *owner;
+    BTBHGPUInstanceBuffer *previous;
+    BTBHGPUInstanceBuffer *next;
+    SDL_GPUBuffer *buffer;
+    uint32_t capacity;
+    uint32_t stride;
+    uint32_t byte_capacity;
+    uint32_t uploaded_prefix_byte_count;
+};
+
 struct BTBHGPUCustomMesh {
     BTBHGPUWindow *owner;
     BTBHGPUCustomMesh *previous;

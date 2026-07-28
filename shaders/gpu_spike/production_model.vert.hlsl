@@ -2,6 +2,7 @@ struct InstanceData
 {
     float4x4 model;
     float4 color;
+    float4 custom;
 };
 
 StructuredBuffer<InstanceData> instances : register(t0, space0);

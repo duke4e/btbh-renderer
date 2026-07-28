@@ -80,6 +80,156 @@ final class GPUWindowProbeTests: XCTestCase {
         #endif
     }
 
+    func testSceneDrawsFromPersistentInstanceBufferWithoutTransientUpload() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH persistent scene instance buffer",
+            width: 320,
+            height: 180,
+            hidden: false,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/instanced-transformed-default-material.gltf"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+        let buffer = try probe.createInstanceBuffer(
+            capacity: 2,
+            stride: 96
+        )
+        defer { GPUWindowProbe.destroyInstanceBuffer(buffer.pointer) }
+        let records: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            -0.5, 0, 0, 1,
+            1, 0, 0, 1,
+            11, 12, 13, 14,
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0.5, 0, 0, 1,
+            0, 1, 0, 1,
+            21, 22, 23, 24,
+        ]
+        let shaderDirectory = packageRoot
+            .appendingPathComponent(
+                "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
+            )
+        let present = {
+            try probe.presentModelInstances(
+                vertexShaderPath: shaderDirectory
+                    .appendingPathComponent("production_model.vert.spv")
+                    .path,
+                animatedVertexShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_animated_model.vert.spv"
+                    )
+                    .path,
+                fragmentShaderPath: shaderDirectory
+                    .appendingPathComponent("production_model.frag.spv")
+                    .path,
+                shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+                viewProjection: [
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    0, 0, 0, 1,
+                ],
+                cameraRight: .right,
+                cameraUp: .up,
+                lighting: .init(
+                    ambientColor: .white,
+                    ambientEnergy: 1,
+                    directionalDirection: .down,
+                    directionalColor: .white,
+                    directionalEnergy: 0,
+                    secondaryDirectionalDirection: .down,
+                    secondaryDirectionalColor: .white,
+                    secondaryDirectionalEnergy: 0
+                ),
+                instances: [],
+                logicalInstanceCount: 2,
+                batches: [
+                    .init(
+                        geometry: .model(model.pointer),
+                        animation: nil,
+                        material: model.materials.first,
+                        materialSlot: nil,
+                        instanceBuffer: buffer.pointer,
+                        firstInstance: 0,
+                        instanceCount: 2
+                    ),
+                ],
+                clearColor: .black
+            )
+        }
+        records[24..<48].withUnsafeBytes { bytes in
+            var uploadReport = BTBHGPUInstanceBufferReport()
+            XCTAssertEqual(
+                btbh_gpu_instance_buffer_upload(
+                    buffer.pointer,
+                    96,
+                    bytes.baseAddress,
+                    UInt32(bytes.count),
+                    &uploadReport
+                ),
+                BTBH_GPU_OK
+            )
+        }
+        XCTAssertThrowsError(try present())
+        try records[0..<24].withUnsafeBytes {
+            try probe.uploadInstanceBuffer(buffer.pointer, bytes: $0)
+        }
+        XCTAssertThrowsError(try present())
+        try records.withUnsafeBytes {
+            try probe.uploadInstanceBuffer(buffer.pointer, bytes: $0)
+        }
+        let report = try present()
+
+        XCTAssertEqual(report.instanceCount, 2)
+        XCTAssertEqual(report.transientInstanceCount, 0)
+        XCTAssertEqual(report.persistentBatchCount, 1)
+        try probe.presentCanvas(
+            vertexShaderPath: shaderDirectory
+                .appendingPathComponent("production_canvas.vert.spv")
+                .path,
+            fragmentShaderPath: shaderDirectory
+                .appendingPathComponent("production_canvas.frag.spv")
+                .path,
+            texturedFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_canvas_textured.frag.spv"
+                )
+                .path,
+            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            vertices: [],
+            batches: [],
+            passes: [
+                .init(
+                    firstBatch: 0,
+                    batchCount: 0,
+                    target: nil,
+                    clearColor: nil,
+                    screenClearToken: nil
+                ),
+            ]
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testWindowsProbePresentsResizesAndRestoresARealVulkanWindow() throws {
         #if os(Windows)
         let probe = try GPUWindowProbe(
@@ -148,6 +298,7 @@ final class GPUWindowProbeTests: XCTestCase {
             0, 0, 1, 0,
             0, 0, 0, 1,
             1, 1, 1, 1,
+            0, 0, 0, 0,
         ]
         let batches = [0, 1].map { slot in
             GPUSceneGeometryProbeBatch(

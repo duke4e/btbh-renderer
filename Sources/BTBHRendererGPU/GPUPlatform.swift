@@ -419,9 +419,10 @@ public final class GPUPlatform: GamePlatform {
         cameraUp: RenderVec3,
         lighting: GPUSceneLightingProbe,
         instances: [Float],
+        logicalInstanceCount: Int,
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
-    ) throws {
+    ) throws -> GPUScenePresentationProbeReport {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
         }
@@ -448,7 +449,7 @@ public final class GPUPlatform: GamePlatform {
             extensionName = "metallib"
             shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
         }
-        _ = try window.presentModelInstances(
+        return try window.presentModelInstances(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_model.vert.\(extensionName)"
@@ -470,6 +471,7 @@ public final class GPUPlatform: GamePlatform {
             cameraUp: cameraUp,
             lighting: lighting,
             instances: instances,
+            logicalInstanceCount: logicalInstanceCount,
             batches: batches,
             clearColor: clearColor
         )

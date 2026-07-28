@@ -11,7 +11,7 @@
 #define BTBH_GPU_MODEL_COLOR_OFFSET 48u
 #define BTBH_GPU_MODEL_JOINTS_OFFSET 64u
 #define BTBH_GPU_MODEL_WEIGHTS_OFFSET 80u
-#define BTBH_GPU_SCENE_INSTANCE_FLOATS 20u
+#define BTBH_GPU_SCENE_INSTANCE_FLOATS 24u
 
 typedef struct BTBHGPUSceneUniforms {
     float view_projection[16];
@@ -510,8 +510,9 @@ static bool btbh_gpu_scene_ensure_upload_buffers(
     SDL_zero(transfer_info);
     buffer_info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
     if (
-        runtime->instance_buffer == NULL ||
-        runtime->instance_capacity < instance_bytes
+        instance_bytes > 0u &&
+        (runtime->instance_buffer == NULL ||
+         runtime->instance_capacity < instance_bytes)
     ) {
         if (runtime->instance_buffer != NULL) {
             SDL_ReleaseGPUBuffer(device, runtime->instance_buffer);
@@ -549,8 +550,9 @@ static bool btbh_gpu_scene_ensure_upload_buffers(
         }
     }
     if (
-        runtime->upload_transfer == NULL ||
-        runtime->upload_capacity < transfer_bytes
+        transfer_bytes > 0u &&
+        (runtime->upload_transfer == NULL ||
+         runtime->upload_capacity < transfer_bytes)
     ) {
         if (runtime->upload_transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(
@@ -574,7 +576,7 @@ static bool btbh_gpu_scene_ensure_upload_buffers(
 
 static bool btbh_gpu_scene_validate_batches(
     BTBHGPUWindow *window,
-    uint32_t total_instance_count,
+    uint32_t transient_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count
 ) {
@@ -619,14 +621,28 @@ static bool btbh_gpu_scene_validate_batches(
                     batch->model->material_count)) ||
             (batch->kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH &&
                 batch->material_slot < 0);
+        const bool uses_persistent_instances =
+            batch->instance_buffer != NULL;
+        const bool valid_instance_buffer =
+            !uses_persistent_instances ||
+            (batch->instance_buffer->owner == window &&
+             batch->instance_buffer->buffer != NULL &&
+             batch->instance_buffer->stride ==
+                BTBH_GPU_SCENE_INSTANCE_FLOATS * sizeof(float));
+        const uint32_t available_instance_count =
+            uses_persistent_instances && valid_instance_buffer
+                ? batch->instance_buffer->uploaded_prefix_byte_count /
+                    batch->instance_buffer->stride
+                : transient_instance_count;
         if (!valid_geometry ||
             !valid_animation ||
             !valid_material ||
             !valid_material_slot ||
+            !valid_instance_buffer ||
             batch->instance_count == 0u ||
-            batch->first_instance > total_instance_count ||
+            batch->first_instance > available_instance_count ||
             batch->instance_count >
-                total_instance_count - batch->first_instance) {
+                available_instance_count - batch->first_instance) {
             return false;
         }
     }
@@ -790,7 +806,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float camera_up[3],
     const BTBHGPUSceneLighting *lighting,
     const float *instances,
-    uint32_t total_instance_count,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
     uint8_t clear_red,
@@ -845,17 +862,17 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         !isfinite(lighting->secondary_directional_red) ||
         !isfinite(lighting->secondary_directional_green) ||
         !isfinite(lighting->secondary_directional_blue) ||
-        instances == NULL ||
-        total_instance_count == 0u ||
+        (instances == NULL && transient_instance_count > 0u) ||
+        logical_instance_count == 0u ||
         batches == NULL ||
         batch_count == 0u ||
         btbh_gpu_scene_shader_format(shader_format) ==
             SDL_GPU_SHADERFORMAT_INVALID ||
-        (uint64_t)total_instance_count *
+        (uint64_t)transient_instance_count *
             BTBH_GPU_SCENE_INSTANCE_FLOATS * sizeof(float) > UINT32_MAX ||
         !btbh_gpu_scene_validate_batches(
             window,
-            total_instance_count,
+            transient_instance_count,
             batches,
             batch_count
         )) {
@@ -904,7 +921,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
 
     SDL_GPUDevice *device = window->device->gpu;
     const uint32_t instance_bytes =
-        total_instance_count *
+        transient_instance_count *
         BTBH_GPU_SCENE_INSTANCE_FLOATS *
         (uint32_t)sizeof(float);
     const uint32_t bone_bytes =
@@ -936,31 +953,37 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
-    SDL_GPUBuffer *instance_buffer = runtime->instance_buffer;
+    SDL_GPUBuffer *transient_instance_buffer = instance_bytes > 0u
+        ? runtime->instance_buffer
+        : NULL;
     SDL_GPUBuffer *bone_buffer = bone_bytes > 0u
         ? runtime->bone_buffer
         : NULL;
     SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
-    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
-    if (mapped == NULL) {
-        free(bone_matrices);
-        free(bone_offsets);
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
+    if (transfer_bytes > 0u) {
+        void *mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
+        if (mapped == NULL) {
+            free(bone_matrices);
+            free(bone_offsets);
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        if (instance_bytes > 0u) {
+            (void)memcpy(mapped, instances, instance_bytes);
+        }
+        if (bone_bytes > 0u) {
+            (void)memcpy(
+                (uint8_t *)mapped + instance_bytes,
+                bone_matrices,
+                bone_bytes
+            );
+        }
+        SDL_UnmapGPUTransferBuffer(device, transfer);
     }
-    (void)memcpy(mapped, instances, instance_bytes);
-    if (bone_bytes > 0u) {
-        (void)memcpy(
-            (uint8_t *)mapped + instance_bytes,
-            bone_matrices,
-            bone_bytes
-        );
-    }
-    SDL_UnmapGPUTransferBuffer(device, transfer);
     free(bone_matrices);
     bone_matrices = NULL;
 
@@ -974,32 +997,36 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
         return report->result;
     }
-    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
-    if (copy == NULL) {
-        (void)SDL_CancelGPUCommandBuffer(command);
-        free(bone_offsets);
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
+    if (transfer_bytes > 0u) {
+        SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+        if (copy == NULL) {
+            (void)SDL_CancelGPUCommandBuffer(command);
+            free(bone_offsets);
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        SDL_GPUTransferBufferLocation source;
+        SDL_GPUBufferRegion destination;
+        SDL_zero(source);
+        SDL_zero(destination);
+        source.transfer_buffer = transfer;
+        if (transient_instance_buffer != NULL) {
+            destination.buffer = transient_instance_buffer;
+            destination.size = instance_bytes;
+            SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        }
+        if (bone_buffer != NULL) {
+            source.offset = instance_bytes;
+            destination.buffer = bone_buffer;
+            destination.size = bone_bytes;
+            SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        }
+        SDL_EndGPUCopyPass(copy);
     }
-    SDL_GPUTransferBufferLocation source;
-    SDL_GPUBufferRegion destination;
-    SDL_zero(source);
-    SDL_zero(destination);
-    source.transfer_buffer = transfer;
-    destination.buffer = instance_buffer;
-    destination.size = instance_bytes;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
-    if (bone_buffer != NULL) {
-        source.offset = instance_bytes;
-        destination.buffer = bone_buffer;
-        destination.size = bone_bytes;
-        SDL_UploadToGPUBuffer(copy, &source, &destination, true);
-    }
-    SDL_EndGPUCopyPass(copy);
 
     SDL_GPUTexture *swapchain = NULL;
     uint32_t drawable_width = 0u;
@@ -1073,6 +1100,10 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
          batch_index < batch_count;
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        SDL_GPUBuffer *batch_instance_buffer =
+            batch->instance_buffer != NULL
+                ? batch->instance_buffer->buffer
+                : transient_instance_buffer;
         const uint32_t geometry_count =
             batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
                 ? batch->model->primitive_count
@@ -1188,7 +1219,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                     ][batch->depth_compare]
                 );
                 SDL_GPUBuffer *storage_buffers[2] = {
-                    instance_buffer,
+                    batch_instance_buffer,
                     bone_buffer
                 };
                 SDL_BindGPUVertexStorageBuffers(
@@ -1207,7 +1238,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
                     0u,
-                    &instance_buffer,
+                    &batch_instance_buffer,
                     1u
                 );
             }
@@ -1308,7 +1339,15 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     report->batch_count = batch_count;
     report->primitive_draw_count = primitive_draw_count;
     report->prepared_geometry_count = prepared_geometry_count;
-    report->instance_count = total_instance_count;
+    uint32_t persistent_batch_count = 0u;
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        if (batches[index].instance_buffer != NULL) {
+            persistent_batch_count += 1u;
+        }
+    }
+    report->instance_count = logical_instance_count;
+    report->transient_instance_count = transient_instance_count;
+    report->persistent_batch_count = persistent_batch_count;
     report->message[0] = '\0';
     return report->result;
 }

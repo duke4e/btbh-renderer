@@ -360,6 +360,7 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint32_t animation_index;
     float animation_time;
     int32_t material_slot;
+    BTBHGPUInstanceBuffer *instance_buffer;
     uint32_t first_instance;
     uint32_t instance_count;
     BTBHGPUTexture *albedo_texture;
@@ -412,6 +413,8 @@ typedef struct BTBHGPUSceneReport {
     uint32_t primitive_draw_count;
     uint32_t prepared_geometry_count;
     uint32_t instance_count;
+    uint32_t transient_instance_count;
+    uint32_t persistent_batch_count;
     char message[256];
 } BTBHGPUSceneReport;
 
@@ -645,7 +648,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const float camera_up[3],
     const BTBHGPUSceneLighting *lighting,
     const float *instances,
-    uint32_t total_instance_count,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
     uint8_t clear_red,

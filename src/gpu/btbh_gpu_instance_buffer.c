@@ -5,16 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct BTBHGPUInstanceBuffer {
-    BTBHGPUWindow *owner;
-    BTBHGPUInstanceBuffer *previous;
-    BTBHGPUInstanceBuffer *next;
-    SDL_GPUBuffer *buffer;
-    uint32_t capacity;
-    uint32_t stride;
-    uint32_t byte_capacity;
-};
-
 static void btbh_gpu_instance_buffer_error(
     BTBHGPUInstanceBufferReport *report,
     BTBHGPUResult result,
@@ -237,6 +227,13 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
         return report->result;
     }
 
+    const uint32_t uploaded_end = byte_offset + byte_count;
+    if (
+        byte_offset <= buffer->uploaded_prefix_byte_count &&
+        uploaded_end > buffer->uploaded_prefix_byte_count
+    ) {
+        buffer->uploaded_prefix_byte_count = uploaded_end;
+    }
     report->result = BTBH_GPU_OK;
     report->capacity = buffer->capacity;
     report->stride = buffer->stride;

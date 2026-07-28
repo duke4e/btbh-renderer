@@ -5,11 +5,44 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPURenderServicesTests: XCTestCase {
+    func testSemanticInstancePackingNormalizesColorAndPreservesCustomValues() {
+        var packed: [Float] = []
+        GPUInstanceRecordPacking.append(
+            .init(
+                transform: .identity,
+                color: .init(r: 0, g: 127, b: 255, a: 64),
+                custom: .init(x: 11, y: 12, z: 13, w: 14)
+            ),
+            to: &packed
+        )
+
+        XCTAssertEqual(packed.count, 24)
+        XCTAssertEqual(Array(packed[0..<16]), [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ])
+        XCTAssertEqual(packed[16], 0)
+        XCTAssertEqual(
+            packed[17],
+            Float(127) / 255,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(packed[18], 1)
+        XCTAssertEqual(
+            packed[19],
+            Float(64) / 255,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(Array(packed[20..<24]), [11, 12, 13, 14])
+    }
+
     func testSceneSubmissionScratchRetainsWarmCapacityAcrossFrames() {
         let scratch = GPUSceneSubmissionScratch()
-        scratch.packedInstances.reserveCapacity(80)
+        scratch.packedInstances.reserveCapacity(96)
         scratch.batches.reserveCapacity(8)
-        scratch.packedInstances.append(contentsOf: repeatElement(0, count: 80))
+        scratch.packedInstances.append(contentsOf: repeatElement(0, count: 96))
         scratch.batches.append(.init(
             geometry: .customMesh(OpaquePointer(bitPattern: 1)!),
             animation: nil,
@@ -544,6 +577,125 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
+    func testModelInstancesUsePersistentGPUBufferInsteadOfTransientPacking() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH persistent model instance integration",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let buffer = try RenderServices.resources.createInstanceBuffer(.init(
+            capacity: 2,
+            stride: 0,
+            includesColor: true,
+            customFloatCount: 4
+        ))
+        let instances = [
+            RenderInstance(
+                transform: .identity,
+                color: .init(r: 255, g: 0, b: 0, a: 255),
+                custom: .init(x: 1, y: 2, z: 3, w: 4)
+            ),
+            RenderInstance(
+                transform: .identity,
+                color: .init(r: 0, g: 255, b: 0, a: 255),
+                custom: .init(x: 5, y: 6, z: 7, w: 8)
+            ),
+        ]
+        try instances.withUnsafeBytes {
+            try RenderServices.resources.uploadInstances(
+                buffer,
+                instances: $0
+            )
+        }
+        let frame = FrameDescriptor(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        )
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            sourceStart: 0,
+            count: 2
+        )))
+        try RenderServices.scene.endFrame()
+
+        let scene = try XCTUnwrap(bundle.scene as? GPUSceneBackend)
+        let report = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(report.instanceCount, 2)
+        XCTAssertEqual(report.transientInstanceCount, 0)
+        XCTAssertGreaterThan(report.persistentBatchCount, 0)
+
+        RenderServices.canvas.endFrame()
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            sourceStart: 0,
+            count: 2
+        )))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [instances[0]],
+            overrides: [],
+            persistentBuffer: nil,
+            sourceStart: 0,
+            count: 1
+        )))
+        try RenderServices.scene.endFrame()
+
+        let mixedReport = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(mixedReport.instanceCount, 3)
+        XCTAssertEqual(mixedReport.transientInstanceCount, 1)
+        XCTAssertGreaterThan(mixedReport.persistentBatchCount, 0)
+
+        RenderServices.canvas.endFrame()
+        RenderServices.resources.destroyInstanceBuffer(buffer)
+        RenderServices.resources.destroyModel(model)
         #else
         throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
         #endif
