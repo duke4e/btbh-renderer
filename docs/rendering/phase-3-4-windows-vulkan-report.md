@@ -18,24 +18,27 @@ gate are closed.
 ## Source and host
 
 - Latest captured game source:
-  `ec6d3671f7fbb2740af5068288f5eb9a2b496280`
+  `bfb26b7bcec9cdeeeec7e65ce0daeccb3d77fa06`
 - Latest captured renderer source:
-  `2620c64d5b1b5f82ceb2dc3c0eff81857f967441`
+  `ba7cbedf1f62677109c76993b3a21dc44136878d`
 - Initial final-telemetry capture source:
   game `c5e8d16c67d243cff1722bee4fa1464207feb277`,
   renderer `4c8c92cffee2ceea59da1ec9805ea5fa032d97e9`
-- Renderer implementation source (the later renderer commits are report-only):
-  `fcdf7de61f74d2da03864a941a9ce9a8012de9e2`
+- Direct-PBR renderer implementation source:
+  `5af2603e8f5b8066d3574d9abe46f731fc227099`
 - Branch: `codex/renderer-phase-0-1`
 - CPU: AMD Ryzen 9 9950X
 - GPU: NVIDIA GeForce RTX 3070 Ti
 - OS: Windows 10.0.19045
 - Backend bootstrap: `requested=vulkan actual=vulkan hardware=1`
 - Release executable: `City Generator (r3d)/.build/release/Main.exe`
+- Release executable size: 50,989,056 bytes
+- Release executable SHA-256:
+  `F354748377B995EB899CEFECED5B6BB27118689A16A9828B40EFE9813758E48F`
 - Resolution: 1920×1080
 - Seed: 424242
 
-The current-head telemetry evidence directories are:
+The pre-direct-PBR final-telemetry evidence directories were:
 
 - `.build/render-baselines/windows-gpu-4c8c92c-final10-gpu-A`
 - `.build/render-baselines/windows-gpu-4c8c92c-final10-gpu-B`
@@ -335,6 +338,112 @@ forward shader. It is prerequisite data/lifetime plumbing for the remaining
 PBR/IBL work, not a claim of PBR visual parity, and it does not replace or
 modify any golden or threshold.
 
+### Production direct-PBR closeout
+
+Renderer implementation commit `5af2603` replaces the simplified
+albedo-times-Lambert model path with the first production direct-PBR slice:
+
+- static and animated vertices carry world position, inverse-transpose
+  normals, forward-transformed tangents, and determinant-corrected tangent
+  handedness;
+- the fragment path samples albedo, emission, normal, and metallic-roughness
+  channels, applies normal scale plus material scalar factors, and evaluates
+  Burley diffuse, GGX/Smith specular, and Schlick Fresnel for the two
+  directional lights;
+- camera position is transported through the neutral C ABI, and a neutral
+  normal fallback texture preserves models without a normal map;
+- unlit and zero-light behavior remain compatible with the retained scene
+  contract;
+- ambient occlusion remains transported but is deliberately not applied
+  until the ambient/IBL path and separate glTF occlusion-texture semantics
+  are implemented.
+
+Independent review found one medium TBN issue: the initial shader revision
+forward-transformed normals and did not correct tangent handedness for
+mirrored transforms. Both static and animated shaders now use an
+inverse-transpose-equivalent cofactor transform, forward-transform tangents,
+and carry the instance/skin determinant sign. A real Vulkan regression with
+a slanted normal under non-uniform scale would fail the old transform. The
+focused re-review found no remaining HIGH/MEDIUM issue.
+
+Fresh renderer verification passed 13/13 native CTests, 123 GPU-enabled
+XCTest cases with one expected interactive-dialog skip plus one Swift Testing
+check on real Vulkan, and 65 base XCTest cases plus one Swift Testing check.
+The pinned game then passed 1,514 XCTest cases plus three Swift Testing checks,
+the render API audit, a release build, and a hardware Vulkan bootstrap:
+`requested=vulkan actual=vulkan hardware=1`.
+
+The direct-PBR Windows evidence directories are:
+
+- `.build/render-baselines/windows-gpu-ba7cbed-direct-pbr-A`
+- `.build/render-baselines/windows-gpu-ba7cbed-direct-pbr-B`
+
+All ten child processes emitted exactly one `CAPTURED` and `FINISHED` marker,
+exited with status 0, and produced PNG, QOI, cue, metrics, entity, and manifest
+artifacts. Every PNG is 1920x1080. Entity JSON is byte-identical between A and
+B for all five modes, and no log contains an unsupported, fallback, fatal, or
+error diagnostic.
+
+Run B passed the unchanged Run A manifest and all required cues:
+
+| Mode | B-to-A global SSIM | Result |
+| --- | ---: | --- |
+| Game | 0.999888891 | Pass |
+| Combat Lab | 0.999914495 | Pass |
+| Particle editor | 0.999939191 | Pass |
+| City-block editor | 0.999900315 | Pass |
+| Unified city | 0.999976497 | Pass |
+
+No golden or threshold changed. The strict retained legacy manifest still
+fails at its older game entity signature (`projectiles=13185` versus the
+current `13196`) before image scoring, so the authority was neither bypassed
+nor rewritten. The capture scenes also do not isolate every normal/ORM
+response; that semantic proof comes from the real Vulkan shader regression.
+
+The presented-frame measurements are:
+
+| Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
+| --- | ---: | ---: |
+| Game | 31.637 / 37.783 / 50.944 | 31.167 / 38.482 / 52.860 |
+| Combat Lab | 30.824 / 36.886 / 50.232 | 30.935 / 38.205 / 50.530 |
+| Particle editor | 3.777 / 4.272 / 4.723 | 3.777 / 4.155 / 4.646 |
+| City-block editor | 1.825 / 2.053 / 2.702 | 1.838 / 2.095 / 2.540 |
+| Unified city | 2.131 / 2.257 / 2.474 | 2.151 / 2.516 / 2.682 |
+
+The two-run means versus the retained Windows Run 3/4 legacy means are:
+
+| Mode | Direct-PBR mean median / p95 ms | Median delta | p95 delta | Absolute median / p95 delta |
+| --- | ---: | ---: | ---: | ---: |
+| Game | 31.402 / 38.133 | +2.63% | +2.75% | +0.804 / +1.022 ms |
+| Combat Lab | 30.880 / 37.546 | +2.59% | +1.04% | +0.780 / +0.388 ms |
+| Particle editor | 3.777 / 4.213 | +113.45% | +58.94% | +2.008 / +1.562 ms |
+| City-block editor | 1.831 / 2.074 | +258.71% | +188.24% | +1.320 / +1.354 ms |
+| Unified city | 2.141 / 2.386 | +310.59% | +215.02% | +1.620 / +1.629 ms |
+
+Game and Combat Lab remain below the 5% median/p95 diagnostic threshold. The
+editor ratios remain dominated by the sub-millisecond legacy baseline; their
+absolute fixed GPU overhead remains open and is not hidden by rounding.
+
+Against the immediately preceding `4c8c92c` GPU A/B closeout, mean
+median/p95 movements are `-1.19%/-0.50%` for Game,
+`-4.23%/-3.14%` for Combat Lab, `-4.94%/-4.82%` for the particle editor,
+`-1.12%/+4.87%` for the city-block editor, and `-6.39%/-8.22%` for unified
+city. No same-backend regression exceeds 5%; the only movements over 5% are
+unified-city improvements.
+
+Manual inspection confirms that same-source A/B output is stable but does not
+establish legacy parity. The current path still lacks the legacy ambient/IBL,
+AO, shadow, stencil/cull, transparency, bloom, tilt-shift, and full post-chain
+result. A cross-series comparison with the preceding GPU closeout passed the
+stationary modes; the dynamic Game world cue scored 0.979288724, just below
+0.98, while its HUD cue passed. The difference is concentrated in the
+frame-phased central projectile/effect field, not a changed entity signature,
+and the adjacent same-source A/B gate passes at 0.999888891. This diagnostic
+is recorded rather than hidden by a threshold change.
+
+The historical Windows-to-Apple SSIM issue at font, text, and antialiased
+edges remains unresolved and is not claimed fixed.
+
 ### Production GPU file-dialog closeout
 
 Renderer commit `9403e5a` replaces the GPU platform placeholder with the
@@ -371,8 +480,8 @@ or performance authority.
 The following work remains before Windows visual/performance parity can be
 called complete:
 
-1. Port the used PBR/IBL, shadow, stencil/cull, transparency, and post-chain
-   behavior instead of the current simplified forward scene pass.
+1. Add the used ambient/IBL and AO behavior around the direct-PBR pass, then
+   port shadow, stencil/cull, transparency, and post-chain behavior.
 2. Group the remaining per-frame scene-content rebuild and per-primitive
    bindings/draw calls. Persistent semantic instance buffers now bind and
    reuse native GPU storage directly, but geometry/material submission is
