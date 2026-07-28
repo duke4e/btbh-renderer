@@ -17,11 +17,11 @@ gate are closed.
 
 ## Source and host
 
-- Game implementation and capture-tool source:
-  `264b560f447c848079211623f97cf6085d279b74`
-- Captured game runtime parent:
-  `a28832a3593b130c571f05072e794158ba2a98c9`
-- Renderer implementation source:
+- Captured game source:
+  `c5e8d16c67d243cff1722bee4fa1464207feb277`
+- Captured renderer source:
+  `4c8c92cffee2ceea59da1ec9805ea5fa032d97e9`
+- Renderer implementation source (the later renderer commits are report-only):
   `fcdf7de61f74d2da03864a941a9ce9a8012de9e2`
 - Branch: `codex/renderer-phase-0-1`
 - CPU: AMD Ryzen 9 9950X
@@ -32,10 +32,10 @@ gate are closed.
 - Resolution: 1920×1080
 - Seed: 424242
 
-The final telemetry evidence directories are:
+The current-head telemetry evidence directories are:
 
-- `.build/render-baselines/windows-gpu-fcdf7de-telemetry-final-A`
-- `.build/render-baselines/windows-gpu-fcdf7de-telemetry-final-B`
+- `.build/render-baselines/windows-gpu-4c8c92c-final10-gpu-A`
+- `.build/render-baselines/windows-gpu-4c8c92c-final10-gpu-B`
 
 All ten child processes emitted `CAPTURED` and `FINISHED`, exited with status
 0, and produced PNG, QOI, cue, metrics, entity, and manifest artifacts. Every
@@ -43,7 +43,20 @@ PNG header reports 1920×1080. No telemetry-run log contains an unsupported,
 fallback, fatal, or error diagnostic.
 
 The closeout commits after `a28832a3` change the capture report/test, renderer
-gitlink, and audit inventory; they do not change the captured game workload.
+gitlink, audit inventory, and this report; they do not change the captured
+game workload.
+
+The first recapture shell after a usage-limit interruption omitted both
+`BTBH_ENABLE_GPU_BACKEND=1` and `BTBH_RENDER_BACKEND=gpu`. It therefore
+rebuilt and exercised the legacy-only executable. Its isolated
+`windows-gpu-4c8c92c-final10-A` and
+`windows-gpu-4c8c92c-final10-current-A` artifacts were retained as
+diagnostic evidence but are excluded from the GPU benchmark. The absence of
+GPU telemetry and the exact legacy entity signature proved the environment
+error. The accepted A/B runs used an explicit GPU feature flag, Vulkan
+selection, native library path, shader staging, and Visual Studio linker
+environment. A post-capture release bootstrap independently reported
+`requested=vulkan actual=vulkan hardware=1`.
 
 ## Reproducibility and visual cue gate
 
@@ -60,11 +73,11 @@ Run B passed the unchanged Run A manifest and every required cue:
 
 | Mode | Run B to Run A global SSIM | Result |
 | --- | ---: | --- |
-| Game | 0.999995399 | Pass |
-| Combat Lab | 0.999881952 | Pass |
-| Particle editor | 0.999913307 | Pass |
-| City-block editor | 0.999948750 | Pass |
-| Unified city | 0.999934984 | Pass |
+| Game | 0.999807654 | Pass |
+| Combat Lab | 0.999856126 | Pass |
+| Particle editor | 0.999875400 | Pass |
+| City-block editor | 0.999938133 | Pass |
+| Unified city | 0.999901147 | Pass |
 
 No golden or threshold was changed.
 
@@ -92,27 +105,27 @@ measurements are:
 
 | Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
 | --- | ---: | ---: |
-| Game | 30.999 / 37.157 / 46.150 | 32.455 / 39.989 / 50.085 |
-| Combat Lab | 31.558 / 37.811 / 52.895 | 32.276 / 39.820 / 47.792 |
-| Particle editor | 3.984 / 4.627 / 5.260 | 4.055 / 4.641 / 5.730 |
-| City-block editor | 1.841 / 2.057 / 2.252 | 1.943 / 2.254 / 2.644 |
-| Unified city | 2.230 / 2.450 / 2.619 | 2.447 / 3.375 / 3.652 |
+| Game | 31.300 / 37.472 / 49.331 | 32.258 / 39.173 / 52.004 |
+| Combat Lab | 31.969 / 38.177 / 48.818 | 32.516 / 39.349 / 48.214 |
+| Particle editor | 3.962 / 4.340 / 5.205 | 3.985 / 4.514 / 5.053 |
+| City-block editor | 1.822 / 2.037 / 3.580 | 1.882 / 1.918 / 2.329 |
+| Unified city | 2.241 / 2.591 / 3.136 | 2.334 / 2.609 / 3.035 |
 
 Two-run means compared with the retained Windows Run 3/4 legacy means:
 
 | Mode | GPU mean median / p95 ms | Median delta | p95 delta |
 | --- | ---: | ---: | ---: |
-| Game | 31.727 / 38.573 | +3.69% | +3.94% |
-| Combat Lab | 31.917 / 38.816 | +6.04% | +4.46% |
-| Particle editor | 4.019 / 4.634 | +127.14% | +74.80% |
-| City-block editor | 1.892 / 2.156 | +270.65% | +199.60% |
-| Unified city | 2.339 / 2.912 | +348.42% | +284.49% |
+| Game | 31.779 / 38.323 | +3.86% | +3.27% |
+| Combat Lab | 32.242 / 38.763 | +7.12% | +4.32% |
+| Particle editor | 3.973 / 4.427 | +124.53% | +66.98% |
+| City-block editor | 1.852 / 1.978 | +262.78% | +174.86% |
+| Unified city | 2.288 / 2.600 | +338.64% | +243.23% |
 
 Game is now below the 5% median/p95 diagnostic threshold. Combat median
-remains 6.04% (+1.818 ms) above the legacy mean while its p95 is below the
+remains 7.12% (+2.143 ms) above the legacy mean while its p95 is below the
 threshold. The editor ratios are amplified by the sub-millisecond legacy
-baseline, but remain real absolute mean regressions of 1.382–2.250 ms median
-and 1.436–2.155 ms p95.
+baseline, but remain real absolute mean regressions of 1.342–2.204 ms median
+and 1.258–1.843 ms p95.
 
 Material-slot filtering prepares only the primitives each batch draws;
 compared with the immediately preceding `d347d9b` two-run means, this reduced
@@ -187,22 +200,19 @@ recovery. Every mode reports 120 CPU-submit and 120 fence-completion samples:
 
 | Mode | CPU submit A median / p95 / worst ms | CPU submit B median / p95 / worst ms | Fence completion A median / p95 / worst ms | Fence completion B median / p95 / worst ms |
 | --- | ---: | ---: | ---: | ---: |
-| Game | 0.109300 / 0.121500 / 1.855100 | 0.114150 / 0.134600 / 1.709600 | 31.287300 / 38.051100 / 70.658300 | 32.661150 / 40.417200 / 71.254500 |
-| Combat Lab | 0.112500 / 0.123700 / 9.723000 | 0.114100 / 0.139400 / 9.470400 | 31.695200 / 38.979600 / 63.746200 | 32.416450 / 40.354700 / 73.434800 |
-| Particle editor | 0.343400 / 0.390300 / 0.488000 | 0.358950 / 0.411600 / 0.489000 | 0.346750 / 0.403600 / 4.798800 | 0.362500 / 0.421800 / 4.353100 |
-| City-block editor | 0.053300 / 0.065700 / 0.086500 | 0.055600 / 0.061300 / 0.079200 | 1.901900 / 2.115300 / 38.313900 | 2.006400 / 2.342300 / 43.709900 |
-| Unified city | 0.151600 / 0.170900 / 0.190800 | 0.165750 / 0.254700 / 0.320300 | 2.312600 / 2.494800 / 42.217700 | 0.183800 / 3.027800 / 3.863400 |
+| Game | 0.109800 / 0.127400 / 3.697300 | 0.110350 / 0.125300 / 1.707800 | 31.469350 / 37.943700 / 66.901000 | 32.445050 / 39.742600 / 69.212700 |
+| Combat Lab | 0.113550 / 0.124300 / 9.594700 | 0.113050 / 0.123500 / 10.079000 | 32.124200 / 40.588000 / 68.528400 | 32.653850 / 40.258200 / 69.251100 |
+| Particle editor | 0.352250 / 0.396100 / 0.433100 | 0.353100 / 0.397100 / 0.475500 | 0.354800 / 0.399000 / 0.435900 | 0.355850 / 0.399900 / 0.478200 |
+| City-block editor | 0.052300 / 0.068300 / 0.078200 | 0.053000 / 0.061400 / 0.077700 | 1.882900 / 2.098200 / 42.537200 | 1.941000 / 1.985100 / 39.803000 |
+| Unified city | 0.155850 / 0.180300 / 0.273900 | 0.160150 / 0.191800 / 0.241900 | 0.173250 / 2.466100 / 46.008400 | 0.170350 / 2.624700 / 47.622000 |
 
 These are observed fence-completion latencies, not native GPU timestamp
-durations. Unified-city's A/B fence median changed from 2.313 ms to 0.184 ms
-with identical source, entities, cues, and output resolution, demonstrating
-the expected polling-cadence sensitivity. Its presented-frame p95 also moved
-by 0.924 ms between the same-build A/B runs and is diagnosed as short-frame
-driver/scheduler variation, not a code delta. Compared with the earlier
-scratch A-B-A means, the telemetry closeout improves every median and four
-p95 values; unified p95 is +8.84% (+0.237 ms). Because host state and
-instrumentation differ, those movements are recorded as run drift rather than
-credited as an optimization.
+durations. The current same-build A/B presented-frame medians and p95 values
+remain within 5% except city-block p95, whose B-to-A movement is -5.81% but
+only -0.118 ms on a roughly 2 ms frame. It is recorded as short-frame
+driver/scheduler variation, not a code delta. Because host state and
+instrumentation differ from earlier runs, those movements are recorded as
+run drift rather than credited as an optimization.
 
 ## Remaining Windows work
 
