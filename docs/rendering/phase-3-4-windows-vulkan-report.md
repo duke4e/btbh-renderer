@@ -17,7 +17,7 @@ gate are closed.
 
 ## Source and host
 
-- Game closeout source:
+- Game implementation and capture-tool source:
   `264b560f447c848079211623f97cf6085d279b74`
 - Captured game runtime parent:
   `a28832a3593b130c571f05072e794158ba2a98c9`
