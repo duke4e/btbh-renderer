@@ -17,10 +17,12 @@ gate are closed.
 
 ## Source and host
 
-- Game source:
-  `d91f13acdab3cf7d8e4381787f654153ce4f610f`
+- Game closeout source:
+  `264b560f447c848079211623f97cf6085d279b74`
+- Captured game runtime parent:
+  `a28832a3593b130c571f05072e794158ba2a98c9`
 - Renderer implementation source:
-  `346adfb0e22ffe3efb6d29e56083adddd7437bf9`
+  `fcdf7de61f74d2da03864a941a9ce9a8012de9e2`
 - Branch: `codex/renderer-phase-0-1`
 - CPU: AMD Ryzen 9 9950X
 - GPU: NVIDIA GeForce RTX 3070 Ti
@@ -30,15 +32,18 @@ gate are closed.
 - Resolution: 1920×1080
 - Seed: 424242
 
-The final evidence directories are:
+The final telemetry evidence directories are:
 
-- `.build/render-baselines/windows-gpu-ca6ece5-final-run1`
-- `.build/render-baselines/windows-gpu-ca6ece5-final-run2`
+- `.build/render-baselines/windows-gpu-fcdf7de-telemetry-final-A`
+- `.build/render-baselines/windows-gpu-fcdf7de-telemetry-final-B`
 
 All ten child processes emitted `CAPTURED` and `FINISHED`, exited with status
 0, and produced PNG, QOI, cue, metrics, entity, and manifest artifacts. Every
-PNG header reports 1920×1080. No final-run log contains an unsupported,
+PNG header reports 1920×1080. No telemetry-run log contains an unsupported,
 fallback, fatal, or error diagnostic.
+
+The closeout commits after `a28832a3` change the capture report/test, renderer
+gitlink, and audit inventory; they do not change the captured game workload.
 
 ## Reproducibility and visual cue gate
 
@@ -51,15 +56,15 @@ Entity signatures are byte-identical between Run 1 and Run 2 for every mode:
 | City-block editor | scene_objects=64 |
 | Unified city | assets=154, districts=9, road_meshes=3 |
 
-Run 2 passed the unchanged Run 1 manifest and every required cue:
+Run B passed the unchanged Run A manifest and every required cue:
 
-| Mode | Run 2 to Run 1 global SSIM | Result |
+| Mode | Run B to Run A global SSIM | Result |
 | --- | ---: | --- |
-| Game | 0.999961898 | Pass |
-| Combat Lab | 0.999988185 | Pass |
-| Particle editor | 0.999914365 | Pass |
-| City-block editor | 0.999916946 | Pass |
-| Unified city | 0.999893473 | Pass |
+| Game | 0.999995399 | Pass |
+| Combat Lab | 0.999881952 | Pass |
+| Particle editor | 0.999913307 | Pass |
+| City-block editor | 0.999948750 | Pass |
+| Unified city | 0.999934984 | Pass |
 
 No golden or threshold was changed.
 
@@ -82,30 +87,32 @@ cross-platform issue was fixed.
 
 ## Performance
 
-Each entry contains 120 presented-frame samples. The final measurements are:
+Each entry contains 120 presented-frame samples. The telemetry closeout
+measurements are:
 
-| Mode | Run 1 median / p95 / worst ms | Run 2 median / p95 / worst ms |
+| Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
 | --- | ---: | ---: |
-| Game | 35.301 / 44.329 / 49.599 | 36.582 / 43.963 / 54.614 |
-| Combat Lab | 37.077 / 45.250 / 56.990 | 34.874 / 40.673 / 54.855 |
-| Particle editor | 3.943 / 4.591 / 4.910 | 3.878 / 4.549 / 12.913 |
-| City-block editor | 1.589 / 2.032 / 2.682 | 1.532 / 1.871 / 12.700 |
-| Unified city | 2.068 / 2.803 / 15.742 | 1.968 / 2.220 / 3.239 |
+| Game | 30.999 / 37.157 / 46.150 | 32.455 / 39.989 / 50.085 |
+| Combat Lab | 31.558 / 37.811 / 52.895 | 32.276 / 39.820 / 47.792 |
+| Particle editor | 3.984 / 4.627 / 5.260 | 4.055 / 4.641 / 5.730 |
+| City-block editor | 1.841 / 2.057 / 2.252 | 1.943 / 2.254 / 2.644 |
+| Unified city | 2.230 / 2.450 / 2.619 | 2.447 / 3.375 / 3.652 |
 
 Two-run means compared with the retained Windows Run 3/4 legacy means:
 
 | Mode | GPU mean median / p95 ms | Median delta | p95 delta |
 | --- | ---: | ---: | ---: |
-| Game | 35.941 / 44.146 | +17.46% | +18.96% |
-| Combat Lab | 35.975 / 42.962 | +19.52% | +15.62% |
-| Particle editor | 3.911 / 4.570 | +121.00% | +72.38% |
-| City-block editor | 1.561 / 1.952 | +205.70% | +171.27% |
-| Unified city | 2.018 / 2.511 | +286.91% | +231.55% |
+| Game | 31.727 / 38.573 | +3.69% | +3.94% |
+| Combat Lab | 31.917 / 38.816 | +6.04% | +4.46% |
+| Particle editor | 4.019 / 4.634 | +127.14% | +74.80% |
+| City-block editor | 1.892 / 2.156 | +270.65% | +199.60% |
+| Unified city | 2.339 / 2.912 | +348.42% | +284.49% |
 
-These regressions exceed the 5% diagnostic threshold. The heavy game and
-combat paths show real absolute mean regressions of 5.344 ms and 5.876 ms
-median. The editor ratios are amplified by the sub-millisecond legacy
-baseline but also remain real absolute regressions.
+Game is now below the 5% median/p95 diagnostic threshold. Combat median
+remains 6.04% (+1.818 ms) above the legacy mean while its p95 is below the
+threshold. The editor ratios are amplified by the sub-millisecond legacy
+baseline, but remain real absolute mean regressions of 1.382–2.250 ms median
+and 1.436–2.155 ms p95.
 
 Material-slot filtering prepares only the primitives each batch draws;
 compared with the immediately preceding `d347d9b` two-run means, this reduced
@@ -161,11 +168,41 @@ the five entity signatures identical to the reference manifest, produced
 and left no game, supervisor, or comparator process running. No golden or
 threshold was changed.
 
-CPU-submit and asynchronous fence-completion distributions are not yet exposed
-by the production capture schema. Adding them by synchronously waiting on a
-fence would perturb the measurement, so this report records that missing
-instrumentation as an open acceptance item instead of fabricating values from
-whole-frame time.
+### CPU-submit and fence-completion telemetry
+
+Renderer `fcdf7de` adds opt-in telemetry only when
+`BTBH_RENDER_PERF_LOG=1`. The normal production path still calls
+`SDL_SubmitGPUCommandBuffer` and does not acquire or poll fences. The telemetry
+path measures the CPU duration of
+`SDL_SubmitGPUCommandBufferAndAcquireFence`, then observes completion with
+non-blocking `SDL_QueryGPUFence` calls after presentation. It never waits in
+the measured frame path. A controlled wait/drain occurs only while closing
+the window, after the measured loop, so final samples are not silently
+dropped.
+
+The capture report selects the final 120 telemetry samples. Heavy modes
+produced frame serials 1–292 and editor modes 1–152; therefore the selected
+tail maps exactly to the 120 measured frames after warm-up, capture, and
+recovery. Every mode reports 120 CPU-submit and 120 fence-completion samples:
+
+| Mode | CPU submit A median / p95 / worst ms | CPU submit B median / p95 / worst ms | Fence completion A median / p95 / worst ms | Fence completion B median / p95 / worst ms |
+| --- | ---: | ---: | ---: | ---: |
+| Game | 0.109300 / 0.121500 / 1.855100 | 0.114150 / 0.134600 / 1.709600 | 31.287300 / 38.051100 / 70.658300 | 32.661150 / 40.417200 / 71.254500 |
+| Combat Lab | 0.112500 / 0.123700 / 9.723000 | 0.114100 / 0.139400 / 9.470400 | 31.695200 / 38.979600 / 63.746200 | 32.416450 / 40.354700 / 73.434800 |
+| Particle editor | 0.343400 / 0.390300 / 0.488000 | 0.358950 / 0.411600 / 0.489000 | 0.346750 / 0.403600 / 4.798800 | 0.362500 / 0.421800 / 4.353100 |
+| City-block editor | 0.053300 / 0.065700 / 0.086500 | 0.055600 / 0.061300 / 0.079200 | 1.901900 / 2.115300 / 38.313900 | 2.006400 / 2.342300 / 43.709900 |
+| Unified city | 0.151600 / 0.170900 / 0.190800 | 0.165750 / 0.254700 / 0.320300 | 2.312600 / 2.494800 / 42.217700 | 0.183800 / 3.027800 / 3.863400 |
+
+These are observed fence-completion latencies, not native GPU timestamp
+durations. Unified-city's A/B fence median changed from 2.313 ms to 0.184 ms
+with identical source, entities, cues, and output resolution, demonstrating
+the expected polling-cadence sensitivity. Its presented-frame p95 also moved
+by 0.924 ms between the same-build A/B runs and is diagnosed as short-frame
+driver/scheduler variation, not a code delta. Compared with the earlier
+scratch A-B-A means, the telemetry closeout improves every median and four
+p95 values; unified p95 is +8.84% (+0.237 ms). Because host state and
+instrumentation differ, those movements are recorded as run drift rather than
+credited as an optimization.
 
 ## Remaining Windows work
 
@@ -178,11 +215,9 @@ called complete:
    production material representation.
 3. Replace the remaining per-frame scene-content rebuild and per-primitive
    submission with persistent, grouped GPU batches.
-4. Add non-perturbing CPU-submit and fence-completion telemetry to the capture
-   report.
-5. Implement and exercise the production GPU file-dialog path; automated tool
+4. Implement and exercise the production GPU file-dialog path; automated tool
    captures do not open a dialog.
-6. Re-run the strict platform-local legacy visual gate on matching current
+5. Re-run the strict platform-local legacy visual gate on matching current
    entity signatures without changing the retained authority to force a pass.
 
 After those Windows items pass, the remaining platform gate is native
