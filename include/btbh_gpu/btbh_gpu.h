@@ -164,6 +164,33 @@ typedef struct BTBHGPUPlatformSnapshot {
     uint8_t reserved[5];
 } BTBHGPUPlatformSnapshot;
 
+typedef enum BTBHGPUFileDialogKind {
+    BTBH_GPU_FILE_DIALOG_OPEN = 1,
+    BTBH_GPU_FILE_DIALOG_SAVE = 2
+} BTBHGPUFileDialogKind;
+
+typedef struct BTBHGPUFileDialogDescriptor {
+    BTBHGPUFileDialogKind kind;
+    const char *title;
+    const char *const *filter_names;
+    const char *const *filter_patterns;
+    uint32_t filter_count;
+    uint8_t allows_multiple_selection;
+    uint8_t reserved[3];
+    const char *location;
+} BTBHGPUFileDialogDescriptor;
+
+typedef struct BTBHGPUFileDialogReport {
+    BTBHGPUResult result;
+    char message[256];
+} BTBHGPUFileDialogReport;
+
+typedef void (*BTBHGPUFileDialogCallback)(
+    void *userdata,
+    const char *const *paths,
+    const char *error_message
+);
+
 typedef struct BTBHGPUWindow BTBHGPUWindow;
 typedef struct BTBHGPUTexture BTBHGPUTexture;
 typedef struct BTBHGPUFont BTBHGPUFont;
@@ -517,6 +544,13 @@ BTBHGPUResult btbh_gpu_window_set_cursor_visible(
 BTBHGPUResult btbh_gpu_window_set_clipboard_text(
     BTBHGPUWindow *window,
     const char *text
+);
+BTBHGPUResult btbh_gpu_window_show_file_dialog(
+    BTBHGPUWindow *window,
+    const BTBHGPUFileDialogDescriptor *descriptor,
+    BTBHGPUFileDialogCallback callback,
+    void *userdata,
+    BTBHGPUFileDialogReport *report
 );
 uint8_t btbh_gpu_window_key_down(
     BTBHGPUWindow *window,

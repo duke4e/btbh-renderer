@@ -273,10 +273,27 @@ public final class GPUPlatform: GamePlatform {
             Result<[URL], FileDialogError>
         ) -> Void
     ) {
-        _ = request
-        completion(.failure(.backendFailure(
-            "GPU platform file dialogs are not implemented yet"
-        )))
+        do {
+            let configuration = try GPUFileDialogConfiguration(
+                request: request
+            )
+            guard let window else {
+                completion(.failure(.backendFailure(
+                    "GPU window is not open"
+                )))
+                return
+            }
+            window.showFileDialog(
+                configuration,
+                completion: completion
+            )
+        } catch let error as FileDialogError {
+            completion(.failure(error))
+        } catch {
+            completion(.failure(.backendFailure(
+                String(describing: error)
+            )))
+        }
     }
 
     func presentClear(_ color: RenderColor) throws {

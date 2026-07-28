@@ -28,6 +28,72 @@ static bool btbh_gpu_valid_window_size(uint32_t width, uint32_t height) {
         height <= (uint32_t) INT_MAX;
 }
 
+typedef struct BTBHGPUFileDialogContext {
+    BTBHGPUFileDialogCallback callback;
+    void *userdata;
+    SDL_PropertiesID properties;
+    SDL_DialogFileFilter *filters;
+    char **filter_names;
+    char **filter_patterns;
+    uint32_t filter_count;
+} BTBHGPUFileDialogContext;
+
+static void btbh_gpu_set_file_dialog_report(
+    BTBHGPUFileDialogReport *report,
+    BTBHGPUResult result,
+    const char *message
+) {
+    if (report == NULL) {
+        return;
+    }
+    memset(report, 0, sizeof(*report));
+    report->result = result;
+    (void) snprintf(
+        report->message,
+        sizeof(report->message),
+        "%s",
+        message != NULL ? message : ""
+    );
+}
+
+static void btbh_gpu_free_file_dialog_context(
+    BTBHGPUFileDialogContext *context
+) {
+    if (context == NULL) {
+        return;
+    }
+    if (context->properties != 0) {
+        SDL_DestroyProperties(context->properties);
+    }
+    for (uint32_t index = 0; index < context->filter_count; index += 1) {
+        if (context->filter_names != NULL) {
+            SDL_free(context->filter_names[index]);
+        }
+        if (context->filter_patterns != NULL) {
+            SDL_free(context->filter_patterns[index]);
+        }
+    }
+    free(context->filter_names);
+    free(context->filter_patterns);
+    free(context->filters);
+    free(context);
+}
+
+static void SDLCALL btbh_gpu_file_dialog_callback(
+    void *userdata,
+    const char *const *paths,
+    int selected_filter
+) {
+    (void) selected_filter;
+    BTBHGPUFileDialogContext *context = userdata;
+    if (context == NULL) {
+        return;
+    }
+    const char *error_message = paths == NULL ? SDL_GetError() : NULL;
+    context->callback(context->userdata, paths, error_message);
+    btbh_gpu_free_file_dialog_context(context);
+}
+
 static void btbh_gpu_write_window_state(
     const BTBHGPUWindow *window,
     BTBHGPUWindowReport *report
@@ -720,6 +786,189 @@ BTBHGPUResult btbh_gpu_window_set_clipboard_text(
     return SDL_SetClipboardText(text)
         ? BTBH_GPU_OK
         : BTBH_GPU_WINDOW_FAILURE;
+}
+
+BTBHGPUResult btbh_gpu_window_show_file_dialog(
+    BTBHGPUWindow *window,
+    const BTBHGPUFileDialogDescriptor *descriptor,
+    BTBHGPUFileDialogCallback callback,
+    void *userdata,
+    BTBHGPUFileDialogReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    btbh_gpu_set_file_dialog_report(report, BTBH_GPU_OK, "");
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        descriptor == NULL ||
+        callback == NULL ||
+        descriptor->title == NULL ||
+        (
+            descriptor->kind != BTBH_GPU_FILE_DIALOG_OPEN &&
+            descriptor->kind != BTBH_GPU_FILE_DIALOG_SAVE
+        ) ||
+        descriptor->filter_count > (uint32_t) INT_MAX ||
+        (
+            descriptor->filter_count > 0 &&
+            (
+                descriptor->filter_names == NULL ||
+                descriptor->filter_patterns == NULL
+            )
+        ) ||
+        (
+            descriptor->kind == BTBH_GPU_FILE_DIALOG_SAVE &&
+            descriptor->allows_multiple_selection != 0
+        )
+    ) {
+        btbh_gpu_set_file_dialog_report(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU file-dialog descriptor"
+        );
+        return report->result;
+    }
+
+    BTBHGPUFileDialogContext *context = calloc(1, sizeof(*context));
+    if (context == NULL) {
+        btbh_gpu_set_file_dialog_report(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "Could not allocate GPU file-dialog callback context"
+        );
+        return report->result;
+    }
+    context->callback = callback;
+    context->userdata = userdata;
+    context->filter_count = descriptor->filter_count;
+
+    if (context->filter_count > 0) {
+        context->filters = calloc(
+            context->filter_count,
+            sizeof(*context->filters)
+        );
+        context->filter_names = calloc(
+            context->filter_count,
+            sizeof(*context->filter_names)
+        );
+        context->filter_patterns = calloc(
+            context->filter_count,
+            sizeof(*context->filter_patterns)
+        );
+        if (
+            context->filters == NULL ||
+            context->filter_names == NULL ||
+            context->filter_patterns == NULL
+        ) {
+            btbh_gpu_free_file_dialog_context(context);
+            btbh_gpu_set_file_dialog_report(
+                report,
+                BTBH_GPU_PLATFORM_FAILURE,
+                "Could not allocate GPU file-dialog filters"
+            );
+            return report->result;
+        }
+        for (
+            uint32_t index = 0;
+            index < context->filter_count;
+            index += 1
+        ) {
+            const char *name = descriptor->filter_names[index];
+            const char *pattern = descriptor->filter_patterns[index];
+            if (name == NULL || pattern == NULL) {
+                btbh_gpu_free_file_dialog_context(context);
+                btbh_gpu_set_file_dialog_report(
+                    report,
+                    BTBH_GPU_INVALID_ARGUMENT,
+                    "Invalid GPU file-dialog filter"
+                );
+                return report->result;
+            }
+            context->filter_names[index] = SDL_strdup(name);
+            context->filter_patterns[index] = SDL_strdup(pattern);
+            if (
+                context->filter_names[index] == NULL ||
+                context->filter_patterns[index] == NULL
+            ) {
+                btbh_gpu_free_file_dialog_context(context);
+                btbh_gpu_set_file_dialog_report(
+                    report,
+                    BTBH_GPU_PLATFORM_FAILURE,
+                    "Could not copy GPU file-dialog filters"
+                );
+                return report->result;
+            }
+            context->filters[index].name =
+                context->filter_names[index];
+            context->filters[index].pattern =
+                context->filter_patterns[index];
+        }
+    }
+
+    context->properties = SDL_CreateProperties();
+    if (context->properties == 0) {
+        btbh_gpu_free_file_dialog_context(context);
+        btbh_gpu_set_file_dialog_report(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "SDL file-dialog property creation failed"
+        );
+        return report->result;
+    }
+    if (
+        !SDL_SetStringProperty(
+            context->properties,
+            SDL_PROP_FILE_DIALOG_TITLE_STRING,
+            descriptor->title
+        ) ||
+        !SDL_SetNumberProperty(
+            context->properties,
+            SDL_PROP_FILE_DIALOG_NFILTERS_NUMBER,
+            (Sint64) context->filter_count
+        ) ||
+        !SDL_SetBooleanProperty(
+            context->properties,
+            SDL_PROP_FILE_DIALOG_MANY_BOOLEAN,
+            descriptor->allows_multiple_selection != 0
+        ) ||
+        (
+            context->filter_count > 0 &&
+            !SDL_SetPointerProperty(
+                context->properties,
+                SDL_PROP_FILE_DIALOG_FILTERS_POINTER,
+                context->filters
+            )
+        ) ||
+        (
+            descriptor->location != NULL &&
+            !SDL_SetStringProperty(
+                context->properties,
+                SDL_PROP_FILE_DIALOG_LOCATION_STRING,
+                descriptor->location
+            )
+        )
+    ) {
+        btbh_gpu_free_file_dialog_context(context);
+        btbh_gpu_set_file_dialog_report(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "SDL file-dialog property setup failed"
+        );
+        return report->result;
+    }
+
+    const SDL_FileDialogType type =
+        descriptor->kind == BTBH_GPU_FILE_DIALOG_SAVE
+            ? SDL_FILEDIALOG_SAVEFILE
+            : SDL_FILEDIALOG_OPENFILE;
+    SDL_ShowFileDialogWithProperties(
+        type,
+        btbh_gpu_file_dialog_callback,
+        context,
+        context->properties
+    );
+    return BTBH_GPU_OK;
 }
 
 static SDL_Scancode btbh_gpu_project_key_scancode(uint16_t key) {

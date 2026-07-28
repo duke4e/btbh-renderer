@@ -112,11 +112,63 @@ static void test_matching_snapshot_passes(void) {
     assert(report.missing_features == 0);
 }
 
+static int file_dialog_callback_count = 0;
+
+static void file_dialog_callback(
+    void *userdata,
+    const char *const *paths,
+    const char *error_message
+) {
+    (void) userdata;
+    (void) paths;
+    (void) error_message;
+    file_dialog_callback_count += 1;
+}
+
+static void test_file_dialog_rejects_invalid_ownership_transfer(void) {
+    const char *names[] = {"JSON"};
+    const char *patterns[] = {"json"};
+    BTBHGPUFileDialogDescriptor descriptor = {0};
+    descriptor.kind = BTBH_GPU_FILE_DIALOG_OPEN;
+    descriptor.title = "Open";
+    descriptor.filter_names = names;
+    descriptor.filter_patterns = patterns;
+    descriptor.filter_count = 1;
+    BTBHGPUFileDialogReport report = {0};
+
+    assert(
+        btbh_gpu_window_show_file_dialog(
+            NULL,
+            &descriptor,
+            file_dialog_callback,
+            NULL,
+            &report
+        ) == BTBH_GPU_INVALID_ARGUMENT
+    );
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(strcmp(
+        report.message,
+        "Invalid GPU file-dialog descriptor"
+    ) == 0);
+    assert(file_dialog_callback_count == 0);
+    assert(
+        btbh_gpu_window_show_file_dialog(
+            NULL,
+            &descriptor,
+            file_dialog_callback,
+            NULL,
+            NULL
+        ) == BTBH_GPU_INVALID_ARGUMENT
+    );
+    assert(file_dialog_callback_count == 0);
+}
+
 int main(void) {
     test_backend_contract();
     test_exact_driver_is_required();
     test_software_vulkan_is_rejected();
     test_missing_features_are_reported_exactly();
     test_matching_snapshot_passes();
+    test_file_dialog_rejects_invalid_ownership_transfer();
     return 0;
 }

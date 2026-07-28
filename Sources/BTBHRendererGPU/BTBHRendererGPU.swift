@@ -1,5 +1,6 @@
 import BTBHRenderer
 import BTBHRendererGPUCore
+import Foundation
 
 public enum GPUBackendRequest: String, Equatable, Sendable {
     case vulkan
@@ -700,6 +701,25 @@ public final class GPUWindowProbe {
                 )
             }
         }
+    }
+
+    func showFileDialog(
+        _ configuration: GPUFileDialogConfiguration,
+        completion: @escaping @Sendable (
+            Result<[URL], FileDialogError>
+        ) -> Void
+    ) {
+        guard let window, !isShutdown else {
+            completion(.failure(.backendFailure(
+                "GPU window is not open"
+            )))
+            return
+        }
+        GPUFileDialogNativeLauncher.launch(
+            window: window,
+            configuration: configuration,
+            completion: completion
+        )
     }
 
     func isKeyDown(_ key: InputKey) -> Bool {

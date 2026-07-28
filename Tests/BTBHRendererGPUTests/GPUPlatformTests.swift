@@ -5,6 +5,129 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPUPlatformTests: XCTestCase {
+    func testFileDialogConfigurationMapsOpenFiltersAndLocationExactly() throws {
+        let directory = URL(
+            fileURLWithPath: "C:/tmp/particle-presets",
+            isDirectory: true
+        )
+
+        let configuration = try GPUFileDialogConfiguration(
+            request: .init(
+                title: "Choose city data",
+                allowedExtensions: ["json", "yaml"],
+                allowsMultipleSelection: true,
+                initialDirectory: directory
+            )
+        )
+
+        XCTAssertEqual(configuration.kind, .open)
+        XCTAssertEqual(configuration.title, "Choose city data")
+        XCTAssertEqual(configuration.filterNames, ["JSON", "YAML"])
+        XCTAssertEqual(configuration.filterPatterns, ["json", "yaml"])
+        XCTAssertTrue(configuration.allowsMultipleSelection)
+        XCTAssertEqual(configuration.location, directory.path)
+    }
+
+    func testFileDialogConfigurationMapsSaveSuggestedLocationAndWildcard() throws {
+        let directory = URL(
+            fileURLWithPath: "C:/tmp/particle-presets",
+            isDirectory: true
+        )
+
+        let configuration = try GPUFileDialogConfiguration(
+            request: .init(
+                kind: .save,
+                title: "Save particle",
+                allowedExtensions: [],
+                initialDirectory: directory,
+                suggestedFileName: "effect.json"
+            )
+        )
+
+        XCTAssertEqual(configuration.kind, .save)
+        XCTAssertEqual(configuration.filterNames, ["*"])
+        XCTAssertEqual(configuration.filterPatterns, ["*"])
+        XCTAssertFalse(configuration.allowsMultipleSelection)
+        XCTAssertEqual(
+            configuration.location,
+            directory.appendingPathComponent("effect.json").path
+        )
+    }
+
+    func testFileDialogConfigurationRejectsSaveMultipleSelection() {
+        XCTAssertThrowsError(try GPUFileDialogConfiguration(
+            request: .init(
+                kind: .save,
+                title: "Invalid save",
+                allowedExtensions: ["json"],
+                allowsMultipleSelection: true
+            )
+        )) { error in
+            XCTAssertEqual(
+                error as? FileDialogError,
+                .invalidRequest(
+                    "Save dialogs cannot select multiple files"
+                )
+            )
+        }
+    }
+
+    func testFileDialogCallbackMapsCancellationSelectionAndBackendFailure() {
+        let cancellations = LockedDialogResults()
+        GPUFileDialogCallbackBox { cancellations.append($0) }
+            .complete(paths: [], errorMessage: nil)
+        XCTAssertEqual(cancellations.values, [.success([])])
+
+        let selections = LockedDialogResults()
+        GPUFileDialogCallbackBox { selections.append($0) }
+            .complete(
+                paths: [
+                    "C:/tmp/one.json",
+                    "C:/tmp/two.json",
+                ],
+                errorMessage: nil
+            )
+        XCTAssertEqual(
+            selections.values,
+            [.success([
+                URL(fileURLWithPath: "C:/tmp/one.json"),
+                URL(fileURLWithPath: "C:/tmp/two.json"),
+            ])]
+        )
+
+        let failures = LockedDialogResults()
+        GPUFileDialogCallbackBox { failures.append($0) }
+            .complete(
+                paths: nil,
+                errorMessage: "Injected SDL dialog failure"
+            )
+        XCTAssertEqual(
+            failures.values,
+            [.failure(.backendFailure(
+                "Injected SDL dialog failure"
+            ))]
+        )
+    }
+
+    func testFileDialogWithoutOpenWindowFailsDeterministically() {
+        let platform = GPUPlatform(
+            request: .platformDefault,
+            debugMode: true
+        )
+        let results = LockedDialogResults()
+
+        platform.showOpenFileDialog(
+            .init(title: "No window", allowedExtensions: ["json"])
+        ) { results.append($0) }
+
+        XCTAssertEqual(
+            results.values,
+            [.failure(.backendFailure(
+                "GPU window is not open"
+            ))]
+        )
+    }
+
     func testWindowsPlatformOwnsWindowTimingAndCleanShutdown() throws {
         #if os(Windows)
         let platform = GPUPlatform(
@@ -45,6 +168,54 @@ final class GPUPlatformTests: XCTestCase {
         platform.closeWindow()
         #else
         throw XCTSkip("The Windows Vulkan platform test runs only on Windows")
+        #endif
+    }
+
+    func testProductionFileDialogCancellationSmoke() throws {
+        #if os(Windows)
+        guard ProcessInfo.processInfo.environment[
+            "BTBH_RUN_GPU_FILE_DIALOG_SMOKE"
+        ] == "1" else {
+            throw XCTSkip(
+                "Set BTBH_RUN_GPU_FILE_DIALOG_SMOKE=1 for the interactive smoke"
+            )
+        }
+        let platform = GPUPlatform(
+            request: .vulkan,
+            debugMode: true
+        )
+        try platform.openWindow(
+            .init(
+                title: "BTBH GPU file-dialog smoke",
+                width: 640,
+                height: 360,
+                mode: .windowed,
+                frameRatePolicy: .uncapped,
+                drawableScalePolicy: .oneToOne
+            )
+        )
+        defer { platform.closeWindow() }
+        let completed = expectation(
+            description: "production SDL file-dialog callback"
+        )
+        let results = LockedDialogResults()
+
+        platform.showOpenFileDialog(
+            .init(
+                title: "BTBH GPU file-dialog smoke - press Cancel",
+                allowedExtensions: ["json"]
+            )
+        ) {
+            results.append($0)
+            completed.fulfill()
+        }
+
+        wait(for: [completed], timeout: 120)
+        XCTAssertEqual(results.values, [.success([])])
+        #else
+        throw XCTSkip(
+            "The production file-dialog smoke runs only on Windows"
+        )
         #endif
     }
 
@@ -95,5 +266,20 @@ final class GPUPlatformTests: XCTestCase {
             mode: .windowed,
             frameRatePolicy: .fixed(0)
         )))
+    }
+}
+
+private final class LockedDialogResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Result<[URL], FileDialogError>] = []
+
+    var values: [Result<[URL], FileDialogError>] {
+        lock.withLock { storage }
+    }
+
+    func append(_ value: Result<[URL], FileDialogError>) {
+        lock.withLock {
+            storage.append(value)
+        }
     }
 }
