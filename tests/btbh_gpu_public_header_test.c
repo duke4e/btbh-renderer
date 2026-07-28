@@ -51,6 +51,10 @@ int main(void)
     failed |= contains_forbidden_token(source, "VkDevice");
     failed |= contains_forbidden_token(source, "MTLDevice");
     failed |= contains_forbidden_token(source, "id<MTL");
+    failed |= contains_forbidden_token(
+        source,
+        "shadow_resources_ready"
+    );
     free(source);
     return failed != 0;
 }

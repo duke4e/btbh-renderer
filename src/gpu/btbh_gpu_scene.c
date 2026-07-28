@@ -98,6 +98,42 @@ struct BTBHGPUSceneRuntime {
     uint32_t upload_capacity;
 };
 
+static bool btbh_gpu_scene_shadow_resources_ready(
+    const BTBHGPUSceneRuntime *runtime
+) {
+    if (runtime == NULL ||
+        runtime->shadow_pipeline == NULL ||
+        runtime->animated_shadow_pipeline == NULL ||
+        runtime->directional_shadow_textures[0] == NULL ||
+        runtime->directional_shadow_textures[1] == NULL ||
+        runtime->directional_shadow_sampler == NULL) {
+        return false;
+    }
+    for (uint32_t mode = 0u;
+         mode < BTBH_GPU_SCENE_BLEND_COUNT;
+         ++mode) {
+        for (uint32_t depth = 0u;
+             depth < BTBH_GPU_SCENE_DEPTH_COUNT;
+             ++depth) {
+            if (runtime->model_pipelines[mode][depth] == NULL ||
+                runtime
+                    ->animated_model_pipelines[mode][depth] == NULL) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+uint8_t btbh_gpu_window_scene_shadow_resources_ready(
+    const BTBHGPUWindow *window
+) {
+    return window != NULL &&
+        btbh_gpu_scene_shadow_resources_ready(window->scene_runtime)
+            ? 1u
+            : 0u;
+}
+
 static void btbh_gpu_scene_error(
     BTBHGPUSceneReport *report,
     BTBHGPUResult result,
@@ -386,7 +422,41 @@ static bool btbh_gpu_scene_create_model_pipeline_set(
     return true;
 }
 
-static bool btbh_gpu_scene_create_pipeline(
+static bool btbh_gpu_scene_create_base_pipelines(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUSceneReport *report
+) {
+    if (!btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            vertex_shader_path,
+            unshadowed_fragment_shader_path,
+            project_format,
+            false,
+            4u,
+            window->scene_runtime->unshadowed_model_pipelines,
+            report
+        ) ||
+        !btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            animated_vertex_shader_path,
+            unshadowed_fragment_shader_path,
+            project_format,
+            true,
+            4u,
+            window->scene_runtime
+                ->unshadowed_animated_model_pipelines,
+            report
+        )) {
+        return false;
+    }
+    return true;
+}
+
+static bool btbh_gpu_scene_create_shadow_pipelines(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
@@ -394,7 +464,6 @@ static bool btbh_gpu_scene_create_pipeline(
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
-    const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     BTBHGPUSceneReport *report
 ) {
@@ -423,27 +492,6 @@ static bool btbh_gpu_scene_create_pipeline(
             true,
             6u,
             window->scene_runtime->animated_model_pipelines,
-            report
-        ) ||
-        !btbh_gpu_scene_create_model_pipeline_set(
-            window,
-            vertex_shader_path,
-            unshadowed_fragment_shader_path,
-            project_format,
-            false,
-            4u,
-            window->scene_runtime->unshadowed_model_pipelines,
-            report
-        ) ||
-        !btbh_gpu_scene_create_model_pipeline_set(
-            window,
-            animated_vertex_shader_path,
-            unshadowed_fragment_shader_path,
-            project_format,
-            true,
-            4u,
-            window->scene_runtime
-                ->unshadowed_animated_model_pipelines,
             report
         )) {
         return false;
@@ -568,10 +616,6 @@ static bool btbh_gpu_scene_ensure_runtime(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
-    const char *shadow_vertex_shader_path,
-    const char *animated_shadow_vertex_shader_path,
-    const char *shadow_fragment_shader_path,
-    const char *fragment_shader_path,
     const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     BTBHGPUSceneReport *report
@@ -579,7 +623,6 @@ static bool btbh_gpu_scene_ensure_runtime(
     if (window->scene_runtime != NULL) {
         return true;
     }
-    SDL_GPUDevice *device = window->device->gpu;
     window->scene_runtime = (BTBHGPUSceneRuntime *)calloc(
         1u,
         sizeof(BTBHGPUSceneRuntime)
@@ -592,14 +635,10 @@ static bool btbh_gpu_scene_ensure_runtime(
         );
         return false;
     }
-    if (!btbh_gpu_scene_create_pipeline(
+    if (!btbh_gpu_scene_create_base_pipelines(
             window,
             vertex_shader_path,
             animated_vertex_shader_path,
-            shadow_vertex_shader_path,
-            animated_shadow_vertex_shader_path,
-            shadow_fragment_shader_path,
-            fragment_shader_path,
             unshadowed_fragment_shader_path,
             shader_format,
             report
@@ -648,6 +687,40 @@ static bool btbh_gpu_scene_ensure_runtime(
         btbh_gpu_window_release_scene(window);
         return false;
     }
+    return true;
+}
+
+static bool btbh_gpu_scene_ensure_shadow_resources(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (btbh_gpu_scene_shadow_resources_ready(runtime)) {
+        return true;
+    }
+    if (!btbh_gpu_scene_create_shadow_pipelines(
+            window,
+            vertex_shader_path,
+            animated_vertex_shader_path,
+            shadow_vertex_shader_path,
+            animated_shadow_vertex_shader_path,
+            shadow_fragment_shader_path,
+            fragment_shader_path,
+            shader_format,
+            report
+        )) {
+        btbh_gpu_window_release_scene(window);
+        return false;
+    }
+
+    SDL_GPUDevice *device = window->device->gpu;
     SDL_GPUTextureCreateInfo shadow_info;
     SDL_zero(shadow_info);
     shadow_info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -661,10 +734,9 @@ static bool btbh_gpu_scene_ensure_runtime(
     shadow_info.num_levels = 1u;
     shadow_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
     for (uint32_t index = 0u; index < 2u; ++index) {
-        window->scene_runtime->directional_shadow_textures[index] =
+        runtime->directional_shadow_textures[index] =
             SDL_CreateGPUTexture(device, &shadow_info);
-        if (window->scene_runtime
-                ->directional_shadow_textures[index] == NULL) {
+        if (runtime->directional_shadow_textures[index] == NULL) {
             btbh_gpu_scene_error(
                 report,
                 BTBH_GPU_DEVICE_FAILURE,
@@ -674,6 +746,7 @@ static bool btbh_gpu_scene_ensure_runtime(
             return false;
         }
     }
+
     SDL_GPUSamplerCreateInfo sampler_info;
     SDL_zero(sampler_info);
     sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
@@ -686,9 +759,9 @@ static bool btbh_gpu_scene_ensure_runtime(
         SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     sampler_info.address_mode_w =
         SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    window->scene_runtime->directional_shadow_sampler =
+    runtime->directional_shadow_sampler =
         SDL_CreateGPUSampler(device, &sampler_info);
-    if (window->scene_runtime->directional_shadow_sampler == NULL) {
+    if (runtime->directional_shadow_sampler == NULL) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -1407,11 +1480,27 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             window,
             vertex_shader_path,
             animated_vertex_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            report
+        )) {
+        return report->result;
+    }
+    const uint32_t shadow_enabled[2] = {
+        lighting->directional_shadow_enabled,
+        lighting->secondary_directional_shadow_enabled
+    };
+    const bool shadows_active =
+        shadow_enabled[0] != 0u || shadow_enabled[1] != 0u;
+    if (shadows_active &&
+        !btbh_gpu_scene_ensure_shadow_resources(
+            window,
+            vertex_shader_path,
+            animated_vertex_shader_path,
             shadow_vertex_shader_path,
             animated_shadow_vertex_shader_path,
             shadow_fragment_shader_path,
             fragment_shader_path,
-            unshadowed_fragment_shader_path,
             shader_format,
             report
         )) {
@@ -1552,12 +1641,6 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         SDL_EndGPUCopyPass(copy);
     }
 
-    const uint32_t shadow_enabled[2] = {
-        lighting->directional_shadow_enabled,
-        lighting->secondary_directional_shadow_enabled
-    };
-    const bool shadows_active =
-        shadow_enabled[0] != 0u || shadow_enabled[1] != 0u;
     const float *shadow_matrices[2] = {
         lighting->directional_shadow_view_projection,
         lighting->secondary_directional_shadow_view_projection

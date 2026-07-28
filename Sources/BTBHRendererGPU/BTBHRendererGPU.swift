@@ -428,6 +428,7 @@ struct GPUScenePresentationProbeReport {
     let instanceCount: Int
     let transientInstanceCount: Int
     let persistentBatchCount: Int
+    let shadowResourcesReady: Bool
 }
 
 struct GPUFrameTelemetrySample: Equatable {
@@ -1504,7 +1505,9 @@ public final class GPUWindowProbe {
             transientInstanceCount: Int(
                 report.transient_instance_count
             ),
-            persistentBatchCount: Int(report.persistent_batch_count)
+            persistentBatchCount: Int(report.persistent_batch_count),
+            shadowResourcesReady:
+                btbh_gpu_window_scene_shadow_resources_ready(window) != 0
         )
     }
 

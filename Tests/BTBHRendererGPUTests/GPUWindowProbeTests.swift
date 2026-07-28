@@ -467,6 +467,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(report.instanceCount, 2)
         XCTAssertEqual(report.transientInstanceCount, 0)
         XCTAssertEqual(report.persistentBatchCount, 1)
+        XCTAssertFalse(report.shadowResourcesReady)
         XCTAssertThrowsError(try present(.init(
             x: .nan,
             y: 0,
@@ -652,7 +653,18 @@ final class GPUWindowProbeTests: XCTestCase {
                 directionalEnergy: 0,
                 secondaryDirectionalDirection: .down,
                 secondaryDirectionalColor: .white,
-                secondaryDirectionalEnergy: 0
+                secondaryDirectionalEnergy: 0,
+                directionalShadow: .init(
+                    enabled: true,
+                    range: 10,
+                    softness: 1,
+                    viewProjection: [
+                        1, 0, 0, 0,
+                        0, 1, 0, 0,
+                        0, 0, 1, 0,
+                        0, 0, 0, 1,
+                    ]
+                )
             ),
             instances: instances,
             batches: batches,
@@ -660,6 +672,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         XCTAssertEqual(report.primitiveDrawCount, 4)
         XCTAssertEqual(report.preparedGeometryCount, 4)
+        XCTAssertTrue(report.shadowResourcesReady)
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")
