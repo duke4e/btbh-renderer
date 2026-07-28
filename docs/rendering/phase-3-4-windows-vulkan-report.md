@@ -657,13 +657,11 @@ only the four-sampler unshadowed fragment SPIR-V with the exact pre-shadow
 specialized fragment program and trimmed uniform prefix as the cause. Game
 and Combat Lab enable real shadows, so their fence cost includes the new
 2048x2048 opaque depth pass and PCF receiver work. The no-shadow editors issue
-no shadow draw pass, but the current runtime still eagerly creates both D32
-maps, the shadow sampler, both shadow pipelines, and both shadow-capable model
-pipeline families. Their unchanged CPU-submit and old-fragment diagnostic
-isolate the remaining movement to that new GPU runtime/resource-residency
-layer. Lazy creation and release of shadow-only resources is therefore a
-recorded performance follow-up; this report does not claim that regression
-was removed.
+no shadow draw pass. Eager shadow resource residency was initially recorded
+as the remaining hypothesis; the lazy-resource follow-up below implemented
+and tested that boundary, but its final A/B measurements disproved residency
+alone as the steady-state cause. The regression is therefore still open and
+is not waived or claimed removed.
 
 This slice deliberately covers opaque directional shadows only. It does not
 implement cascades, spot/omnidirectional shadows, alpha-tested casters,
@@ -671,6 +669,95 @@ transparent casters, or arbitrary legacy shadow filters. Stencil/cull,
 transparency, bloom, tilt-shift, and the rest of the post chain remain open.
 The historical Windows-to-Apple text and antialiasing SSIM issue also remains
 documented and unresolved.
+
+### Lazy directional-shadow resource closeout
+
+Renderer commit `3830811` moves every shadow-only scene resource behind the
+first active shadow submission:
+
+- base scene creation now builds only the common resources and unshadowed
+  four-sampler static and animated model pipelines;
+- the first active shadow submission creates both shadow-capable model
+  pipeline families, both depth-only pipelines, two 2048x2048 D32 maps, and
+  the shadow sampler before command acquisition;
+- the resources are reused until scene release, and partial creation failure
+  releases the whole scene and fails closed;
+- package-internal lifecycle probes prove that a real no-shadow Vulkan scene
+  remains unallocated and a real receiver/caster scene becomes allocated;
+- the public C report and public backend-neutral Swift API remain unchanged.
+
+The first review found one medium public-C-ABI problem in a diagnostic report
+field. That field was removed rather than versioned into the public struct,
+and the readiness observation was moved to the package-internal bridge. The
+focused re-review found no remaining HIGH/MEDIUM issue, and a source test now
+prevents that probe from entering the public header.
+
+Fresh verification passed:
+
+- the native `/W4 /WX` build and 13/13 CTests;
+- 129 GPU-enabled renderer XCTest cases with one expected gated
+  interactive-dialog skip, plus the Windows Swift Testing ABI/lifecycle
+  check;
+- the real Vulkan no-shadow and active receiver/caster lifecycle probes;
+- 1,514 game XCTest cases plus three Swift Testing checks;
+- the GPU-enabled release build and hardware Vulkan bootstrap:
+  `requested=vulkan actual=vulkan hardware=1 claimed=1`;
+- the render API audit and `git diff --check`.
+
+The final evidence directories are:
+
+- `.build/render-baselines/windows-gpu-3830811-lazy-shadow-resources-A`
+- `.build/render-baselines/windows-gpu-3830811-lazy-shadow-resources-B`
+
+These two series contain ten successful child processes. Every launch
+emitted exactly one `CAPTURED` and `FINISHED` marker, exited with status 0,
+and produced a 1920x1080 PNG plus QOI, cue, metrics, entity, and manifest
+artifacts. Entity JSON is byte-identical between A and B for all five modes.
+No log contains an error, fatal, fallback, unsupported, failed, or assertion
+diagnostic.
+
+Run A passed the unchanged directional-shadow manifest. Run B passed the
+unchanged Run A manifest and every required cue:
+
+| Mode | B-to-A global SSIM | Result |
+| --- | ---: | --- |
+| Game | 0.999906059 | Pass |
+| Combat Lab | 0.999888923 | Pass |
+| Particle editor | 0.999972802 | Pass |
+| City-block editor | 0.999982679 | Pass |
+| Unified city | 0.999857724 | Pass |
+
+Manual inspection confirms intact Game and Combat Lab worlds, shadows, HUD,
+tool panel, and editor layout. No golden or threshold changed. The strict
+retained legacy authority still stops at the documented older Game entity
+signature (`projectiles=13185` versus current `13196`), so it was not
+bypassed or rewritten.
+
+The final presented-frame measurements are:
+
+| Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
+| --- | ---: | ---: |
+| Game | 31.699 / 38.825 / 51.303 | 32.425 / 39.382 / 48.209 |
+| Combat Lab | 32.534 / 39.730 / 48.274 | 33.314 / 38.877 / 47.943 |
+| Particle editor | 4.077 / 4.464 / 6.879 | 4.076 / 4.739 / 5.337 |
+| City-block editor | 2.052 / 2.346 / 3.407 | 2.048 / 2.183 / 3.221 |
+| Unified city | 2.423 / 2.612 / 3.038 | 2.427 / 2.595 / 2.849 |
+
+Against the interleaved same-machine pre-shadow control pair, the A/B mean
+median/p95 movements are `+8.55%/+9.07%` for Game,
+`+3.82%/+3.99%` for Combat Lab, `+7.85%/+5.41%` for the particle
+editor, `+18.06%/+25.05%` for the city-block editor, and
+`+15.76%/+14.53%` for unified city. The lazy boundary therefore succeeds as
+a lifecycle/resource-footprint improvement but does not recover steady-state
+presented-frame performance. In particular, the no-shadow editor movement
+survives with shadow maps, shadow pipelines, and shadow-capable model
+families absent. The earlier residency hypothesis is disproved; further
+GPU-timeline or driver-level isolation is required before attributing the
+remaining change. The above-five-percent results remain explicitly open.
+
+This slice changes no visual authority, threshold, renderer selection, or
+shadow appearance. The historical Windows-to-Apple text and antialiasing
+SSIM issue also remains documented and unresolved.
 
 ### Production GPU file-dialog closeout
 
@@ -708,9 +795,9 @@ or performance authority.
 The following work remains before Windows visual/performance parity can be
 called complete:
 
-1. Lazily create and release shadow-only GPU resources for scenes with active
-   directional shadows, then port stencil/cull, transparency, and post-chain
-   behavior.
+1. Diagnose the remaining post-shadow steady-state frame movement with
+   GPU-timeline or driver-level evidence, then port stencil/cull,
+   transparency, and post-chain behavior.
 2. Group the remaining per-frame scene-content rebuild and per-primitive
    bindings/draw calls. Persistent semantic instance buffers now bind and
    reuse native GPU storage directly, but geometry/material submission is
