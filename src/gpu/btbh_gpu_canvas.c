@@ -358,9 +358,43 @@ bool btbh_gpu_window_finish_pending_frame(
     window->pending_drawable_width = 0u;
     window->pending_drawable_height = 0u;
     window->presented_frame_readback_requested = false;
-    const bool result = submit
-        ? SDL_SubmitGPUCommandBuffer(command)
-        : SDL_CancelGPUCommandBuffer(command);
+    bool result;
+    if (submit && window->frame_telemetry_enabled) {
+        const uint64_t submit_started_ticks = SDL_GetTicksNS();
+        SDL_GPUFence *fence =
+            SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+        const uint64_t submit_finished_ticks = SDL_GetTicksNS();
+        result = fence != NULL;
+        if (fence != NULL) {
+            const uint32_t index =
+                window->frame_telemetry_pending_count;
+            if (index < BTBH_GPU_FRAME_TELEMETRY_CAPACITY) {
+                BTBHGPUFrameTelemetryPending *pending =
+                    &window->frame_telemetry_pending[index];
+                window->next_frame_telemetry_serial += 1u;
+                pending->fence = fence;
+                pending->frame_serial =
+                    window->next_frame_telemetry_serial;
+                pending->submit_started_ticks =
+                    submit_started_ticks;
+                pending->cpu_submit_milliseconds =
+                    (double)(
+                        submit_finished_ticks -
+                        submit_started_ticks
+                    ) / 1000000.0;
+                window->frame_telemetry_pending_count += 1u;
+            } else {
+                SDL_ReleaseGPUFence(
+                    window->device->gpu,
+                    fence
+                );
+            }
+        }
+    } else {
+        result = submit
+            ? SDL_SubmitGPUCommandBuffer(command)
+            : SDL_CancelGPUCommandBuffer(command);
+    }
     SDL_GPUDevice *device =
         window->device != NULL && !window->device->shutdown
             ? window->device->gpu
@@ -389,6 +423,143 @@ bool btbh_gpu_window_finish_pending_frame(
     window->pending_bone_buffer = NULL;
     window->pending_instance_buffer = NULL;
     return result;
+}
+
+void btbh_gpu_window_set_frame_telemetry_enabled(
+    BTBHGPUWindow *window,
+    uint8_t enabled
+) {
+    if (window == NULL) {
+        return;
+    }
+    const bool should_enable = enabled != 0u;
+    if (window->frame_telemetry_enabled == should_enable) {
+        return;
+    }
+    btbh_gpu_window_release_frame_telemetry(window);
+    window->frame_telemetry_enabled = should_enable;
+    window->next_frame_telemetry_serial = 0u;
+}
+
+uint32_t btbh_gpu_window_poll_frame_telemetry(
+    BTBHGPUWindow *window,
+    BTBHGPUFrameTelemetrySample *samples,
+    uint32_t capacity
+) {
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->frame_telemetry_enabled ||
+        samples == NULL ||
+        capacity == 0u
+    ) {
+        return 0u;
+    }
+    const uint64_t observed_ticks = SDL_GetTicksNS();
+    uint32_t output_count = 0u;
+    uint32_t retained_count = 0u;
+    for (
+        uint32_t index = 0u;
+        index < window->frame_telemetry_pending_count;
+        ++index
+    ) {
+        BTBHGPUFrameTelemetryPending pending =
+            window->frame_telemetry_pending[index];
+        if (
+            output_count < capacity &&
+            SDL_QueryGPUFence(
+                window->device->gpu,
+                pending.fence
+            )
+        ) {
+            BTBHGPUFrameTelemetrySample *sample =
+                &samples[output_count];
+            sample->frame_serial = pending.frame_serial;
+            sample->cpu_submit_milliseconds =
+                pending.cpu_submit_milliseconds;
+            sample->fence_completion_milliseconds =
+                (double)(
+                    observed_ticks -
+                    pending.submit_started_ticks
+                ) / 1000000.0;
+            output_count += 1u;
+            SDL_ReleaseGPUFence(
+                window->device->gpu,
+                pending.fence
+            );
+        } else {
+            window->frame_telemetry_pending[retained_count] =
+                pending;
+            retained_count += 1u;
+        }
+    }
+    window->frame_telemetry_pending_count = retained_count;
+    return output_count;
+}
+
+uint32_t btbh_gpu_window_finish_frame_telemetry(
+    BTBHGPUWindow *window,
+    BTBHGPUFrameTelemetrySample *samples,
+    uint32_t capacity
+) {
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->frame_telemetry_enabled ||
+        samples == NULL ||
+        capacity == 0u ||
+        window->frame_telemetry_pending_count == 0u
+    ) {
+        return 0u;
+    }
+    SDL_GPUFence *fences[BTBH_GPU_FRAME_TELEMETRY_CAPACITY];
+    for (
+        uint32_t index = 0u;
+        index < window->frame_telemetry_pending_count;
+        ++index
+    ) {
+        fences[index] =
+            window->frame_telemetry_pending[index].fence;
+    }
+    (void)SDL_WaitForGPUFences(
+        window->device->gpu,
+        true,
+        fences,
+        window->frame_telemetry_pending_count
+    );
+    return btbh_gpu_window_poll_frame_telemetry(
+        window,
+        samples,
+        capacity
+    );
+}
+
+void btbh_gpu_window_release_frame_telemetry(
+    BTBHGPUWindow *window
+) {
+    if (window == NULL) {
+        return;
+    }
+    SDL_GPUDevice *device =
+        window->device != NULL &&
+        !window->device->shutdown
+            ? window->device->gpu
+            : NULL;
+    if (device != NULL) {
+        for (
+            uint32_t index = 0u;
+            index < window->frame_telemetry_pending_count;
+            ++index
+        ) {
+            SDL_ReleaseGPUFence(
+                device,
+                window->frame_telemetry_pending[index].fence
+            );
+        }
+    }
+    window->frame_telemetry_pending_count = 0u;
 }
 
 BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(

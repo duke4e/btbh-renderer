@@ -898,6 +898,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     if (window->pending_command != NULL) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
     }
+    btbh_gpu_window_release_frame_telemetry(window);
     btbh_gpu_window_release_canvas(window);
     btbh_gpu_window_release_scene(window);
     btbh_gpu_window_release_custom_meshes(window);

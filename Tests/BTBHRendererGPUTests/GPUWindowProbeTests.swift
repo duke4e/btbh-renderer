@@ -4,6 +4,43 @@ import BTBHRendererGPUCore
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testFrameTelemetryFinishesPendingFencesAfterMeasuredPath() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH non-blocking frame telemetry",
+            width: 320,
+            height: 180,
+            hidden: false,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        probe.setFrameTelemetryEnabled(true)
+
+        for frame in 0..<3 {
+            try probe.presentClear(
+                red: UInt8(20 + frame),
+                green: 40,
+                blue: 60,
+                alpha: 255
+            )
+        }
+
+        var samples: [GPUFrameTelemetrySample] = []
+        probe.finishFrameTelemetry(into: &samples)
+
+        XCTAssertEqual(samples.map(\.frameSerial), [1, 2, 3])
+        XCTAssertTrue(samples.allSatisfy {
+            $0.cpuSubmitMilliseconds >= 0 &&
+            $0.fenceCompletionMilliseconds >=
+                $0.cpuSubmitMilliseconds
+        })
+        XCTAssertTrue(probe.pollFrameTelemetry().isEmpty)
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testCustomMeshCABIRejectsMismatchedLayoutAndIndices() throws {
         #if os(Windows)
         let probe = try GPUWindowProbe(

@@ -13,11 +13,13 @@ public enum GPUPlatformError: Error, Equatable {
 public final class GPUPlatform: GamePlatform {
     private let request: GPUBackendRequest
     private let debugMode: Bool
+    private let frameTelemetryEnabled: Bool
     private var window: GPUWindowProbe?
     private var state = GPUPlatformState.empty
     private var forcedClose = false
     private var targetFramesPerSecond = 0
     private var previousFrameStart: TimeInterval?
+    private var frameTelemetrySamples: [GPUFrameTelemetrySample] = []
 
     public init(
         request: GPUBackendRequest = .platformDefault,
@@ -25,6 +27,10 @@ public final class GPUPlatform: GamePlatform {
     ) {
         self.request = request
         self.debugMode = debugMode
+        frameTelemetryEnabled =
+            ProcessInfo.processInfo.environment[
+                "BTBH_RENDER_PERF_LOG"
+            ] == "1"
     }
 
     public func openWindow(_ descriptor: WindowDescriptor) throws {
@@ -56,6 +62,11 @@ public final class GPUPlatform: GamePlatform {
             highPixelDensity: descriptor.drawableScalePolicy == .system,
             debugMode: debugMode
         )
+        window.setFrameTelemetryEnabled(frameTelemetryEnabled)
+        if frameTelemetryEnabled {
+            frameTelemetrySamples.removeAll(keepingCapacity: false)
+            frameTelemetrySamples.reserveCapacity(512)
+        }
         self.window = window
         forcedClose = false
         state = try window.pollPlatform()
@@ -78,6 +89,8 @@ public final class GPUPlatform: GamePlatform {
     }
 
     public func closeWindow() {
+        finishFrameTelemetry()
+        emitFrameTelemetry()
         window?.shutdown()
         window = nil
         state = .empty
@@ -276,6 +289,7 @@ public final class GPUPlatform: GamePlatform {
             blue: color.b,
             alpha: color.a
         )
+        collectFrameTelemetry()
     }
 
     func loadTexture(
@@ -513,6 +527,7 @@ public final class GPUPlatform: GamePlatform {
             batches: batches,
             passes: passes
         )
+        collectFrameTelemetry()
     }
 
     func capturePendingSceneTexture() throws -> GPUTextureProbeResource {
@@ -556,6 +571,40 @@ public final class GPUPlatform: GamePlatform {
         print("BTBH_GPU_UNSUPPORTED operation=\(operation)")
         fflush(stdout)
         forcedClose = true
+    }
+
+    private func collectFrameTelemetry() {
+        guard frameTelemetryEnabled, let window else { return }
+        window.drainFrameTelemetry(
+            into: &frameTelemetrySamples
+        )
+    }
+
+    private func finishFrameTelemetry() {
+        guard frameTelemetryEnabled, let window else { return }
+        window.finishFrameTelemetry(
+            into: &frameTelemetrySamples
+        )
+    }
+
+    private func emitFrameTelemetry() {
+        guard frameTelemetryEnabled,
+              !frameTelemetrySamples.isEmpty else {
+            return
+        }
+        let locale = Locale(identifier: "en_US_POSIX")
+        let lines = frameTelemetrySamples.map { sample in
+            String(
+                format:
+                    "BTBH_GPU_FRAME_TELEMETRY frame=%llu cpu_submit_ms=%.6f fence_completion_ms=%.6f\n",
+                locale: locale,
+                sample.frameSerial,
+                sample.cpuSubmitMilliseconds,
+                sample.fenceCompletionMilliseconds
+            )
+        }.joined()
+        FileHandle.standardError.write(Data(lines.utf8))
+        frameTelemetrySamples.removeAll(keepingCapacity: false)
     }
 
     private func throttleIfNeeded() {

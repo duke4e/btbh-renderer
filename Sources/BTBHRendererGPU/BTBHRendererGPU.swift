@@ -352,6 +352,12 @@ struct GPUScenePresentationProbeReport {
     let instanceCount: Int
 }
 
+struct GPUFrameTelemetrySample: Equatable {
+    let frameSerial: UInt64
+    let cpuSubmitMilliseconds: Double
+    let fenceCompletionMilliseconds: Double
+}
+
 struct GPUCustomMeshProbeResource {
     let pointer: OpaquePointer
     let vertexCount: Int
@@ -415,6 +421,11 @@ public final class GPUWindowProbe {
     private var nativeSceneBatches: [BTBHGPUSceneGeometryBatch] = []
     private var sceneCameraRightValues: [Float] = [0, 0, 0]
     private var sceneCameraUpValues: [Float] = [0, 0, 0]
+    private var nativeFrameTelemetrySamples =
+        [BTBHGPUFrameTelemetrySample](
+            repeating: .init(),
+            count: 64
+        )
 
     public init(
         request: GPUBackendRequest = .platformDefault,
@@ -479,6 +490,93 @@ public final class GPUWindowProbe {
                 alpha,
                 report
             )
+        }
+    }
+
+    func setFrameTelemetryEnabled(_ enabled: Bool) {
+        guard let window, !isShutdown else { return }
+        btbh_gpu_window_set_frame_telemetry_enabled(
+            window,
+            enabled ? 1 : 0
+        )
+    }
+
+    func pollFrameTelemetry(
+        maximumSampleCount: Int = 64
+    ) -> [GPUFrameTelemetrySample] {
+        var samples: [GPUFrameTelemetrySample] = []
+        samples.reserveCapacity(max(0, maximumSampleCount))
+        drainFrameTelemetry(
+            into: &samples,
+            maximumSampleCount: maximumSampleCount
+        )
+        return samples
+    }
+
+    func drainFrameTelemetry(
+        into samples: inout [GPUFrameTelemetrySample],
+        maximumSampleCount: Int = 64
+    ) {
+        drainFrameTelemetry(
+            into: &samples,
+            maximumSampleCount: maximumSampleCount,
+            finish: false
+        )
+    }
+
+    func finishFrameTelemetry(
+        into samples: inout [GPUFrameTelemetrySample],
+        maximumSampleCount: Int = 256
+    ) {
+        drainFrameTelemetry(
+            into: &samples,
+            maximumSampleCount: maximumSampleCount,
+            finish: true
+        )
+    }
+
+    private func drainFrameTelemetry(
+        into samples: inout [GPUFrameTelemetrySample],
+        maximumSampleCount: Int,
+        finish: Bool
+    ) {
+        guard let window, !isShutdown,
+              maximumSampleCount > 0 else {
+            return
+        }
+        let capacity = min(maximumSampleCount, Int(UInt32.max))
+        if nativeFrameTelemetrySamples.count < capacity {
+            nativeFrameTelemetrySamples = .init(
+                repeating: .init(),
+                count: capacity
+            )
+        }
+        let count = nativeFrameTelemetrySamples
+            .withUnsafeMutableBufferPointer {
+            samples in
+            if finish {
+                return Int(
+                    btbh_gpu_window_finish_frame_telemetry(
+                        window,
+                        samples.baseAddress,
+                        UInt32(capacity)
+                    )
+                )
+            }
+            return Int(btbh_gpu_window_poll_frame_telemetry(
+                window,
+                samples.baseAddress,
+                UInt32(capacity)
+            ))
+        }
+        for native in nativeFrameTelemetrySamples.prefix(count) {
+            samples.append(GPUFrameTelemetrySample(
+                frameSerial: native.frame_serial,
+                cpuSubmitMilliseconds:
+                    native.cpu_submit_milliseconds,
+                fenceCompletionMilliseconds:
+                    native.fence_completion_milliseconds
+            ))
         }
     }
 
@@ -1451,6 +1549,7 @@ public final class GPUWindowProbe {
             self.window = nil
         }
         nativeSceneBatches = []
+        nativeFrameTelemetrySamples = []
         deviceProbe.shutdown()
         isShutdown = true
     }

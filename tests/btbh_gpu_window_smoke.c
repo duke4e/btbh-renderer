@@ -63,6 +63,7 @@ int main(void) {
     assert(window_report.swapchain_format != BTBH_GPU_TEXTURE_FORMAT_INVALID);
     assert(window_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
     assert(window_report.present_mode != BTBH_GPU_PRESENT_MODE_INVALID);
+    btbh_gpu_window_set_frame_telemetry_enabled(window, 1u);
     BTBHGPUWindowReport present_report = {0};
     assert(
         btbh_gpu_window_present_clear(
@@ -142,6 +143,22 @@ int main(void) {
     );
     assert(final_present_report.present_mode == present_report.present_mode);
     assert(final_present_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
+
+    BTBHGPUFrameTelemetrySample telemetry[2] = {0};
+    const uint32_t telemetry_count =
+        btbh_gpu_window_finish_frame_telemetry(
+            window,
+            telemetry,
+            2u
+        );
+    assert(telemetry_count == 2u);
+    assert(telemetry[0].frame_serial == 1u);
+    assert(telemetry[1].frame_serial == 2u);
+    assert(telemetry[0].cpu_submit_milliseconds >= 0.0);
+    assert(
+        telemetry[0].fence_completion_milliseconds >=
+        telemetry[0].cpu_submit_milliseconds
+    );
 
     btbh_gpu_window_destroy(window);
     btbh_gpu_device_shutdown(device);

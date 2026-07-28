@@ -19,6 +19,15 @@ typedef struct BTBHGPUModelPrimitive {
 typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
 typedef struct BTBHGPUCanvasRuntime BTBHGPUCanvasRuntime;
 
+#define BTBH_GPU_FRAME_TELEMETRY_CAPACITY 256u
+
+typedef struct BTBHGPUFrameTelemetryPending {
+    SDL_GPUFence *fence;
+    uint64_t frame_serial;
+    uint64_t submit_started_ticks;
+    double cpu_submit_milliseconds;
+} BTBHGPUFrameTelemetryPending;
+
 struct BTBHGPUDevice {
     SDL_GPUDevice *gpu;
     bool owns_video_subsystem;
@@ -59,6 +68,12 @@ struct BTBHGPUWindow {
     SDL_GPUBuffer *pending_bone_buffer;
     uint32_t pending_drawable_width;
     uint32_t pending_drawable_height;
+    bool frame_telemetry_enabled;
+    uint64_t next_frame_telemetry_serial;
+    BTBHGPUFrameTelemetryPending frame_telemetry_pending[
+        BTBH_GPU_FRAME_TELEMETRY_CAPACITY
+    ];
+    uint32_t frame_telemetry_pending_count;
 };
 
 struct BTBHGPUTexture {
@@ -106,6 +121,9 @@ void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
+);
+void btbh_gpu_window_release_frame_telemetry(
+    BTBHGPUWindow *window
 );
 bool btbh_gpu_window_record_presented_frame(
     BTBHGPUWindow *window

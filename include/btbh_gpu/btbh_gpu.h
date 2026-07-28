@@ -415,6 +415,12 @@ typedef struct BTBHGPUSceneReport {
     char message[256];
 } BTBHGPUSceneReport;
 
+typedef struct BTBHGPUFrameTelemetrySample {
+    uint64_t frame_serial;
+    double cpu_submit_milliseconds;
+    double fence_completion_milliseconds;
+} BTBHGPUFrameTelemetrySample;
+
 const char *btbh_gpu_backend_driver_name(BTBHGPUBackendRequest backend);
 BTBHGPUShaderFormat btbh_gpu_backend_shader_format(BTBHGPUBackendRequest backend);
 BTBHGPUResult btbh_gpu_validate_capabilities(
@@ -469,6 +475,20 @@ BTBHGPUResult btbh_gpu_window_begin_frame(
     BTBHGPUWindow *window,
     BTBHGPUWindowReport *report,
     BTBHGPUPlatformSnapshot *snapshot
+);
+void btbh_gpu_window_set_frame_telemetry_enabled(
+    BTBHGPUWindow *window,
+    uint8_t enabled
+);
+uint32_t btbh_gpu_window_poll_frame_telemetry(
+    BTBHGPUWindow *window,
+    BTBHGPUFrameTelemetrySample *samples,
+    uint32_t capacity
+);
+uint32_t btbh_gpu_window_finish_frame_telemetry(
+    BTBHGPUWindow *window,
+    BTBHGPUFrameTelemetrySample *samples,
+    uint32_t capacity
 );
 BTBHGPUResult btbh_gpu_window_set_mouse_position(
     BTBHGPUWindow *window,
