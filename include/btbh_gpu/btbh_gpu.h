@@ -442,6 +442,34 @@ typedef struct BTBHGPUSceneLighting {
     float secondary_directional_green;
     float secondary_directional_blue;
     float secondary_reserved;
+    float irradiance_sh[27];
+    uint32_t ibl_enabled;
+    float ground_bottom_red;
+    float ground_bottom_green;
+    float ground_bottom_blue;
+    float ground_energy;
+    float ground_horizon_red;
+    float ground_horizon_green;
+    float ground_horizon_blue;
+    float ground_horizon_curve;
+    float sky_top_red;
+    float sky_top_green;
+    float sky_top_blue;
+    float sky_energy;
+    float sky_horizon_red;
+    float sky_horizon_green;
+    float sky_horizon_blue;
+    float sky_horizon_curve;
+    float sun_red;
+    float sun_green;
+    float sun_blue;
+    float sun_energy;
+    float sun_direction_x;
+    float sun_direction_y;
+    float sun_direction_z;
+    float sun_size_radians;
+    float sun_curve;
+    float ibl_reserved[3];
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUSceneReport {

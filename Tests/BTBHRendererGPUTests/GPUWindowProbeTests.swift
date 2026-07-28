@@ -274,6 +274,16 @@ final class GPUWindowProbeTests: XCTestCase {
             .appendingPathComponent(
                 "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
             )
+        var testLighting = GPUSceneLightingProbe(
+            ambientColor: .white,
+            ambientEnergy: 1,
+            directionalDirection: .down,
+            directionalColor: .white,
+            directionalEnergy: 0,
+            secondaryDirectionalDirection: .down,
+            secondaryDirectionalColor: .white,
+            secondaryDirectionalEnergy: 0
+        )
         let present = { (cameraPosition: RenderVec3) in
             try probe.presentModelInstances(
                 vertexShaderPath: shaderDirectory
@@ -297,16 +307,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 cameraRight: .right,
                 cameraUp: .up,
                 cameraPosition: cameraPosition,
-                lighting: .init(
-                    ambientColor: .white,
-                    ambientEnergy: 1,
-                    directionalDirection: .down,
-                    directionalColor: .white,
-                    directionalEnergy: 0,
-                    secondaryDirectionalDirection: .down,
-                    secondaryDirectionalColor: .white,
-                    secondaryDirectionalEnergy: 0
-                ),
+                lighting: testLighting,
                 instances: [],
                 logicalInstanceCount: 2,
                 batches: [
@@ -355,6 +356,26 @@ final class GPUWindowProbeTests: XCTestCase {
             y: 0,
             z: -3
         )))
+        var invalidCoefficients = Array(
+            repeating: RenderVec3.zero,
+            count: 9
+        )
+        invalidCoefficients[0].x = .nan
+        testLighting = .init(
+            ambientColor: .white,
+            ambientEnergy: 1,
+            environment: .init(
+                irradianceSH: invalidCoefficients,
+                sky: .init(color: .white, resolution: 32)
+            ),
+            directionalDirection: .down,
+            directionalColor: .white,
+            directionalEnergy: 0,
+            secondaryDirectionalDirection: .down,
+            secondaryDirectionalColor: .white,
+            secondaryDirectionalEnergy: 0
+        )
+        XCTAssertThrowsError(try present(validCameraPosition))
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")

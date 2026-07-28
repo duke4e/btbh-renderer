@@ -5,6 +5,109 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPURenderServicesTests: XCTestCase {
+    func testProceduralEnvironmentProjectionIsFiniteAndPreservesConstantSky() {
+        let descriptor = ProceduralSkyDescriptor(
+            color: .init(r: 64, g: 128, b: 192, a: 255),
+            resolution: 32
+        )
+
+        let projection =
+            GPUProceduralEnvironmentProjection.project(descriptor)
+        let repeatedProjection =
+            GPUProceduralEnvironmentProjection.project(descriptor)
+
+        XCTAssertEqual(projection.irradianceSH.count, 9)
+        XCTAssertEqual(
+            projection.irradianceSH,
+            repeatedProjection.irradianceSH
+        )
+        XCTAssertTrue(projection.irradianceSH.allSatisfy {
+            $0.x.isFinite && $0.y.isFinite && $0.z.isFinite
+        })
+        for direction in [
+            RenderVec3.up,
+            RenderVec3.down,
+            RenderVec3.forward,
+            RenderVec3.right,
+        ] {
+            let irradiance = projection.irradiance(at: direction)
+            XCTAssertEqual(
+                irradiance.x,
+                Float(descriptor.color.r) / 255,
+                accuracy: 0.015
+            )
+            XCTAssertEqual(
+                irradiance.y,
+                Float(descriptor.color.g) / 255,
+                accuracy: 0.015
+            )
+            XCTAssertEqual(
+                irradiance.z,
+                Float(descriptor.color.b) / 255,
+                accuracy: 0.015
+            )
+        }
+    }
+
+    func testProceduralEnvironmentProjectionRetainsDirectionalColor() {
+        let descriptor = ProceduralSkyDescriptor(
+            resolution: 32,
+            groundBottomColor: .init(r: 0, g: 16, b: 255, a: 255),
+            groundEnergy: 1,
+            groundHorizonColor: .black,
+            groundHorizonCurve: 0.2,
+            skyEnergy: 1,
+            skyHorizonColor: .black,
+            skyHorizonCurve: 0.2,
+            skyTopColor: .init(r: 255, g: 16, b: 0, a: 255),
+            sunColor: .white,
+            sunCurve: 0.15,
+            sunDirection: .down,
+            sunEnergy: 0,
+            sunSizeRadians: 0
+        )
+
+        let projection =
+            GPUProceduralEnvironmentProjection.project(descriptor)
+        let above = projection.irradiance(at: .up)
+        let below = projection.irradiance(at: .down)
+
+        XCTAssertGreaterThan(above.x, above.z)
+        XCTAssertGreaterThan(below.z, below.x)
+        XCTAssertNotEqual(above, below)
+    }
+
+    func testProceduralEnvironmentProjectionUsesLegacyNegatedSunDirection() {
+        let descriptor = ProceduralSkyDescriptor(
+            resolution: 64,
+            groundBottomColor: .black,
+            groundEnergy: 0,
+            groundHorizonColor: .black,
+            groundHorizonCurve: 0.2,
+            skyEnergy: 0,
+            skyHorizonColor: .black,
+            skyHorizonCurve: 0.2,
+            skyTopColor: .black,
+            sunColor: .init(r: 255, g: 32, b: 16, a: 255),
+            sunCurve: 0.15,
+            sunDirection: .down,
+            sunEnergy: 4,
+            sunSizeRadians: 0.05
+        )
+
+        let projection =
+            GPUProceduralEnvironmentProjection.project(descriptor)
+        let legacyNegatedDirection =
+            projection.irradiance(at: .up)
+        let authoredDirection =
+            projection.irradiance(at: .down)
+
+        XCTAssertGreaterThan(
+            legacyNegatedDirection.x,
+            authoredDirection.x * 2
+        )
+    }
+
     func testSemanticInstancePackingNormalizesColorAndPreservesCustomValues() {
         var packed: [Float] = []
         GPUInstanceRecordPacking.append(
@@ -3036,6 +3139,244 @@ final class GPURenderServicesTests: XCTestCase {
         )
         #else
         throw XCTSkip("The Windows Vulkan direct PBR test runs only on Windows")
+        #endif
+    }
+
+    func testProceduralIBLUsesMaterialAOAndMetallicEnvironmentSpecular() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU procedural IBL material test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btbh-procedural-ibl-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+        }
+        func writePPM(_ name: String, rgb: [UInt8]) throws -> String {
+            let url = temporaryDirectory.appendingPathComponent(name)
+            var bytes = Data("P6\n1 1\n255\n".utf8)
+            bytes.append(contentsOf: rgb)
+            try bytes.write(to: url)
+            return url.path
+        }
+        let openORM = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("orm-open.ppm", rgb: [255, 220, 0]),
+            filter: .nearest
+        ))
+        let occludedORM = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("orm-occluded.ppm", rgb: [24, 220, 0]),
+            filter: .nearest
+        ))
+        let metalORM = try RenderServices.resources.loadTexture(.init(
+            path: writePPM("orm-metal.ppm", rgb: [255, 48, 255]),
+            filter: .nearest
+        ))
+        defer {
+            RenderServices.resources.destroyTexture(metalORM)
+            RenderServices.resources.destroyTexture(occludedORM)
+            RenderServices.resources.destroyTexture(openORM)
+        }
+
+        let vertices = [
+            RenderVertex(
+                position: .init(x: -1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        let mesh = try vertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: vertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        defer { RenderServices.resources.destroyMesh(mesh) }
+
+        func makeMaterial(_ orm: TextureHandle) throws -> MaterialHandle {
+            var descriptor = MaterialDescriptor.default
+            descriptor.ormTexture = orm
+            descriptor.occlusion = 1
+            descriptor.roughness = 1
+            descriptor.metalness = 1
+            return try RenderServices.resources.createMaterial(descriptor)
+        }
+        let openMaterial = try makeMaterial(openORM)
+        let occludedMaterial = try makeMaterial(occludedORM)
+        let metalMaterial = try makeMaterial(metalORM)
+        defer {
+            RenderServices.resources.destroyMaterial(metalMaterial)
+            RenderServices.resources.destroyMaterial(occludedMaterial)
+            RenderServices.resources.destroyMaterial(openMaterial)
+        }
+
+        let sky = try RenderServices.resources.createProceduralSky(.init(
+            resolution: 32,
+            groundBottomColor: .init(r: 16, g: 32, b: 255, a: 255),
+            groundEnergy: 1,
+            groundHorizonColor: .init(r: 16, g: 32, b: 255, a: 255),
+            groundHorizonCurve: 0.2,
+            skyEnergy: 1,
+            skyHorizonColor: .init(r: 255, g: 48, b: 16, a: 255),
+            skyHorizonCurve: 0.2,
+            skyTopColor: .init(r: 255, g: 48, b: 16, a: 255),
+            sunColor: .white,
+            sunCurve: 0.15,
+            sunDirection: .down,
+            sunEnergy: 0,
+            sunSizeRadians: 0
+        ))
+        let ambient = try RenderServices.resources.createAmbientMap(from: sky)
+        defer {
+            RenderServices.resources.destroyAmbientMap(ambient)
+            RenderServices.resources.destroyCubemap(sky)
+        }
+        func frame(
+            ambientMap: AmbientMapHandle,
+            cameraY: Float
+        ) -> FrameDescriptor {
+            .init(
+                camera: .init(
+                    position: .init(x: 0, y: cameraY, z: -3),
+                    target: .zero,
+                    up: .up,
+                    verticalFOVDegrees: 60,
+                    projection: .perspective
+                ),
+                environment: .init(
+                    backgroundColor: .black,
+                    backgroundEnergy: 0,
+                    ambientColor: ambientMap.isValid ? .white : .black,
+                    ambientEnergy: 1,
+                    ambientMap: ambientMap,
+                    skyCubemap: .invalid,
+                    ssaoEnabled: false,
+                    tonemap: .reinhard,
+                    tonemapWhite: 1
+                )
+            )
+        }
+        func centerRGB(
+            _ material: MaterialHandle,
+            ambientMap: AmbientMapHandle,
+            cameraY: Float = 0
+        ) throws -> [UInt8] {
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(frame(
+                ambientMap: ambientMap,
+                cameraY: cameraY
+            ))
+            RenderServices.scene.submit(.mesh(.init(
+                mesh: mesh,
+                material: material,
+                transform: .identity
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.endFrame()
+            let readback =
+                try RenderServices.canvas.readbackPresentedFrame()
+            let center = (
+                (readback.size.height / 2) * readback.size.width +
+                readback.size.width / 2
+            ) * 4
+            return Array(readback.rgba8[center..<(center + 3)])
+        }
+
+        let openRGB = try centerRGB(openMaterial, ambientMap: ambient)
+        let occludedRGB =
+            try centerRGB(occludedMaterial, ambientMap: ambient)
+        let skyReflectionRGB = try centerRGB(
+            metalMaterial,
+            ambientMap: ambient,
+            cameraY: -1.5
+        )
+        let groundReflectionRGB = try centerRGB(
+            metalMaterial,
+            ambientMap: ambient,
+            cameraY: 1.5
+        )
+        let metalFallbackRGB =
+            try centerRGB(
+                metalMaterial,
+                ambientMap: .invalid,
+                cameraY: -1.5
+            )
+        let openLuma = openRGB.reduce(0) { $0 + Int($1) }
+        let occludedLuma = occludedRGB.reduce(0) { $0 + Int($1) }
+        let skyReflectionLuma =
+            skyReflectionRGB.reduce(0) { $0 + Int($1) }
+        let metalFallbackLuma =
+            metalFallbackRGB.reduce(0) { $0 + Int($1) }
+
+        XCTAssertGreaterThan(
+            openLuma,
+            occludedLuma + 100,
+            "ORM.r must attenuate indirect diffuse lighting"
+        )
+        XCTAssertGreaterThan(
+            skyReflectionLuma,
+            metalFallbackLuma + 50,
+            "metal must receive environment specular from the ambient map"
+        )
+        XCTAssertGreaterThan(
+            skyReflectionRGB[0],
+            skyReflectionRGB[2] + 20,
+            "upward reflection must retain the red sky color"
+        )
+        XCTAssertGreaterThan(
+            groundReflectionRGB[2],
+            groundReflectionRGB[0] + 20,
+            "view-dependent downward reflection must retain the blue ground"
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan procedural IBL test runs only on Windows")
         #endif
     }
 

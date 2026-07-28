@@ -19,6 +19,14 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 emission_color_energy;
     uint unlit_enabled;
     uint3 material_padding;
+    float4 irradiance_sh[9];
+    float4 ground_bottom_energy;
+    float4 ground_horizon_curve;
+    float4 sky_top_energy;
+    float4 sky_horizon_curve;
+    float4 sun_color_energy;
+    float4 sun_direction_size;
+    float4 procedural_controls;
 };
 
 struct FragmentInput
@@ -141,6 +149,144 @@ float3 evaluate_directional_light(
     return (diffuse + specular) * light_color * light_energy;
 }
 
+float3 evaluate_irradiance_sh(float3 direction)
+{
+    const float x = direction.x;
+    const float y = direction.y;
+    const float z = direction.z;
+    const float basis[9] = {
+        0.2820948f,
+        0.48860252f * y,
+        0.48860252f * z,
+        0.48860252f * x,
+        1.0925485f * x * y,
+        1.0925485f * y * z,
+        0.31539157f * (3.0f * z * z - 1.0f),
+        1.0925485f * x * z,
+        0.54627424f * (x * x - y * y)
+    };
+    float3 irradiance = 0.0f;
+    [unroll]
+    for (uint index = 0u; index < 9u; ++index)
+    {
+        irradiance += irradiance_sh[index].rgb * basis[index];
+    }
+    return max(irradiance, 0.0f);
+}
+
+float3 sample_procedural_sky(float3 direction)
+{
+    direction = stable_normalize(
+        direction,
+        float3(0.0f, 1.0f, 0.0f)
+    );
+    const float vertical_angle =
+        acos(clamp(direction.y, -1.0f, 1.0f));
+    float3 color;
+    if (direction.y >= 0.0f)
+    {
+        const float c =
+            1.0f - vertical_angle / (3.14159265f * 0.5f);
+        const float gradient = saturate(
+            1.0f -
+            pow(
+                1.0f - c,
+                1.0f / max(sky_horizon_curve.w, 0.001f)
+            )
+        );
+        color = lerp(
+            sky_horizon_curve.rgb,
+            sky_top_energy.rgb,
+            gradient
+        ) * sky_top_energy.w;
+    }
+    else
+    {
+        const float c =
+            (vertical_angle - 3.14159265f * 0.5f) /
+            (3.14159265f * 0.5f);
+        const float gradient = saturate(
+            1.0f -
+            pow(
+                1.0f - c,
+                1.0f / max(ground_horizon_curve.w, 0.001f)
+            )
+        );
+        color = lerp(
+            ground_horizon_curve.rgb,
+            ground_bottom_energy.rgb,
+            gradient
+        ) * ground_bottom_energy.w;
+    }
+
+    if (
+        sun_direction_size.w > 0.0f &&
+        dot(sun_direction_size.xyz, sun_direction_size.xyz) >
+            0.00000001f
+    )
+    {
+        const float3 sun_direction = stable_normalize(
+            sun_direction_size.xyz,
+            float3(0.0f, -1.0f, 0.0f)
+        );
+        const float sun_angle = acos(clamp(
+            dot(sun_direction, direction),
+            -1.0f,
+            1.0f
+        ));
+        const float3 sun = sun_color_energy.rgb *
+            sun_color_energy.w;
+        if (sun_angle < sun_direction_size.w)
+        {
+            return sun;
+        }
+        if (sun_angle < sun_direction_size.w * 10.0f)
+        {
+            const float c =
+                (sun_angle - sun_direction_size.w) /
+                (sun_direction_size.w * 9.0f);
+            const float fade = saturate(
+                1.0f -
+                pow(
+                    1.0f - c,
+                    1.0f / max(procedural_controls.x, 0.001f)
+                )
+            );
+            return lerp(sun, color, fade);
+        }
+    }
+    return color;
+}
+
+float2 environment_brdf(float normal_dot_view, float roughness)
+{
+    const float4 c0 =
+        float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 c1 =
+        float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    const float4 r = roughness * c0 + c1;
+    const float a004 =
+        min(r.x * r.x, exp2(-9.28f * normal_dot_view)) *
+        r.x + r.y;
+    return float2(-1.04f, 1.04f) * a004 + r.zw;
+}
+
+float specular_occlusion(
+    float normal_dot_view,
+    float occlusion,
+    float roughness
+)
+{
+    return saturate(
+        pow(
+            normal_dot_view + occlusion,
+            exp2(-16.0f * roughness - 1.0f)
+        ) -
+        1.0f +
+        occlusion
+    );
+}
+
 float4 main(FragmentInput input) : SV_Target0
 {
     const float4 albedo_sample = albedo_texture.Sample(
@@ -192,6 +338,8 @@ float4 main(FragmentInput input) : SV_Target0
         orm_sampler,
         input.texture_coordinate
     ).rgb;
+    const float occlusion =
+        saturate(orm.r * material_factors.y);
     const float roughness = saturate(orm.g * material_factors.z);
     const float metalness = saturate(orm.b * material_factors.w);
     const float3 view = stable_normalize(
@@ -213,11 +361,50 @@ float4 main(FragmentInput input) : SV_Target0
         return float4(albedo_sample.rgb + emission, albedo_sample.a);
     }
 
-    float3 lighting =
-        albedo_sample.rgb *
-        (1.0f - metalness) *
-        ambient_color_energy.rgb *
-        ambient_color_energy.w;
+    float3 lighting;
+    if (procedural_controls.y > 0.5f)
+    {
+        const float normal_dot_view =
+            max(dot(normal, view), 0.0001f);
+        const float3 reflection = reflect(-view, normal);
+        const float3 irradiance =
+            evaluate_irradiance_sh(normal);
+        const float3 sharp_radiance =
+            sample_procedural_sky(reflection);
+        const float3 broad_radiance =
+            evaluate_irradiance_sh(reflection);
+        const float3 radiance = lerp(
+            sharp_radiance,
+            broad_radiance,
+            roughness * roughness
+        );
+        const float2 brdf =
+            environment_brdf(normal_dot_view, roughness);
+        const float3 diffuse =
+            irradiance *
+            albedo_sample.rgb *
+            (1.0f - metalness) *
+            occlusion;
+        const float3 specular =
+            radiance *
+            (f0 * brdf.x + brdf.y) *
+            specular_occlusion(
+                normal_dot_view,
+                occlusion,
+                roughness
+            );
+        lighting = (diffuse + specular) *
+            ambient_color_energy.w;
+    }
+    else
+    {
+        lighting =
+            albedo_sample.rgb *
+            (1.0f - metalness) *
+            ambient_color_energy.rgb *
+            ambient_color_energy.w *
+            occlusion;
+    }
     lighting += evaluate_directional_light(
         directional_direction_energy.xyz,
         directional_direction_energy.w,

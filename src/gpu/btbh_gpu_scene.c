@@ -43,6 +43,14 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float emission_color_energy[4];
     uint32_t unlit_enabled;
     uint32_t padding[3];
+    float irradiance_sh[9][4];
+    float ground_bottom_energy[4];
+    float ground_horizon_curve[4];
+    float sky_top_energy[4];
+    float sky_horizon_curve[4];
+    float sun_color_energy[4];
+    float sun_direction_size[4];
+    float procedural_controls[4];
 } BTBHGPUSceneFragmentUniforms;
 
 struct BTBHGPUSceneRuntime {
@@ -851,6 +859,76 @@ static bool btbh_gpu_scene_prepare_bones(
     return true;
 }
 
+static bool btbh_gpu_scene_lighting_valid(
+    const BTBHGPUSceneLighting *lighting
+) {
+    if (lighting == NULL ||
+        !isfinite(lighting->ambient_red) ||
+        !isfinite(lighting->ambient_green) ||
+        !isfinite(lighting->ambient_blue) ||
+        !isfinite(lighting->ambient_energy) ||
+        lighting->ambient_energy < 0.0f ||
+        !isfinite(lighting->directional_x) ||
+        !isfinite(lighting->directional_y) ||
+        !isfinite(lighting->directional_z) ||
+        !isfinite(lighting->directional_energy) ||
+        lighting->directional_energy < 0.0f ||
+        !isfinite(lighting->directional_red) ||
+        !isfinite(lighting->directional_green) ||
+        !isfinite(lighting->directional_blue) ||
+        !isfinite(lighting->secondary_directional_x) ||
+        !isfinite(lighting->secondary_directional_y) ||
+        !isfinite(lighting->secondary_directional_z) ||
+        !isfinite(lighting->secondary_directional_energy) ||
+        lighting->secondary_directional_energy < 0.0f ||
+        !isfinite(lighting->secondary_directional_red) ||
+        !isfinite(lighting->secondary_directional_green) ||
+        !isfinite(lighting->secondary_directional_blue) ||
+        lighting->ibl_enabled > 1u) {
+        return false;
+    }
+    for (size_t index = 0u; index < 27u; index += 1u) {
+        if (!isfinite(lighting->irradiance_sh[index])) {
+            return false;
+        }
+    }
+    const float procedural_values[] = {
+        lighting->ground_bottom_red,
+        lighting->ground_bottom_green,
+        lighting->ground_bottom_blue,
+        lighting->ground_energy,
+        lighting->ground_horizon_red,
+        lighting->ground_horizon_green,
+        lighting->ground_horizon_blue,
+        lighting->ground_horizon_curve,
+        lighting->sky_top_red,
+        lighting->sky_top_green,
+        lighting->sky_top_blue,
+        lighting->sky_energy,
+        lighting->sky_horizon_red,
+        lighting->sky_horizon_green,
+        lighting->sky_horizon_blue,
+        lighting->sky_horizon_curve,
+        lighting->sun_red,
+        lighting->sun_green,
+        lighting->sun_blue,
+        lighting->sun_energy,
+        lighting->sun_direction_x,
+        lighting->sun_direction_y,
+        lighting->sun_direction_z,
+        lighting->sun_size_radians,
+        lighting->sun_curve
+    };
+    for (size_t index = 0u;
+         index < sizeof(procedural_values) / sizeof(procedural_values[0]);
+         index += 1u) {
+        if (!isfinite(procedural_values[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -901,28 +979,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         !isfinite(camera_position[0]) ||
         !isfinite(camera_position[1]) ||
         !isfinite(camera_position[2]) ||
-        lighting == NULL ||
-        !isfinite(lighting->ambient_red) ||
-        !isfinite(lighting->ambient_green) ||
-        !isfinite(lighting->ambient_blue) ||
-        !isfinite(lighting->ambient_energy) ||
-        lighting->ambient_energy < 0.0f ||
-        !isfinite(lighting->directional_x) ||
-        !isfinite(lighting->directional_y) ||
-        !isfinite(lighting->directional_z) ||
-        !isfinite(lighting->directional_energy) ||
-        lighting->directional_energy < 0.0f ||
-        !isfinite(lighting->directional_red) ||
-        !isfinite(lighting->directional_green) ||
-        !isfinite(lighting->directional_blue) ||
-        !isfinite(lighting->secondary_directional_x) ||
-        !isfinite(lighting->secondary_directional_y) ||
-        !isfinite(lighting->secondary_directional_z) ||
-        !isfinite(lighting->secondary_directional_energy) ||
-        lighting->secondary_directional_energy < 0.0f ||
-        !isfinite(lighting->secondary_directional_red) ||
-        !isfinite(lighting->secondary_directional_green) ||
-        !isfinite(lighting->secondary_directional_blue) ||
+        !btbh_gpu_scene_lighting_valid(lighting) ||
         (instances == NULL && transient_instance_count > 0u) ||
         logical_instance_count == 0u ||
         batches == NULL ||
@@ -1326,6 +1383,71 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             );
             fragment_uniforms.unlit_enabled =
                 uniforms.unlit_enabled;
+            for (size_t coefficient = 0u;
+                 coefficient < 9u;
+                 coefficient += 1u) {
+                for (size_t channel = 0u;
+                     channel < 3u;
+                     channel += 1u) {
+                    fragment_uniforms
+                        .irradiance_sh[coefficient][channel] =
+                        lighting->irradiance_sh[
+                            coefficient * 3u + channel
+                        ];
+                }
+            }
+            fragment_uniforms.ground_bottom_energy[0] =
+                lighting->ground_bottom_red;
+            fragment_uniforms.ground_bottom_energy[1] =
+                lighting->ground_bottom_green;
+            fragment_uniforms.ground_bottom_energy[2] =
+                lighting->ground_bottom_blue;
+            fragment_uniforms.ground_bottom_energy[3] =
+                lighting->ground_energy;
+            fragment_uniforms.ground_horizon_curve[0] =
+                lighting->ground_horizon_red;
+            fragment_uniforms.ground_horizon_curve[1] =
+                lighting->ground_horizon_green;
+            fragment_uniforms.ground_horizon_curve[2] =
+                lighting->ground_horizon_blue;
+            fragment_uniforms.ground_horizon_curve[3] =
+                lighting->ground_horizon_curve;
+            fragment_uniforms.sky_top_energy[0] =
+                lighting->sky_top_red;
+            fragment_uniforms.sky_top_energy[1] =
+                lighting->sky_top_green;
+            fragment_uniforms.sky_top_energy[2] =
+                lighting->sky_top_blue;
+            fragment_uniforms.sky_top_energy[3] =
+                lighting->sky_energy;
+            fragment_uniforms.sky_horizon_curve[0] =
+                lighting->sky_horizon_red;
+            fragment_uniforms.sky_horizon_curve[1] =
+                lighting->sky_horizon_green;
+            fragment_uniforms.sky_horizon_curve[2] =
+                lighting->sky_horizon_blue;
+            fragment_uniforms.sky_horizon_curve[3] =
+                lighting->sky_horizon_curve;
+            fragment_uniforms.sun_color_energy[0] =
+                lighting->sun_red;
+            fragment_uniforms.sun_color_energy[1] =
+                lighting->sun_green;
+            fragment_uniforms.sun_color_energy[2] =
+                lighting->sun_blue;
+            fragment_uniforms.sun_color_energy[3] =
+                lighting->sun_energy;
+            fragment_uniforms.sun_direction_size[0] =
+                lighting->sun_direction_x;
+            fragment_uniforms.sun_direction_size[1] =
+                lighting->sun_direction_y;
+            fragment_uniforms.sun_direction_size[2] =
+                lighting->sun_direction_z;
+            fragment_uniforms.sun_direction_size[3] =
+                lighting->sun_size_radians;
+            fragment_uniforms.procedural_controls[0] =
+                lighting->sun_curve;
+            fragment_uniforms.procedural_controls[1] =
+                (float)lighting->ibl_enabled;
             SDL_PushGPUFragmentUniformData(
                 command,
                 0u,

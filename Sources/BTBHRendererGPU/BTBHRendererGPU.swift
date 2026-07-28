@@ -362,12 +362,36 @@ struct GPUSceneMaterialProbe {
 struct GPUSceneLightingProbe {
     let ambientColor: RenderColor
     let ambientEnergy: Float
+    let environment: GPUProceduralEnvironmentProjection?
     let directionalDirection: RenderVec3
     let directionalColor: RenderColor
     let directionalEnergy: Float
     let secondaryDirectionalDirection: RenderVec3
     let secondaryDirectionalColor: RenderColor
     let secondaryDirectionalEnergy: Float
+
+    init(
+        ambientColor: RenderColor,
+        ambientEnergy: Float,
+        environment: GPUProceduralEnvironmentProjection? = nil,
+        directionalDirection: RenderVec3,
+        directionalColor: RenderColor,
+        directionalEnergy: Float,
+        secondaryDirectionalDirection: RenderVec3,
+        secondaryDirectionalColor: RenderColor,
+        secondaryDirectionalEnergy: Float
+    ) {
+        self.ambientColor = ambientColor
+        self.ambientEnergy = ambientEnergy
+        self.environment = environment
+        self.directionalDirection = directionalDirection
+        self.directionalColor = directionalColor
+        self.directionalEnergy = directionalEnergy
+        self.secondaryDirectionalDirection =
+            secondaryDirectionalDirection
+        self.secondaryDirectionalColor = secondaryDirectionalColor
+        self.secondaryDirectionalEnergy = secondaryDirectionalEnergy
+    }
 }
 
 struct GPUScenePresentationProbeReport {
@@ -1175,6 +1199,7 @@ public final class GPUWindowProbe {
               cameraPosition.x.isFinite,
               cameraPosition.y.isFinite,
               cameraPosition.z.isFinite,
+              Self.sceneLightingIsValid(lighting),
               !batches.isEmpty,
               batches.count <= Int(UInt32.max) else {
             throw GPUSceneProbeError.operationFailed(
@@ -1190,35 +1215,61 @@ public final class GPUWindowProbe {
         sceneCameraPositionValues[0] = cameraPosition.x
         sceneCameraPositionValues[1] = cameraPosition.y
         sceneCameraPositionValues[2] = cameraPosition.z
-        var nativeLighting = BTBHGPUSceneLighting(
-            ambient_red: Float(lighting.ambientColor.r) / 255,
-            ambient_green: Float(lighting.ambientColor.g) / 255,
-            ambient_blue: Float(lighting.ambientColor.b) / 255,
-            ambient_energy: lighting.ambientEnergy,
-            directional_x: lighting.directionalDirection.x,
-            directional_y: lighting.directionalDirection.y,
-            directional_z: lighting.directionalDirection.z,
-            directional_energy: lighting.directionalEnergy,
-            directional_red: Float(lighting.directionalColor.r) / 255,
-            directional_green: Float(lighting.directionalColor.g) / 255,
-            directional_blue: Float(lighting.directionalColor.b) / 255,
-            secondary_directional_energy:
-                lighting.secondaryDirectionalEnergy,
-            secondary_directional_x:
-                lighting.secondaryDirectionalDirection.x,
-            secondary_directional_y:
-                lighting.secondaryDirectionalDirection.y,
-            secondary_directional_z:
-                lighting.secondaryDirectionalDirection.z,
-            reserved: 0,
-            secondary_directional_red:
-                Float(lighting.secondaryDirectionalColor.r) / 255,
-            secondary_directional_green:
-                Float(lighting.secondaryDirectionalColor.g) / 255,
-            secondary_directional_blue:
-                Float(lighting.secondaryDirectionalColor.b) / 255,
-            secondary_reserved: 0
-        )
+        var nativeLighting = BTBHGPUSceneLighting()
+        nativeLighting.ambient_red =
+            Float(lighting.ambientColor.r) / 255
+        nativeLighting.ambient_green =
+            Float(lighting.ambientColor.g) / 255
+        nativeLighting.ambient_blue =
+            Float(lighting.ambientColor.b) / 255
+        nativeLighting.ambient_energy = lighting.ambientEnergy
+        nativeLighting.directional_x = lighting.directionalDirection.x
+        nativeLighting.directional_y = lighting.directionalDirection.y
+        nativeLighting.directional_z = lighting.directionalDirection.z
+        nativeLighting.directional_energy = lighting.directionalEnergy
+        nativeLighting.directional_red =
+            Float(lighting.directionalColor.r) / 255
+        nativeLighting.directional_green =
+            Float(lighting.directionalColor.g) / 255
+        nativeLighting.directional_blue =
+            Float(lighting.directionalColor.b) / 255
+        nativeLighting.secondary_directional_energy =
+            lighting.secondaryDirectionalEnergy
+        nativeLighting.secondary_directional_x =
+            lighting.secondaryDirectionalDirection.x
+        nativeLighting.secondary_directional_y =
+            lighting.secondaryDirectionalDirection.y
+        nativeLighting.secondary_directional_z =
+            lighting.secondaryDirectionalDirection.z
+        nativeLighting.secondary_directional_red =
+            Float(lighting.secondaryDirectionalColor.r) / 255
+        nativeLighting.secondary_directional_green =
+            Float(lighting.secondaryDirectionalColor.g) / 255
+        nativeLighting.secondary_directional_blue =
+            Float(lighting.secondaryDirectionalColor.b) / 255
+        if let environment = lighting.environment {
+            nativeLighting.ibl_enabled = 1
+            withUnsafeMutablePointer(
+                to: &nativeLighting.irradiance_sh
+            ) {
+                $0.withMemoryRebound(
+                    to: Float.self,
+                    capacity: 27
+                ) { values in
+                    for (index, coefficient) in
+                        environment.irradianceSH.enumerated()
+                    {
+                        values[index * 3] = coefficient.x
+                        values[index * 3 + 1] = coefficient.y
+                        values[index * 3 + 2] = coefficient.z
+                    }
+                }
+            }
+            Self.populateProceduralEnvironment(
+                environment.sky,
+                lighting: &nativeLighting
+            )
+        }
         nativeSceneBatches.removeAll(keepingCapacity: true)
         nativeSceneBatches.reserveCapacity(batches.count)
         for batch in batches {
@@ -1367,6 +1418,99 @@ public final class GPUWindowProbe {
             ),
             persistentBatchCount: Int(report.persistent_batch_count)
         )
+    }
+
+    private static func populateProceduralEnvironment(
+        _ sky: ProceduralSkyDescriptor,
+        lighting: inout BTBHGPUSceneLighting
+    ) {
+        lighting.ground_bottom_red =
+            Float(sky.groundBottomColor.r) / 255
+        lighting.ground_bottom_green =
+            Float(sky.groundBottomColor.g) / 255
+        lighting.ground_bottom_blue =
+            Float(sky.groundBottomColor.b) / 255
+        lighting.ground_energy = sky.groundEnergy
+        lighting.ground_horizon_red =
+            Float(sky.groundHorizonColor.r) / 255
+        lighting.ground_horizon_green =
+            Float(sky.groundHorizonColor.g) / 255
+        lighting.ground_horizon_blue =
+            Float(sky.groundHorizonColor.b) / 255
+        lighting.ground_horizon_curve = sky.groundHorizonCurve
+        lighting.sky_top_red = Float(sky.skyTopColor.r) / 255
+        lighting.sky_top_green = Float(sky.skyTopColor.g) / 255
+        lighting.sky_top_blue = Float(sky.skyTopColor.b) / 255
+        lighting.sky_energy = sky.skyEnergy
+        lighting.sky_horizon_red =
+            Float(sky.skyHorizonColor.r) / 255
+        lighting.sky_horizon_green =
+            Float(sky.skyHorizonColor.g) / 255
+        lighting.sky_horizon_blue =
+            Float(sky.skyHorizonColor.b) / 255
+        lighting.sky_horizon_curve = sky.skyHorizonCurve
+        lighting.sun_red = Float(sky.sunColor.r) / 255
+        lighting.sun_green = Float(sky.sunColor.g) / 255
+        lighting.sun_blue = Float(sky.sunColor.b) / 255
+        lighting.sun_energy = sky.sunEnergy
+        let authoredSunDirection = sky.sunDirection
+        let sunDirection = RenderVec3(
+            x: -authoredSunDirection.x,
+            y: -authoredSunDirection.y,
+            z: -authoredSunDirection.z
+        ).normalized()
+        lighting.sun_direction_x = sunDirection.x
+        lighting.sun_direction_y = sunDirection.y
+        lighting.sun_direction_z = sunDirection.z
+        lighting.sun_size_radians =
+            sunDirection.lengthSquared > 0
+                ? sky.sunSizeRadians
+                : 0
+        lighting.sun_curve = sky.sunCurve
+    }
+
+    private static func sceneLightingIsValid(
+        _ lighting: GPUSceneLightingProbe
+    ) -> Bool {
+        let values = [
+            lighting.ambientEnergy,
+            lighting.directionalDirection.x,
+            lighting.directionalDirection.y,
+            lighting.directionalDirection.z,
+            lighting.directionalEnergy,
+            lighting.secondaryDirectionalDirection.x,
+            lighting.secondaryDirectionalDirection.y,
+            lighting.secondaryDirectionalDirection.z,
+            lighting.secondaryDirectionalEnergy,
+        ]
+        guard values.allSatisfy(\.isFinite),
+              lighting.ambientEnergy >= 0,
+              lighting.directionalEnergy >= 0,
+              lighting.secondaryDirectionalEnergy >= 0 else {
+            return false
+        }
+        guard let environment = lighting.environment else {
+            return true
+        }
+        guard environment.irradianceSH.count == 9,
+              environment.irradianceSH.allSatisfy({
+                $0.x.isFinite && $0.y.isFinite && $0.z.isFinite
+              }) else {
+            return false
+        }
+        let sky = environment.sky
+        return [
+            sky.groundEnergy,
+            sky.groundHorizonCurve,
+            sky.skyEnergy,
+            sky.skyHorizonCurve,
+            sky.sunCurve,
+            sky.sunDirection.x,
+            sky.sunDirection.y,
+            sky.sunDirection.z,
+            sky.sunEnergy,
+            sky.sunSizeRadians,
+        ].allSatisfy(\.isFinite)
     }
 
     private static func sceneBlendMode(

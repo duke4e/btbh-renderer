@@ -147,8 +147,203 @@ private struct GPUCustomMeshUpload {
     let indices: [UInt32]
 }
 
+struct GPUProceduralEnvironmentProjection {
+    let irradianceSH: [RenderVec3]
+    let sky: ProceduralSkyDescriptor
+
+    static func project(
+        _ descriptor: ProceduralSkyDescriptor
+    ) -> Self {
+        let resolution = min(max(descriptor.resolution, 4), 64)
+        var coefficients = Array(repeating: RenderVec3.zero, count: 9)
+        var totalWeight: Float = 0
+
+        for face in 0..<6 {
+            for y in 0..<resolution {
+                for x in 0..<resolution {
+                    let u =
+                        2 * (Float(x) + 0.5) / Float(resolution) - 1
+                    let v =
+                        2 * (Float(y) + 0.5) / Float(resolution) - 1
+                    let direction = cubemapDirection(
+                        face: face,
+                        u: u,
+                        v: v
+                    ).normalized()
+                    let weight =
+                        1 / pow(1 + u * u + v * v, 1.5)
+                    let radiance = sampleSky(
+                        descriptor,
+                        direction: direction
+                    )
+                    let basis = sphericalHarmonicBasis(direction)
+                    for index in coefficients.indices {
+                        coefficients[index] =
+                            coefficients[index] +
+                            radiance * (basis[index] * weight)
+                    }
+                    totalWeight += weight
+                }
+            }
+        }
+
+        let normalization = 4 * Float.pi / max(totalWeight, 0.000_001)
+        let cosineKernel: [Float] = [
+            1,
+            2 / 3, 2 / 3, 2 / 3,
+            1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4,
+        ]
+        for index in coefficients.indices {
+            let coefficient = coefficients[index]
+            let scale = normalization * cosineKernel[index]
+            coefficients[index] = coefficient * scale
+        }
+        return .init(irradianceSH: coefficients, sky: descriptor)
+    }
+
+    func irradiance(at direction: RenderVec3) -> RenderVec3 {
+        let basis = Self.sphericalHarmonicBasis(
+            direction.normalized()
+        )
+        var result = RenderVec3.zero
+        for index in irradianceSH.indices {
+            result =
+                result + irradianceSH[index] * basis[index]
+        }
+        return .init(
+            x: max(result.x, 0),
+            y: max(result.y, 0),
+            z: max(result.z, 0)
+        )
+    }
+
+    private static func cubemapDirection(
+        face: Int,
+        u: Float,
+        v: Float
+    ) -> RenderVec3 {
+        switch face {
+        case 0: return .init(x: 1, y: -v, z: -u)
+        case 1: return .init(x: -1, y: -v, z: u)
+        case 2: return .init(x: u, y: 1, z: v)
+        case 3: return .init(x: u, y: -1, z: -v)
+        case 4: return .init(x: u, y: -v, z: 1)
+        default: return .init(x: -u, y: -v, z: -1)
+        }
+    }
+
+    private static func sphericalHarmonicBasis(
+        _ direction: RenderVec3
+    ) -> [Float] {
+        let x = direction.x
+        let y = direction.y
+        let z = direction.z
+        return [
+            0.282_094_8,
+            0.488_602_52 * y,
+            0.488_602_52 * z,
+            0.488_602_52 * x,
+            1.092_548_5 * x * y,
+            1.092_548_5 * y * z,
+            0.315_391_57 * (3 * z * z - 1),
+            1.092_548_5 * x * z,
+            0.546_274_24 * (x * x - y * y),
+        ]
+    }
+
+    private static func sampleSky(
+        _ descriptor: ProceduralSkyDescriptor,
+        direction: RenderVec3
+    ) -> RenderVec3 {
+        let verticalAngle = acos(
+            min(max(direction.y, -1), 1)
+        )
+        let color: RenderVec3
+        if direction.y >= 0 {
+            let c = 1 - verticalAngle / (Float.pi * 0.5)
+            let gradient = min(max(
+                1 - pow(
+                    1 - c,
+                    1 / max(descriptor.skyHorizonCurve, 0.001)
+                ),
+                0
+            ), 1)
+            color = mix(
+                rgb(descriptor.skyHorizonColor),
+                rgb(descriptor.skyTopColor),
+                gradient
+            ) * descriptor.skyEnergy
+        } else {
+            let c =
+                (verticalAngle - Float.pi * 0.5) /
+                (Float.pi * 0.5)
+            let gradient = min(max(
+                1 - pow(
+                    1 - c,
+                    1 / max(descriptor.groundHorizonCurve, 0.001)
+                ),
+                0
+            ), 1)
+            color = mix(
+                rgb(descriptor.groundHorizonColor),
+                rgb(descriptor.groundBottomColor),
+                gradient
+            ) * descriptor.groundEnergy
+        }
+
+        let authoredSunDirection = descriptor.sunDirection
+        let sunDirection = RenderVec3(
+            x: -authoredSunDirection.x,
+            y: -authoredSunDirection.y,
+            z: -authoredSunDirection.z
+        ).normalized()
+        guard sunDirection.lengthSquared > 0,
+              descriptor.sunSizeRadians > 0 else {
+            return color
+        }
+        let sunAngle = acos(
+            min(max(sunDirection.dot(direction), -1), 1)
+        )
+        let sun = rgb(descriptor.sunColor) * descriptor.sunEnergy
+        if sunAngle < descriptor.sunSizeRadians {
+            return sun
+        }
+        if sunAngle < descriptor.sunSizeRadians * 10 {
+            let c =
+                (sunAngle - descriptor.sunSizeRadians) /
+                (descriptor.sunSizeRadians * 9)
+            let fade = min(max(
+                1 - pow(
+                    1 - c,
+                    1 / max(descriptor.sunCurve, 0.001)
+                ),
+                0
+            ), 1)
+            return mix(sun, color, fade)
+        }
+        return color
+    }
+
+    private static func rgb(_ color: RenderColor) -> RenderVec3 {
+        .init(
+            x: Float(color.r) / 255,
+            y: Float(color.g) / 255,
+            z: Float(color.b) / 255
+        )
+    }
+
+    private static func mix(
+        _ lhs: RenderVec3,
+        _ rhs: RenderVec3,
+        _ amount: Float
+    ) -> RenderVec3 {
+        lhs + (rhs - lhs) * amount
+    }
+}
+
 private struct GPUAmbientMapResource {
     let cubemap: CubemapHandle
+    let environment: GPUProceduralEnvironmentProjection
 }
 
 private struct GPURenderTargetResource {
@@ -668,20 +863,18 @@ final class GPUResourceBackend: RenderResourceBackend {
     func sceneLighting(
         environment: EnvironmentDescriptor
     ) throws -> GPUSceneLightingProbe {
-        var ambientColor = environment.ambientColor
+        var projectedEnvironment:
+            GPUProceduralEnvironmentProjection?
         if environment.ambientMap.isValid {
             guard
                 let ambient = ambientMaps[environment.ambientMap],
-                let sky = cubemaps[ambient.cubemap]
+                cubemaps[ambient.cubemap] != nil
             else {
                 throw GPUResourceStagingError.invalidAmbientMap(
                     environment.ambientMap.rawValue
                 )
             }
-            ambientColor = Self.multiply(
-                ambientColor,
-                by: sky.color
-            )
+            projectedEnvironment = ambient.environment
         }
         let directionals = lights
             .sorted { $0.key.rawValue < $1.key.rawValue }
@@ -694,8 +887,9 @@ final class GPUResourceBackend: RenderResourceBackend {
         let primary = directionals.first
         let secondary = directionals.dropFirst().first
         return .init(
-            ambientColor: ambientColor,
+            ambientColor: environment.ambientColor,
             ambientEnergy: environment.ambientEnergy,
+            environment: projectedEnvironment,
             directionalDirection:
                 primary?.direction.normalized() ?? .down,
             directionalColor: primary?.color ?? .white,
@@ -725,18 +919,6 @@ final class GPUResourceBackend: RenderResourceBackend {
             energy = environment.backgroundEnergy
         }
         return Self.scaled(source, by: energy)
-    }
-
-    private static func multiply(
-        _ lhs: RenderColor,
-        by rhs: RenderColor
-    ) -> RenderColor {
-        .init(
-            r: UInt8((UInt16(lhs.r) * UInt16(rhs.r)) / 255),
-            g: UInt8((UInt16(lhs.g) * UInt16(rhs.g)) / 255),
-            b: UInt8((UInt16(lhs.b) * UInt16(rhs.b)) / 255),
-            a: lhs.a
-        )
     }
 
     private static func scaled(
@@ -1447,7 +1629,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         trace("createAmbientMap")
         guard
             !pendingCubemapDestruction.contains(cubemap),
-            cubemaps[cubemap] != nil
+            let sky = cubemaps[cubemap]
         else {
             throw GPUResourceStagingError.invalidCubemap(cubemap.rawValue)
         }
@@ -1455,7 +1637,11 @@ final class GPUResourceBackend: RenderResourceBackend {
             throw GPUResourceStagingError.invalidAmbientMap(0)
         }
         let handle = try ambientMapHandles.acquire(AmbientMapHandle.self)
-        ambientMaps[handle] = .init(cubemap: cubemap)
+        ambientMaps[handle] = .init(
+            cubemap: cubemap,
+            environment:
+                GPUProceduralEnvironmentProjection.project(sky)
+        )
         return handle
     }
 
