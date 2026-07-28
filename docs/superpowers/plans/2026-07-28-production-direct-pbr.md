@@ -78,4 +78,3 @@ Windows Run 3/4. Diagnose any regression above 5%. Update the Windows Vulkan
 report with exact commits, artifacts, results, and the remaining AO/IBL,
 shadow, post, and Mac work. Commit and push the game gitlink/report only
 after all gates are green.
-
