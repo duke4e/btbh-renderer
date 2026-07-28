@@ -135,6 +135,8 @@ source:
 
 The scene runtime owns matching static and animated model pipeline sets and
 selects one set once per scene submission. No-shadow draws bind only the four
-material samplers. This specialization must preserve identical pixels and the
-existing material/light uniform layout while removing disabled-shadow shader
-occupancy and descriptor overhead.
+material samplers. Its constant buffer ends at the common pre-shadow
+`procedural_controls` prefix, and native submission pushes only that prefix.
+This specialization must preserve identical pixels and the existing common
+material/light uniform layout while removing disabled-shadow shader occupancy,
+descriptor, and uniform-upload overhead.

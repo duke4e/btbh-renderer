@@ -1,6 +1,7 @@
 #include "btbh_gpu_internal.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1927,7 +1928,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 command,
                 0u,
                 &fragment_uniforms,
-                sizeof(fragment_uniforms)
+                shadows_active
+                    ? (uint32_t)sizeof(fragment_uniforms)
+                    : (uint32_t)offsetof(
+                        BTBHGPUSceneFragmentUniforms,
+                        directional_shadow_view_projection
+                    )
             );
             if (animated) {
                 SDL_BindGPUGraphicsPipeline(

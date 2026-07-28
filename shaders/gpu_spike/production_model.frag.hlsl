@@ -39,10 +39,12 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_color_energy;
     float4 sun_direction_size;
     float4 procedural_controls;
+#if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
     float4 directional_shadow_controls;
     float4 secondary_directional_shadow_controls;
+#endif
 };
 
 struct FragmentInput
