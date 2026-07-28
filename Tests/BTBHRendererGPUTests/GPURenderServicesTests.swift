@@ -2869,6 +2869,212 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testDirectionalShadowDarkensReceiverBehindOpaqueCaster() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU directional shadow test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        func quad(
+            minimumX: Float,
+            maximumX: Float,
+            minimumY: Float,
+            maximumY: Float,
+            z: Float
+        ) -> [RenderVertex] {
+            let positions = [
+                RenderVec3(x: minimumX, y: minimumY, z: z),
+                RenderVec3(x: maximumX, y: minimumY, z: z),
+                RenderVec3(x: maximumX, y: maximumY, z: z),
+                RenderVec3(x: minimumX, y: minimumY, z: z),
+                RenderVec3(x: maximumX, y: maximumY, z: z),
+                RenderVec3(x: minimumX, y: maximumY, z: z),
+            ]
+            return positions.map {
+                RenderVertex(
+                    position: $0,
+                    textureCoordinate: .zero,
+                    normal: .backward,
+                    tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                    color: .white
+                )
+            }
+        }
+
+        let receiverVertices = quad(
+            minimumX: -2,
+            maximumX: 2,
+            minimumY: -1.2,
+            maximumY: 1.2,
+            z: 0
+        )
+        let casterVertices = quad(
+            minimumX: -0.95,
+            maximumX: -0.25,
+            minimumY: -0.35,
+            maximumY: 0.35,
+            z: -0.6
+        )
+        let receiver = try receiverVertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: receiverVertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -2, y: -1.2, z: 0),
+                        maximum: .init(x: 2, y: 1.2, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        let caster = try casterVertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: casterVertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -0.95, y: -0.35, z: -0.6),
+                        maximum: .init(x: -0.25, y: 0.35, z: -0.6)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        let material = try RenderServices.resources.createMaterial(.default)
+        let unshadowedDescriptor = LightDescriptor(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .init(x: 1, y: 0, z: 1),
+            color: .white,
+            energy: 3,
+            range: 10,
+            castsShadow: false,
+            shadowSoftness: 1
+        )
+        let light = try RenderServices.resources.createLight(
+            unshadowedDescriptor
+        )
+        defer {
+            RenderServices.resources.destroyLight(light)
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyMesh(caster)
+            RenderServices.resources.destroyMesh(receiver)
+        }
+        let frame = FrameDescriptor(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -5),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 50,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1
+            )
+        )
+
+        func renderFrame() throws {
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(frame)
+            RenderServices.scene.submit(.mesh(.init(
+                mesh: receiver,
+                material: material,
+                transform: .identity
+            )))
+            RenderServices.scene.submit(.mesh(.init(
+                mesh: caster,
+                material: material,
+                transform: .identity
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.endFrame()
+        }
+
+        try renderFrame()
+        let unshadowed =
+            try RenderServices.canvas.readbackPresentedFrame()
+        let shadowedDescriptor = LightDescriptor(
+            kind: unshadowedDescriptor.kind,
+            active: unshadowedDescriptor.active,
+            position: unshadowedDescriptor.position,
+            direction: unshadowedDescriptor.direction,
+            color: unshadowedDescriptor.color,
+            energy: unshadowedDescriptor.energy,
+            range: unshadowedDescriptor.range,
+            castsShadow: true,
+            shadowSoftness: unshadowedDescriptor.shadowSoftness
+        )
+        try RenderServices.resources.updateLight(
+            light,
+            descriptor: shadowedDescriptor
+        )
+        try renderFrame()
+        let shadowed =
+            try RenderServices.canvas.readbackPresentedFrame()
+
+        XCTAssertEqual(shadowed.size, unshadowed.size)
+        var materiallyDarkerPixels = 0
+        var litPixels = 0
+        for offset in stride(
+            from: 0,
+            to: shadowed.rgba8.count,
+            by: 4
+        ) {
+            let unshadowedBrightness =
+                Int(unshadowed.rgba8[offset]) +
+                Int(unshadowed.rgba8[offset + 1]) +
+                Int(unshadowed.rgba8[offset + 2])
+            let shadowedBrightness =
+                Int(shadowed.rgba8[offset]) +
+                Int(shadowed.rgba8[offset + 1]) +
+                Int(shadowed.rgba8[offset + 2])
+            if unshadowedBrightness - shadowedBrightness >= 24 {
+                materiallyDarkerPixels += 1
+            }
+            if shadowedBrightness >= 96 {
+                litPixels += 1
+            }
+        }
+        XCTAssertGreaterThan(materiallyDarkerPixels, 100)
+        XCTAssertGreaterThan(litPixels, 1_000)
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testDirectPBRUsesNormalRoughnessAndMetalnessMaps() throws {
         #if os(Windows)
         RenderServices.uninstall()

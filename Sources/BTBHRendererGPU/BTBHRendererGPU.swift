@@ -369,6 +369,8 @@ struct GPUSceneLightingProbe {
     let secondaryDirectionalDirection: RenderVec3
     let secondaryDirectionalColor: RenderColor
     let secondaryDirectionalEnergy: Float
+    let directionalShadow: GPUSceneDirectionalShadowProbe
+    let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
 
     init(
         ambientColor: RenderColor,
@@ -379,7 +381,9 @@ struct GPUSceneLightingProbe {
         directionalEnergy: Float,
         secondaryDirectionalDirection: RenderVec3,
         secondaryDirectionalColor: RenderColor,
-        secondaryDirectionalEnergy: Float
+        secondaryDirectionalEnergy: Float,
+        directionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
+        secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled
     ) {
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
@@ -391,7 +395,29 @@ struct GPUSceneLightingProbe {
             secondaryDirectionalDirection
         self.secondaryDirectionalColor = secondaryDirectionalColor
         self.secondaryDirectionalEnergy = secondaryDirectionalEnergy
+        self.directionalShadow = directionalShadow
+        self.secondaryDirectionalShadow = secondaryDirectionalShadow
     }
+}
+
+struct GPUSceneDirectionalShadowProbe: Equatable {
+    static let mapSize: Float = 2_048
+    static let disabled = Self(
+        enabled: false,
+        range: 0,
+        softness: 0,
+        viewProjection: [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ]
+    )
+
+    let enabled: Bool
+    let range: Float
+    let softness: Float
+    let viewProjection: [Float]
 }
 
 struct GPUScenePresentationProbeReport {
@@ -1175,6 +1201,9 @@ public final class GPUWindowProbe {
     func presentModelInstances(
         vertexShaderPath: String,
         animatedVertexShaderPath: String,
+        shadowVertexShaderPath: String,
+        animatedShadowVertexShaderPath: String,
+        shadowFragmentShaderPath: String,
         fragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
@@ -1247,6 +1276,37 @@ public final class GPUWindowProbe {
             Float(lighting.secondaryDirectionalColor.g) / 255
         nativeLighting.secondary_directional_blue =
             Float(lighting.secondaryDirectionalColor.b) / 255
+        nativeLighting.directional_shadow_enabled =
+            lighting.directionalShadow.enabled ? 1 : 0
+        nativeLighting.directional_shadow_softness =
+            lighting.directionalShadow.softness
+        nativeLighting.secondary_directional_shadow_enabled =
+            lighting.secondaryDirectionalShadow.enabled ? 1 : 0
+        nativeLighting.secondary_directional_shadow_softness =
+            lighting.secondaryDirectionalShadow.softness
+        withUnsafeMutablePointer(
+            to: &nativeLighting.directional_shadow_view_projection
+        ) {
+            $0.withMemoryRebound(to: Float.self, capacity: 16) { values in
+                for index in 0..<16 {
+                    values[index] =
+                        lighting.directionalShadow.viewProjection[index]
+                }
+            }
+        }
+        withUnsafeMutablePointer(
+            to:
+                &nativeLighting
+                    .secondary_directional_shadow_view_projection
+        ) {
+            $0.withMemoryRebound(to: Float.self, capacity: 16) { values in
+                for index in 0..<16 {
+                    values[index] =
+                        lighting.secondaryDirectionalShadow
+                            .viewProjection[index]
+                }
+            }
+        }
         if let environment = lighting.environment {
             nativeLighting.ibl_enabled = 1
             withUnsafeMutablePointer(
@@ -1358,38 +1418,61 @@ public final class GPUWindowProbe {
         var report = BTBHGPUSceneReport()
         let result = vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
-                fragmentShaderPath.withCString { fragmentPath in
-                    viewProjection.withUnsafeBufferPointer { matrix in
-                        sceneCameraRightValues.withUnsafeBufferPointer { right in
-                            sceneCameraUpValues.withUnsafeBufferPointer { up in
-                                sceneCameraPositionValues
-                                    .withUnsafeBufferPointer { position in
-                                    instances.withUnsafeBufferPointer { instanceData in
-                                        nativeSceneBatches.withUnsafeBufferPointer { batchData in
-                                            btbh_gpu_window_scene_present_instances(
-                                                window,
-                                                vertexPath,
-                                                animatedVertexPath,
-                                                fragmentPath,
-                                                shaderFormat,
-                                                matrix.baseAddress,
-                                                right.baseAddress,
-                                                up.baseAddress,
-                                                position.baseAddress,
-                                                &nativeLighting,
-                                                instanceData.baseAddress,
-                                                UInt32(transientInstanceCount),
-                                                UInt32(
-                                                    resolvedLogicalInstanceCount
-                                                ),
-                                                batchData.baseAddress,
-                                                UInt32(nativeSceneBatches.count),
-                                                clearColor.r,
-                                                clearColor.g,
-                                                clearColor.b,
-                                                clearColor.a,
-                                                &report
-                                            )
+                shadowVertexShaderPath.withCString { shadowVertexPath in
+                    animatedShadowVertexShaderPath.withCString {
+                        animatedShadowVertexPath in
+                        shadowFragmentShaderPath.withCString {
+                            shadowFragmentPath in
+                            fragmentShaderPath.withCString {
+                                fragmentPath in
+                                viewProjection.withUnsafeBufferPointer {
+                                    matrix in
+                                    sceneCameraRightValues
+                                        .withUnsafeBufferPointer { right in
+                                        sceneCameraUpValues
+                                            .withUnsafeBufferPointer { up in
+                                            sceneCameraPositionValues
+                                                .withUnsafeBufferPointer {
+                                                    position in
+                                            instances.withUnsafeBufferPointer {
+                                                instanceData in
+                                            nativeSceneBatches
+                                                .withUnsafeBufferPointer {
+                                                    batchData in
+                                                btbh_gpu_window_scene_present_instances(
+                                                    window,
+                                                    vertexPath,
+                                                    animatedVertexPath,
+                                                    shadowVertexPath,
+                                                    animatedShadowVertexPath,
+                                                    shadowFragmentPath,
+                                                    fragmentPath,
+                                                    shaderFormat,
+                                                    matrix.baseAddress,
+                                                    right.baseAddress,
+                                                    up.baseAddress,
+                                                    position.baseAddress,
+                                                    &nativeLighting,
+                                                    instanceData.baseAddress,
+                                                    UInt32(
+                                                        transientInstanceCount
+                                                    ),
+                                                    UInt32(
+                                                        resolvedLogicalInstanceCount
+                                                    ),
+                                                    batchData.baseAddress,
+                                                    UInt32(
+                                                        nativeSceneBatches.count
+                                                    ),
+                                                    clearColor.r,
+                                                    clearColor.g,
+                                                    clearColor.b,
+                                                    clearColor.a,
+                                                    &report
+                                                )
+                                            }
+                                            }
+                                        }
                                         }
                                     }
                                 }
@@ -1487,6 +1570,20 @@ public final class GPUWindowProbe {
               lighting.ambientEnergy >= 0,
               lighting.directionalEnergy >= 0,
               lighting.secondaryDirectionalEnergy >= 0 else {
+            return false
+        }
+        let shadows = [
+            lighting.directionalShadow,
+            lighting.secondaryDirectionalShadow,
+        ]
+        guard shadows.allSatisfy({
+            $0.range.isFinite &&
+            $0.range >= 0 &&
+            $0.softness.isFinite &&
+            $0.softness >= 0 &&
+            $0.viewProjection.count == 16 &&
+            $0.viewProjection.allSatisfy(\.isFinite)
+        }) else {
             return false
         }
         guard let environment = lighting.environment else {

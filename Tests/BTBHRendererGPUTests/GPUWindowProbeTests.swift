@@ -5,6 +5,102 @@ import BTBHRendererGPUCore
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testDirectionalLightingProjectionKeepsShadowContractWithSortedSlot()
+        throws
+    {
+        #if os(Windows)
+        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH directional shadow projection",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        let primary = try resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .init(x: -1, y: -1, z: -1),
+            color: .white,
+            energy: 2,
+            range: 16,
+            castsShadow: true,
+            shadowSoftness: 2
+        ))
+        _ = try resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 0.5,
+            range: 50,
+            castsShadow: false,
+            shadowSoftness: 7
+        ))
+        let camera = RenderCamera(
+            position: .init(x: 0, y: 4, z: -8),
+            target: .zero,
+            up: .up,
+            verticalFOVDegrees: 60,
+            projection: .perspective
+        )
+
+        var projection = try resources.sceneLighting(
+            environment: .default,
+            camera: camera,
+            aspect: 320 / 180
+        )
+
+        XCTAssertTrue(projection.directionalShadow.enabled)
+        XCTAssertEqual(projection.directionalShadow.range, 16)
+        XCTAssertEqual(projection.directionalShadow.softness, 2)
+        XCTAssertEqual(
+            projection.directionalShadow.viewProjection.count,
+            16
+        )
+        XCTAssertTrue(
+            projection.directionalShadow.viewProjection.allSatisfy(
+                \.isFinite
+            )
+        )
+        XCTAssertFalse(projection.secondaryDirectionalShadow.enabled)
+        XCTAssertEqual(projection.secondaryDirectionalShadow.range, 50)
+        XCTAssertEqual(projection.secondaryDirectionalShadow.softness, 7)
+
+        try resources.updateLight(primary, descriptor: .init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .zero,
+            color: .white,
+            energy: 2,
+            range: 16,
+            castsShadow: true,
+            shadowSoftness: 2
+        ))
+        projection = try resources.sceneLighting(
+            environment: .default,
+            camera: camera,
+            aspect: 320 / 180
+        )
+        XCTAssertFalse(projection.directionalShadow.enabled)
+        XCTAssertEqual(
+            projection.directionalShadow.viewProjection,
+            GPUSceneDirectionalShadowProbe.disabled.viewProjection
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
         #if os(Windows)
         let platform = GPUPlatform(request: .vulkan, debugMode: true)
@@ -294,6 +390,21 @@ final class GPUWindowProbeTests: XCTestCase {
                         "production_animated_model.vert.spv"
                     )
                     .path,
+                shadowVertexShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_shadow.vert.spv"
+                    )
+                    .path,
+                animatedShadowVertexShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_animated_shadow.vert.spv"
+                    )
+                    .path,
+                shadowFragmentShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_shadow.frag.spv"
+                    )
+                    .path,
                 fragmentShaderPath: shaderDirectory
                     .appendingPathComponent("production_model.frag.spv")
                     .path,
@@ -493,6 +604,21 @@ final class GPUWindowProbeTests: XCTestCase {
             animatedVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_animated_model.vert.spv"
+                )
+                .path,
+            shadowVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow.vert.spv"
+                )
+                .path,
+            animatedShadowVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_animated_shadow.vert.spv"
+                )
+                .path,
+            shadowFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow.frag.spv"
                 )
                 .path,
             fragmentShaderPath: shaderDirectory

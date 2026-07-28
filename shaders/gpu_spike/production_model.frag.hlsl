@@ -6,6 +6,12 @@ Texture2D<float4> normal_texture : register(t2, space2);
 SamplerState normal_sampler : register(s2, space2);
 Texture2D<float4> orm_texture : register(t3, space2);
 SamplerState orm_sampler : register(s3, space2);
+Texture2D<float> directional_shadow_texture : register(t4, space2);
+SamplerState directional_shadow_sampler : register(s4, space2);
+Texture2D<float> secondary_directional_shadow_texture
+    : register(t5, space2);
+SamplerState secondary_directional_shadow_sampler
+    : register(s5, space2);
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -27,6 +33,10 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_color_energy;
     float4 sun_direction_size;
     float4 procedural_controls;
+    float4x4 directional_shadow_view_projection;
+    float4x4 secondary_directional_shadow_view_projection;
+    float4 directional_shadow_controls;
+    float4 secondary_directional_shadow_controls;
 };
 
 struct FragmentInput
@@ -87,7 +97,8 @@ float3 evaluate_directional_light(
     float3 view,
     float roughness,
     float metalness,
-    float3 f0
+    float3 f0,
+    float visibility
 )
 {
     if (light_energy <= 0.0f)
@@ -146,7 +157,127 @@ float3 evaluate_directional_light(
         distribution *
         fresnel *
         geometry;
-    return (diffuse + specular) * light_color * light_energy;
+    return
+        (diffuse + specular) *
+        light_color *
+        light_energy *
+        visibility;
+}
+
+float primary_directional_visibility(
+    float3 world_position,
+    float3 normal
+)
+{
+    if (directional_shadow_controls.x < 0.5f)
+    {
+        return 1.0f;
+    }
+    const float4 clip = mul(
+        directional_shadow_view_projection,
+        float4(world_position, 1.0f)
+    );
+    if (clip.w <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float3 projected = clip.xyz / clip.w;
+    if (
+        projected.x < -1.0f || projected.x > 1.0f ||
+        projected.y < -1.0f || projected.y > 1.0f ||
+        projected.z < 0.0f || projected.z > 1.0f
+    )
+    {
+        return 1.0f;
+    }
+    const float2 uv = float2(
+        projected.x * 0.5f + 0.5f,
+        -projected.y * 0.5f + 0.5f
+    );
+    const float3 light = stable_normalize(
+        -directional_direction_energy.xyz,
+        float3(0.0f, 1.0f, 0.0f)
+    );
+    const float normal_dot_light = saturate(dot(normal, light));
+    const float bias =
+        0.001f + 0.0015f * (1.0f - normal_dot_light);
+    const float texel_radius =
+        max(directional_shadow_controls.y, 0.0f) / 2048.0f;
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            const float stored_depth = directional_shadow_texture.Sample(
+                directional_shadow_sampler,
+                uv + float2(x, y) * texel_radius
+            );
+            visibility +=
+                projected.z - bias <= stored_depth ? 1.0f : 0.0f;
+        }
+    }
+    return visibility / 9.0f;
+}
+
+float secondary_directional_visibility(
+    float3 world_position,
+    float3 normal
+)
+{
+    if (secondary_directional_shadow_controls.x < 0.5f)
+    {
+        return 1.0f;
+    }
+    const float4 clip = mul(
+        secondary_directional_shadow_view_projection,
+        float4(world_position, 1.0f)
+    );
+    if (clip.w <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float3 projected = clip.xyz / clip.w;
+    if (
+        projected.x < -1.0f || projected.x > 1.0f ||
+        projected.y < -1.0f || projected.y > 1.0f ||
+        projected.z < 0.0f || projected.z > 1.0f
+    )
+    {
+        return 1.0f;
+    }
+    const float2 uv = float2(
+        projected.x * 0.5f + 0.5f,
+        -projected.y * 0.5f + 0.5f
+    );
+    const float3 light = stable_normalize(
+        -secondary_directional_direction_energy.xyz,
+        float3(0.0f, 1.0f, 0.0f)
+    );
+    const float normal_dot_light = saturate(dot(normal, light));
+    const float bias =
+        0.001f + 0.0015f * (1.0f - normal_dot_light);
+    const float texel_radius =
+        max(secondary_directional_shadow_controls.y, 0.0f) /
+        2048.0f;
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            const float stored_depth =
+                secondary_directional_shadow_texture.Sample(
+                    secondary_directional_shadow_sampler,
+                    uv + float2(x, y) * texel_radius
+                );
+            visibility +=
+                projected.z - bias <= stored_depth ? 1.0f : 0.0f;
+        }
+    }
+    return visibility / 9.0f;
 }
 
 float3 evaluate_irradiance_sh(float3 direction)
@@ -414,7 +545,11 @@ float4 main(FragmentInput input) : SV_Target0
         view,
         roughness,
         metalness,
-        f0
+        f0,
+        primary_directional_visibility(
+            input.world_position,
+            normal
+        )
     );
     lighting += evaluate_directional_light(
         secondary_directional_direction_energy.xyz,
@@ -425,7 +560,11 @@ float4 main(FragmentInput input) : SV_Target0
         view,
         roughness,
         metalness,
-        f0
+        f0,
+        secondary_directional_visibility(
+            input.world_position,
+            normal
+        )
     );
     const float3 tone_mapped = lighting / (1.0f + lighting);
     return float4(tone_mapped + emission, albedo_sample.a);

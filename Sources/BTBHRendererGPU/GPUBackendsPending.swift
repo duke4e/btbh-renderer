@@ -861,7 +861,9 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 
     func sceneLighting(
-        environment: EnvironmentDescriptor
+        environment: EnvironmentDescriptor,
+        camera: RenderCamera,
+        aspect: Float
     ) throws -> GPUSceneLightingProbe {
         var projectedEnvironment:
             GPUProceduralEnvironmentProjection?
@@ -897,8 +899,140 @@ final class GPUResourceBackend: RenderResourceBackend {
             secondaryDirectionalDirection:
                 secondary?.direction.normalized() ?? .down,
             secondaryDirectionalColor: secondary?.color ?? .white,
-            secondaryDirectionalEnergy: secondary?.energy ?? 0
+            secondaryDirectionalEnergy: secondary?.energy ?? 0,
+            directionalShadow: Self.directionalShadow(
+                primary,
+                camera: camera,
+                aspect: aspect
+            ),
+            secondaryDirectionalShadow: Self.directionalShadow(
+                secondary,
+                camera: camera,
+                aspect: aspect
+            )
         )
+    }
+
+    private static func directionalShadow(
+        _ descriptor: LightDescriptor?,
+        camera: RenderCamera,
+        aspect: Float
+    ) -> GPUSceneDirectionalShadowProbe {
+        guard let descriptor else { return .disabled }
+        let disabled = GPUSceneDirectionalShadowProbe(
+            enabled: false,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            viewProjection:
+                GPUSceneDirectionalShadowProbe.disabled.viewProjection
+        )
+        let direction = descriptor.direction.normalized()
+        let cameraForward = (camera.target - camera.position).normalized()
+        guard descriptor.castsShadow,
+              descriptor.energy > 0,
+              descriptor.range > 0,
+              aspect.isFinite,
+              aspect > 0,
+              camera.verticalFOVDegrees.isFinite,
+              camera.verticalFOVDegrees > 0,
+              camera.verticalFOVDegrees < 180,
+              direction.lengthSquared > 0,
+              cameraForward.lengthSquared > 0 else {
+            return disabled
+        }
+
+        let shadowNear = descriptor.range / 1_000
+        let shadowFar = descriptor.range
+        let farHeight = shadowFar * tan(
+            camera.verticalFOVDegrees * .pi / 360
+        )
+        let halfDepth = (shadowFar - shadowNear) * 0.5
+        let radius = sqrt(
+            farHeight * farHeight * (1 + aspect * aspect) +
+            halfDepth * halfDepth
+        )
+        guard radius.isFinite, radius > 0 else { return disabled }
+        let frustumCenter =
+            camera.position +
+            cameraForward * ((shadowNear + shadowFar) * 0.5)
+
+        let absolute = RenderVec3(
+            x: abs(direction.x),
+            y: abs(direction.y),
+            z: abs(direction.z)
+        )
+        let leastAligned: RenderVec3
+        if absolute.x <= absolute.y && absolute.x <= absolute.z {
+            leastAligned = .right
+        } else if absolute.y <= absolute.z {
+            leastAligned = .up
+        } else {
+            leastAligned = .forward
+        }
+        let lightRight = direction.cross(leastAligned).normalized()
+        let lightUp = lightRight.cross(direction).normalized()
+        guard lightRight.lengthSquared > 0,
+              lightUp.lengthSquared > 0 else {
+            return disabled
+        }
+
+        let texelSize =
+            radius * 2 / GPUSceneDirectionalShadowProbe.mapSize
+        let snappedX =
+            floor(frustumCenter.dot(lightRight) / texelSize) * texelSize
+        let snappedY =
+            floor(frustumCenter.dot(lightUp) / texelSize) * texelSize
+        let snappedZ = frustumCenter.dot(direction)
+        let center =
+            lightRight * snappedX +
+            lightUp * snappedY +
+            direction * snappedZ
+        let depthExtension: Float = 100
+        let eye =
+            center - direction * (radius + depthExtension)
+        let view: [Float] = [
+            lightRight.x, lightUp.x, direction.x, 0,
+            lightRight.y, lightUp.y, direction.y, 0,
+            lightRight.z, lightUp.z, direction.z, 0,
+            -eye.dot(lightRight),
+            -eye.dot(lightUp),
+            -eye.dot(direction),
+            1,
+        ]
+        let depth = depthExtension + radius * 2
+        let projection: [Float] = [
+            1 / radius, 0, 0, 0,
+            0, 1 / radius, 0, 0,
+            0, 0, 1 / depth, 0,
+            0, 0, 0, 1,
+        ]
+        let viewProjection = multiplyShadowMatrix(projection, view)
+        guard viewProjection.allSatisfy(\.isFinite) else {
+            return disabled
+        }
+        return .init(
+            enabled: true,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            viewProjection: viewProjection
+        )
+    }
+
+    private static func multiplyShadowMatrix(
+        _ lhs: [Float],
+        _ rhs: [Float]
+    ) -> [Float] {
+        var result = Array(repeating: Float.zero, count: 16)
+        for column in 0..<4 {
+            for row in 0..<4 {
+                result[column * 4 + row] =
+                    lhs[row] * rhs[column * 4] +
+                    lhs[4 + row] * rhs[column * 4 + 1] +
+                    lhs[8 + row] * rhs[column * 4 + 2] +
+                    lhs[12 + row] * rhs[column * 4 + 3]
+            }
+        }
+        return result
     }
 
     func sceneClearColor(
@@ -2966,7 +3100,11 @@ final class GPUSceneBackend: SceneBackend {
             .cross(cameraForward)
             .normalized()
         let lighting = try resources.sceneLighting(
-            environment: currentFrame.environment
+            environment: currentFrame.environment,
+            camera: currentFrame.camera,
+            aspect:
+                Float(drawableSize.width) /
+                Float(drawableSize.height)
         )
         let clearColor = try resources.sceneClearColor(
             environment: currentFrame.environment

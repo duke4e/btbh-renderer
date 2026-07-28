@@ -470,6 +470,12 @@ typedef struct BTBHGPUSceneLighting {
     float sun_size_radians;
     float sun_curve;
     float ibl_reserved[3];
+    float directional_shadow_view_projection[16];
+    float secondary_directional_shadow_view_projection[16];
+    uint32_t directional_shadow_enabled;
+    float directional_shadow_softness;
+    uint32_t secondary_directional_shadow_enabled;
+    float secondary_directional_shadow_softness;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUSceneReport {
@@ -715,6 +721,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],

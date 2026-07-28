@@ -26,6 +26,12 @@
 #ifndef BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
@@ -107,8 +113,20 @@ int main(void)
             "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 6"
         ) ||
         !require_text(
+            BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"storage_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"storage_buffers\": 2"
+        ) ||
+        !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 4"
+            "\"samplers\": 6"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
