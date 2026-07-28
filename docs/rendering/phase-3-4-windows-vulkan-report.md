@@ -18,9 +18,9 @@ gate are closed.
 ## Source and host
 
 - Game source:
-  `3b77065094c3bc307ff0b792d1d64a7f2446985b`
-- Renderer source:
-  `ca6ece5cc50b53586e09bea8618993d8a1b88507`
+  `d91f13acdab3cf7d8e4381787f654153ce4f610f`
+- Renderer implementation source:
+  `346adfb0e22ffe3efb6d29e56083adddd7437bf9`
 - Branch: `codex/renderer-phase-0-1`
 - CPU: AMD Ryzen 9 9950X
 - GPU: NVIDIA GeForce RTX 3070 Ti
@@ -107,17 +107,59 @@ combat paths show real absolute mean regressions of 5.344 ms and 5.876 ms
 median. The editor ratios are amplified by the sub-millisecond legacy
 baseline but also remain real absolute regressions.
 
-The current production path materializes Swift batch, instance, material, and
-bone arrays each frame, then records a large number of per-primitive
-pipeline/sampler/buffer bindings and draw calls. Material-slot filtering now
-prepares only the primitives each batch draws; compared with the immediately
-preceding `d347d9b` two-run means, this reduced game median from 43.971 ms to
-35.941 ms and combat median from 43.205 ms to 35.975 ms. The remaining
-submission overhead is still above the legacy gate. The final captures retain
-identical workloads across both GPU runs, confirming same-source
-reproducibility. The documented legacy-to-current entity-signature drift is
-small relative to these regressions, but cannot be strictly excluded from the
-legacy comparison until a matching-workload gate is available.
+Material-slot filtering prepares only the primitives each batch draws;
+compared with the immediately preceding `d347d9b` two-run means, this reduced
+game median from 43.971 ms to 35.941 ms and combat median from 43.205 ms to
+35.975 ms. Renderer `346adfb` additionally retains the packed Swift instance
+and batch buffers, native batch conversion storage, and camera vectors across
+frames, while releasing that storage on shutdown. The scene contents are
+still rebuilt each frame and the renderer still records a large number of
+per-primitive pipeline/sampler/buffer bindings and draw calls. The remaining
+submission overhead is therefore still above the legacy gate. The final
+captures retain identical workloads across both GPU runs, confirming
+same-source reproducibility. The documented legacy-to-current
+entity-signature drift is small relative to these regressions, but cannot be
+strictly excluded from the legacy comparison until a matching-workload gate
+is available.
+
+### Scene-submission scratch A/B
+
+The retained-buffer change was verified with two warmed five-mode captures,
+followed by a same-session A-B-A control because comparison with the older
+closeout runs initially showed editor deltas above the 5% diagnostic
+threshold:
+
+- New before: `.build/render-baselines/windows-gpu-346adfb-scratch-run2`
+- Old control: `.build/render-baselines/windows-gpu-adf9484-control-now`
+- New after: `.build/render-baselines/windows-gpu-346adfb-scratch-run3`
+
+The old `adf9484` control itself moved from the earlier 1.561 / 2.018 / 3.911
+ms two-run editor medians to 2.040 / 2.437 / 4.230 ms for city, unified, and
+particle respectively. That reproduced the apparent editor slowdown without
+the new code and identifies host/run drift as the source of the historical
+comparison delta.
+
+Using the old control between the two adjacent new runs gives:
+
+| Mode | Old control median / p95 ms | New A-B-A mean median / p95 ms | Median delta | p95 delta |
+| --- | ---: | ---: | ---: | ---: |
+| Game | 36.422 / 42.931 | 34.262 / 40.929 | -5.93% | -4.66% |
+| Combat Lab | 36.781 / 45.294 | 35.083 / 42.094 | -4.62% | -7.07% |
+| Particle editor | 4.230 / 4.699 | 4.353 / 4.921 | +2.90% | +4.73% |
+| City-block editor | 2.040 / 2.397 | 2.035 / 2.544 | -0.23% | +6.12% |
+| Unified city | 2.437 / 2.727 | 2.365 / 2.676 | -2.97% | -1.86% |
+
+The city p95 delta is 0.147 ms on a roughly 2 ms frame and is not stable:
+the post-control new run was only +2.24% versus the immediately preceding
+control. It is recorded as short-frame/run-order noise rather than a stable
+regression. No other editor mean exceeds the 5% gate, while the heavy game
+and combat workloads improve.
+
+Both retained new runs passed all 19 unchanged visual/cue comparisons, kept
+the five entity signatures identical to the reference manifest, produced
+1920×1080 PNGs, emitted exactly one `CAPTURED` and `FINISHED` marker per mode,
+and left no game, supervisor, or comparator process running. No golden or
+threshold was changed.
 
 CPU-submit and asynchronous fence-completion distributions are not yet exposed
 by the production capture schema. Adding them by synchronously waiting on a
@@ -134,7 +176,7 @@ called complete:
    behavior instead of the current simplified forward scene pass.
 2. Preserve the imported metallic/roughness and normal-map channels in the
    production material representation.
-3. Replace per-frame Swift/native scene materialization and per-primitive
+3. Replace the remaining per-frame scene-content rebuild and per-primitive
    submission with persistent, grouped GPU batches.
 4. Add non-perturbing CPU-submit and fence-completion telemetry to the capture
    report.
