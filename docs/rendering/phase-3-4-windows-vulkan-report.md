@@ -306,6 +306,35 @@ per-frame scene rebuild, per-primitive bindings/draw calls, simplified
 lighting, or missing post chain. The historical Windows-to-Apple text and
 antialiasing SSIM issue remains unresolved and is not claimed fixed here.
 
+### Production material-channel preservation
+
+Renderer commit `cc1d470` closes the representation half of the imported
+PBR-material gap:
+
+- glTF normal textures and normal scale now survive model import, native
+  ownership, the C ABI, Swift scene preparation, model material patches, and
+  scene-batch validation;
+- the glTF metallic-roughness texture plus occlusion, roughness, and
+  metalness factors survive the same path;
+- actual glTF materials retain glTF's implicit roughness/metalness defaults,
+  while the synthetic slot-zero material retains the engine defaults;
+- standalone `MaterialDescriptor` values and normal/ORM texture overrides
+  propagate without discarding imported scalar factors;
+- normal and ORM textures are released with the owning model, including
+  partial-import failure paths.
+
+The final source passes 13/13 native CTests, 116 GPU-enabled XCTest cases
+plus one Swift Testing check on real Vulkan, and 65 base XCTest cases plus
+one Swift Testing check without the GPU test target. An independent review
+found and closed two importer semantic gaps—occlusion strength and implicit
+glTF metalness—and its affected-boundary re-review has no remaining
+HIGH/MEDIUM finding.
+
+This slice deliberately does not sample the new channels in the simplified
+forward shader. It is prerequisite data/lifetime plumbing for the remaining
+PBR/IBL work, not a claim of PBR visual parity, and it does not replace or
+modify any golden or threshold.
+
 ## Remaining Windows work
 
 The following work remains before Windows visual/performance parity can be
@@ -313,15 +342,13 @@ called complete:
 
 1. Port the used PBR/IBL, shadow, stencil/cull, transparency, and post-chain
    behavior instead of the current simplified forward scene pass.
-2. Preserve the imported metallic/roughness and normal-map channels in the
-   production material representation.
-3. Group the remaining per-frame scene-content rebuild and per-primitive
+2. Group the remaining per-frame scene-content rebuild and per-primitive
    bindings/draw calls. Persistent semantic instance buffers now bind and
    reuse native GPU storage directly, but geometry/material submission is
    not yet retained as a grouped render graph.
-4. Implement and exercise the production GPU file-dialog path; automated tool
+3. Implement and exercise the production GPU file-dialog path; automated tool
    captures do not open a dialog.
-5. Re-run the strict platform-local legacy visual gate on matching current
+4. Re-run the strict platform-local legacy visual gate on matching current
    entity signatures without changing the retained authority to force a pass.
 
 After those Windows items pass, the remaining platform gate is native
