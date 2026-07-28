@@ -408,6 +408,11 @@ final class GPUWindowProbeTests: XCTestCase {
                 fragmentShaderPath: shaderDirectory
                     .appendingPathComponent("production_model.frag.spv")
                     .path,
+                unshadowedFragmentShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_model_unshadowed.frag.spv"
+                    )
+                    .path,
                 shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
                 viewProjection: [
                     1, 0, 0, 0,
@@ -623,6 +628,11 @@ final class GPUWindowProbeTests: XCTestCase {
                 .path,
             fragmentShaderPath: shaderDirectory
                 .appendingPathComponent("production_model.frag.spv")
+                .path,
+            unshadowedFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_model_unshadowed.frag.spv"
+                )
                 .path,
             shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
             viewProjection: [

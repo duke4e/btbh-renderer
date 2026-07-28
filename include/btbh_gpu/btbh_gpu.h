@@ -725,6 +725,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],
     const float camera_right[3],

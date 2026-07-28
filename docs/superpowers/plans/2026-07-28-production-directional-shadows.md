@@ -42,6 +42,10 @@ Status: approved automatically on 2026-07-28.
 
 - Run native `/W4 /WX`, all CTests, focused then full renderer Swift tests,
   full game Swift tests, release build, API audit, and diff checks.
+- If the warmed captures show a stable disabled-shadow regression, add a RED
+  reflection contract for a four-sampler no-shadow fragment variant, compile
+  it from the shared production shader, select matching model pipelines when
+  both shadow slots are disabled, and repeat verification/captures.
 - Request one independent final code review and resolve all high/medium
   findings.
 - Run two warmed five-mode Windows A/B capture series; inspect output, entity
@@ -49,4 +53,3 @@ Status: approved automatically on 2026-07-28.
 - Update the Windows report without changing goldens or thresholds.
 - Commit and push the renderer branch, then update, commit, and push the game
   submodule gitlink.
-

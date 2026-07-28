@@ -587,6 +587,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_animated_shadow.vert|vertex"
         "production_shadow.frag|fragment"
         "production_model.frag|fragment"
+        "production_model_unshadowed.frag|fragment"
         "production_canvas.vert|vertex"
         "production_canvas.frag|fragment"
         "production_canvas_textured.frag|fragment"
@@ -612,6 +613,14 @@ if(BTBH_BUILD_GPU_SPIKE)
             _shader_reflection
             "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.json"
         )
+        set(_shader_dependencies shadercross "${_shader_source}")
+        if(_shader_name STREQUAL "production_model_unshadowed.frag")
+            list(
+                APPEND
+                _shader_dependencies
+                "${R3D_ROOT_PATH}/shaders/gpu_spike/production_model.frag.hlsl"
+            )
+        endif()
 
         add_custom_command(
             OUTPUT "${_shader_spirv}"
@@ -625,10 +634,9 @@ if(BTBH_BUILD_GPU_SPIKE)
                 -d SPIRV
                 -t "${_shadercross_stage}"
                 -e main
+                -I "${R3D_ROOT_PATH}/shaders/gpu_spike"
                 -o "${_shader_spirv}"
-            DEPENDS
-                shadercross
-                "${_shader_source}"
+            DEPENDS ${_shader_dependencies}
             COMMENT "Compiling ${_shader_name} HLSL to SPIR-V"
             VERBATIM
         )
@@ -825,6 +833,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow.vert.json"
             BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_shadow.vert.json"
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
+            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
     )
     add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
     add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)

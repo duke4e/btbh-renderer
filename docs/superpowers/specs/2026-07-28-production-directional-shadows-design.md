@@ -117,3 +117,24 @@ Final Windows acceptance uses two warmed five-mode captures. It requires clean
 shutdown, 1920 by 1080 output, identical entity signatures, unchanged goldens
 and thresholds, visual cue inspection, and diagnosis of any stable same-backend
 median or p95 regression above five percent.
+
+## Benchmark-driven no-shadow specialization
+
+The first warmed A/B/C captures showed that the shadow-capable fragment shader
+added a stable GPU-fence regression to modes where both directional shadows
+were disabled. CPU submission remained unchanged, isolating the cost to the
+shared production fragment pipeline.
+
+The production shader is therefore compiled into two variants from the same
+source:
+
+- the six-sampler shadow-capable variant used when either directional shadow
+  slot is enabled;
+- a four-sampler no-shadow variant that compile-time removes both PCF paths and
+  shadow resources.
+
+The scene runtime owns matching static and animated model pipeline sets and
+selects one set once per scene submission. No-shadow draws bind only the four
+material samplers. This specialization must preserve identical pixels and the
+existing material/light uniform layout while removing disabled-shadow shader
+occupancy and descriptor overhead.

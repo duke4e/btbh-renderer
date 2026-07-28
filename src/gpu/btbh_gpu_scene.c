@@ -74,6 +74,12 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *animated_model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
     ][BTBH_GPU_SCENE_DEPTH_COUNT];
+    SDL_GPUGraphicsPipeline *unshadowed_model_pipelines[
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT];
+    SDL_GPUGraphicsPipeline *unshadowed_animated_model_pipelines[
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT];
     SDL_GPUGraphicsPipeline *shadow_pipeline;
     SDL_GPUGraphicsPipeline *animated_shadow_pipeline;
     BTBHGPUTexture *fallback_texture;
@@ -225,15 +231,16 @@ static SDL_GPUCompareOp btbh_gpu_scene_depth_compare(
     }
 }
 
-static bool btbh_gpu_scene_create_pipeline(
+static bool btbh_gpu_scene_create_model_pipeline_set(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
-    const char *animated_vertex_shader_path,
-    const char *shadow_vertex_shader_path,
-    const char *animated_shadow_vertex_shader_path,
-    const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
+    bool animated,
+    uint32_t fragment_sampler_count,
+    SDL_GPUGraphicsPipeline *pipelines[
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT],
     BTBHGPUSceneReport *report
 ) {
     SDL_GPUDevice *device = window->device->gpu;
@@ -249,7 +256,7 @@ static bool btbh_gpu_scene_create_pipeline(
         entrypoint,
         format,
         SDL_GPU_SHADERSTAGE_VERTEX,
-        1u,
+        animated ? 2u : 1u,
         0u,
         1u,
         report
@@ -264,7 +271,7 @@ static bool btbh_gpu_scene_create_pipeline(
         format,
         SDL_GPU_SHADERSTAGE_FRAGMENT,
         0u,
-        6u,
+        fragment_sampler_count,
         1u,
         report
     );
@@ -287,7 +294,6 @@ static bool btbh_gpu_scene_create_pipeline(
         window->window
     );
     color_target.blend_state.color_write_mask = 0x0fu;
-
     vertex_buffer.slot = 0u;
     vertex_buffer.pitch = BTBH_GPU_MODEL_VERTEX_STRIDE;
     vertex_buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
@@ -311,29 +317,43 @@ static bool btbh_gpu_scene_create_pipeline(
     attributes[4].location = 4u;
     attributes[4].buffer_slot = 0u;
     attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[4].offset = BTBH_GPU_MODEL_TANGENT_OFFSET;
+    attributes[4].offset = animated
+        ? BTBH_GPU_MODEL_JOINTS_OFFSET
+        : BTBH_GPU_MODEL_TANGENT_OFFSET;
+    if (animated) {
+        attributes[5].location = 5u;
+        attributes[5].buffer_slot = 0u;
+        attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attributes[5].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
+        attributes[6].location = 6u;
+        attributes[6].buffer_slot = 0u;
+        attributes[6].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+        attributes[6].offset = BTBH_GPU_MODEL_TANGENT_OFFSET;
+    }
 
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer;
     info.vertex_input_state.num_vertex_buffers = 1u;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 5u;
+    info.vertex_input_state.num_vertex_attributes = animated ? 7u : 5u;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    info.rasterizer_state.front_face =
+        SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.enable_depth_test = true;
     info.depth_stencil_state.enable_depth_write = true;
     info.target_info.color_target_descriptions = &color_target;
     info.target_info.num_color_targets = 1u;
-    info.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    info.target_info.depth_stencil_format =
+        SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     info.target_info.has_depth_stencil_target = true;
 
     for (uint32_t mode = 0u;
          mode < BTBH_GPU_SCENE_BLEND_COUNT;
-         mode += 1u) {
+         ++mode) {
         btbh_gpu_scene_blend_state(
             (BTBHGPUSceneBlendMode)mode,
             &color_target.blend_state
@@ -341,98 +361,90 @@ static bool btbh_gpu_scene_create_pipeline(
         color_target.blend_state.color_write_mask = 0x0fu;
         for (uint32_t depth = 0u;
              depth < BTBH_GPU_SCENE_DEPTH_COUNT;
-             depth += 1u) {
+             ++depth) {
             info.depth_stencil_state.compare_op =
                 btbh_gpu_scene_depth_compare(
                     (BTBHGPUSceneDepthCompare)depth
                 );
-            window->scene_runtime->model_pipelines[mode][depth] =
+            pipelines[mode][depth] =
                 SDL_CreateGPUGraphicsPipeline(device, &info);
-            if (
-                window->scene_runtime
-                    ->model_pipelines[mode][depth] == NULL
-            ) {
-                break;
-            }
-        }
-    }
-    SDL_ReleaseGPUShader(device, vertex_shader);
-    if (window->scene_runtime->model_pipelines[
-            BTBH_GPU_SCENE_BLEND_COUNT - 1u
-        ][BTBH_GPU_SCENE_DEPTH_COUNT - 1u] == NULL) {
-        SDL_ReleaseGPUShader(device, fragment_shader);
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
-    SDL_GPUShader *animated_vertex_shader = btbh_gpu_scene_load_shader(
-        device,
-        animated_vertex_shader_path,
-        entrypoint,
-        format,
-        SDL_GPU_SHADERSTAGE_VERTEX,
-        2u,
-        0u,
-        1u,
-        report
-    );
-    if (animated_vertex_shader == NULL) {
-        SDL_ReleaseGPUShader(device, fragment_shader);
-        return false;
-    }
-    attributes[4].location = 4u;
-    attributes[4].buffer_slot = 0u;
-    attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[4].offset = BTBH_GPU_MODEL_JOINTS_OFFSET;
-    attributes[5].location = 5u;
-    attributes[5].buffer_slot = 0u;
-    attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[5].offset = BTBH_GPU_MODEL_WEIGHTS_OFFSET;
-    attributes[6].location = 6u;
-    attributes[6].buffer_slot = 0u;
-    attributes[6].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
-    attributes[6].offset = BTBH_GPU_MODEL_TANGENT_OFFSET;
-    info.vertex_shader = animated_vertex_shader;
-    info.vertex_input_state.num_vertex_attributes = 7u;
-    for (uint32_t mode = 0u;
-         mode < BTBH_GPU_SCENE_BLEND_COUNT;
-         mode += 1u) {
-        btbh_gpu_scene_blend_state(
-            (BTBHGPUSceneBlendMode)mode,
-            &color_target.blend_state
-        );
-        color_target.blend_state.color_write_mask = 0x0fu;
-        for (uint32_t depth = 0u;
-             depth < BTBH_GPU_SCENE_DEPTH_COUNT;
-             depth += 1u) {
-            info.depth_stencil_state.compare_op =
-                btbh_gpu_scene_depth_compare(
-                    (BTBHGPUSceneDepthCompare)depth
+            if (pipelines[mode][depth] == NULL) {
+                SDL_ReleaseGPUShader(device, fragment_shader);
+                SDL_ReleaseGPUShader(device, vertex_shader);
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
                 );
-            window->scene_runtime
-                ->animated_model_pipelines[mode][depth] =
-                    SDL_CreateGPUGraphicsPipeline(device, &info);
-            if (
-                window->scene_runtime
-                    ->animated_model_pipelines[mode][depth] == NULL
-            ) {
-                break;
+                return false;
             }
         }
     }
-    SDL_ReleaseGPUShader(device, animated_vertex_shader);
     SDL_ReleaseGPUShader(device, fragment_shader);
-    if (window->scene_runtime->animated_model_pipelines[
-            BTBH_GPU_SCENE_BLEND_COUNT - 1u
-        ][BTBH_GPU_SCENE_DEPTH_COUNT - 1u] == NULL) {
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
+    SDL_ReleaseGPUShader(device, vertex_shader);
+    return true;
+}
+
+static bool btbh_gpu_scene_create_pipeline(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUSceneReport *report
+) {
+    SDL_GPUDevice *device = window->device->gpu;
+    const SDL_GPUShaderFormat format =
+        btbh_gpu_scene_shader_format(project_format);
+    const char *entrypoint =
+        project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+            ? "main0"
+            : "main";
+    if (!btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            vertex_shader_path,
+            fragment_shader_path,
+            project_format,
+            false,
+            6u,
+            window->scene_runtime->model_pipelines,
+            report
+        ) ||
+        !btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            animated_vertex_shader_path,
+            fragment_shader_path,
+            project_format,
+            true,
+            6u,
+            window->scene_runtime->animated_model_pipelines,
+            report
+        ) ||
+        !btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            vertex_shader_path,
+            unshadowed_fragment_shader_path,
+            project_format,
+            false,
+            4u,
+            window->scene_runtime->unshadowed_model_pipelines,
+            report
+        ) ||
+        !btbh_gpu_scene_create_model_pipeline_set(
+            window,
+            animated_vertex_shader_path,
+            unshadowed_fragment_shader_path,
+            project_format,
+            true,
+            4u,
+            window->scene_runtime
+                ->unshadowed_animated_model_pipelines,
+            report
+        )) {
         return false;
     }
     SDL_GPUShader *shadow_vertex_shader = btbh_gpu_scene_load_shader(
@@ -486,9 +498,16 @@ static bool btbh_gpu_scene_create_pipeline(
         return false;
     }
 
+    SDL_GPUVertexBufferDescription vertex_buffer;
     SDL_GPUVertexAttribute shadow_attributes[3];
+    SDL_GPUGraphicsPipelineCreateInfo info;
+    SDL_zero(vertex_buffer);
     SDL_zeroa(shadow_attributes);
     SDL_zero(info);
+    vertex_buffer.slot = 0u;
+    vertex_buffer.pitch = BTBH_GPU_MODEL_VERTEX_STRIDE;
+    vertex_buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    vertex_buffer.instance_step_rate = 0u;
     shadow_attributes[0].location = 0u;
     shadow_attributes[0].buffer_slot = 0u;
     shadow_attributes[0].format =
@@ -552,6 +571,7 @@ static bool btbh_gpu_scene_ensure_runtime(
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     BTBHGPUSceneReport *report
 ) {
@@ -579,6 +599,7 @@ static bool btbh_gpu_scene_ensure_runtime(
             animated_shadow_vertex_shader_path,
             shadow_fragment_shader_path,
             fragment_shader_path,
+            unshadowed_fragment_shader_path,
             shader_format,
             report
         )) {
@@ -1309,6 +1330,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],
     const float camera_right[3],
@@ -1350,6 +1372,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         animated_shadow_vertex_shader_path == NULL ||
         shadow_fragment_shader_path == NULL ||
         fragment_shader_path == NULL ||
+        unshadowed_fragment_shader_path == NULL ||
         view_projection == NULL ||
         camera_right == NULL ||
         camera_up == NULL ||
@@ -1387,6 +1410,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             animated_shadow_vertex_shader_path,
             shadow_fragment_shader_path,
             fragment_shader_path,
+            unshadowed_fragment_shader_path,
             shader_format,
             report
         )) {
@@ -1531,6 +1555,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         lighting->directional_shadow_enabled,
         lighting->secondary_directional_shadow_enabled
     };
+    const bool shadows_active =
+        shadow_enabled[0] != 0u || shadow_enabled[1] != 0u;
     const float *shadow_matrices[2] = {
         lighting->directional_shadow_view_projection,
         lighting->secondary_directional_shadow_view_projection
@@ -1906,9 +1932,15 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             if (animated) {
                 SDL_BindGPUGraphicsPipeline(
                     pass,
-                    window->scene_runtime->animated_model_pipelines[
-                        batch->blend_mode
-                    ][batch->depth_compare]
+                    shadows_active
+                        ? window->scene_runtime
+                            ->animated_model_pipelines[
+                                batch->blend_mode
+                            ][batch->depth_compare]
+                        : window->scene_runtime
+                            ->unshadowed_animated_model_pipelines[
+                                batch->blend_mode
+                            ][batch->depth_compare]
                 );
                 SDL_GPUBuffer *storage_buffers[2] = {
                     batch_instance_buffer,
@@ -1923,9 +1955,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             } else {
                 SDL_BindGPUGraphicsPipeline(
                     pass,
-                    window->scene_runtime->model_pipelines[
-                        batch->blend_mode
-                    ][batch->depth_compare]
+                    shadows_active
+                        ? window->scene_runtime->model_pipelines[
+                            batch->blend_mode
+                        ][batch->depth_compare]
+                        : window->scene_runtime
+                            ->unshadowed_model_pipelines[
+                                batch->blend_mode
+                            ][batch->depth_compare]
                 );
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
@@ -1971,7 +2008,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 pass,
                 0u,
                 samplers,
-                6u
+                shadows_active ? 6u : 4u
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -2155,6 +2192,30 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                         device,
                         window->scene_runtime
                             ->animated_model_pipelines[mode][depth]
+                    );
+                }
+                if (
+                    window->scene_runtime
+                        ->unshadowed_model_pipelines[mode][depth] != NULL
+                ) {
+                    SDL_ReleaseGPUGraphicsPipeline(
+                        device,
+                        window->scene_runtime
+                            ->unshadowed_model_pipelines[mode][depth]
+                    );
+                }
+                if (
+                    window->scene_runtime
+                        ->unshadowed_animated_model_pipelines[
+                            mode
+                        ][depth] != NULL
+                ) {
+                    SDL_ReleaseGPUGraphicsPipeline(
+                        device,
+                        window->scene_runtime
+                            ->unshadowed_animated_model_pipelines[
+                                mode
+                            ][depth]
                     );
                 }
             }

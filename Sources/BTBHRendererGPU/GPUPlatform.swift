@@ -498,6 +498,11 @@ public final class GPUPlatform: GamePlatform {
                     "production_model.frag.\(extensionName)"
                 )
                 .path,
+            unshadowedFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_model_unshadowed.frag.\(extensionName)"
+                )
+                .path,
             shaderFormat: shaderFormat,
             viewProjection: viewProjection,
             cameraRight: cameraRight,

@@ -35,6 +35,9 @@
 #ifndef BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH must be defined"
+#endif
 
 static int require_text(const char *path, const char *needle)
 {
@@ -127,6 +130,10 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 6"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,

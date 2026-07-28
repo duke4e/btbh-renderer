@@ -1,3 +1,7 @@
+#ifndef BTBH_DIRECTIONAL_SHADOWS
+#define BTBH_DIRECTIONAL_SHADOWS 1
+#endif
+
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
 Texture2D<float4> emission_texture : register(t1, space2);
@@ -6,12 +10,14 @@ Texture2D<float4> normal_texture : register(t2, space2);
 SamplerState normal_sampler : register(s2, space2);
 Texture2D<float4> orm_texture : register(t3, space2);
 SamplerState orm_sampler : register(s3, space2);
+#if BTBH_DIRECTIONAL_SHADOWS
 Texture2D<float> directional_shadow_texture : register(t4, space2);
 SamplerState directional_shadow_sampler : register(s4, space2);
 Texture2D<float> secondary_directional_shadow_texture
     : register(t5, space2);
 SamplerState secondary_directional_shadow_sampler
     : register(s5, space2);
+#endif
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -164,6 +170,7 @@ float3 evaluate_directional_light(
         visibility;
 }
 
+#if BTBH_DIRECTIONAL_SHADOWS
 float primary_directional_visibility(
     float3 world_position,
     float3 normal
@@ -279,6 +286,7 @@ float secondary_directional_visibility(
     }
     return visibility / 9.0f;
 }
+#endif
 
 float3 evaluate_irradiance_sh(float3 direction)
 {
@@ -546,10 +554,14 @@ float4 main(FragmentInput input) : SV_Target0
         roughness,
         metalness,
         f0,
+#if BTBH_DIRECTIONAL_SHADOWS
         primary_directional_visibility(
             input.world_position,
             normal
         )
+#else
+        1.0f
+#endif
     );
     lighting += evaluate_directional_light(
         secondary_directional_direction_energy.xyz,
@@ -561,10 +573,14 @@ float4 main(FragmentInput input) : SV_Target0
         roughness,
         metalness,
         f0,
+#if BTBH_DIRECTIONAL_SHADOWS
         secondary_directional_visibility(
             input.world_position,
             normal
         )
+#else
+        1.0f
+#endif
     );
     const float3 tone_mapped = lighting / (1.0f + lighting);
     return float4(tone_mapped + emission, albedo_sample.a);

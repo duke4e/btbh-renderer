@@ -1205,6 +1205,7 @@ public final class GPUWindowProbe {
         animatedShadowVertexShaderPath: String,
         shadowFragmentShaderPath: String,
         fragmentShaderPath: String,
+        unshadowedFragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
         cameraRight: RenderVec3,
@@ -1425,6 +1426,8 @@ public final class GPUWindowProbe {
                             shadowFragmentPath in
                             fragmentShaderPath.withCString {
                                 fragmentPath in
+                                unshadowedFragmentShaderPath.withCString {
+                                    unshadowedFragmentPath in
                                 viewProjection.withUnsafeBufferPointer {
                                     matrix in
                                     sceneCameraRightValues
@@ -1447,6 +1450,7 @@ public final class GPUWindowProbe {
                                                     animatedShadowVertexPath,
                                                     shadowFragmentPath,
                                                     fragmentPath,
+                                                    unshadowedFragmentPath,
                                                     shaderFormat,
                                                     matrix.baseAddress,
                                                     right.baseAddress,
@@ -1481,6 +1485,7 @@ public final class GPUWindowProbe {
                     }
                 }
             }
+        }
         }
         guard result == BTBH_GPU_OK else {
             throw GPUSceneProbeError.operationFailed(
