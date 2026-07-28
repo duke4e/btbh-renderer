@@ -335,6 +335,37 @@ forward shader. It is prerequisite data/lifetime plumbing for the remaining
 PBR/IBL work, not a claim of PBR visual parity, and it does not replace or
 modify any golden or threshold.
 
+### Production GPU file-dialog closeout
+
+Renderer commit `9403e5a` replaces the GPU platform placeholder with the
+production SDL 3 file-dialog path:
+
+- the public Swift contract remains SDL-free while a neutral C ABI carries
+  open/save kind, title, exact filter names and patterns, multiple-selection
+  policy, and optional initial location;
+- native code copies every caller-owned filter string and retains the SDL
+  properties and filter array until the one-shot callback returns;
+- Swift retains its completion bridge until native ownership completes,
+  including synchronous SDL callbacks, and releases it immediately when
+  native launch setup fails;
+- cancel maps to `.success([])`, selected paths become file URLs, a nil SDL
+  file list becomes an exact backend failure, and save-plus-multiple is
+  rejected before native launch;
+- the dialog callback context does not retain the GPU window, so callback
+  teardown does not depend on renderer shutdown.
+
+The normal full suite remains non-interactive. The opt-in Windows Vulkan
+smoke opened the real OS dialog, cancelled it through the UI, observed the
+production callback, asserted `.success([])`, and shut the renderer down
+cleanly. Final verification passed 13/13 native CTests, 122 GPU-enabled
+XCTest cases with the one gated smoke skipped in the normal run plus one
+Swift Testing check, and 65 base XCTest cases plus one Swift Testing check.
+The gated smoke also passed separately when enabled. Independent ownership
+and race review found no HIGH/MEDIUM issue.
+
+This slice changes no renderer selection, visual golden, threshold, shader,
+or performance authority.
+
 ## Remaining Windows work
 
 The following work remains before Windows visual/performance parity can be
@@ -346,9 +377,7 @@ called complete:
    bindings/draw calls. Persistent semantic instance buffers now bind and
    reuse native GPU storage directly, but geometry/material submission is
    not yet retained as a grouped render graph.
-3. Implement and exercise the production GPU file-dialog path; automated tool
-   captures do not open a dialog.
-4. Re-run the strict platform-local legacy visual gate on matching current
+3. Re-run the strict platform-local legacy visual gate on matching current
    entity signatures without changing the retained authority to force a pass.
 
 After those Windows items pass, the remaining platform gate is native
