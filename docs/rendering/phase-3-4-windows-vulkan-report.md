@@ -18,23 +18,25 @@ gate are closed.
 ## Source and host
 
 - Latest captured game source:
-  `bfb26b7bcec9cdeeeec7e65ce0daeccb3d77fa06`
+  `3926f6b749f8f71c7d42acb4c759e2a119e384c4`
 - Latest captured renderer source:
-  `ba7cbedf1f62677109c76993b3a21dc44136878d`
+  `755348465ae75bed1cb5a46f4c710d5c76f09c61`
 - Initial final-telemetry capture source:
   game `c5e8d16c67d243cff1722bee4fa1464207feb277`,
   renderer `4c8c92cffee2ceea59da1ec9805ea5fa032d97e9`
 - Direct-PBR renderer implementation source:
   `5af2603e8f5b8066d3574d9abe46f731fc227099`
+- Procedural-IBL and material-AO implementation source:
+  `755348465ae75bed1cb5a46f4c710d5c76f09c61`
 - Branch: `codex/renderer-phase-0-1`
 - CPU: AMD Ryzen 9 9950X
 - GPU: NVIDIA GeForce RTX 3070 Ti
 - OS: Windows 10.0.19045
 - Backend bootstrap: `requested=vulkan actual=vulkan hardware=1`
 - Release executable: `City Generator (r3d)/.build/release/Main.exe`
-- Release executable size: 50,989,056 bytes
+- Release executable size: 53,422,080 bytes
 - Release executable SHA-256:
-  `F354748377B995EB899CEFECED5B6BB27118689A16A9828B40EFE9813758E48F`
+  `1719067D7604621D400BBD5477CC1B26EC4061564B4C8462E9C1EF4C0C6C9753`
 - Resolution: 1920×1080
 - Seed: 424242
 
@@ -443,6 +445,120 @@ is recorded rather than hidden by a threshold change.
 
 The historical Windows-to-Apple SSIM issue at font, text, and antialiased
 edges remains unresolved and is not claimed fixed.
+
+### Production procedural IBL and material AO closeout
+
+Renderer commit `7553484` closes the ambient-lighting slice used by the
+current game:
+
+- procedural skies are projected once at ambient-map creation into nine
+  real spherical-harmonic diffuse-irradiance coefficients using cubemap
+  solid-angle weights and normalized cosine convolution;
+- the production fragment pass evaluates that irradiance at the material
+  normal and samples the same procedural-sky equation at the reflection
+  direction for view-dependent environment specular;
+- rough reflections blend toward the low-frequency environment, use an
+  analytic environment-BRDF approximation, and apply Lagarde-style specular
+  occlusion;
+- packed `ORM.r` and the material occlusion factor attenuate indirect
+  diffuse/specular light without attenuating direct lights or emission;
+- the authored procedural-sun direction is negated exactly as in the legacy
+  sky setup, and a zero direction disables the sun consistently;
+- `.invalid` ambient maps retain ambient-color fallback, while stale nonzero
+  handles retain the renderer's fail-closed resource behavior.
+
+The neutral C scene-lighting payload and the production shader cbuffer carry
+the SH coefficients and bounded procedural-sky parameters without adding a
+fifth texture sampler. Independent review found three medium issues in the
+first revision: legacy sun orientation, a stale-handle specification
+mismatch, and a constant-sky Vulkan test that did not prove view dependence.
+All three were fixed. The focused re-review found no remaining HIGH/MEDIUM
+issue.
+
+Fresh verification passed:
+
+- the native `/W4 /WX` build and 13/13 CTests;
+- 127 GPU-enabled XCTest cases with one expected interactive-dialog skip,
+  plus the Windows Swift Testing ABI/lifecycle check;
+- 65 base XCTest cases plus the same Swift Testing check;
+- 1,514 game XCTest cases plus three Swift Testing checks;
+- the render API audit and `git diff --check`;
+- a GPU-enabled release build and hardware Vulkan bootstrap:
+  `requested=vulkan actual=vulkan hardware=1 claimed=1`.
+
+The production-IBL evidence directories are:
+
+- `.build/render-baselines/windows-gpu-7553484-procedural-ibl-A`
+- `.build/render-baselines/windows-gpu-7553484-procedural-ibl-B`
+- `.build/render-baselines/windows-gpu-7553484-procedural-ibl-C-diagnostic`
+
+The required A/B pair contains ten successful child processes. Every launch
+emitted exactly one `CAPTURED` and `FINISHED` marker, exited with status 0,
+and produced a 1920x1080 PNG plus QOI, cue, metrics, entity, and manifest
+artifacts. Entity JSON is byte-identical between A and B for all five modes,
+and no log contains an unsupported, fallback, fatal, or error diagnostic.
+
+Run B passed the unchanged Run A manifest and every required cue:
+
+| Mode | B-to-A global SSIM | Result |
+| --- | ---: | --- |
+| Game | 0.999904663 | Pass |
+| Combat Lab | 0.999871325 | Pass |
+| Particle editor | 0.999893736 | Pass |
+| City-block editor | 0.999975691 | Pass |
+| Unified city | 0.999890705 | Pass |
+
+Run A also passed the preceding direct-PBR Run B manifest. Its lowest
+cross-series global score was `0.999356196` in Game, confirming that the
+bounded ambient change preserves the existing captured cues. Manual
+inspection shows intact HUD/editor layouts and the expected small lighting
+shift without a missing scene or gross artifact. No golden or threshold
+changed. The strict retained legacy manifest still stops at the documented
+older game entity signature (`projectiles=13185` versus current `13196`), so
+that authority was not bypassed or rewritten.
+
+The required A/B presented-frame measurements are:
+
+| Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
+| --- | ---: | ---: |
+| Game | 29.829 / 35.422 / 51.350 | 30.103 / 36.989 / 65.774 |
+| Combat Lab | 32.536 / 39.270 / 48.708 | 30.780 / 38.262 / 46.074 |
+| Particle editor | 3.379 / 3.812 / 4.037 | 3.475 / 3.962 / 5.047 |
+| City-block editor | 1.438 / 1.493 / 2.091 | 1.448 / 1.667 / 1.870 |
+| Unified city | 1.823 / 2.154 / 2.598 | 1.813 / 1.933 / 2.425 |
+
+The A/B Combat median mean is `31.658 ms`, or approximately `+5.18%`
+against the retained Windows Run 3/4 legacy mean. This barely crossed the
+diagnostic threshold because Run A alone measured `32.536 ms`; Run B measured
+`30.780 ms`. The additional same-source C control measured `30.236 ms`
+median and `38.479 ms` p95, diagnosing run-order/driver scheduling variance
+rather than a stable IBL regression.
+
+B and C are therefore the steady-state diagnostic pair:
+
+| Mode | B/C mean median / p95 ms | Delta vs direct-PBR median / p95 |
+| --- | ---: | ---: |
+| Game | 30.539 / 37.486 | -2.75% / -1.70% |
+| Combat Lab | 30.508 / 38.371 | -1.20% / +2.20% |
+| Particle editor | 3.430 / 4.022 | -9.19% / -4.54% |
+| City-block editor | 1.445 / 1.564 | -21.08% / -24.59% |
+| Unified city | 1.822 / 1.947 | -14.90% / -18.40% |
+
+No stable same-backend median or p95 regression exceeds 5%. Against the
+retained Windows Run 3/4 legacy means, the B/C Game deltas are approximately
+`-0.19%/+1.01%` and Combat Lab deltas are `+1.36%/+3.26%`. The remaining
+large editor ratios still reflect the known fixed GPU overhead against
+sub-millisecond legacy baselines; their absolute B/C median overhead is
+approximately `1.66 ms` for particle, `0.93 ms` for city-block, and `1.30 ms`
+for unified city.
+
+This slice is deliberately narrower than complete legacy environment parity.
+It implements the game's procedural ambient-map path and material AO, not
+arbitrary imported cubemaps, native prefiltered environment textures, exact
+legacy BRDF-LUT convolution, reflection probes, or screen-space AO. Shadows,
+stencil/cull/transparency parity, bloom, tilt-shift, and the rest of the post
+chain remain open. The historical Windows-to-Apple text/antialiasing SSIM
+issue also remains unresolved and is not claimed fixed.
 
 ### Production GPU file-dialog closeout
 
