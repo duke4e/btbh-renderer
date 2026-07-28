@@ -560,6 +560,118 @@ stencil/cull/transparency parity, bloom, tilt-shift, and the rest of the post
 chain remain open. The historical Windows-to-Apple text/antialiasing SSIM
 issue also remains unresolved and is not claimed fixed.
 
+### Production directional-shadow closeout
+
+Renderer commits `e6bbd3d`, `b932084`, and `c74f57f` add the production
+directional-shadow slice and its benchmark-driven disabled-shadow
+specialization:
+
+- up to two sorted shadow-casting directional lights own snapped,
+  camera-aware 2048x2048 D32 projections;
+- opaque static, animated, persistent-instance, transient-instance, custom
+  mesh, and billboard geometry share the production transform contract in
+  depth-only passes;
+- each matching direct-light contribution receives deterministic 3x3 PCF,
+  while ambient/IBL, emission, and the other directional light remain
+  independent;
+- the disabled-shadow path uses separate four-sampler static and animated
+  pipelines, compile-time removes the PCF resources, and uploads only the
+  common pre-shadow fragment-uniform prefix;
+- the public backend-neutral Swift API is unchanged. Only the package-private
+  C bridge and shader-path plumbing grew.
+
+Independent implementation and performance-specialization reviews found no
+remaining HIGH/MEDIUM issue. Fresh verification passed:
+
+- the native `/W4 /WX` build and 13/13 CTests;
+- 129 GPU-enabled renderer XCTest cases with one expected gated
+  interactive-dialog skip, plus the Windows Swift Testing ABI/lifecycle
+  check;
+- the real Vulkan shadow enabled/disabled receiver-caster regression and the
+  real no-shadow four-sampler Vulkan probe;
+- 1,514 game XCTest cases plus three Swift Testing checks;
+- the GPU-enabled release build and hardware Vulkan bootstrap:
+  `requested=vulkan actual=vulkan hardware=1 claimed=1`;
+- the render API audit and `git diff --check`.
+
+The final evidence directories are:
+
+- `.build/render-baselines/windows-gpu-c74f57f-directional-shadows-final-A`
+- `.build/render-baselines/windows-gpu-c74f57f-directional-shadows-final-B`
+
+The required A/B pair contains ten successful child processes. Every launch
+emitted exactly one `CAPTURED` and `FINISHED` marker, exited with status 0,
+and produced a 1920x1080 PNG plus QOI, cue, metrics, entity, and manifest
+artifacts. Entity JSON is byte-identical between A and B for all five modes.
+No log contains an error, fatal, fallback, unsupported, failed, or assertion
+diagnostic.
+
+Run A passed the unchanged same-environment pre-shadow manifest, with global
+SSIM from `0.999796782` through `0.999959388`. Run B passed the unchanged Run
+A manifest and every required cue:
+
+| Mode | B-to-A global SSIM | Result |
+| --- | ---: | --- |
+| Game | 0.999829846 | Pass |
+| Combat Lab | 0.999935872 | Pass |
+| Particle editor | 0.999974101 | Pass |
+| City-block editor | 0.999943658 | Pass |
+| Unified city | 0.999905567 | Pass |
+
+Manual inspection confirms intact game and Combat Lab worlds, HUD, tool
+panel, particle field, and editor layouts. No golden or threshold changed.
+The strict retained legacy authority still stops at the documented older Game
+entity signature (`projectiles=13185` versus current `13196`), so it was not
+bypassed or rewritten.
+
+The final presented-frame measurements are:
+
+| Mode | Run A median / p95 / worst ms | Run B median / p95 / worst ms |
+| --- | ---: | ---: |
+| Game | 31.882 / 39.217 / 52.018 | 33.077 / 40.188 / 50.111 |
+| Combat Lab | 31.963 / 39.242 / 48.855 | 33.317 / 39.459 / 52.004 |
+| Particle editor | 4.102 / 4.403 / 4.821 | 4.091 / 4.725 / 5.292 |
+| City-block editor | 2.058 / 2.105 / 2.374 | 2.047 / 2.372 / 3.145 |
+| Unified city | 2.435 / 2.585 / 2.815 | 2.397 / 2.561 / 3.069 |
+
+The A/B means are `32.480/39.702 ms` for Game, `32.640/39.350 ms`
+for Combat Lab, `4.096/4.564 ms` for the particle editor,
+`2.052/2.238 ms` for the city-block editor, and `2.416/2.573 ms` for
+unified city. Against the retained Windows Run 3/4 legacy means, the
+median/p95 deltas are respectively `+6.15%/+6.98%`,
+`+8.44%/+5.90%`, `+131.57%/+72.17%`, `+301.99%/+211.10%`, and
+`+363.33%/+239.71%`. The editor ratios remain amplified by the
+sub-millisecond legacy baseline, but are not hidden.
+
+Two interleaved builds of the immediately preceding `7553484` renderer
+provided a same-machine control pair. Relative to that pair, the final
+median/p95 movements are `+9.96%/+10.74%` for Game,
+`+2.93%/+4.11%` for Combat Lab, `+8.38%/+4.56%` for the particle
+editor, `+18.19%/+23.62%` for the city-block editor, and
+`+15.35%/+13.18%` for unified city.
+
+The above-five-percent movements were diagnosed rather than waived. CPU
+submission stayed effectively flat. An additional c74 diagnostic replaced
+only the four-sampler unshadowed fragment SPIR-V with the exact pre-shadow
+`7553484` artifact; its timings remained at the c74 level. This rules out the
+specialized fragment program and trimmed uniform prefix as the cause. Game
+and Combat Lab enable real shadows, so their fence cost includes the new
+2048x2048 opaque depth pass and PCF receiver work. The no-shadow editors issue
+no shadow draw pass, but the current runtime still eagerly creates both D32
+maps, the shadow sampler, both shadow pipelines, and both shadow-capable model
+pipeline families. Their unchanged CPU-submit and old-fragment diagnostic
+isolate the remaining movement to that new GPU runtime/resource-residency
+layer. Lazy creation and release of shadow-only resources is therefore a
+recorded performance follow-up; this report does not claim that regression
+was removed.
+
+This slice deliberately covers opaque directional shadows only. It does not
+implement cascades, spot/omnidirectional shadows, alpha-tested casters,
+transparent casters, or arbitrary legacy shadow filters. Stencil/cull,
+transparency, bloom, tilt-shift, and the rest of the post chain remain open.
+The historical Windows-to-Apple text and antialiasing SSIM issue also remains
+documented and unresolved.
+
 ### Production GPU file-dialog closeout
 
 Renderer commit `9403e5a` replaces the GPU platform placeholder with the
@@ -596,8 +708,9 @@ or performance authority.
 The following work remains before Windows visual/performance parity can be
 called complete:
 
-1. Add the used ambient/IBL and AO behavior around the direct-PBR pass, then
-   port shadow, stencil/cull, transparency, and post-chain behavior.
+1. Lazily create and release shadow-only GPU resources for scenes with active
+   directional shadows, then port stencil/cull, transparency, and post-chain
+   behavior.
 2. Group the remaining per-frame scene-content rebuild and per-primitive
    bindings/draw calls. Persistent semantic instance buffers now bind and
    reuse native GPU storage directly, but geometry/material submission is
