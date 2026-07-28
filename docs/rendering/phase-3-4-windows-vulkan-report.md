@@ -17,10 +17,13 @@ gate are closed.
 
 ## Source and host
 
-- Captured game source:
-  `c5e8d16c67d243cff1722bee4fa1464207feb277`
-- Captured renderer source:
-  `4c8c92cffee2ceea59da1ec9805ea5fa032d97e9`
+- Latest captured game source:
+  `ec6d3671f7fbb2740af5068288f5eb9a2b496280`
+- Latest captured renderer source:
+  `2620c64d5b1b5f82ceb2dc3c0eff81857f967441`
+- Initial final-telemetry capture source:
+  game `c5e8d16c67d243cff1722bee4fa1464207feb277`,
+  renderer `4c8c92cffee2ceea59da1ec9805ea5fa032d97e9`
 - Renderer implementation source (the later renderer commits are report-only):
   `fcdf7de61f74d2da03864a941a9ce9a8012de9e2`
 - Branch: `codex/renderer-phase-0-1`
@@ -214,6 +217,95 @@ driver/scheduler variation, not a code delta. Because host state and
 instrumentation differ from earlier runs, those movements are recorded as
 run drift rather than credited as an optimization.
 
+### Persistent instance-buffer binding closeout
+
+Renderer commits `de5553bb3e316ac24bdf5c96688fe33832d34cdb` and
+`2620c64d5b1b5f82ceb2dc3c0eff81857f967441` complete the first production
+persistent-instance binding slice:
+
+- semantic instance records are packed once as a 96-byte matrix, normalized
+  color, and four-custom-float record;
+- model and mesh batches bind the persistent SDL_GPU storage buffer directly
+  instead of copying those records into the transient scene buffer each
+  frame;
+- unchanged semantic arrays reuse the existing upload, while a changed array
+  triggers one new upload;
+- mixed persistent and transient batches remain supported;
+- a conflicting attempt to change one persistent handle twice in one frame
+  fails before any upload;
+- native validation accepts only a contiguous uploaded prefix, so an upload
+  with a hole cannot expose uninitialized records to a draw.
+
+The first real-game capture attempt at renderer `de5553b` found that the game
+uses the same semantic lazy-upload contract as the legacy backend. The GPU
+backend had incorrectly required a prior explicit `uploadInstances` call and
+failed closed before the first game frame. The isolated
+`.build/render-baselines/windows-gpu-de5553b-persistent-A` directory is
+retained as diagnostic evidence. Renderer `2620c64` implements lazy upload
+and unchanged-array reuse, and adds regression coverage for first upload,
+reuse, changed data, same-frame conflict, mixed batches, upload holes, and
+zero-transient persistent presentation.
+
+The final Windows evidence directories are:
+
+- `.build/render-baselines/windows-gpu-2620c64-persistent-A`
+- `.build/render-baselines/windows-gpu-2620c64-persistent-B`
+- `.build/render-baselines/windows-gpu-2620c64-persistent-C`
+
+All fifteen child processes emitted exactly one `CAPTURED` and `FINISHED`
+marker, exited with status 0, and produced 1920x1080 PNGs. Every series
+contains 1,040 raw telemetry lines and 120 final CPU-submit and
+fence-completion samples per mode. Entity JSON is byte-identical across A,
+B, and C for all five modes. All five global comparisons and all fourteen
+cue comparisons pass the unchanged reference manifest in every series; the
+lowest global SSIM is 0.999817384. No log contains a scene failure,
+unsupported operation, fallback, fatal, or error diagnostic. No golden or
+threshold changed.
+
+Run A followed a full release rebuild and showed isolated combat/city p95
+movement. A same-session C control returned city to B-level timing and moved
+combat below both A and B, diagnosing run-order/driver scheduling rather than
+a stable code regression. B and C are therefore the steady-state performance
+pair:
+
+| Mode | Run B median / p95 / worst ms | Run C median / p95 / worst ms |
+| --- | ---: | ---: |
+| Game | 31.553 / 38.775 / 65.322 | 29.531 / 37.874 / 63.847 |
+| Combat Lab | 33.723 / 39.943 / 70.390 | 31.467 / 37.158 / 65.816 |
+| Particle editor | 3.853 / 4.160 / 4.529 | 3.980 / 4.576 / 5.421 |
+| City-block editor | 1.835 / 2.035 / 2.286 | 1.830 / 2.084 / 2.489 |
+| Unified city | 2.230 / 2.356 / 3.078 | 2.121 / 2.298 / 2.449 |
+
+The B/C means compared with the immediately preceding `4c8c92c` GPU
+closeout are:
+
+| Mode | B/C mean median / p95 ms | Median delta | p95 delta |
+| --- | ---: | ---: | ---: |
+| Game | 30.542 / 38.325 | -3.89% | +0.01% |
+| Combat Lab | 32.595 / 38.551 | +1.09% | -0.55% |
+| Particle editor | 3.917 / 4.368 | -1.42% | -1.32% |
+| City-block editor | 1.832 / 2.059 | -1.07% | +4.13% |
+| Unified city | 2.176 / 2.327 | -4.90% | -10.49% |
+
+No mean regression against that same-backend closeout exceeds 5%. The B/C
+means versus the retained Windows Run 3/4 legacy authority remain:
+
+| Mode | B/C mean median / p95 ms | Median delta | p95 delta |
+| --- | ---: | ---: | ---: |
+| Game | 30.542 / 38.325 | -0.18% | +3.28% |
+| Combat Lab | 32.595 / 38.551 | +8.29% | +3.75% |
+| Particle editor | 3.917 / 4.368 | +121.40% | +64.77% |
+| City-block editor | 1.832 / 2.059 | +258.55% | +186.00% |
+| Unified city | 2.176 / 2.327 | +316.77% | +207.44% |
+
+Combat median remains 2.496 ms above the legacy mean. Editor percentages are
+again dominated by the sub-millisecond legacy baseline, but their absolute
+GPU overhead remains open. The persistent binding slice removes redundant
+instance record packing/upload work; it does not remove the remaining
+per-frame scene rebuild, per-primitive bindings/draw calls, simplified
+lighting, or missing post chain. The historical Windows-to-Apple text and
+antialiasing SSIM issue remains unresolved and is not claimed fixed here.
+
 ## Remaining Windows work
 
 The following work remains before Windows visual/performance parity can be
@@ -223,8 +315,10 @@ called complete:
    behavior instead of the current simplified forward scene pass.
 2. Preserve the imported metallic/roughness and normal-map channels in the
    production material representation.
-3. Replace the remaining per-frame scene-content rebuild and per-primitive
-   submission with persistent, grouped GPU batches.
+3. Group the remaining per-frame scene-content rebuild and per-primitive
+   bindings/draw calls. Persistent semantic instance buffers now bind and
+   reuse native GPU storage directly, but geometry/material submission is
+   not yet retained as a grouped render graph.
 4. Implement and exercise the production GPU file-dialog path; automated tool
    captures do not open a dialog.
 5. Re-run the strict platform-local legacy visual gate on matching current
