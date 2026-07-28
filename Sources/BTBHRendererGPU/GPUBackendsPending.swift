@@ -536,9 +536,21 @@ final class GPUResourceBackend: RenderResourceBackend {
         let emissionTexture = descriptor.emissionTexture.isValid
             ? try canvasTexture(descriptor.emissionTexture).pointer
             : nil
+        let normalTexture = descriptor.normalTexture.isValid
+            ? try canvasTexture(descriptor.normalTexture).pointer
+            : nil
+        let ormTexture = descriptor.ormTexture.isValid
+            ? try canvasTexture(descriptor.ormTexture).pointer
+            : nil
         return .init(
             albedoTexture: texture,
             albedoColor: descriptor.albedoColor,
+            normalTexture: normalTexture,
+            ormTexture: ormTexture,
+            normalScale: descriptor.normalScale,
+            occlusion: descriptor.occlusion,
+            roughness: descriptor.roughness,
+            metalness: descriptor.metalness,
             emissionTexture: emissionTexture,
             emissionColor: descriptor.emissionColor,
             emissionEnergy: descriptor.emissionEnergy,
@@ -606,11 +618,24 @@ final class GPUResourceBackend: RenderResourceBackend {
                 let texture = try patch.albedoTexture.map {
                     try canvasTexture($0).pointer
                 }
+                let normalTexture = try patch.normalTexture.map {
+                    try canvasTexture($0).pointer
+                }
+                let ormTexture = try patch.ormTexture.map {
+                    try canvasTexture($0).pointer
+                }
                 let base = modelResource.materials[override.slot]
                 material = .init(
                     albedoTexture: texture ?? base.albedoTexture,
                     albedoColor:
                         patch.albedoColor ?? base.albedoColor,
+                    normalTexture:
+                        normalTexture ?? base.normalTexture,
+                    ormTexture: ormTexture ?? base.ormTexture,
+                    normalScale: base.normalScale,
+                    occlusion: base.occlusion,
+                    roughness: base.roughness,
+                    metalness: base.metalness,
                     emissionTexture: patch.clearEmissionTexture
                         ? nil
                         : base.emissionTexture,

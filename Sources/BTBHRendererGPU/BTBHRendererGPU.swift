@@ -342,6 +342,12 @@ final class GPUSceneSubmissionScratch {
 struct GPUSceneMaterialProbe {
     let albedoTexture: OpaquePointer?
     let albedoColor: RenderColor
+    let normalTexture: OpaquePointer?
+    let ormTexture: OpaquePointer?
+    let normalScale: Float
+    let occlusion: Float
+    let roughness: Float
+    let metalness: Float
     let emissionTexture: OpaquePointer?
     let emissionColor: RenderColor
     let emissionEnergy: Float
@@ -941,6 +947,12 @@ public final class GPUWindowProbe {
                     b: info.albedo_blue,
                     a: info.albedo_alpha
                 ),
+                normalTexture: info.normal_texture,
+                ormTexture: info.orm_texture,
+                normalScale: info.normal_scale,
+                occlusion: info.occlusion,
+                roughness: info.roughness,
+                metalness: info.metalness,
                 emissionTexture: info.emission_texture,
                 emissionColor: .init(
                     r: info.emission_red,
@@ -1233,6 +1245,12 @@ public final class GPUWindowProbe {
                 albedo_green: batch.material?.albedoColor.g ?? 255,
                 albedo_blue: batch.material?.albedoColor.b ?? 255,
                 albedo_alpha: batch.material?.albedoColor.a ?? 255,
+                normal_texture: batch.material?.normalTexture,
+                orm_texture: batch.material?.ormTexture,
+                normal_scale: batch.material?.normalScale ?? 1,
+                occlusion: batch.material?.occlusion ?? 1,
+                roughness: batch.material?.roughness ?? 1,
+                metalness: batch.material?.metalness ?? 0,
                 emission_texture: batch.material?.emissionTexture,
                 emission_red: batch.material?.emissionColor.r ?? 255,
                 emission_green: batch.material?.emissionColor.g ?? 255,

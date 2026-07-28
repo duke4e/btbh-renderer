@@ -1,9 +1,157 @@
 import XCTest
+import BTBHRenderer
 import BTBHRendererGPUCore
 @testable import BTBHRendererGPU
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
+        #if os(Windows)
+        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH descriptor PBR material channels",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let texture = try resources.loadTexture(.init(
+            path: packageRoot
+                .appendingPathComponent(
+                    "examples/resources/images/placeholder.png"
+                )
+                .path
+        ))
+        let texturePointer = try resources.canvasTexture(texture).pointer
+        var descriptor = MaterialDescriptor.default
+        descriptor.normalTexture = texture
+        descriptor.normalScale = 0.62
+        descriptor.ormTexture = texture
+        descriptor.occlusion = 0.83
+        descriptor.roughness = 0.27
+        descriptor.metalness = 0.91
+        let standaloneHandle = try resources.createMaterial(descriptor)
+        let standalone = try resources.sceneMaterial(standaloneHandle)
+
+        XCTAssertEqual(standalone.normalTexture, texturePointer)
+        XCTAssertEqual(standalone.ormTexture, texturePointer)
+        XCTAssertEqual(standalone.normalScale, 0.62, accuracy: 0.0001)
+        XCTAssertEqual(standalone.occlusion, 0.83, accuracy: 0.0001)
+        XCTAssertEqual(standalone.roughness, 0.27, accuracy: 0.0001)
+        XCTAssertEqual(standalone.metalness, 0.91, accuracy: 0.0001)
+
+        let model = try resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/material-factor-triangle.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let patchHandle = try resources.createMaterialOverride(
+            from: model,
+            materialIndex: 1,
+            patch: .init(
+                normalTexture: texture,
+                ormTexture: texture
+            )
+        )
+        let patchedEntries = try resources.sceneModelMaterials(
+            model: model,
+            overrides: [.init(slot: 1, material: patchHandle)]
+        )
+        let patched = try XCTUnwrap(patchedEntries.first {
+            $0.materialSlot == 1
+        }?.material)
+
+        XCTAssertEqual(patched.normalTexture, texturePointer)
+        XCTAssertEqual(patched.ormTexture, texturePointer)
+        XCTAssertEqual(patched.normalScale, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(patched.occlusion, 0.66, accuracy: 0.0001)
+        XCTAssertEqual(patched.roughness, 0.31, accuracy: 0.0001)
+        XCTAssertEqual(patched.metalness, 0.72, accuracy: 0.0001)
+
+        resources.destroyMaterial(patchHandle)
+        resources.destroyModel(model)
+        resources.destroyMaterial(standaloneHandle)
+        resources.destroyTexture(texture)
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
+    func testGLTFImportPreservesPBRMaterialChannels() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH imported PBR material channels",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/material-factor-triangle.gltf"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+
+        let material = try XCTUnwrap(model.materials.indices.contains(1)
+            ? model.materials[1]
+            : nil)
+        XCTAssertNotNil(material.normalTexture)
+        XCTAssertNotNil(material.ormTexture)
+        XCTAssertEqual(material.normalScale, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(material.occlusion, 0.66, accuracy: 0.0001)
+        XCTAssertEqual(material.roughness, 0.31, accuracy: 0.0001)
+        XCTAssertEqual(material.metalness, 0.72, accuracy: 0.0001)
+
+        let implicitModel = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/instanced-transformed-default-material.gltf"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(implicitModel.pointer) }
+        XCTAssertEqual(
+            implicitModel.materials[0].metalness,
+            0,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            implicitModel.materials[1].roughness,
+            1,
+            accuracy: 0.0001
+        )
+        XCTAssertEqual(
+            implicitModel.materials[1].metalness,
+            1,
+            accuracy: 0.0001
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testFrameTelemetryFinishesPendingFencesAfterMeasuredPath() throws {
         #if os(Windows)
         let probe = try GPUWindowProbe(

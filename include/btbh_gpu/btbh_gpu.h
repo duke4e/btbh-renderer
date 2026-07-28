@@ -288,6 +288,12 @@ typedef struct BTBHGPUModelMaterialInfo {
     uint8_t albedo_green;
     uint8_t albedo_blue;
     uint8_t albedo_alpha;
+    BTBHGPUTexture *normal_texture;
+    BTBHGPUTexture *orm_texture;
+    float normal_scale;
+    float occlusion;
+    float roughness;
+    float metalness;
     BTBHGPUTexture *emission_texture;
     uint8_t emission_red;
     uint8_t emission_green;
@@ -368,6 +374,12 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t albedo_green;
     uint8_t albedo_blue;
     uint8_t albedo_alpha;
+    BTBHGPUTexture *normal_texture;
+    BTBHGPUTexture *orm_texture;
+    float normal_scale;
+    float occlusion;
+    float roughness;
+    float metalness;
     BTBHGPUTexture *emission_texture;
     uint8_t emission_red;
     uint8_t emission_green;

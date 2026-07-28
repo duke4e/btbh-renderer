@@ -147,6 +147,10 @@ static void btbh_gpu_model_material_default(
     material->emission_green = 255u;
     material->emission_blue = 255u;
     material->emission_alpha = 255u;
+    material->normal_scale = 1.0f;
+    material->occlusion = 1.0f;
+    material->roughness = 1.0f;
+    material->metalness = 0.0f;
 }
 
 static char *btbh_gpu_model_resolve_texture_path(
@@ -333,6 +337,14 @@ static bool btbh_gpu_model_load_gltf_materials(
             &data->materials[source_index];
         BTBHGPUModelMaterialInfo *destination =
             &model->materials[source_index + 1u];
+        destination->roughness = source
+            ->pbr_metallic_roughness.roughness_factor;
+        destination->metalness = source
+            ->pbr_metallic_roughness.metallic_factor;
+        if (source->occlusion_texture.texture != NULL) {
+            destination->occlusion =
+                source->occlusion_texture.scale;
+        }
         if (source->has_pbr_metallic_roughness) {
             const cgltf_float *factor = source
                 ->pbr_metallic_roughness.base_color_factor;
@@ -353,6 +365,28 @@ static bool btbh_gpu_model_load_gltf_materials(
                 )) {
                 return false;
             }
+            if (!btbh_gpu_model_load_texture(
+                    model->owner,
+                    &source->pbr_metallic_roughness
+                        .metallic_roughness_texture,
+                    model_path,
+                    &destination->orm_texture,
+                    report
+                )) {
+                return false;
+            }
+        }
+        if (!btbh_gpu_model_load_texture(
+                model->owner,
+                &source->normal_texture,
+                model_path,
+                &destination->normal_texture,
+                report
+            )) {
+            return false;
+        }
+        if (destination->normal_texture != NULL) {
+            destination->normal_scale = source->normal_texture.scale;
         }
         destination->emission_red =
             btbh_gpu_model_color_channel(source->emissive_factor[0]);
@@ -415,6 +449,14 @@ static void btbh_gpu_model_release_handles(
             if (material->emission_texture != NULL) {
                 btbh_gpu_texture_destroy(material->emission_texture);
                 material->emission_texture = NULL;
+            }
+            if (material->normal_texture != NULL) {
+                btbh_gpu_texture_destroy(material->normal_texture);
+                material->normal_texture = NULL;
+            }
+            if (material->orm_texture != NULL) {
+                btbh_gpu_texture_destroy(material->orm_texture);
+                material->orm_texture = NULL;
             }
         }
     }

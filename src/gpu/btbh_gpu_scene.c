@@ -605,6 +605,10 @@ static bool btbh_gpu_scene_validate_batches(
             batch->depth_compare < BTBH_GPU_SCENE_DEPTH_COUNT &&
             batch->unlit_enabled <= 1u &&
             isfinite(batch->emission_energy) &&
+            isfinite(batch->normal_scale) &&
+            isfinite(batch->occlusion) &&
+            isfinite(batch->roughness) &&
+            isfinite(batch->metalness) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&
@@ -612,7 +616,15 @@ static bool btbh_gpu_scene_validate_batches(
             (batch->emission_texture == NULL ||
              (batch->emission_texture->owner == window &&
               batch->emission_texture->texture != NULL &&
-              batch->emission_texture->sampler != NULL));
+              batch->emission_texture->sampler != NULL)) &&
+            (batch->normal_texture == NULL ||
+             (batch->normal_texture->owner == window &&
+              batch->normal_texture->texture != NULL &&
+              batch->normal_texture->sampler != NULL)) &&
+            (batch->orm_texture == NULL ||
+             (batch->orm_texture->owner == window &&
+              batch->orm_texture->texture != NULL &&
+              batch->orm_texture->sampler != NULL));
         const bool valid_material_slot =
             (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL &&
                 batch->model != NULL &&

@@ -11,8 +11,17 @@
   "materials": [{
     "name": "green",
     "pbrMetallicRoughness": {
-      "baseColorFactor": [0.05, 0.85, 0.1, 1.0]
-    }
+      "baseColorFactor": [0.05, 0.85, 0.1, 1.0],
+      "metallicFactor": 0.72,
+      "roughnessFactor": 0.31,
+      "metallicRoughnessTexture": {"index": 0}
+    },
+    "normalTexture": {"index": 0, "scale": 0.45},
+    "occlusionTexture": {"index": 0, "strength": 0.66}
+  }],
+  "textures": [{"source": 0}],
+  "images": [{
+    "uri": "../../examples/resources/images/placeholder.png"
   }],
   "buffers": [{
     "byteLength": 42,
