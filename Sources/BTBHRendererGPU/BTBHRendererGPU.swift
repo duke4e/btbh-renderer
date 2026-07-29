@@ -48,6 +48,7 @@ enum GPUAntiAliasingProjection {
         case .off: 0
         case .smaaMedium: 1
         case .smaaHigh: 2
+        case .fxaa: 3
         }
     }
 }

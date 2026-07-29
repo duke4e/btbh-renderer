@@ -593,6 +593,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
         "production_post.frag|fragment"
+        "production_fxaa.frag|fragment"
         "production_smaa_edge_medium.frag|fragment"
         "production_smaa_edge_high.frag|fragment"
         "production_smaa_weights_medium.frag|fragment"

@@ -20,6 +20,8 @@
 #define BTBH_GPU_SCENE_TRANSPARENCY_COUNT 2u
 #define BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT 3u
 #define BTBH_GPU_SCENE_SMAA_QUALITY_COUNT 2u
+#define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
+#define BTBH_GPU_SCENE_ANTI_ALIASING_MAX 3u
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -157,6 +159,7 @@ struct BTBHGPUSceneRuntime {
         BTBH_GPU_SCENE_SMAA_QUALITY_COUNT
     ];
     SDL_GPUGraphicsPipeline *smaa_blend_pipeline;
+    SDL_GPUGraphicsPipeline *fxaa_pipeline;
     BTBHGPUTexture *fallback_texture;
     BTBHGPUTexture *normal_fallback_texture;
     BTBHGPUTexture *smaa_area_texture;
@@ -1406,6 +1409,51 @@ static bool btbh_gpu_scene_ensure_smaa_resources(
     return true;
 }
 
+static bool btbh_gpu_scene_ensure_fxaa_pipeline(
+    BTBHGPUWindow *window,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (runtime->fxaa_pipeline != NULL) {
+        return true;
+    }
+    const char *extension = shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+        ? "metallib"
+        : "spv";
+    char filename[128];
+    (void)snprintf(
+        filename,
+        sizeof(filename),
+        "production_fxaa.frag.%s",
+        extension
+    );
+    char path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (!btbh_gpu_scene_sibling_path(
+            post_fragment_shader_path,
+            filename,
+            path
+        ) ||
+        !btbh_gpu_scene_create_fullscreen_pipeline(
+            window,
+            post_vertex_shader_path,
+            path,
+            shader_format,
+            SDL_GetGPUSwapchainTextureFormat(
+                window->device->gpu,
+                window->window
+            ),
+            1u,
+            &runtime->fxaa_pipeline,
+            report
+        )) {
+        return false;
+    }
+    return true;
+}
+
 static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     BTBHGPUSceneRuntime *runtime,
     bool shadows_active,
@@ -2100,56 +2148,68 @@ static SDL_GPUTexture *btbh_gpu_scene_create_smaa_target(
     return SDL_CreateGPUTexture(device, &info);
 }
 
-static bool btbh_gpu_scene_ensure_smaa_targets(
+static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
     BTBHGPUWindow *window,
     uint32_t width,
     uint32_t height,
+    bool smaa_enabled,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
     SDL_GPUDevice *device = window->device->gpu;
     if (runtime->post_color_texture != NULL &&
-        runtime->smaa_edges_texture != NULL &&
-        runtime->smaa_weights_texture != NULL &&
         runtime->smaa_width == width &&
-        runtime->smaa_height == height) {
+        runtime->smaa_height == height &&
+        (!smaa_enabled ||
+         (runtime->smaa_edges_texture != NULL &&
+          runtime->smaa_weights_texture != NULL))) {
         return true;
     }
-    if (runtime->post_color_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->post_color_texture);
-        runtime->post_color_texture = NULL;
-    }
-    if (runtime->smaa_edges_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->smaa_edges_texture);
-        runtime->smaa_edges_texture = NULL;
-    }
-    if (runtime->smaa_weights_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->smaa_weights_texture);
-        runtime->smaa_weights_texture = NULL;
+    if (runtime->smaa_width != width ||
+        runtime->smaa_height != height) {
+        if (runtime->post_color_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->post_color_texture);
+            runtime->post_color_texture = NULL;
+        }
+        if (runtime->smaa_edges_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->smaa_edges_texture);
+            runtime->smaa_edges_texture = NULL;
+        }
+        if (runtime->smaa_weights_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->smaa_weights_texture);
+            runtime->smaa_weights_texture = NULL;
+        }
     }
     const SDL_GPUTextureFormat swapchain_format =
         SDL_GetGPUSwapchainTextureFormat(device, window->window);
-    runtime->post_color_texture = btbh_gpu_scene_create_smaa_target(
-        device,
-        width,
-        height,
-        swapchain_format
-    );
-    runtime->smaa_edges_texture = btbh_gpu_scene_create_smaa_target(
-        device,
-        width,
-        height,
-        SDL_GPU_TEXTUREFORMAT_R8G8_UNORM
-    );
-    runtime->smaa_weights_texture = btbh_gpu_scene_create_smaa_target(
-        device,
-        width,
-        height,
-        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM
-    );
+    if (runtime->post_color_texture == NULL) {
+        runtime->post_color_texture = btbh_gpu_scene_create_smaa_target(
+            device,
+            width,
+            height,
+            swapchain_format
+        );
+    }
+    if (smaa_enabled && runtime->smaa_edges_texture == NULL) {
+        runtime->smaa_edges_texture = btbh_gpu_scene_create_smaa_target(
+            device,
+            width,
+            height,
+            SDL_GPU_TEXTUREFORMAT_R8G8_UNORM
+        );
+    }
+    if (smaa_enabled && runtime->smaa_weights_texture == NULL) {
+        runtime->smaa_weights_texture = btbh_gpu_scene_create_smaa_target(
+            device,
+            width,
+            height,
+            SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM
+        );
+    }
     if (runtime->post_color_texture == NULL ||
-        runtime->smaa_edges_texture == NULL ||
-        runtime->smaa_weights_texture == NULL) {
+        (smaa_enabled &&
+         (runtime->smaa_edges_texture == NULL ||
+          runtime->smaa_weights_texture == NULL))) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -2689,7 +2749,7 @@ static bool btbh_gpu_scene_post_valid(
         post->cas_enabled <= 1u &&
         post->tilt_shift_enabled <= 1u &&
         post->ssao_enabled <= 1u &&
-        post->anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
+        post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL);
 }
@@ -3067,13 +3127,24 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
 
-    if (post->anti_aliasing != 0u &&
+    if (post->anti_aliasing >= 1u &&
+        post->anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
         !btbh_gpu_scene_ensure_smaa_resources(
             window,
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
             post->anti_aliasing,
+            report
+        )) {
+        return report->result;
+    }
+    if (post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA &&
+        !btbh_gpu_scene_ensure_fxaa_pipeline(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
             report
         )) {
         return report->result;
@@ -3323,10 +3394,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             report
         ) ||
         (post->anti_aliasing != 0u &&
-         !btbh_gpu_scene_ensure_smaa_targets(
+         !btbh_gpu_scene_ensure_anti_aliasing_targets(
              window,
              drawable_width,
              drawable_height,
+             post->anti_aliasing <=
+                 BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
              report
          )) ||
         (post->ssao_enabled != 0u &&
@@ -4067,7 +4140,29 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         );
     }
     if (fullscreen_ok &&
-        post->anti_aliasing != 0u) {
+        post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA) {
+        BTBHGPUSceneSMAAUniforms fxaa_uniforms;
+        fxaa_uniforms.metrics[0] = 1.0f / (float)drawable_width;
+        fxaa_uniforms.metrics[1] = 1.0f / (float)drawable_height;
+        fxaa_uniforms.metrics[2] = (float)drawable_width;
+        fxaa_uniforms.metrics[3] = (float)drawable_height;
+        SDL_GPUTextureSamplerBinding fxaa_sampler;
+        SDL_zero(fxaa_sampler);
+        fxaa_sampler.texture = runtime->post_color_texture;
+        fxaa_sampler.sampler = runtime->scene_color_sampler;
+        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+            command,
+            runtime->fxaa_pipeline,
+            swapchain,
+            &fxaa_uniforms,
+            (uint32_t)sizeof(fxaa_uniforms),
+            &fxaa_sampler,
+            1u
+        );
+    }
+    if (fullscreen_ok &&
+        post->anti_aliasing >= 1u &&
+        post->anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT) {
         BTBHGPUSceneSMAAUniforms smaa_uniforms;
         smaa_uniforms.metrics[0] = 1.0f / (float)drawable_width;
         smaa_uniforms.metrics[1] = 1.0f / (float)drawable_height;
@@ -4368,6 +4463,12 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUGraphicsPipeline(
                 device,
                 window->scene_runtime->smaa_blend_pipeline
+            );
+        }
+        if (window->scene_runtime->fxaa_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(
+                device,
+                window->scene_runtime->fxaa_pipeline
             );
         }
         const size_t pipeline_count =

@@ -670,7 +670,7 @@ public struct ProceduralSkyDescriptor: Sendable {
 }
 
 public enum AntiAliasing: UInt8, Sendable {
-    case off, smaaMedium, smaaHigh
+    case off, smaaMedium, smaaHigh, fxaa
 }
 
 public enum UpscaleMode: UInt8, Sendable {

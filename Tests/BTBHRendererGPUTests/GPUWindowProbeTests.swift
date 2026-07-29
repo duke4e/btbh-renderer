@@ -226,6 +226,49 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(GPUAntiAliasingProjection.native(.off), 0)
         XCTAssertEqual(GPUAntiAliasingProjection.native(.smaaMedium), 1)
         XCTAssertEqual(GPUAntiAliasingProjection.native(.smaaHigh), 2)
+        XCTAssertEqual(GPUAntiAliasingProjection.native(.fxaa), 3)
+    }
+
+    func testProductionFXAAUsesOneDedicatedFullscreenPass() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_fxaa.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let cmake = try String(
+            contentsOf: packageRoot.appendingPathComponent("CMakeLists.txt"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(nativeSource.contains(
+            "#define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u"
+        ))
+        XCTAssertTrue(nativeSource.contains(
+            "post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA"
+        ))
+        XCTAssertTrue(nativeSource.contains(
+            "runtime->fxaa_pipeline"
+        ))
+        XCTAssertTrue(shader.contains(
+            "float3 fxaa(float2 uv)"
+        ))
+        XCTAssertTrue(shader.contains(
+            "return float4(fxaa(input.texture_coordinate), 1.0f);"
+        ))
+        XCTAssertTrue(cmake.contains(
+            "\"production_fxaa.frag|fragment\""
+        ))
     }
 
     func testProductionFontAtlasUsesLegacyRaylibRasterizationContract() throws {

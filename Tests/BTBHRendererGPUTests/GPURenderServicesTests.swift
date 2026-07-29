@@ -1175,7 +1175,7 @@ final class GPURenderServicesTests: XCTestCase {
         )
     }
 
-    func testScenePresentsDebugPrimitivesWithoutFailClosing() throws {
+    func testScenePresentsDebugPrimitivesThroughFXAAWithoutFailClosing() throws {
         #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
@@ -1203,7 +1203,8 @@ final class GPURenderServicesTests: XCTestCase {
                 verticalFOVDegrees: 60,
                 projection: .perspective
             ),
-            environment: .default
+            environment: .default,
+            antiAliasing: .fxaa
         ))
         RenderServices.scene.submit(.debug(.grid(slices: 10, spacing: 1)))
         RenderServices.scene.submit(.debug(.wireCube(
