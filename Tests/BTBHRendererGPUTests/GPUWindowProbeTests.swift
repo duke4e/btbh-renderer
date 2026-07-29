@@ -887,6 +887,49 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(ordered[4].firstInstance, 4)
     }
 
+    func testAdjacentPersistentInstanceRangesConsolidateWithoutCrossingGaps()
+    {
+        let geometry = OpaquePointer(bitPattern: 1)!
+        let otherGeometry = OpaquePointer(bitPattern: 2)!
+        let instanceBuffer = OpaquePointer(bitPattern: 3)!
+        func batch(
+            geometry pointer: OpaquePointer = geometry,
+            firstInstance: Int,
+            instanceCount: Int
+        ) -> GPUSceneGeometryProbeBatch {
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(pointer),
+                animation: nil,
+                material: nil,
+                materialSlot: 0,
+                legacyInstanced: true,
+                instanceBuffer: instanceBuffer,
+                firstInstance: firstInstance,
+                instanceCount: instanceCount
+            )
+        }
+
+        let consolidated =
+            GPUSceneBatchConsolidation.adjacentPersistentRanges([
+                batch(firstInstance: 0, instanceCount: 4),
+                batch(firstInstance: 4, instanceCount: 2),
+                batch(firstInstance: 8, instanceCount: 1),
+                batch(
+                    geometry: otherGeometry,
+                    firstInstance: 9,
+                    instanceCount: 1
+                ),
+            ])
+
+        XCTAssertEqual(consolidated.count, 3)
+        XCTAssertEqual(consolidated[0].firstInstance, 0)
+        XCTAssertEqual(consolidated[0].instanceCount, 6)
+        XCTAssertEqual(consolidated[1].firstInstance, 8)
+        XCTAssertEqual(consolidated[1].instanceCount, 1)
+        XCTAssertEqual(consolidated[2].firstInstance, 9)
+        XCTAssertEqual(consolidated[2].instanceCount, 1)
+    }
+
     func testProductionSurfaceShadersClassifyKnownVariantsAndParameters()
         throws
     {

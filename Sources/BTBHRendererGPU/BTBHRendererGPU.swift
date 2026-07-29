@@ -318,7 +318,7 @@ struct GPUCanvasPassProbe {
     let screenClearToken: UInt64?
 }
 
-enum GPUSceneGeometryProbe {
+enum GPUSceneGeometryProbe: Equatable {
     case model(OpaquePointer)
     case customMesh(OpaquePointer)
 }
@@ -396,6 +396,52 @@ enum GPUSceneBatchOrdering {
             }
             return left.index < right.index
         }.map(\.batch)
+    }
+}
+
+enum GPUSceneBatchConsolidation {
+    static func adjacentPersistentRanges(
+        _ batches: [GPUSceneGeometryProbeBatch]
+    ) -> [GPUSceneGeometryProbeBatch] {
+        var consolidated: [GPUSceneGeometryProbeBatch] = []
+        consolidated.reserveCapacity(batches.count)
+        for batch in batches {
+            guard let previous = consolidated.last,
+                  canMerge(previous, batch) else {
+                consolidated.append(batch)
+                continue
+            }
+            consolidated[consolidated.count - 1] = .init(
+                geometry: previous.geometry,
+                animation: nil,
+                material: previous.material,
+                materialSlot: previous.materialSlot,
+                legacyInstanced: true,
+                instanceBuffer: previous.instanceBuffer,
+                firstInstance: previous.firstInstance,
+                instanceCount:
+                    previous.instanceCount + batch.instanceCount
+            )
+        }
+        return consolidated
+    }
+
+    private static func canMerge(
+        _ left: GPUSceneGeometryProbeBatch,
+        _ right: GPUSceneGeometryProbeBatch
+    ) -> Bool {
+        left.legacyInstanced &&
+            right.legacyInstanced &&
+            left.instanceBuffer != nil &&
+            left.instanceBuffer == right.instanceBuffer &&
+            left.geometry == right.geometry &&
+            left.animation == nil &&
+            right.animation == nil &&
+            left.material == right.material &&
+            left.materialSlot == right.materialSlot &&
+            left.firstInstance <= Int.max - left.instanceCount &&
+            left.firstInstance + left.instanceCount == right.firstInstance &&
+            left.instanceCount <= Int.max - right.instanceCount
     }
 }
 
@@ -563,7 +609,7 @@ final class GPUSceneSubmissionScratch {
     }
 }
 
-struct GPUSceneMaterialProbe {
+struct GPUSceneMaterialProbe: Equatable {
     let albedoTexture: OpaquePointer?
     let albedoColor: RenderColor
     let normalTexture: OpaquePointer?

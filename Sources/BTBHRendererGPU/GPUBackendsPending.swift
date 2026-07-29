@@ -3607,6 +3607,10 @@ final class GPUSceneBackend: SceneBackend {
         )
         let orderedBatches =
             GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(batches)
+        let consolidatedBatches =
+            GPUSceneBatchConsolidation.adjacentPersistentRanges(
+                orderedBatches
+            )
         _ = frameCoordinator.claimScreenClearForScene()
         lastPresentationReport = try platform.presentModelInstances(
             viewProjection: viewProjection,
@@ -3617,7 +3621,7 @@ final class GPUSceneBackend: SceneBackend {
             post: post,
             instances: packedInstances,
             logicalInstanceCount: logicalInstanceCount,
-            batches: orderedBatches,
+            batches: consolidatedBatches,
             clearColor: clearColor
         )
     }
