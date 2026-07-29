@@ -128,6 +128,7 @@ bool btbh_gpu_scene_uses_transparent_pass(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled
 );
+SDL_GPUFrontFace btbh_gpu_scene_model_front_face(bool animated);
 void btbh_gpu_scene_resolve_blend_state(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled,

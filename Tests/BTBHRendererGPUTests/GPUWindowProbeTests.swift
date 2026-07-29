@@ -527,6 +527,29 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
+    func testAnimatedModelPipelineAccountsForSkinnedWinding() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "btbh_gpu_scene_model_front_face(animated)"
+        ))
+        XCTAssertTrue(source.contains(
+            "? SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE"
+        ))
+        XCTAssertTrue(source.contains(
+            ": SDL_GPU_FRONTFACE_CLOCKWISE"
+        ))
+    }
+
     func testProductionNormalMappingPreservesLegacyInterpolatedTBN() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

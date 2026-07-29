@@ -24,6 +24,15 @@ static void assert_factors(
 }
 
 int main(void) {
+    assert(
+        btbh_gpu_scene_model_front_face(false) ==
+        SDL_GPU_FRONTFACE_CLOCKWISE
+    );
+    assert(
+        btbh_gpu_scene_model_front_face(true) ==
+        SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE
+    );
+
     assert(!btbh_gpu_scene_uses_transparent_pass(
         BTBH_GPU_SCENE_BLEND_ALPHA,
         false
