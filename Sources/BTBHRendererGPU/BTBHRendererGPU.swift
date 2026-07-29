@@ -2,6 +2,56 @@ import BTBHRenderer
 import BTBHRendererGPUCore
 import Foundation
 
+enum GPUColorSpace {
+    static func linearComponent(_ srgb: Float) -> Float {
+        let clamped = min(max(srgb, 0), 1)
+        return clamped <= 0.04045
+            ? clamped / 12.92
+            : pow((clamped + 0.055) / 1.055, 2.4)
+    }
+
+    static func linearComponent(_ srgb: UInt8) -> Float {
+        linearComponent(Float(srgb) / 255)
+    }
+
+    static func legacyAmbientComponent(_ authored: UInt8) -> Float {
+        Float(authored) / 255
+    }
+
+    static func linearized(_ color: RenderColor) -> RenderColor {
+        func channel(_ value: UInt8) -> UInt8 {
+            UInt8(clamping: Int(
+                (linearComponent(value) * 255).rounded()
+            ))
+        }
+        return .init(
+            r: channel(color.r),
+            g: channel(color.g),
+            b: channel(color.b),
+            a: color.a
+        )
+    }
+}
+
+enum GPUTextureSamplingProjection {
+    static func filter(
+        _ descriptor: TextureLoadDescriptor
+    ) -> TextureFilter {
+        descriptor.filter ?? .nearest
+    }
+
+}
+
+enum GPUAntiAliasingProjection {
+    static func native(_ antiAliasing: AntiAliasing) -> UInt8 {
+        switch antiAliasing {
+        case .off: 0
+        case .smaaMedium: 1
+        case .smaaHigh: 2
+        }
+    }
+}
+
 public enum GPUBackendRequest: String, Equatable, Sendable {
     case vulkan
     case metal
@@ -164,6 +214,7 @@ struct GPUTextureProbeResource {
     let pointer: OpaquePointer
     let size: PixelSize2D
     let mipCount: Int
+    let isRenderTarget: Bool
 }
 
 enum GPUFontProbeError: Error, Equatable {
@@ -271,10 +322,16 @@ enum GPUSceneGeometryProbe {
     case customMesh(OpaquePointer)
 }
 
-struct GPUAnimationPoseProbe {
-    let library: OpaquePointer
+struct GPUAnimationSampleProbe: Equatable {
     let animationIndex: Int
     let time: Float
+    let weight: Float
+}
+
+struct GPUAnimationPoseProbe {
+    let pointer: OpaquePointer
+    let library: OpaquePointer
+    let samples: [GPUAnimationSampleProbe]
 }
 
 struct GPUSceneGeometryProbeBatch {
@@ -282,6 +339,7 @@ struct GPUSceneGeometryProbeBatch {
     let animation: GPUAnimationPoseProbe?
     let material: GPUSceneMaterialProbe?
     let materialSlot: Int?
+    let legacyInstanced: Bool
     let instanceBuffer: OpaquePointer?
     let firstInstance: Int
     let instanceCount: Int
@@ -291,6 +349,7 @@ struct GPUSceneGeometryProbeBatch {
         animation: GPUAnimationPoseProbe?,
         material: GPUSceneMaterialProbe?,
         materialSlot: Int?,
+        legacyInstanced: Bool = false,
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
         instanceCount: Int
@@ -299,9 +358,172 @@ struct GPUSceneGeometryProbeBatch {
         self.animation = animation
         self.material = material
         self.materialSlot = materialSlot
+        self.legacyInstanced = legacyInstanced
         self.instanceBuffer = instanceBuffer
         self.firstInstance = firstInstance
         self.instanceCount = instanceCount
+    }
+}
+
+enum GPUSceneBatchOrdering {
+    static func opaqueThenLegacyMaterialOrder(
+        _ batches: [GPUSceneGeometryProbeBatch]
+    ) -> [GPUSceneGeometryProbeBatch] {
+        let keyed = batches.enumerated().map { index, batch in
+            let transparent =
+                batch.material?.transparency == .alpha ||
+                batch.material?.blendMode == .multiplied ||
+                batch.material?.blendMode == .premultipliedAlpha
+            return (
+                index: index,
+                batch: batch,
+                transparent: transparent,
+                renderList: transparent
+                    ? (batch.legacyInstanced ? 2 : 3)
+                    : (batch.legacyInstanced ? 0 : 1)
+            )
+        }
+        return keyed.sorted { left, right in
+            if left.renderList != right.renderList {
+                return left.renderList < right.renderList
+            }
+            if left.transparent, left.batch.legacyInstanced,
+               let leftKey = left.batch.material?.legacySortKey,
+               let rightKey = right.batch.material?.legacySortKey,
+               leftKey != rightKey {
+                return leftKey.isOrderedBefore(rightKey)
+            }
+            return left.index < right.index
+        }.map(\.batch)
+    }
+}
+
+struct GPULegacyMaterialSortKey: Equatable {
+    let priority: Int32
+    let shader: UInt64
+    let shading: UInt32
+    let albedo: UInt32
+    let normal: UInt32
+    let orm: UInt32
+    let emission: UInt32
+    let stencilHash: UInt32
+    let depthHash: UInt32
+    let blend: UInt8
+    let cull: UInt8
+    let transparency: UInt8
+    let billboard: UInt8
+
+    init(descriptor: MaterialDescriptor) {
+        priority = 0
+        shader = descriptor.surfaceShader.rawValue
+        shading = descriptor.unlit ? 1 : 0
+        albedo = Self.resourceOrder(descriptor.albedoTexture.rawValue)
+        normal = Self.resourceOrder(descriptor.normalTexture.rawValue)
+        orm = Self.resourceOrder(descriptor.ormTexture.rawValue)
+        emission = Self.resourceOrder(descriptor.emissionTexture.rawValue)
+        stencilHash = Self.stencilStateHash(descriptor)
+        depthHash = Self.depthStateHash(descriptor)
+        blend = descriptor.blend.rawValue
+        switch descriptor.cullMode {
+        case .none: cull = 0
+        case .back: cull = 1
+        case .front: cull = 2
+        }
+        switch descriptor.transparency {
+        case .disabled: transparency = 0
+        case .alpha: transparency = 2
+        }
+        billboard = descriptor.billboard.rawValue
+    }
+
+    func isOrderedBefore(_ other: Self) -> Bool {
+        if priority != other.priority { return priority < other.priority }
+        if shader != other.shader {
+            return shader.byteSwapped < other.shader.byteSwapped
+        }
+        if shading != other.shading {
+            return shading.byteSwapped < other.shading.byteSwapped
+        }
+        if albedo != other.albedo {
+            return albedo.byteSwapped < other.albedo.byteSwapped
+        }
+        if normal != other.normal {
+            return normal.byteSwapped < other.normal.byteSwapped
+        }
+        if orm != other.orm {
+            return orm.byteSwapped < other.orm.byteSwapped
+        }
+        if emission != other.emission {
+            return emission.byteSwapped < other.emission.byteSwapped
+        }
+        if stencilHash != other.stencilHash {
+            return stencilHash.byteSwapped < other.stencilHash.byteSwapped
+        }
+        if depthHash != other.depthHash {
+            return depthHash.byteSwapped < other.depthHash.byteSwapped
+        }
+        if blend != other.blend { return blend < other.blend }
+        if cull != other.cull { return cull < other.cull }
+        if transparency != other.transparency {
+            return transparency < other.transparency
+        }
+        return billboard < other.billboard
+    }
+
+    private static func resourceOrder(_ rawValue: UInt64) -> UInt32 {
+        UInt32(truncatingIfNeeded: rawValue)
+    }
+
+    private static func legacyCompare(_ value: CompareFunction) -> UInt32 {
+        switch value {
+        case .less: 0
+        case .lessEqual: 1
+        case .equal: 2
+        case .greater: 3
+        case .greaterEqual: 4
+        case .notEqual: 5
+        case .always: 6
+        case .never: 7
+        }
+    }
+
+    private static func depthStateHash(
+        _ descriptor: MaterialDescriptor
+    ) -> UInt32 {
+        var hash: UInt32 = 2_166_136_261
+        append(legacyCompare(descriptor.depthCompare), to: &hash)
+        append(descriptor.depthOffsetFactor.bitPattern, to: &hash)
+        append(descriptor.depthOffsetUnits.bitPattern, to: &hash)
+        append(descriptor.depthRangeNear.bitPattern, to: &hash)
+        append(descriptor.depthRangeFar.bitPattern, to: &hash)
+        return hash
+    }
+
+    private static func stencilStateHash(
+        _ descriptor: MaterialDescriptor
+    ) -> UInt32 {
+        var hash: UInt32 = 2_166_136_261
+        append(legacyCompare(descriptor.stencilCompare), to: &hash)
+        append(descriptor.stencilReference, to: &hash)
+        append(descriptor.stencilMask, to: &hash)
+        append(UInt8(0), to: &hash)
+        append(UInt8(0), to: &hash)
+        append(UInt32(descriptor.stencilFail.rawValue), to: &hash)
+        append(UInt32(descriptor.stencilDepthFail.rawValue), to: &hash)
+        append(UInt32(descriptor.stencilPass.rawValue), to: &hash)
+        return hash
+    }
+
+    private static func append(_ value: UInt32, to hash: inout UInt32) {
+        append(UInt8(truncatingIfNeeded: value), to: &hash)
+        append(UInt8(truncatingIfNeeded: value >> 8), to: &hash)
+        append(UInt8(truncatingIfNeeded: value >> 16), to: &hash)
+        append(UInt8(truncatingIfNeeded: value >> 24), to: &hash)
+    }
+
+    private static func append(_ value: UInt8, to hash: inout UInt32) {
+        hash ^= UInt32(value)
+        hash &*= 16_777_619
     }
 }
 
@@ -352,14 +574,29 @@ struct GPUSceneMaterialProbe {
     let emissionTexture: OpaquePointer?
     let emissionColor: RenderColor
     let emissionEnergy: Float
+    let alphaCutoff: Float
     let blendMode: MaterialBlendMode
     let billboardMode: BillboardMode
     let depthCompare: CompareFunction
+    let stencilCompare: CompareFunction
+    let stencilReference: UInt8
+    let stencilMask: UInt8
+    let stencilFail: StencilOperation
+    let stencilDepthFail: StencilOperation
+    let stencilPass: StencilOperation
+    let cullMode: CullMode
     let transparency: TransparencyMode
     let unlit: Bool
+    let surface: GPUSceneSurfaceProjection
+    var legacySortKey: GPULegacyMaterialSortKey? = nil
 }
 
 struct GPUSceneLightingProbe {
+    static let legacySpotInnerCutoff: Float =
+        cos(22.5 * .pi / 180)
+    static let legacySpotOuterCutoff: Float =
+        cos(45 * .pi / 180)
+
     let ambientColor: RenderColor
     let ambientEnergy: Float
     let environment: GPUProceduralEnvironmentProjection?
@@ -369,8 +606,17 @@ struct GPUSceneLightingProbe {
     let secondaryDirectionalDirection: RenderVec3
     let secondaryDirectionalColor: RenderColor
     let secondaryDirectionalEnergy: Float
+    let spotPosition: RenderVec3
+    let spotDirection: RenderVec3
+    let spotColor: RenderColor
+    let spotEnergy: Float
+    let spotRange: Float
+    let spotFalloff: Float
+    let spotInnerCutoff: Float
+    let spotOuterCutoff: Float
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
+    let spotShadow: GPUSceneDirectionalShadowProbe
 
     init(
         ambientColor: RenderColor,
@@ -382,8 +628,17 @@ struct GPUSceneLightingProbe {
         secondaryDirectionalDirection: RenderVec3,
         secondaryDirectionalColor: RenderColor,
         secondaryDirectionalEnergy: Float,
+        spotPosition: RenderVec3 = .zero,
+        spotDirection: RenderVec3 = .forward,
+        spotColor: RenderColor = .white,
+        spotEnergy: Float = 0,
+        spotRange: Float = 50,
+        spotFalloff: Float = 1,
+        spotInnerCutoff: Float = Self.legacySpotInnerCutoff,
+        spotOuterCutoff: Float = Self.legacySpotOuterCutoff,
         directionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
-        secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled
+        secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
+        spotShadow: GPUSceneDirectionalShadowProbe = .disabled
     ) {
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
@@ -395,9 +650,54 @@ struct GPUSceneLightingProbe {
             secondaryDirectionalDirection
         self.secondaryDirectionalColor = secondaryDirectionalColor
         self.secondaryDirectionalEnergy = secondaryDirectionalEnergy
+        self.spotPosition = spotPosition
+        self.spotDirection = spotDirection
+        self.spotColor = spotColor
+        self.spotEnergy = spotEnergy
+        self.spotRange = spotRange
+        self.spotFalloff = spotFalloff
+        self.spotInnerCutoff = spotInnerCutoff
+        self.spotOuterCutoff = spotOuterCutoff
         self.directionalShadow = directionalShadow
         self.secondaryDirectionalShadow = secondaryDirectionalShadow
+        self.spotShadow = spotShadow
     }
+}
+
+struct GPUScenePostProbe {
+    static let `default` = Self(
+        lutTexture: nil,
+        tonemapWhite: 1,
+        casSharpness: 0,
+        focusPoint: .init(x: 0.5, y: 0.55),
+        focusDirection: .init(x: 1, y: 0),
+        focusHalfWidth: 0.05,
+        maximumRadiusPixels: 0,
+        blurCurve: 1,
+        highlightThreshold: 0.7,
+        highlightGain: 0,
+        lutEnabled: false,
+        casEnabled: false,
+        tiltShiftEnabled: false,
+        ssaoEnabled: false,
+        antiAliasing: .off
+    )
+
+    let lutTexture: OpaquePointer?
+    let tonemapWhite: Float
+    let casSharpness: Float
+    let focusPoint: RenderVec2
+    let focusDirection: RenderVec2
+    let focusHalfWidth: Float
+    let maximumRadiusPixels: Float
+    let blurCurve: Float
+    let highlightThreshold: Float
+    let highlightGain: Float
+    let lutEnabled: Bool
+    let casEnabled: Bool
+    let tiltShiftEnabled: Bool
+    let ssaoEnabled: Bool
+    let antiAliasing: AntiAliasing
 }
 
 struct GPUSceneDirectionalShadowProbe: Equatable {
@@ -429,6 +729,7 @@ struct GPUScenePresentationProbeReport {
     let transientInstanceCount: Int
     let persistentBatchCount: Int
     let shadowResourcesReady: Bool
+    let cpuEncodeMilliseconds: Double
 }
 
 struct GPUFrameTelemetrySample: Equatable {
@@ -819,7 +1120,7 @@ public final class GPUWindowProbe {
             )
         }
         let filter: BTBHGPUTextureFilter
-        switch descriptor.filter ?? .bilinear {
+        switch GPUTextureSamplingProjection.filter(descriptor) {
         case .nearest:
             filter = BTBH_GPU_TEXTURE_FILTER_NEAREST
         case .bilinear:
@@ -861,7 +1162,8 @@ public final class GPUWindowProbe {
                 width: Int(report.width),
                 height: Int(report.height)
             ),
-            mipCount: Int(report.mip_count)
+            mipCount: Int(report.mip_count),
+            isRenderTarget: false
         )
     }
 
@@ -903,7 +1205,12 @@ public final class GPUWindowProbe {
                 message: GPUDeviceProbe.string(from: &report.message)
             )
         }
-        return .init(pointer: texture, size: size, mipCount: 1)
+        return .init(
+            pointer: texture,
+            size: size,
+            mipCount: 1,
+            isRenderTarget: true
+        )
     }
 
     func loadFont(
@@ -998,6 +1305,94 @@ public final class GPUWindowProbe {
         let slots = (0..<meshCount).map {
             Int(btbh_gpu_model_material_slot(model, UInt32($0)))
         }
+        let bounds = RenderBounds3(
+            minimum: .init(
+                x: report.minimum_x,
+                y: report.minimum_y,
+                z: report.minimum_z
+            ),
+            maximum: .init(
+                x: report.maximum_x,
+                y: report.maximum_y,
+                z: report.maximum_z
+            )
+        )
+        let meshes = try (0..<meshCount).map { meshIndex in
+            var info = BTBHGPUModelMeshInfo()
+            guard btbh_gpu_model_mesh_info(
+                model,
+                UInt32(meshIndex),
+                &info
+            ) == BTBH_GPU_OK else {
+                btbh_gpu_model_destroy(model)
+                throw GPUModelProbeError.operationFailed(
+                    message: "Could not query imported mesh \(meshIndex)"
+                )
+            }
+
+            var positionComponents = [Float](
+                repeating: 0,
+                count: Int(info.vertex_count) * 3
+            )
+            let positionResult = positionComponents
+                .withUnsafeMutableBufferPointer { buffer in
+                    btbh_gpu_model_mesh_copy_positions(
+                        model,
+                        UInt32(meshIndex),
+                        buffer.baseAddress,
+                        UInt32(buffer.count)
+                    )
+                }
+            guard positionResult == BTBH_GPU_OK else {
+                btbh_gpu_model_destroy(model)
+                throw GPUModelProbeError.operationFailed(
+                    message:
+                        "Could not copy imported mesh \(meshIndex) positions"
+                )
+            }
+            let positions = stride(
+                from: 0,
+                to: positionComponents.count,
+                by: 3
+            ).map {
+                RenderVec3(
+                    x: positionComponents[$0],
+                    y: positionComponents[$0 + 1],
+                    z: positionComponents[$0 + 2]
+                )
+            }
+
+            var indices = [UInt32](
+                repeating: 0,
+                count: Int(info.index_count)
+            )
+            if !indices.isEmpty {
+                let indexResult = indices.withUnsafeMutableBufferPointer {
+                    buffer in
+                    btbh_gpu_model_mesh_copy_indices(
+                        model,
+                        UInt32(meshIndex),
+                        buffer.baseAddress,
+                        UInt32(buffer.count)
+                    )
+                }
+                guard indexResult == BTBH_GPU_OK else {
+                    btbh_gpu_model_destroy(model)
+                    throw GPUModelProbeError.operationFailed(
+                        message:
+                            "Could not copy imported mesh \(meshIndex) indices"
+                    )
+                }
+            }
+            return GPUModelMeshGeometry(
+                positions: positions,
+                indices: indices
+            )
+        }
+        let footprint = GPUModelFootprintExtractor.extract(
+            bounds: bounds,
+            meshes: meshes
+        )
         let materials = try (0..<Int(report.material_count)).map {
             index in
             var info = BTBHGPUModelMaterialInfo()
@@ -1033,31 +1428,32 @@ public final class GPUWindowProbe {
                     a: info.emission_alpha
                 ),
                 emissionEnergy: info.emission_energy,
+                alphaCutoff: info.alpha_cutoff,
                 blendMode: .mix,
                 billboardMode: .disabled,
                 depthCompare: .less,
-                transparency: .disabled,
-                unlit: info.unlit_enabled != 0
+                stencilCompare: .always,
+                stencilReference: 0,
+                stencilMask: 0xFF,
+                stencilFail: .keep,
+                stencilDepthFail: .keep,
+                stencilPass: .replace,
+                cullMode: info.double_sided_enabled != 0 ? .none : .back,
+                transparency:
+                    info.transparency_enabled != 0 ? .alpha : .disabled,
+                unlit: info.unlit_enabled != 0,
+                surface: .none
             )
         }
         return GPUModelProbeResource(
             pointer: model,
             metadata: .init(
-                bounds: .init(
-                    minimum: .init(
-                        x: report.minimum_x,
-                        y: report.minimum_y,
-                        z: report.minimum_z
-                    ),
-                    maximum: .init(
-                        x: report.maximum_x,
-                        y: report.maximum_y,
-                        z: report.maximum_z
-                    )
-                ),
+                bounds: bounds,
                 meshCount: meshCount,
                 materialCount: Int(report.material_count),
-                meshMaterialSlots: slots
+                meshMaterialSlots: slots,
+                baseFootprint: footprint.points,
+                footprintKind: footprint.kind
             ),
             materials: materials
         )
@@ -1207,12 +1603,15 @@ public final class GPUWindowProbe {
         shadowFragmentShaderPath: String,
         fragmentShaderPath: String,
         unshadowedFragmentShaderPath: String,
+        postVertexShaderPath: String,
+        postFragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
         cameraPosition: RenderVec3,
         lighting: GPUSceneLightingProbe,
+        post: GPUScenePostProbe,
         instances: [Float],
         logicalInstanceCount: Int? = nil,
         batches: [GPUSceneGeometryProbeBatch],
@@ -1231,6 +1630,7 @@ public final class GPUWindowProbe {
               cameraPosition.y.isFinite,
               cameraPosition.z.isFinite,
               Self.sceneLightingIsValid(lighting),
+              Self.scenePostIsValid(post),
               !batches.isEmpty,
               batches.count <= Int(UInt32.max) else {
             throw GPUSceneProbeError.operationFailed(
@@ -1248,22 +1648,22 @@ public final class GPUWindowProbe {
         sceneCameraPositionValues[2] = cameraPosition.z
         var nativeLighting = BTBHGPUSceneLighting()
         nativeLighting.ambient_red =
-            Float(lighting.ambientColor.r) / 255
+            GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.r)
         nativeLighting.ambient_green =
-            Float(lighting.ambientColor.g) / 255
+            GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.g)
         nativeLighting.ambient_blue =
-            Float(lighting.ambientColor.b) / 255
+            GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.b)
         nativeLighting.ambient_energy = lighting.ambientEnergy
         nativeLighting.directional_x = lighting.directionalDirection.x
         nativeLighting.directional_y = lighting.directionalDirection.y
         nativeLighting.directional_z = lighting.directionalDirection.z
         nativeLighting.directional_energy = lighting.directionalEnergy
         nativeLighting.directional_red =
-            Float(lighting.directionalColor.r) / 255
+            GPUColorSpace.linearComponent(lighting.directionalColor.r)
         nativeLighting.directional_green =
-            Float(lighting.directionalColor.g) / 255
+            GPUColorSpace.linearComponent(lighting.directionalColor.g)
         nativeLighting.directional_blue =
-            Float(lighting.directionalColor.b) / 255
+            GPUColorSpace.linearComponent(lighting.directionalColor.b)
         nativeLighting.secondary_directional_energy =
             lighting.secondaryDirectionalEnergy
         nativeLighting.secondary_directional_x =
@@ -1273,11 +1673,34 @@ public final class GPUWindowProbe {
         nativeLighting.secondary_directional_z =
             lighting.secondaryDirectionalDirection.z
         nativeLighting.secondary_directional_red =
-            Float(lighting.secondaryDirectionalColor.r) / 255
+            GPUColorSpace.linearComponent(
+                lighting.secondaryDirectionalColor.r
+            )
         nativeLighting.secondary_directional_green =
-            Float(lighting.secondaryDirectionalColor.g) / 255
+            GPUColorSpace.linearComponent(
+                lighting.secondaryDirectionalColor.g
+            )
         nativeLighting.secondary_directional_blue =
-            Float(lighting.secondaryDirectionalColor.b) / 255
+            GPUColorSpace.linearComponent(
+                lighting.secondaryDirectionalColor.b
+            )
+        nativeLighting.spot_position_x = lighting.spotPosition.x
+        nativeLighting.spot_position_y = lighting.spotPosition.y
+        nativeLighting.spot_position_z = lighting.spotPosition.z
+        nativeLighting.spot_range = lighting.spotRange
+        nativeLighting.spot_direction_x = lighting.spotDirection.x
+        nativeLighting.spot_direction_y = lighting.spotDirection.y
+        nativeLighting.spot_direction_z = lighting.spotDirection.z
+        nativeLighting.spot_energy = lighting.spotEnergy
+        nativeLighting.spot_red =
+            GPUColorSpace.linearComponent(lighting.spotColor.r)
+        nativeLighting.spot_green =
+            GPUColorSpace.linearComponent(lighting.spotColor.g)
+        nativeLighting.spot_blue =
+            GPUColorSpace.linearComponent(lighting.spotColor.b)
+        nativeLighting.spot_falloff = lighting.spotFalloff
+        nativeLighting.spot_inner_cutoff = lighting.spotInnerCutoff
+        nativeLighting.spot_outer_cutoff = lighting.spotOuterCutoff
         nativeLighting.directional_shadow_enabled =
             lighting.directionalShadow.enabled ? 1 : 0
         nativeLighting.directional_shadow_softness =
@@ -1286,6 +1709,10 @@ public final class GPUWindowProbe {
             lighting.secondaryDirectionalShadow.enabled ? 1 : 0
         nativeLighting.secondary_directional_shadow_softness =
             lighting.secondaryDirectionalShadow.softness
+        nativeLighting.spot_shadow_enabled =
+            lighting.spotShadow.enabled ? 1 : 0
+        nativeLighting.spot_shadow_softness =
+            lighting.spotShadow.softness
         withUnsafeMutablePointer(
             to: &nativeLighting.directional_shadow_view_projection
         ) {
@@ -1306,6 +1733,16 @@ public final class GPUWindowProbe {
                     values[index] =
                         lighting.secondaryDirectionalShadow
                             .viewProjection[index]
+                }
+            }
+        }
+        withUnsafeMutablePointer(
+            to: &nativeLighting.spot_shadow_view_projection
+        ) {
+            $0.withMemoryRebound(to: Float.self, capacity: 16) { values in
+                for index in 0..<16 {
+                    values[index] =
+                        lighting.spotShadow.viewProjection[index]
                 }
             }
         }
@@ -1332,8 +1769,29 @@ public final class GPUWindowProbe {
                 lighting: &nativeLighting
             )
         }
+        var nativePost = BTBHGPUScenePost()
+        nativePost.lut_texture = post.lutTexture
+        nativePost.tonemap_white = post.tonemapWhite
+        nativePost.cas_sharpness = post.casSharpness
+        nativePost.focus_point_x = post.focusPoint.x
+        nativePost.focus_point_y = post.focusPoint.y
+        nativePost.focus_direction_x = post.focusDirection.x
+        nativePost.focus_direction_y = post.focusDirection.y
+        nativePost.focus_half_width = post.focusHalfWidth
+        nativePost.maximum_radius_pixels = post.maximumRadiusPixels
+        nativePost.blur_curve = post.blurCurve
+        nativePost.highlight_threshold = post.highlightThreshold
+        nativePost.highlight_gain = post.highlightGain
+        nativePost.lut_enabled = post.lutEnabled ? 1 : 0
+        nativePost.cas_enabled = post.casEnabled ? 1 : 0
+        nativePost.tilt_shift_enabled =
+            post.tiltShiftEnabled ? 1 : 0
+        nativePost.ssao_enabled = post.ssaoEnabled ? 1 : 0
+        nativePost.anti_aliasing =
+            GPUAntiAliasingProjection.native(post.antiAliasing)
         nativeSceneBatches.removeAll(keepingCapacity: true)
         nativeSceneBatches.reserveCapacity(batches.count)
+        let surfaceTime = Float(Self.monotonicElapsedSeconds)
         for batch in batches {
             guard batch.firstInstance >= 0,
                   batch.firstInstance <= Int(UInt32.max),
@@ -1360,32 +1818,42 @@ public final class GPUWindowProbe {
                 customMesh = pointer
             }
             if let animation = batch.animation {
-                guard animation.animationIndex >= 0,
-                      animation.animationIndex <= Int(UInt32.max),
-                      animation.time.isFinite else {
+                guard !animation.samples.isEmpty,
+                      animation.samples.allSatisfy({
+                          $0.animationIndex >= 0 &&
+                          $0.animationIndex <= Int(UInt32.max) &&
+                          $0.time.isFinite &&
+                          $0.weight.isFinite &&
+                          $0.weight >= 0
+                      }) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU animation pose"
                     )
                 }
             }
+            let linearAlbedo = GPUColorSpace.linearized(
+                batch.material?.albedoColor ?? .white
+            )
+            let linearEmission = GPUColorSpace.linearized(
+                batch.material?.emissionColor ?? .white
+            )
             nativeSceneBatches.append(BTBHGPUSceneGeometryBatch(
                 kind: kind,
                 model: model,
                 custom_mesh: customMesh,
-                animation_library: batch.animation?.library,
-                animation_index: UInt32(
-                    batch.animation?.animationIndex ?? 0
-                ),
-                animation_time: batch.animation?.time ?? 0,
+                animation_library: nil,
+                animation_pose: batch.animation?.pointer,
+                animation_index: 0,
+                animation_time: 0,
                 material_slot: Int32(batch.materialSlot ?? -1),
                 instance_buffer: batch.instanceBuffer,
                 first_instance: UInt32(batch.firstInstance),
                 instance_count: UInt32(batch.instanceCount),
                 albedo_texture: batch.material?.albedoTexture,
-                albedo_red: batch.material?.albedoColor.r ?? 255,
-                albedo_green: batch.material?.albedoColor.g ?? 255,
-                albedo_blue: batch.material?.albedoColor.b ?? 255,
-                albedo_alpha: batch.material?.albedoColor.a ?? 255,
+                albedo_red: linearAlbedo.r,
+                albedo_green: linearAlbedo.g,
+                albedo_blue: linearAlbedo.b,
+                albedo_alpha: linearAlbedo.a,
                 normal_texture: batch.material?.normalTexture,
                 orm_texture: batch.material?.ormTexture,
                 normal_scale: batch.material?.normalScale ?? 1,
@@ -1393,10 +1861,10 @@ public final class GPUWindowProbe {
                 roughness: batch.material?.roughness ?? 1,
                 metalness: batch.material?.metalness ?? 0,
                 emission_texture: batch.material?.emissionTexture,
-                emission_red: batch.material?.emissionColor.r ?? 255,
-                emission_green: batch.material?.emissionColor.g ?? 255,
-                emission_blue: batch.material?.emissionColor.b ?? 255,
-                emission_alpha: batch.material?.emissionColor.a ?? 255,
+                emission_red: linearEmission.r,
+                emission_green: linearEmission.g,
+                emission_blue: linearEmission.b,
+                emission_alpha: linearEmission.a,
                 emission_energy: batch.material?.emissionEnergy ?? 0,
                 blend_mode: Self.sceneBlendMode(
                     batch.material?.blendMode ?? .mix
@@ -1407,6 +1875,27 @@ public final class GPUWindowProbe {
                 depth_compare: Self.sceneDepthCompare(
                     batch.material?.depthCompare ?? .less
                 ),
+                alpha_cutoff:
+                    batch.material?.alphaCutoff ??
+                    MaterialDescriptor.default.alphaCutoff,
+                stencil_compare: Self.sceneDepthCompare(
+                    batch.material?.stencilCompare ?? .always
+                ),
+                cull_mode: Self.sceneCullMode(
+                    batch.material?.cullMode ?? .back
+                ),
+                stencil_fail: Self.sceneStencilOperation(
+                    batch.material?.stencilFail ?? .keep
+                ),
+                stencil_depth_fail: Self.sceneStencilOperation(
+                    batch.material?.stencilDepthFail ?? .keep
+                ),
+                stencil_pass: Self.sceneStencilOperation(
+                    batch.material?.stencilPass ?? .replace
+                ),
+                stencil_reference:
+                    batch.material?.stencilReference ?? 0,
+                stencil_mask: batch.material?.stencilMask ?? 0xFF,
                 transparency_enabled:
                     batch.material?.transparency == .alpha ? 1 : 0,
                 unlit_enabled:
@@ -1414,10 +1903,26 @@ public final class GPUWindowProbe {
                     (batch.material == nil &&
                      kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
                         ? 1 : 0,
-                reserved: 0
+                surface_variant: Self.sceneSurfaceVariant(
+                    batch.material?.surface.variant ?? .none
+                ),
+                surface_time: surfaceTime,
+                surface_parameters0: (
+                    batch.material?.surface.parameters0.x ?? 0,
+                    batch.material?.surface.parameters0.y ?? 0,
+                    batch.material?.surface.parameters0.z ?? 0,
+                    batch.material?.surface.parameters0.w ?? 0
+                ),
+                surface_parameters1: (
+                    batch.material?.surface.parameters1.x ?? 0,
+                    batch.material?.surface.parameters1.y ?? 0,
+                    batch.material?.surface.parameters1.z ?? 0,
+                    batch.material?.surface.parameters1.w ?? 0
+                )
             ))
         }
         var report = BTBHGPUSceneReport()
+        let encodeStarted = Self.monotonicElapsedSeconds
         let result = vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
                 shadowVertexShaderPath.withCString { shadowVertexPath in
@@ -1429,6 +1934,10 @@ public final class GPUWindowProbe {
                                 fragmentPath in
                                 unshadowedFragmentShaderPath.withCString {
                                     unshadowedFragmentPath in
+                                postVertexShaderPath.withCString {
+                                    postVertexPath in
+                                postFragmentShaderPath.withCString {
+                                    postFragmentPath in
                                 viewProjection.withUnsafeBufferPointer {
                                     matrix in
                                     sceneCameraRightValues
@@ -1452,12 +1961,15 @@ public final class GPUWindowProbe {
                                                     shadowFragmentPath,
                                                     fragmentPath,
                                                     unshadowedFragmentPath,
+                                                    postVertexPath,
+                                                    postFragmentPath,
                                                     shaderFormat,
                                                     matrix.baseAddress,
                                                     right.baseAddress,
                                                     up.baseAddress,
                                                     position.baseAddress,
                                                     &nativeLighting,
+                                                    &nativePost,
                                                     instanceData.baseAddress,
                                                     UInt32(
                                                         transientInstanceCount
@@ -1481,6 +1993,8 @@ public final class GPUWindowProbe {
                                         }
                                     }
                                 }
+                                }
+                                }
                             }
                         }
                     }
@@ -1488,6 +2002,8 @@ public final class GPUWindowProbe {
             }
         }
         }
+        let cpuEncodeMilliseconds =
+            (Self.monotonicElapsedSeconds - encodeStarted) * 1_000
         guard result == BTBH_GPU_OK else {
             throw GPUSceneProbeError.operationFailed(
                 message: GPUDeviceProbe.string(from: &report.message)
@@ -1507,7 +2023,8 @@ public final class GPUWindowProbe {
             ),
             persistentBatchCount: Int(report.persistent_batch_count),
             shadowResourcesReady:
-                btbh_gpu_window_scene_shadow_resources_ready(window) != 0
+                btbh_gpu_window_scene_shadow_resources_ready(window) != 0,
+            cpuEncodeMilliseconds: cpuEncodeMilliseconds
         )
     }
 
@@ -1516,40 +2033,42 @@ public final class GPUWindowProbe {
         lighting: inout BTBHGPUSceneLighting
     ) {
         lighting.ground_bottom_red =
-            Float(sky.groundBottomColor.r) / 255
+            GPUColorSpace.linearComponent(sky.groundBottomColor.r)
         lighting.ground_bottom_green =
-            Float(sky.groundBottomColor.g) / 255
+            GPUColorSpace.linearComponent(sky.groundBottomColor.g)
         lighting.ground_bottom_blue =
-            Float(sky.groundBottomColor.b) / 255
+            GPUColorSpace.linearComponent(sky.groundBottomColor.b)
         lighting.ground_energy = sky.groundEnergy
         lighting.ground_horizon_red =
-            Float(sky.groundHorizonColor.r) / 255
+            GPUColorSpace.linearComponent(sky.groundHorizonColor.r)
         lighting.ground_horizon_green =
-            Float(sky.groundHorizonColor.g) / 255
+            GPUColorSpace.linearComponent(sky.groundHorizonColor.g)
         lighting.ground_horizon_blue =
-            Float(sky.groundHorizonColor.b) / 255
+            GPUColorSpace.linearComponent(sky.groundHorizonColor.b)
         lighting.ground_horizon_curve = sky.groundHorizonCurve
-        lighting.sky_top_red = Float(sky.skyTopColor.r) / 255
-        lighting.sky_top_green = Float(sky.skyTopColor.g) / 255
-        lighting.sky_top_blue = Float(sky.skyTopColor.b) / 255
+        lighting.sky_top_red =
+            GPUColorSpace.linearComponent(sky.skyTopColor.r)
+        lighting.sky_top_green =
+            GPUColorSpace.linearComponent(sky.skyTopColor.g)
+        lighting.sky_top_blue =
+            GPUColorSpace.linearComponent(sky.skyTopColor.b)
         lighting.sky_energy = sky.skyEnergy
         lighting.sky_horizon_red =
-            Float(sky.skyHorizonColor.r) / 255
+            GPUColorSpace.linearComponent(sky.skyHorizonColor.r)
         lighting.sky_horizon_green =
-            Float(sky.skyHorizonColor.g) / 255
+            GPUColorSpace.linearComponent(sky.skyHorizonColor.g)
         lighting.sky_horizon_blue =
-            Float(sky.skyHorizonColor.b) / 255
+            GPUColorSpace.linearComponent(sky.skyHorizonColor.b)
         lighting.sky_horizon_curve = sky.skyHorizonCurve
-        lighting.sun_red = Float(sky.sunColor.r) / 255
-        lighting.sun_green = Float(sky.sunColor.g) / 255
-        lighting.sun_blue = Float(sky.sunColor.b) / 255
+        lighting.sun_red =
+            GPUColorSpace.linearComponent(sky.sunColor.r)
+        lighting.sun_green =
+            GPUColorSpace.linearComponent(sky.sunColor.g)
+        lighting.sun_blue =
+            GPUColorSpace.linearComponent(sky.sunColor.b)
         lighting.sun_energy = sky.sunEnergy
-        let authoredSunDirection = sky.sunDirection
-        let sunDirection = RenderVec3(
-            x: -authoredSunDirection.x,
-            y: -authoredSunDirection.y,
-            z: -authoredSunDirection.z
-        ).normalized()
+        let sunDirection =
+            (sky.sunDirection * -1).normalized()
         lighting.sun_direction_x = sunDirection.x
         lighting.sun_direction_y = sunDirection.y
         lighting.sun_direction_z = sunDirection.z
@@ -1573,16 +2092,32 @@ public final class GPUWindowProbe {
             lighting.secondaryDirectionalDirection.y,
             lighting.secondaryDirectionalDirection.z,
             lighting.secondaryDirectionalEnergy,
+            lighting.spotPosition.x,
+            lighting.spotPosition.y,
+            lighting.spotPosition.z,
+            lighting.spotDirection.x,
+            lighting.spotDirection.y,
+            lighting.spotDirection.z,
+            lighting.spotEnergy,
+            lighting.spotRange,
+            lighting.spotFalloff,
+            lighting.spotInnerCutoff,
+            lighting.spotOuterCutoff,
         ]
         guard values.allSatisfy(\.isFinite),
               lighting.ambientEnergy >= 0,
               lighting.directionalEnergy >= 0,
-              lighting.secondaryDirectionalEnergy >= 0 else {
+              lighting.secondaryDirectionalEnergy >= 0,
+              lighting.spotEnergy >= 0,
+              lighting.spotRange >= 0,
+              lighting.spotFalloff > 0,
+              lighting.spotInnerCutoff > lighting.spotOuterCutoff else {
             return false
         }
         let shadows = [
             lighting.directionalShadow,
             lighting.secondaryDirectionalShadow,
+            lighting.spotShadow,
         ]
         guard shadows.allSatisfy({
             $0.range.isFinite &&
@@ -1618,6 +2153,32 @@ public final class GPUWindowProbe {
         ].allSatisfy(\.isFinite)
     }
 
+    private static func scenePostIsValid(
+        _ post: GPUScenePostProbe
+    ) -> Bool {
+        [
+            post.tonemapWhite,
+            post.casSharpness,
+            post.focusPoint.x,
+            post.focusPoint.y,
+            post.focusDirection.x,
+            post.focusDirection.y,
+            post.focusHalfWidth,
+            post.maximumRadiusPixels,
+            post.blurCurve,
+            post.highlightThreshold,
+            post.highlightGain,
+        ].allSatisfy(\.isFinite) &&
+        post.tonemapWhite > 0 &&
+        post.casSharpness >= 0 &&
+        post.casSharpness <= 1 &&
+        post.focusHalfWidth >= 0 &&
+        post.focusHalfWidth < 1 &&
+        post.maximumRadiusPixels >= 0 &&
+        post.blurCurve > 0 &&
+        (!post.lutEnabled || post.lutTexture != nil)
+    }
+
     private static func sceneBlendMode(
         _ mode: MaterialBlendMode
     ) -> BTBHGPUSceneBlendMode {
@@ -1630,6 +2191,25 @@ public final class GPUWindowProbe {
             BTBH_GPU_SCENE_BLEND_MULTIPLIED
         case .premultipliedAlpha:
             BTBH_GPU_SCENE_BLEND_PREMULTIPLIED_ALPHA
+        }
+    }
+
+    private static func sceneSurfaceVariant(
+        _ variant: GPUSceneSurfaceVariant
+    ) -> BTBHGPUSceneSurfaceVariant {
+        switch variant {
+        case .none:
+            BTBH_GPU_SCENE_SURFACE_NONE
+        case .glitterStatic:
+            BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC
+        case .water:
+            BTBH_GPU_SCENE_SURFACE_WATER
+        case .dissolve:
+            BTBH_GPU_SCENE_SURFACE_DISSOLVE
+        case .shatter:
+            BTBH_GPU_SCENE_SURFACE_SHATTER
+        case .glitter:
+            BTBH_GPU_SCENE_SURFACE_GLITTER
         }
     }
 
@@ -1666,6 +2246,36 @@ public final class GPUWindowProbe {
             BTBH_GPU_SCENE_DEPTH_GREATER_EQUAL
         case .never:
             BTBH_GPU_SCENE_DEPTH_NEVER
+        }
+    }
+
+    private static func sceneCullMode(
+        _ mode: CullMode
+    ) -> BTBHGPUSceneCullMode {
+        switch mode {
+        case .none:
+            BTBH_GPU_SCENE_CULL_NONE
+        case .front:
+            BTBH_GPU_SCENE_CULL_FRONT
+        case .back:
+            BTBH_GPU_SCENE_CULL_BACK
+        }
+    }
+
+    private static func sceneStencilOperation(
+        _ operation: StencilOperation
+    ) -> BTBHGPUSceneStencilOperation {
+        switch operation {
+        case .keep:
+            BTBH_GPU_SCENE_STENCIL_KEEP
+        case .zero:
+            BTBH_GPU_SCENE_STENCIL_ZERO
+        case .replace:
+            BTBH_GPU_SCENE_STENCIL_REPLACE
+        case .incrementClamp:
+            BTBH_GPU_SCENE_STENCIL_INCREMENT_CLAMP
+        case .decrementClamp:
+            BTBH_GPU_SCENE_STENCIL_DECREMENT_CLAMP
         }
     }
 
@@ -1817,7 +2427,8 @@ public final class GPUWindowProbe {
                 width: Int(report.width),
                 height: Int(report.height)
             ),
-            mipCount: Int(report.mip_count)
+            mipCount: Int(report.mip_count),
+            isRenderTarget: false
         )
     }
 

@@ -21,6 +21,8 @@
 #pragma clang diagnostic ignored "-Wignored-attributes"
 #endif
 #include <assimp/cimport.h>
+#include <assimp/GltfMaterial.h>
+#include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #if defined(__clang__)
@@ -48,8 +50,88 @@ typedef struct BTBHGPUFloatAttribute {
     uint32_t component_count;
 } BTBHGPUFloatAttribute;
 
+bool btbh_gpu_model_assign_bone_weight(
+    float joints[4],
+    float weights[4],
+    uint32_t bone_index,
+    float influence
+) {
+    if (
+        joints == NULL ||
+        weights == NULL ||
+        bone_index > UINT8_MAX ||
+        !isfinite(influence) ||
+        influence <= 0.0f
+    ) {
+        return false;
+    }
+    const float scaled = influence * 255.0f + 0.5f;
+    const uint32_t quantized = scaled >= 255.0f
+        ? 255u
+        : (uint32_t) scaled;
+    if (quantized == 0u) {
+        return false;
+    }
+
+    int empty_slot = -1;
+    uint32_t minimum_slot = 0u;
+    float minimum_weight = weights[0];
+    for (uint32_t slot = 1u; slot < 4u; slot += 1u) {
+        if (weights[slot] == 0.0f && empty_slot < 0) {
+            empty_slot = (int) slot;
+        }
+        if (weights[slot] < minimum_weight) {
+            minimum_weight = weights[slot];
+            minimum_slot = slot;
+        }
+    }
+    const uint32_t destination = empty_slot >= 0
+        ? (uint32_t) empty_slot
+        : minimum_slot;
+    if (empty_slot < 0 && (float) quantized <= minimum_weight) {
+        return false;
+    }
+    joints[destination] = (float) bone_index;
+    weights[destination] = (float) quantized;
+    return true;
+}
+
+void btbh_gpu_model_normalize_bone_weights(
+    float joints[4],
+    float weights[4]
+) {
+    if (joints == NULL || weights == NULL) {
+        return;
+    }
+    const uint32_t sum =
+        (uint32_t) weights[0] +
+        (uint32_t) weights[1] +
+        (uint32_t) weights[2] +
+        (uint32_t) weights[3];
+    if (sum == 0u) {
+        memset(joints, 0, sizeof(float) * 4u);
+        memset(weights, 0, sizeof(float) * 4u);
+        weights[0] = 1.0f;
+        return;
+    }
+    const uint32_t half = sum >> 1u;
+    for (uint32_t slot = 0u; slot < 4u; slot += 1u) {
+        const uint32_t quantized =
+            ((uint32_t) weights[slot] * 255u + half) / sum;
+        weights[slot] = (float) quantized / 255.0f;
+    }
+}
+
 struct BTBHGPUAnimationLibrary {
     cgltf_data *data;
+};
+
+struct BTBHGPUAnimationPose {
+    const BTBHGPUAnimationLibrary *library;
+    uint32_t *animation_indices;
+    float *animation_times;
+    float *animation_weights;
+    uint32_t sample_count;
 };
 
 static void btbh_gpu_model_error(
@@ -151,6 +233,7 @@ static void btbh_gpu_model_material_default(
     material->occlusion = 1.0f;
     material->roughness = 1.0f;
     material->metalness = 0.0f;
+    material->alpha_cutoff = 0.01f;
 }
 
 static char *btbh_gpu_model_resolve_texture_path(
@@ -200,10 +283,324 @@ static char *btbh_gpu_model_resolve_texture_path(
     return resolved;
 }
 
+bool btbh_gpu_model_compose_orm_rgba8(
+    const uint8_t *occlusion_pixels,
+    uint32_t occlusion_width,
+    uint32_t occlusion_height,
+    const uint8_t *metallic_roughness_pixels,
+    uint32_t metallic_roughness_width,
+    uint32_t metallic_roughness_height,
+    uint8_t **composed_pixels,
+    uint32_t *composed_width,
+    uint32_t *composed_height
+) {
+    if (
+        composed_pixels == NULL ||
+        composed_width == NULL ||
+        composed_height == NULL
+    ) {
+        return false;
+    }
+    *composed_pixels = NULL;
+    *composed_width = 0u;
+    *composed_height = 0u;
+    const bool has_occlusion =
+        occlusion_pixels != NULL &&
+        occlusion_width > 0u &&
+        occlusion_height > 0u;
+    const bool has_metallic_roughness =
+        metallic_roughness_pixels != NULL &&
+        metallic_roughness_width > 0u &&
+        metallic_roughness_height > 0u;
+    if (
+        has_occlusion != (
+            occlusion_pixels != NULL ||
+            occlusion_width > 0u ||
+            occlusion_height > 0u
+        ) ||
+        has_metallic_roughness != (
+            metallic_roughness_pixels != NULL ||
+            metallic_roughness_width > 0u ||
+            metallic_roughness_height > 0u
+        ) ||
+        (!has_occlusion && !has_metallic_roughness)
+    ) {
+        return false;
+    }
+    const uint32_t width =
+        occlusion_width > metallic_roughness_width
+            ? occlusion_width
+            : metallic_roughness_width;
+    const uint32_t height =
+        occlusion_height > metallic_roughness_height
+            ? occlusion_height
+            : metallic_roughness_height;
+    const uint64_t byte_count =
+        (uint64_t)width * (uint64_t)height * UINT64_C(4);
+    if (byte_count > SIZE_MAX) {
+        return false;
+    }
+    uint8_t *output = malloc((size_t)byte_count);
+    if (output == NULL) {
+        return false;
+    }
+    for (uint32_t y = 0u; y < height; y += 1u) {
+        const uint32_t occlusion_y = has_occlusion
+            ? (uint32_t)(
+                (uint64_t)y * occlusion_height / height
+            )
+            : 0u;
+        const uint32_t metallic_roughness_y =
+            has_metallic_roughness
+                ? (uint32_t)(
+                    (uint64_t)y * metallic_roughness_height /
+                    height
+                )
+                : 0u;
+        for (uint32_t x = 0u; x < width; x += 1u) {
+            const uint32_t occlusion_x = has_occlusion
+                ? (uint32_t)(
+                    (uint64_t)x * occlusion_width / width
+                )
+                : 0u;
+            const uint32_t metallic_roughness_x =
+                has_metallic_roughness
+                    ? (uint32_t)(
+                        (uint64_t)x * metallic_roughness_width /
+                        width
+                    )
+                    : 0u;
+            const size_t destination =
+                ((size_t)y * width + x) * 4u;
+            const size_t occlusion_source =
+                ((size_t)occlusion_y * occlusion_width +
+                    occlusion_x) * 4u;
+            const size_t metallic_roughness_source =
+                ((size_t)metallic_roughness_y *
+                    metallic_roughness_width +
+                    metallic_roughness_x) * 4u;
+            output[destination] = has_occlusion
+                ? occlusion_pixels[occlusion_source]
+                : 255u;
+            output[destination + 1u] = has_metallic_roughness
+                ? metallic_roughness_pixels[
+                    metallic_roughness_source + 1u
+                ]
+                : 255u;
+            output[destination + 2u] = has_metallic_roughness
+                ? metallic_roughness_pixels[
+                    metallic_roughness_source + 2u
+                ]
+                : 255u;
+            output[destination + 3u] = 255u;
+        }
+    }
+    *composed_pixels = output;
+    *composed_width = width;
+    *composed_height = height;
+    return true;
+}
+
+static bool btbh_gpu_model_decode_texture(
+    const cgltf_texture_view *view,
+    const char *model_path,
+    uint8_t **pixels,
+    uint32_t *width,
+    uint32_t *height,
+    BTBHGPUModelReport *model_report
+) {
+    *pixels = NULL;
+    *width = 0u;
+    *height = 0u;
+    if (view == NULL || view->texture == NULL) {
+        return true;
+    }
+    const cgltf_image *image = view->texture->image;
+    if (image == NULL) {
+        btbh_gpu_model_error(
+            model_report,
+            "glTF texture does not reference an image"
+        );
+        return false;
+    }
+    const uint8_t *encoded = NULL;
+    size_t encoded_size = 0u;
+    void *external_bytes = NULL;
+    if (image->buffer_view != NULL) {
+        const cgltf_buffer_view *buffer_view = image->buffer_view;
+        if (
+            buffer_view->buffer == NULL ||
+            buffer_view->buffer->data == NULL ||
+            buffer_view->offset > buffer_view->buffer->size ||
+            buffer_view->size >
+                buffer_view->buffer->size - buffer_view->offset ||
+            buffer_view->size == 0u ||
+            buffer_view->size > (cgltf_size)INT_MAX
+        ) {
+            btbh_gpu_model_error(
+                model_report,
+                "glTF embedded texture buffer view is invalid"
+            );
+            return false;
+        }
+        encoded =
+            (const uint8_t *)buffer_view->buffer->data +
+            buffer_view->offset;
+        encoded_size = (size_t)buffer_view->size;
+    } else {
+        char *texture_path = btbh_gpu_model_resolve_texture_path(
+            model_path,
+            image->uri
+        );
+        if (texture_path == NULL) {
+            btbh_gpu_model_error(
+                model_report,
+                image->uri != NULL &&
+                        strncmp(image->uri, "data:", 5u) == 0
+                    ? "GPU glTF import does not support data-URI textures"
+                    : "Could not resolve external glTF texture path"
+            );
+            return false;
+        }
+        cgltf_memory_options memory_options = {0};
+        cgltf_file_options file_options = {0};
+        cgltf_size external_size = 0u;
+        const cgltf_result read_result = btbh_gpu_model_file_read(
+            &memory_options,
+            &file_options,
+            texture_path,
+            &external_size,
+            &external_bytes
+        );
+        free(texture_path);
+        if (
+            read_result != cgltf_result_success ||
+            external_size == 0u ||
+            external_size > (cgltf_size)INT_MAX
+        ) {
+            free(external_bytes);
+            btbh_gpu_model_error(
+                model_report,
+                "Could not read external glTF texture"
+            );
+            return false;
+        }
+        encoded = external_bytes;
+        encoded_size = (size_t)external_size;
+    }
+    const bool decoded = btbh_gpu_texture_decode_memory_rgba8(
+        encoded,
+        encoded_size,
+        pixels,
+        width,
+        height
+    );
+    free(external_bytes);
+    if (!decoded) {
+        btbh_gpu_model_error(
+            model_report,
+            "Could not decode glTF texture for ORM composition"
+        );
+        return false;
+    }
+    return true;
+}
+
+static bool btbh_gpu_model_load_orm_texture(
+    BTBHGPUWindow *window,
+    const cgltf_texture_view *occlusion_view,
+    const cgltf_texture_view *metallic_roughness_view,
+    const char *model_path,
+    BTBHGPUTexture **texture,
+    BTBHGPUModelReport *model_report
+) {
+    *texture = NULL;
+    if (
+        (occlusion_view == NULL ||
+            occlusion_view->texture == NULL) &&
+        (metallic_roughness_view == NULL ||
+            metallic_roughness_view->texture == NULL)
+    ) {
+        return true;
+    }
+    uint8_t *occlusion = NULL;
+    uint32_t occlusion_width = 0u;
+    uint32_t occlusion_height = 0u;
+    uint8_t *metallic_roughness = NULL;
+    uint32_t metallic_roughness_width = 0u;
+    uint32_t metallic_roughness_height = 0u;
+    uint8_t *composed = NULL;
+    uint32_t composed_width = 0u;
+    uint32_t composed_height = 0u;
+    bool success = btbh_gpu_model_decode_texture(
+        occlusion_view,
+        model_path,
+        &occlusion,
+        &occlusion_width,
+        &occlusion_height,
+        model_report
+    );
+    if (success) {
+        success = btbh_gpu_model_decode_texture(
+            metallic_roughness_view,
+            model_path,
+            &metallic_roughness,
+            &metallic_roughness_width,
+            &metallic_roughness_height,
+            model_report
+        );
+    }
+    if (success) {
+        success = btbh_gpu_model_compose_orm_rgba8(
+            occlusion,
+            occlusion_width,
+            occlusion_height,
+            metallic_roughness,
+            metallic_roughness_width,
+            metallic_roughness_height,
+            &composed,
+            &composed_width,
+            &composed_height
+        );
+        if (!success) {
+            btbh_gpu_model_error(
+                model_report,
+                "Could not compose glTF ORM texture"
+            );
+        }
+    }
+    if (success) {
+        BTBHGPUTextureReport texture_report = {0};
+        *texture = btbh_gpu_window_texture_create_rgba8_mipmapped(
+            window,
+            composed,
+            composed_width,
+            composed_height,
+            BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
+            BTBH_GPU_TEXTURE_WRAP_REPEAT,
+            &texture_report
+        );
+        success = *texture != NULL;
+        if (!success) {
+            btbh_gpu_model_error(
+                model_report,
+                texture_report.message[0] != '\0'
+                    ? texture_report.message
+                    : "Could not upload composed glTF ORM texture"
+            );
+        }
+    }
+    free(composed);
+    free(metallic_roughness);
+    free(occlusion);
+    return success;
+}
+
 static bool btbh_gpu_model_load_texture(
     BTBHGPUWindow *window,
     const cgltf_texture_view *view,
     const char *model_path,
+    SDL_GPUTextureFormat format,
     BTBHGPUTexture **texture,
     BTBHGPUModelReport *model_report
 ) {
@@ -235,12 +632,13 @@ static bool btbh_gpu_model_load_texture(
             return false;
         }
         BTBHGPUTextureReport texture_report = {0};
-        *texture = btbh_gpu_window_texture_load(
+        *texture = btbh_gpu_window_texture_load_format(
             window,
             texture_path,
-            0u,
-            BTBH_GPU_TEXTURE_FILTER_LINEAR,
+            1u,
+            BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
             BTBH_GPU_TEXTURE_WRAP_REPEAT,
+            format,
             &texture_report
         );
         free(texture_path);
@@ -284,12 +682,14 @@ static bool btbh_gpu_model_load_texture(
         return false;
     }
     BTBHGPUTextureReport texture_report = {0};
-    *texture = btbh_gpu_window_texture_load_memory(
+    *texture = btbh_gpu_window_texture_load_memory_format(
         window,
         encoded,
         (size_t)buffer_view->size,
-        BTBH_GPU_TEXTURE_FILTER_LINEAR,
+        1u,
+        BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
         BTBH_GPU_TEXTURE_WRAP_REPEAT,
+        format,
         &texture_report
     );
     if (*texture != NULL) {
@@ -360,29 +760,32 @@ static bool btbh_gpu_model_load_gltf_materials(
                     model->owner,
                     &source->pbr_metallic_roughness.base_color_texture,
                     model_path,
+                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
                     &destination->albedo_texture,
                     report
                 )) {
                 return false;
             }
-            if (!btbh_gpu_model_load_texture(
-                    model->owner,
-                    &source->pbr_metallic_roughness
-                        .metallic_roughness_texture,
-                    model_path,
-                    &destination->orm_texture,
-                    report
-                )) {
-                return false;
-            }
         }
-        if (!btbh_gpu_model_load_texture(
+        if (!btbh_gpu_model_load_orm_texture(
                 model->owner,
-                &source->normal_texture,
+                &source->occlusion_texture,
+                &source->pbr_metallic_roughness
+                    .metallic_roughness_texture,
                 model_path,
-                &destination->normal_texture,
+                &destination->orm_texture,
                 report
             )) {
+            return false;
+        }
+        if (!btbh_gpu_model_load_texture(
+                    model->owner,
+                    &source->normal_texture,
+                    model_path,
+                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                    &destination->normal_texture,
+                    report
+                )) {
             return false;
         }
         if (destination->normal_texture != NULL) {
@@ -402,12 +805,20 @@ static bool btbh_gpu_model_load_gltf_materials(
                 model->owner,
                 &source->emissive_texture,
                 model_path,
+                SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
                 &destination->emission_texture,
                 report
             )) {
             return false;
         }
         destination->unlit_enabled = source->unlit ? 1u : 0u;
+        destination->double_sided_enabled =
+            source->double_sided ? 1u : 0u;
+        if (source->alpha_mode == cgltf_alpha_mode_mask) {
+            destination->alpha_cutoff = source->alpha_cutoff;
+        } else if (source->alpha_mode == cgltf_alpha_mode_blend) {
+            destination->transparency_enabled = 1u;
+        }
     }
     return true;
 }
@@ -475,6 +886,10 @@ static void btbh_gpu_model_release_handles(
         }
         primitive->index_buffer = NULL;
         primitive->vertex_buffer = NULL;
+        free(primitive->positions);
+        free(primitive->indices);
+        primitive->positions = NULL;
+        primitive->indices = NULL;
     }
 }
 
@@ -916,10 +1331,25 @@ static bool btbh_gpu_model_decode_vertices(
         vertices,
         vertex_size
     );
-    free(vertices);
     if (destination->vertex_buffer == NULL) {
+        free(vertices);
         return false;
     }
+    destination->positions = malloc(
+        vertex_count * 3u * (uint32_t) sizeof(float)
+    );
+    if (destination->positions == NULL) {
+        free(vertices);
+        return false;
+    }
+    for (uint32_t index = 0u; index < vertex_count; index += 1u) {
+        memcpy(
+            &destination->positions[index * 3u],
+            vertices[index].position,
+            3u * sizeof(float)
+        );
+    }
+    free(vertices);
     destination->vertex_count = vertex_count;
     return true;
 }
@@ -1022,10 +1452,11 @@ static bool btbh_gpu_model_decode_indices(
         );
         valid = destination->index_buffer != NULL;
     }
-    free(indices);
     if (!valid) {
+        free(indices);
         return false;
     }
+    destination->indices = indices;
     destination->index_count = index_count;
     return true;
 }
@@ -1067,6 +1498,155 @@ static uint32_t btbh_gpu_model_primitive_count(
 }
 
 #if defined(_WIN32)
+static uint8_t btbh_gpu_model_assimp_color_channel(float value) {
+    const float clamped = fmaxf(0.0f, fminf(1.0f, value));
+    return (uint8_t)(clamped * 255.0f);
+}
+
+static void btbh_gpu_model_load_assimp_material(
+    BTBHGPUModelMaterialInfo *destination,
+    const struct aiMaterial *source
+) {
+    struct aiColor4D color;
+    if (
+        aiGetMaterialColor(
+            source,
+            AI_MATKEY_BASE_COLOR,
+            &color
+        ) == AI_SUCCESS ||
+        aiGetMaterialColor(
+            source,
+            AI_MATKEY_COLOR_DIFFUSE,
+            &color
+        ) == AI_SUCCESS
+    ) {
+        destination->albedo_red =
+            btbh_gpu_model_assimp_color_channel(color.r);
+        destination->albedo_green =
+            btbh_gpu_model_assimp_color_channel(color.g);
+        destination->albedo_blue =
+            btbh_gpu_model_assimp_color_channel(color.b);
+        destination->albedo_alpha =
+            btbh_gpu_model_assimp_color_channel(color.a);
+    }
+
+    float opacity = 1.0f;
+    if (
+        destination->albedo_alpha == 255u &&
+        aiGetMaterialFloat(
+            source,
+            AI_MATKEY_OPACITY,
+            &opacity
+        ) == AI_SUCCESS
+    ) {
+        destination->albedo_alpha =
+            btbh_gpu_model_assimp_color_channel(opacity);
+    }
+
+    bool has_emission = false;
+    if (
+        aiGetMaterialColor(
+            source,
+            AI_MATKEY_COLOR_EMISSIVE,
+            &color
+        ) == AI_SUCCESS
+    ) {
+        destination->emission_red =
+            btbh_gpu_model_assimp_color_channel(color.r);
+        destination->emission_green =
+            btbh_gpu_model_assimp_color_channel(color.g);
+        destination->emission_blue =
+            btbh_gpu_model_assimp_color_channel(color.b);
+        has_emission =
+            destination->emission_red != 0u ||
+            destination->emission_green != 0u ||
+            destination->emission_blue != 0u;
+    }
+    float emission_energy = 0.0f;
+    if (
+        aiGetMaterialFloat(
+            source,
+            AI_MATKEY_EMISSIVE_INTENSITY,
+            &emission_energy
+        ) == AI_SUCCESS
+    ) {
+        destination->emission_energy = emission_energy;
+    } else if (has_emission) {
+        destination->emission_energy = 1.0f;
+    }
+
+    float roughness = 0.0f;
+    if (
+        aiGetMaterialFloat(
+            source,
+            AI_MATKEY_ROUGHNESS_FACTOR,
+            &roughness
+        ) == AI_SUCCESS
+    ) {
+        destination->roughness = roughness;
+    } else {
+        float shininess = 0.0f;
+        if (
+            aiGetMaterialFloat(
+                source,
+                AI_MATKEY_SHININESS,
+                &shininess
+            ) == AI_SUCCESS &&
+            shininess > 0.0f
+        ) {
+            const float normalized =
+                fminf(shininess / 1000.0f, 1.0f);
+            float derived = 1.0f - sqrtf(normalized);
+            float strength = 1.0f;
+            if (
+                aiGetMaterialFloat(
+                    source,
+                    AI_MATKEY_SHININESS_STRENGTH,
+                    &strength
+                ) == AI_SUCCESS
+            ) {
+                strength = fminf(fmaxf(strength, 0.0f), 1.0f);
+                derived +=
+                    (1.0f - derived) * (1.0f - strength);
+            }
+            destination->roughness =
+                fminf(fmaxf(derived, 0.0f), 1.0f);
+        }
+    }
+
+    float metalness = 0.0f;
+    if (
+        aiGetMaterialFloat(
+            source,
+            AI_MATKEY_METALLIC_FACTOR,
+            &metalness
+        ) == AI_SUCCESS
+    ) {
+        destination->metalness = metalness;
+    }
+    float normal_scale = 0.0f;
+    if (
+        aiGetMaterialFloat(
+            source,
+            AI_MATKEY_BUMPSCALING,
+            &normal_scale
+        ) == AI_SUCCESS
+    ) {
+        destination->normal_scale = normal_scale;
+    }
+    int shading_mode = 0;
+    if (
+        aiGetMaterialInteger(
+            source,
+            AI_MATKEY_SHADING_MODEL,
+            &shading_mode
+        ) == AI_SUCCESS
+    ) {
+        destination->unlit_enabled =
+            shading_mode == aiShadingMode_Unlit ? 1u : 0u;
+    }
+}
+
 static uint32_t btbh_gpu_model_assimp_primitive_count(
     const struct aiScene *scene
 ) {
@@ -1127,7 +1707,6 @@ static bool btbh_gpu_model_decode_assimp_vertices(
         vertex->color[1] = 1.0f;
         vertex->color[2] = 1.0f;
         vertex->color[3] = 1.0f;
-        vertex->weights[0] = 1.0f;
 
         if (mesh->mNormals != NULL) {
             vertex->normal[0] = mesh->mNormals[index].x;
@@ -1175,6 +1754,39 @@ static bool btbh_gpu_model_decode_assimp_vertices(
         }
         btbh_gpu_model_include_position(model, vertex->position);
     }
+    if (mesh->mNumBones > UINT8_MAX + 1u) {
+        free(vertices);
+        return false;
+    }
+    for (uint32_t bone_index = 0u;
+         bone_index < mesh->mNumBones;
+         bone_index += 1u) {
+        const struct aiBone *bone = mesh->mBones[bone_index];
+        if (bone == NULL) {
+            continue;
+        }
+        for (uint32_t weight_index = 0u;
+             weight_index < bone->mNumWeights;
+             weight_index += 1u) {
+            const struct aiVertexWeight *influence =
+                &bone->mWeights[weight_index];
+            if (influence->mVertexId >= vertex_count) {
+                continue;
+            }
+            (void) btbh_gpu_model_assign_bone_weight(
+                vertices[influence->mVertexId].joints,
+                vertices[influence->mVertexId].weights,
+                bone_index,
+                influence->mWeight
+            );
+        }
+    }
+    for (uint32_t index = 0u; index < vertex_count; index += 1u) {
+        btbh_gpu_model_normalize_bone_weights(
+            vertices[index].joints,
+            vertices[index].weights
+        );
+    }
 
     destination->vertex_buffer = btbh_gpu_model_upload_buffer(
         model->owner->device->gpu,
@@ -1182,10 +1794,25 @@ static bool btbh_gpu_model_decode_assimp_vertices(
         vertices,
         vertex_size
     );
-    free(vertices);
     if (destination->vertex_buffer == NULL) {
+        free(vertices);
         return false;
     }
+    destination->positions = malloc(
+        vertex_count * 3u * (uint32_t) sizeof(float)
+    );
+    if (destination->positions == NULL) {
+        free(vertices);
+        return false;
+    }
+    for (uint32_t index = 0u; index < vertex_count; index += 1u) {
+        memcpy(
+            &destination->positions[index * 3u],
+            vertices[index].position,
+            3u * sizeof(float)
+        );
+    }
+    free(vertices);
     destination->vertex_count = vertex_count;
     return true;
 }
@@ -1228,7 +1855,9 @@ static bool btbh_gpu_model_decode_assimp_indices(
             const unsigned int source_index = face->mIndices[corner];
             valid = source_index < destination->vertex_count;
             if (valid) {
-                indices[face_index * 3u + corner] =
+                const uint32_t destination_corner =
+                    corner == 1u ? 2u : (corner == 2u ? 1u : 0u);
+                indices[face_index * 3u + destination_corner] =
                     (uint32_t) source_index;
             }
         }
@@ -1242,10 +1871,11 @@ static bool btbh_gpu_model_decode_assimp_indices(
         );
         valid = destination->index_buffer != NULL;
     }
-    free(indices);
     if (!valid) {
+        free(indices);
         return false;
     }
+    destination->indices = indices;
     destination->index_count = index_count;
     return true;
 }
@@ -1330,6 +1960,15 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
         btbh_gpu_model_material_default(
             &model->materials[material_index]
         );
+        if (
+            material_index < scene->mNumMaterials &&
+            scene->mMaterials[material_index] != NULL
+        ) {
+            btbh_gpu_model_load_assimp_material(
+                &model->materials[material_index],
+                scene->mMaterials[material_index]
+            );
+        }
     }
     for (uint32_t axis = 0; axis < 3u; axis += 1u) {
         model->minimum[axis] = FLT_MAX;
@@ -1612,6 +2251,92 @@ BTBHGPUResult btbh_gpu_model_material_info(
     return BTBH_GPU_OK;
 }
 
+BTBHGPUResult btbh_gpu_model_mesh_info(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    BTBHGPUModelMeshInfo *info
+) {
+    if (
+        model == NULL ||
+        model->primitives == NULL ||
+        mesh_index >= model->primitive_count ||
+        info == NULL
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    const BTBHGPUModelPrimitive *primitive =
+        &model->primitives[mesh_index];
+    info->vertex_count = primitive->vertex_count;
+    info->index_count = primitive->index_count;
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_model_mesh_copy_positions(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    float *positions,
+    uint32_t float_capacity
+) {
+    if (
+        model == NULL ||
+        model->primitives == NULL ||
+        mesh_index >= model->primitive_count
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    const BTBHGPUModelPrimitive *primitive =
+        &model->primitives[mesh_index];
+    if (
+        primitive->positions == NULL ||
+        primitive->vertex_count > UINT32_MAX / 3u ||
+        positions == NULL ||
+        float_capacity < primitive->vertex_count * 3u
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    memcpy(
+        positions,
+        primitive->positions,
+        primitive->vertex_count * 3u * sizeof(float)
+    );
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_model_mesh_copy_indices(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    uint32_t *indices,
+    uint32_t index_capacity
+) {
+    if (
+        model == NULL ||
+        model->primitives == NULL ||
+        mesh_index >= model->primitive_count
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    const BTBHGPUModelPrimitive *primitive =
+        &model->primitives[mesh_index];
+    if (primitive->index_count == 0u) {
+        return index_capacity == 0u
+            ? BTBH_GPU_OK
+            : BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (
+        primitive->indices == NULL ||
+        indices == NULL ||
+        index_capacity < primitive->index_count
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    memcpy(
+        indices,
+        primitive->indices,
+        primitive->index_count * sizeof(uint32_t)
+    );
+    return BTBH_GPU_OK;
+}
+
 void btbh_gpu_model_destroy(BTBHGPUModel *model) {
     if (model == NULL) {
         return;
@@ -1786,6 +2511,7 @@ static bool btbh_gpu_animation_sample_value(
     const cgltf_animation_sampler *sampler,
     float time,
     cgltf_size component_count,
+    bool quaternion,
     float *value
 ) {
     if (
@@ -1944,6 +2670,13 @@ static bool btbh_gpu_animation_sample_value(
                 h01 * upper_value[component] +
                 h11 * interval * upper_tangent[component];
         }
+    } else if (quaternion && component_count == 4u) {
+        btbh_gpu_animation_slerp_shortest(
+            lower_value,
+            upper_value,
+            amount,
+            value
+        );
     } else {
         for (cgltf_size component = 0u;
              component < component_count;
@@ -1974,6 +2707,56 @@ static void btbh_gpu_animation_normalize_quaternion(float rotation[4]) {
     for (uint32_t component = 0u; component < 4u; component += 1u) {
         rotation[component] *= inverse_length;
     }
+}
+
+void btbh_gpu_animation_slerp_shortest(
+    const float lower[4],
+    const float upper[4],
+    float amount,
+    float output[4]
+) {
+    float start[4];
+    float end[4];
+    (void)memcpy(start, lower, sizeof(start));
+    (void)memcpy(end, upper, sizeof(end));
+    btbh_gpu_animation_normalize_quaternion(start);
+    btbh_gpu_animation_normalize_quaternion(end);
+
+    float dot =
+        start[0] * end[0] +
+        start[1] * end[1] +
+        start[2] * end[2] +
+        start[3] * end[3];
+    if (dot < 0.0f) {
+        dot = -dot;
+        for (uint32_t component = 0u; component < 4u; ++component) {
+            end[component] = -end[component];
+        }
+    }
+    dot = fminf(fmaxf(dot, -1.0f), 1.0f);
+    const float clamped_amount = fminf(fmaxf(amount, 0.0f), 1.0f);
+    if (dot > 0.9995f) {
+        for (uint32_t component = 0u; component < 4u; ++component) {
+            output[component] =
+                start[component] +
+                (end[component] - start[component]) * clamped_amount;
+        }
+        btbh_gpu_animation_normalize_quaternion(output);
+        return;
+    }
+
+    const float angle = acosf(dot);
+    const float inverse_sine = 1.0f / sinf(angle);
+    const float start_weight =
+        sinf((1.0f - clamped_amount) * angle) * inverse_sine;
+    const float end_weight =
+        sinf(clamped_amount * angle) * inverse_sine;
+    for (uint32_t component = 0u; component < 4u; ++component) {
+        output[component] =
+            start[component] * start_weight +
+            end[component] * end_weight;
+    }
+    btbh_gpu_animation_normalize_quaternion(output);
 }
 
 static void btbh_gpu_animation_multiply_matrix(
@@ -2053,59 +2836,48 @@ uint32_t btbh_gpu_animation_library_skin_joint_count(
     return (uint32_t)library->data->skins[skin_index].joints_count;
 }
 
-bool btbh_gpu_animation_library_sample_skin(
+static bool btbh_gpu_animation_sample_local_transforms(
     const BTBHGPUAnimationLibrary *library,
     uint32_t animation_index,
     float time,
-    uint32_t skin_index,
-    float *matrices,
-    uint32_t matrix_capacity
+    float *translations,
+    float *rotations,
+    float *scales,
+    uint8_t *animated_nodes
 ) {
     if (
         library == NULL ||
         library->data == NULL ||
         !isfinite(time) ||
         animation_index >= library->data->animations_count ||
-        skin_index >= library->data->skins_count ||
-        matrices == NULL
+        translations == NULL ||
+        rotations == NULL ||
+        scales == NULL ||
+        animated_nodes == NULL
     ) {
         return false;
     }
     const cgltf_data *data = library->data;
-    const cgltf_skin *skin = &data->skins[skin_index];
-    if (
-        skin->joints_count == 0u ||
-        skin->joints_count > matrix_capacity ||
-        data->nodes_count == 0u ||
-        data->nodes_count > SIZE_MAX / (sizeof(float) * 16u)
-    ) {
-        return false;
-    }
-    float *translations = calloc(data->nodes_count * 3u, sizeof(float));
-    float *rotations = calloc(data->nodes_count * 4u, sizeof(float));
-    float *scales = calloc(data->nodes_count * 3u, sizeof(float));
-    float *local_matrices = calloc(data->nodes_count * 16u, sizeof(float));
-    float *world_matrices = calloc(data->nodes_count * 16u, sizeof(float));
-    uint8_t *animated_nodes = calloc(data->nodes_count, sizeof(uint8_t));
-    uint8_t *states = calloc(data->nodes_count, sizeof(uint8_t));
-    if (
-        translations == NULL ||
-        rotations == NULL ||
-        scales == NULL ||
-        local_matrices == NULL ||
-        world_matrices == NULL ||
-        animated_nodes == NULL ||
-        states == NULL
-    ) {
-        free(states);
-        free(animated_nodes);
-        free(world_matrices);
-        free(local_matrices);
-        free(scales);
-        free(rotations);
-        free(translations);
-        return false;
-    }
+    (void)memset(
+        translations,
+        0,
+        data->nodes_count * 3u * sizeof(float)
+    );
+    (void)memset(
+        rotations,
+        0,
+        data->nodes_count * 4u * sizeof(float)
+    );
+    (void)memset(
+        scales,
+        0,
+        data->nodes_count * 3u * sizeof(float)
+    );
+    (void)memset(
+        animated_nodes,
+        0,
+        data->nodes_count * sizeof(uint8_t)
+    );
 
     for (cgltf_size index = 0u; index < data->nodes_count; index += 1u) {
         const cgltf_node *node = &data->nodes[index];
@@ -2172,6 +2944,8 @@ bool btbh_gpu_animation_library_sample_skin(
             channel->sampler,
             time,
             component_count,
+            channel->target_path ==
+                cgltf_animation_path_type_rotation,
             target
         );
         animated_nodes[(cgltf_size)node_index] = 1u;
@@ -2182,7 +2956,55 @@ bool btbh_gpu_animation_library_sample_skin(
             btbh_gpu_animation_normalize_quaternion(target);
         }
     }
+    return valid;
+}
 
+static bool btbh_gpu_animation_build_skin_matrices(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t skin_index,
+    const float *translations,
+    const float *rotations,
+    const float *scales,
+    const uint8_t *animated_nodes,
+    float *matrices,
+    uint32_t matrix_capacity
+) {
+    if (
+        library == NULL ||
+        library->data == NULL ||
+        skin_index >= library->data->skins_count ||
+        translations == NULL ||
+        rotations == NULL ||
+        scales == NULL ||
+        animated_nodes == NULL ||
+        matrices == NULL
+    ) {
+        return false;
+    }
+    const cgltf_data *data = library->data;
+    const cgltf_skin *skin = &data->skins[skin_index];
+    if (
+        skin->joints_count == 0u ||
+        skin->joints_count > matrix_capacity ||
+        data->nodes_count == 0u ||
+        data->nodes_count > SIZE_MAX / (sizeof(float) * 16u)
+    ) {
+        return false;
+    }
+    float *local_matrices = calloc(data->nodes_count * 16u, sizeof(float));
+    float *world_matrices = calloc(data->nodes_count * 16u, sizeof(float));
+    uint8_t *states = calloc(data->nodes_count, sizeof(uint8_t));
+    if (
+        local_matrices == NULL ||
+        world_matrices == NULL ||
+        states == NULL
+    ) {
+        free(states);
+        free(world_matrices);
+        free(local_matrices);
+        return false;
+    }
+    bool valid = true;
     for (cgltf_size index = 0u;
          valid && index < data->nodes_count;
          index += 1u) {
@@ -2260,13 +3082,305 @@ bool btbh_gpu_animation_library_sample_skin(
     }
 
     free(states);
-    free(animated_nodes);
     free(world_matrices);
     free(local_matrices);
+    return valid;
+}
+
+static bool btbh_gpu_animation_library_sample_skin_blended(
+    const BTBHGPUAnimationLibrary *library,
+    const uint32_t *animation_indices,
+    const float *animation_times,
+    const float *animation_weights,
+    uint32_t sample_count,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+) {
+    if (
+        library == NULL ||
+        library->data == NULL ||
+        animation_indices == NULL ||
+        animation_times == NULL ||
+        animation_weights == NULL ||
+        sample_count == 0u ||
+        skin_index >= library->data->skins_count ||
+        matrices == NULL
+    ) {
+        return false;
+    }
+    const cgltf_data *data = library->data;
+    if (
+        data->nodes_count == 0u ||
+        data->nodes_count > SIZE_MAX / (sizeof(float) * 16u)
+    ) {
+        return false;
+    }
+    float weight_sum = 0.0f;
+    for (uint32_t sample = 0u; sample < sample_count; sample += 1u) {
+        if (
+            animation_indices[sample] >= data->animations_count ||
+            !isfinite(animation_times[sample]) ||
+            !isfinite(animation_weights[sample]) ||
+            animation_weights[sample] < 0.0f
+        ) {
+            return false;
+        }
+        weight_sum += animation_weights[sample];
+    }
+    if (!isfinite(weight_sum) || weight_sum <= 0.0f) {
+        return false;
+    }
+
+    float *translations = calloc(data->nodes_count * 3u, sizeof(float));
+    float *rotations = calloc(data->nodes_count * 4u, sizeof(float));
+    float *scales = calloc(data->nodes_count * 3u, sizeof(float));
+    float *sample_translations =
+        calloc(data->nodes_count * 3u, sizeof(float));
+    float *sample_rotations =
+        calloc(data->nodes_count * 4u, sizeof(float));
+    float *sample_scales =
+        calloc(data->nodes_count * 3u, sizeof(float));
+    float *rotation_weight_sums =
+        calloc(data->nodes_count, sizeof(float));
+    uint8_t *animated_nodes =
+        calloc(data->nodes_count, sizeof(uint8_t));
+    uint8_t *sample_animated_nodes =
+        calloc(data->nodes_count, sizeof(uint8_t));
+    if (
+        translations == NULL ||
+        rotations == NULL ||
+        scales == NULL ||
+        sample_translations == NULL ||
+        sample_rotations == NULL ||
+        sample_scales == NULL ||
+        rotation_weight_sums == NULL ||
+        animated_nodes == NULL ||
+        sample_animated_nodes == NULL
+    ) {
+        free(sample_animated_nodes);
+        free(animated_nodes);
+        free(rotation_weight_sums);
+        free(sample_scales);
+        free(sample_rotations);
+        free(sample_translations);
+        free(scales);
+        free(rotations);
+        free(translations);
+        return false;
+    }
+
+    bool valid = true;
+    for (uint32_t sample = 0u;
+         valid && sample < sample_count;
+         sample += 1u) {
+        valid = btbh_gpu_animation_sample_local_transforms(
+            library,
+            animation_indices[sample],
+            animation_times[sample],
+            sample_translations,
+            sample_rotations,
+            sample_scales,
+            sample_animated_nodes
+        );
+        const float weight = animation_weights[sample] / weight_sum;
+        for (cgltf_size node = 0u;
+             valid && node < data->nodes_count;
+             node += 1u) {
+            for (uint32_t component = 0u; component < 3u; component += 1u) {
+                translations[node * 3u + component] +=
+                    sample_translations[node * 3u + component] * weight;
+                scales[node * 3u + component] +=
+                    sample_scales[node * 3u + component] * weight;
+            }
+            if (weight > 0.0f) {
+                float *rotation = &rotations[node * 4u];
+                const float *sample_rotation =
+                    &sample_rotations[node * 4u];
+                const float previous_weight =
+                    rotation_weight_sums[node];
+                if (previous_weight <= 0.0f) {
+                    (void)memcpy(
+                        rotation,
+                        sample_rotation,
+                        sizeof(float) * 4u
+                    );
+                } else {
+                    btbh_gpu_animation_slerp_shortest(
+                        rotation,
+                        sample_rotation,
+                        weight / (previous_weight + weight),
+                        rotation
+                    );
+                }
+                rotation_weight_sums[node] = previous_weight + weight;
+            }
+            animated_nodes[node] |= sample_animated_nodes[node];
+        }
+    }
+    if (valid) {
+        valid = btbh_gpu_animation_build_skin_matrices(
+            library,
+            skin_index,
+            translations,
+            rotations,
+            scales,
+            animated_nodes,
+            matrices,
+            matrix_capacity
+        );
+    }
+
+    free(sample_animated_nodes);
+    free(animated_nodes);
+    free(rotation_weight_sums);
+    free(sample_scales);
+    free(sample_rotations);
+    free(sample_translations);
     free(scales);
     free(rotations);
     free(translations);
     return valid;
+}
+
+bool btbh_gpu_animation_library_sample_skin(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index,
+    float time,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+) {
+    const float weight = 1.0f;
+    return btbh_gpu_animation_library_sample_skin_blended(
+        library,
+        &animation_index,
+        &time,
+        &weight,
+        1u,
+        skin_index,
+        matrices,
+        matrix_capacity
+    );
+}
+
+BTBHGPUAnimationPose *btbh_gpu_animation_pose_create(
+    const BTBHGPUAnimationLibrary *library
+) {
+    if (library == NULL || library->data == NULL) {
+        return NULL;
+    }
+    BTBHGPUAnimationPose *pose = calloc(1, sizeof(*pose));
+    if (pose != NULL) {
+        pose->library = library;
+    }
+    return pose;
+}
+
+uint8_t btbh_gpu_animation_pose_set_samples(
+    BTBHGPUAnimationPose *pose,
+    const uint32_t *animation_indices,
+    const float *animation_times,
+    const float *animation_weights,
+    uint32_t sample_count
+) {
+    if (
+        pose == NULL ||
+        pose->library == NULL ||
+        animation_indices == NULL ||
+        animation_times == NULL ||
+        animation_weights == NULL ||
+        sample_count == 0u ||
+        (size_t)sample_count > SIZE_MAX / sizeof(float)
+    ) {
+        return 0u;
+    }
+    uint32_t *indices = malloc(
+        (size_t)sample_count * sizeof(*indices)
+    );
+    float *times = malloc((size_t)sample_count * sizeof(*times));
+    float *weights = malloc((size_t)sample_count * sizeof(*weights));
+    if (indices == NULL || times == NULL || weights == NULL) {
+        free(weights);
+        free(times);
+        free(indices);
+        return 0u;
+    }
+    float weight_sum = 0.0f;
+    bool valid = true;
+    for (uint32_t index = 0u; index < sample_count; index += 1u) {
+        if (
+            animation_indices[index] >=
+                pose->library->data->animations_count ||
+            !isfinite(animation_times[index]) ||
+            !isfinite(animation_weights[index]) ||
+            animation_weights[index] < 0.0f
+        ) {
+            valid = false;
+            break;
+        }
+        indices[index] = animation_indices[index];
+        times[index] = animation_times[index];
+        weights[index] = animation_weights[index];
+        weight_sum += animation_weights[index];
+    }
+    if (!valid || !isfinite(weight_sum) || weight_sum <= 0.0f) {
+        free(weights);
+        free(times);
+        free(indices);
+        return 0u;
+    }
+    free(pose->animation_weights);
+    free(pose->animation_times);
+    free(pose->animation_indices);
+    pose->animation_indices = indices;
+    pose->animation_times = times;
+    pose->animation_weights = weights;
+    pose->sample_count = sample_count;
+    return 1u;
+}
+
+bool btbh_gpu_animation_pose_sample_skin(
+    const BTBHGPUAnimationPose *pose,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+) {
+    return pose != NULL &&
+        btbh_gpu_animation_library_sample_skin_blended(
+            pose->library,
+            pose->animation_indices,
+            pose->animation_times,
+            pose->animation_weights,
+            pose->sample_count,
+            skin_index,
+            matrices,
+            matrix_capacity
+        );
+}
+
+uint32_t btbh_gpu_animation_pose_skin_joint_count(
+    const BTBHGPUAnimationPose *pose,
+    uint32_t skin_index
+) {
+    return pose != NULL
+        ? btbh_gpu_animation_library_skin_joint_count(
+            pose->library,
+            skin_index
+        )
+        : 0u;
+}
+
+void btbh_gpu_animation_pose_destroy(
+    BTBHGPUAnimationPose *pose
+) {
+    if (pose == NULL) {
+        return;
+    }
+    free(pose->animation_weights);
+    free(pose->animation_times);
+    free(pose->animation_indices);
+    free(pose);
 }
 
 void btbh_gpu_animation_library_destroy(

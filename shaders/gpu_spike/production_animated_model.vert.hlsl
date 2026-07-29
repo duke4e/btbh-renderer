@@ -1,3 +1,5 @@
+#include "production_surface.hlsli"
+
 struct InstanceData
 {
     float4x4 model;
@@ -23,7 +25,10 @@ cbuffer SceneUniforms : register(b0, space1)
     uint bone_offset;
     uint billboard_mode;
     uint unlit_enabled;
-    uint scene_padding;
+    uint surface_variant;
+    float4 surface_controls;
+    float4 surface_parameters0;
+    float4 surface_parameters1;
 };
 
 struct VertexInput
@@ -44,7 +49,10 @@ struct VertexOutput
     float2 texture_coordinate : TEXCOORD1;
     float3 world_position : TEXCOORD2;
     float3 world_normal : TEXCOORD3;
-    float4 world_tangent : TEXCOORD4;
+    float3 world_tangent : TEXCOORD4;
+    float4 instance_custom : TEXCOORD5;
+    float3 world_bitangent : TEXCOORD6;
+    float4 surface_data : TEXCOORD7;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -76,8 +84,18 @@ float3 transform_normal(float3x3 matrix, float3 normal)
 VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
 {
     const InstanceData instance = instances[instance_id];
+    const BTBHSurfaceVertexResult surface =
+        btbh_apply_surface_vertex(
+            input.position,
+            input.normal,
+            instance.custom,
+            surface_variant,
+            surface_controls.x,
+            surface_parameters0,
+            surface_parameters1
+        );
     const uint4 joint_indices = uint4(input.joints);
-    const float4 local_position = float4(input.position, 1.0f);
+    const float4 local_position = float4(surface.position, 1.0f);
     const float4x4 skin_matrix =
         bones[bone_offset + joint_indices.x] * input.weights.x +
         bones[bone_offset + joint_indices.y] * input.weights.y +
@@ -87,9 +105,9 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     const float4 skinned_position =
         mul(skin_matrix, local_position);
     const float3 skinned_normal =
-        transform_normal(skin_linear, input.normal);
+        transform_normal(skin_linear, surface.normal);
     const float3 skinned_tangent =
-        mul(skin_linear, input.tangent.xyz);
+        transform_normal(skin_linear, input.tangent.xyz);
 
     const float4 world_position = mul(instance.model, skinned_position);
     const float3x3 instance_linear = (float3x3)instance.model;
@@ -98,16 +116,23 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         float3(0.0f, 0.0f, 1.0f)
     );
     const float3 raw_world_tangent =
-        mul(instance_linear, skinned_tangent);
-    const float3 orthogonal_tangent =
-        raw_world_tangent -
-        world_normal * dot(raw_world_tangent, world_normal);
+        transform_normal(instance_linear, skinned_tangent);
     const float3 tangent_fallback = abs(world_normal.z) < 0.999f
         ? stable_normalize(
             cross(float3(0.0f, 0.0f, 1.0f), world_normal),
             float3(1.0f, 0.0f, 0.0f)
         )
         : float3(1.0f, 0.0f, 0.0f);
+    const float3 world_tangent = stable_normalize(
+        raw_world_tangent,
+        tangent_fallback
+    );
+    const float tangent_handedness =
+        input.tangent.w < 0.0f ? -1.0f : 1.0f;
+    const float3 world_bitangent = stable_normalize(
+        cross(world_normal, world_tangent) * tangent_handedness,
+        float3(0.0f, 1.0f, 0.0f)
+    );
 
     VertexOutput output;
     output.position = mul(view_projection, world_position);
@@ -118,11 +143,9 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.texture_coordinate = input.texture_coordinate;
     output.world_position = world_position.xyz;
     output.world_normal = world_normal;
-    output.world_tangent = float4(
-        stable_normalize(orthogonal_tangent, tangent_fallback),
-        (input.tangent.w < 0.0f ? -1.0f : 1.0f) *
-            matrix_handedness(skin_linear) *
-            matrix_handedness(instance_linear)
-    );
+    output.world_tangent = world_tangent;
+    output.instance_custom = instance.custom;
+    output.world_bitangent = world_bitangent;
+    output.surface_data = surface.data;
     return output;
 }

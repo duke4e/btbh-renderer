@@ -591,11 +591,13 @@ final class GPUCanvas: Canvas2DBackend {
         let inverseWidth = 1 / Float(texture.size.width)
         let inverseHeight = 1 / Float(texture.size.height)
         let u0 = command.source.x * inverseWidth
-        let v0 = command.source.y * inverseHeight
         let u1 = (command.source.x + command.source.width)
             * inverseWidth
-        let v1 = (command.source.y + command.source.height)
+        let sourceV0 = command.source.y * inverseHeight
+        let sourceV1 = (command.source.y + command.source.height)
             * inverseHeight
+        let v0 = texture.isRenderTarget ? 1 - sourceV0 : sourceV0
+        let v1 = texture.isRenderTarget ? 1 - sourceV1 : sourceV1
         appendTexturedVertices([
             (positions[0], .init(x: u0, y: v0)),
             (positions[1], .init(x: u1, y: v0)),

@@ -198,6 +198,7 @@ typedef struct BTBHGPUModel BTBHGPUModel;
 typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
 typedef struct BTBHGPUCustomMesh BTBHGPUCustomMesh;
 typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
+typedef struct BTBHGPUAnimationPose BTBHGPUAnimationPose;
 
 typedef enum BTBHGPUTextureFilter {
     BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
@@ -327,9 +328,17 @@ typedef struct BTBHGPUModelMaterialInfo {
     uint8_t emission_blue;
     uint8_t emission_alpha;
     float emission_energy;
+    float alpha_cutoff;
     uint8_t unlit_enabled;
-    uint8_t reserved[3];
+    uint8_t double_sided_enabled;
+    uint8_t transparency_enabled;
+    uint8_t reserved;
 } BTBHGPUModelMaterialInfo;
+
+typedef struct BTBHGPUModelMeshInfo {
+    uint32_t vertex_count;
+    uint32_t index_count;
+} BTBHGPUModelMeshInfo;
 
 typedef struct BTBHGPUInstanceBufferReport {
     BTBHGPUResult result;
@@ -367,6 +376,16 @@ typedef enum BTBHGPUSceneBlendMode {
     BTBH_GPU_SCENE_BLEND_COUNT = 4
 } BTBHGPUSceneBlendMode;
 
+typedef enum BTBHGPUSceneSurfaceVariant {
+    BTBH_GPU_SCENE_SURFACE_NONE = 0,
+    BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC = 1,
+    BTBH_GPU_SCENE_SURFACE_WATER = 2,
+    BTBH_GPU_SCENE_SURFACE_DISSOLVE = 3,
+    BTBH_GPU_SCENE_SURFACE_SHATTER = 4,
+    BTBH_GPU_SCENE_SURFACE_GLITTER = 5,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 6
+} BTBHGPUSceneSurfaceVariant;
+
 typedef enum BTBHGPUSceneBillboardMode {
     BTBH_GPU_SCENE_BILLBOARD_DISABLED = 0,
     BTBH_GPU_SCENE_BILLBOARD_FRONT = 1,
@@ -385,11 +404,28 @@ typedef enum BTBHGPUSceneDepthCompare {
     BTBH_GPU_SCENE_DEPTH_COUNT = 8
 } BTBHGPUSceneDepthCompare;
 
+typedef enum BTBHGPUSceneCullMode {
+    BTBH_GPU_SCENE_CULL_NONE = 0,
+    BTBH_GPU_SCENE_CULL_FRONT = 1,
+    BTBH_GPU_SCENE_CULL_BACK = 2,
+    BTBH_GPU_SCENE_CULL_COUNT = 3
+} BTBHGPUSceneCullMode;
+
+typedef enum BTBHGPUSceneStencilOperation {
+    BTBH_GPU_SCENE_STENCIL_KEEP = 0,
+    BTBH_GPU_SCENE_STENCIL_ZERO = 1,
+    BTBH_GPU_SCENE_STENCIL_REPLACE = 2,
+    BTBH_GPU_SCENE_STENCIL_INCREMENT_CLAMP = 3,
+    BTBH_GPU_SCENE_STENCIL_DECREMENT_CLAMP = 4,
+    BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT = 5
+} BTBHGPUSceneStencilOperation;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
     BTBHGPUCustomMesh *custom_mesh;
     BTBHGPUAnimationLibrary *animation_library;
+    BTBHGPUAnimationPose *animation_pose;
     uint32_t animation_index;
     float animation_time;
     int32_t material_slot;
@@ -416,9 +452,20 @@ typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneBlendMode blend_mode;
     BTBHGPUSceneBillboardMode billboard_mode;
     BTBHGPUSceneDepthCompare depth_compare;
+    float alpha_cutoff;
+    BTBHGPUSceneDepthCompare stencil_compare;
+    BTBHGPUSceneCullMode cull_mode;
+    BTBHGPUSceneStencilOperation stencil_fail;
+    BTBHGPUSceneStencilOperation stencil_depth_fail;
+    BTBHGPUSceneStencilOperation stencil_pass;
+    uint8_t stencil_reference;
+    uint8_t stencil_mask;
     uint8_t transparency_enabled;
     uint8_t unlit_enabled;
-    uint8_t reserved;
+    BTBHGPUSceneSurfaceVariant surface_variant;
+    float surface_time;
+    float surface_parameters0[4];
+    float surface_parameters1[4];
 } BTBHGPUSceneGeometryBatch;
 
 typedef struct BTBHGPUSceneLighting {
@@ -442,6 +489,21 @@ typedef struct BTBHGPUSceneLighting {
     float secondary_directional_green;
     float secondary_directional_blue;
     float secondary_reserved;
+    float spot_position_x;
+    float spot_position_y;
+    float spot_position_z;
+    float spot_range;
+    float spot_direction_x;
+    float spot_direction_y;
+    float spot_direction_z;
+    float spot_energy;
+    float spot_red;
+    float spot_green;
+    float spot_blue;
+    float spot_falloff;
+    float spot_inner_cutoff;
+    float spot_outer_cutoff;
+    float spot_reserved[2];
     float irradiance_sh[27];
     uint32_t ibl_enabled;
     float ground_bottom_red;
@@ -472,11 +534,35 @@ typedef struct BTBHGPUSceneLighting {
     float ibl_reserved[3];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
+    float spot_shadow_view_projection[16];
     uint32_t directional_shadow_enabled;
     float directional_shadow_softness;
     uint32_t secondary_directional_shadow_enabled;
     float secondary_directional_shadow_softness;
+    uint32_t spot_shadow_enabled;
+    float spot_shadow_softness;
+    float shadow_reserved[2];
 } BTBHGPUSceneLighting;
+
+typedef struct BTBHGPUScenePost {
+    BTBHGPUTexture *lut_texture;
+    float tonemap_white;
+    float cas_sharpness;
+    float focus_point_x;
+    float focus_point_y;
+    float focus_direction_x;
+    float focus_direction_y;
+    float focus_half_width;
+    float maximum_radius_pixels;
+    float blur_curve;
+    float highlight_threshold;
+    float highlight_gain;
+    uint8_t lut_enabled;
+    uint8_t cas_enabled;
+    uint8_t tilt_shift_enabled;
+    uint8_t ssao_enabled;
+    uint8_t anti_aliasing;
+} BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;
@@ -684,6 +770,23 @@ BTBHGPUResult btbh_gpu_model_material_info(
     uint32_t material_index,
     BTBHGPUModelMaterialInfo *info
 );
+BTBHGPUResult btbh_gpu_model_mesh_info(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    BTBHGPUModelMeshInfo *info
+);
+BTBHGPUResult btbh_gpu_model_mesh_copy_positions(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    float *positions,
+    uint32_t float_capacity
+);
+BTBHGPUResult btbh_gpu_model_mesh_copy_indices(
+    const BTBHGPUModel *model,
+    uint32_t mesh_index,
+    uint32_t *indices,
+    uint32_t index_capacity
+);
 void btbh_gpu_model_destroy(BTBHGPUModel *model);
 BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(
     BTBHGPUWindow *window,
@@ -726,12 +829,15 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const char *shadow_fragment_shader_path,
     const char *fragment_shader_path,
     const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
     const float camera_position[3],
     const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
     const float *instances,
     uint32_t transient_instance_count,
     uint32_t logical_instance_count,
@@ -750,6 +856,19 @@ BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
 float btbh_gpu_animation_library_duration(
     const BTBHGPUAnimationLibrary *library,
     uint32_t animation_index
+);
+BTBHGPUAnimationPose *btbh_gpu_animation_pose_create(
+    const BTBHGPUAnimationLibrary *library
+);
+uint8_t btbh_gpu_animation_pose_set_samples(
+    BTBHGPUAnimationPose *pose,
+    const uint32_t *animation_indices,
+    const float *animation_times,
+    const float *animation_weights,
+    uint32_t sample_count
+);
+void btbh_gpu_animation_pose_destroy(
+    BTBHGPUAnimationPose *pose
 );
 void btbh_gpu_animation_library_destroy(
     BTBHGPUAnimationLibrary *library

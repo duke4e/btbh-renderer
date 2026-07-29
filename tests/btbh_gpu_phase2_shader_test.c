@@ -129,7 +129,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 6"
+            "\"samplers\": 7"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "\"location\": 2"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,

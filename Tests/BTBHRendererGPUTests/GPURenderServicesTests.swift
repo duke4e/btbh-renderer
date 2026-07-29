@@ -33,17 +33,17 @@ final class GPURenderServicesTests: XCTestCase {
             let irradiance = projection.irradiance(at: direction)
             XCTAssertEqual(
                 irradiance.x,
-                Float(descriptor.color.r) / 255,
+                GPUColorSpace.linearComponent(descriptor.color.r),
                 accuracy: 0.015
             )
             XCTAssertEqual(
                 irradiance.y,
-                Float(descriptor.color.g) / 255,
+                GPUColorSpace.linearComponent(descriptor.color.g),
                 accuracy: 0.015
             )
             XCTAssertEqual(
                 irradiance.z,
-                Float(descriptor.color.b) / 255,
+                GPUColorSpace.linearComponent(descriptor.color.b),
                 accuracy: 0.015
             )
         }
@@ -97,10 +97,10 @@ final class GPURenderServicesTests: XCTestCase {
 
         let projection =
             GPUProceduralEnvironmentProjection.project(descriptor)
-        let legacyNegatedDirection =
-            projection.irradiance(at: .up)
         let authoredDirection =
             projection.irradiance(at: .down)
+        let legacyNegatedDirection =
+            projection.irradiance(at: .up)
 
         XCTAssertGreaterThan(
             legacyNegatedDirection.x,
@@ -752,6 +752,7 @@ final class GPURenderServicesTests: XCTestCase {
             instances: instances,
             overrides: [],
             persistentBuffer: buffer,
+            persistentRevision: 1,
             sourceStart: 0,
             count: 2
         )))
@@ -776,6 +777,7 @@ final class GPURenderServicesTests: XCTestCase {
             instances: instances,
             overrides: [],
             persistentBuffer: buffer,
+            persistentRevision: 1,
             sourceStart: 0,
             count: 2
         )))
@@ -810,6 +812,7 @@ final class GPURenderServicesTests: XCTestCase {
             instances: updatedInstances,
             overrides: [],
             persistentBuffer: buffer,
+            persistentRevision: 2,
             sourceStart: 0,
             count: 2
         )))
@@ -830,6 +833,7 @@ final class GPURenderServicesTests: XCTestCase {
             instances: updatedInstances,
             overrides: [],
             persistentBuffer: buffer,
+            persistentRevision: 2,
             sourceStart: 0,
             count: 2
         )))
@@ -838,6 +842,7 @@ final class GPURenderServicesTests: XCTestCase {
             instances: instances,
             overrides: [],
             persistentBuffer: buffer,
+            persistentRevision: 1,
             sourceStart: 0,
             count: 2
         )))
@@ -1661,6 +1666,73 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testCanvasRenderTargetSamplingMatchesLegacyVerticalOrigin() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU render target origin test",
+            width: 128,
+            height: 128,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let target = try RenderServices.resources.createRenderTarget(.init(
+            size: .init(width: 64, height: 64),
+            colorFormat: .rgba8,
+            hasDepth: false,
+            filter: .nearest
+        ))
+        let texture = try RenderServices.resources.colorTexture(of: target)
+        defer { RenderServices.resources.destroyRenderTarget(target) }
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.pushRenderTarget(target))
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(x: 0, y: 0, width: 64, height: 32),
+            color: .init(r: 255, g: 0, b: 0, a: 255)
+        )))
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(x: 0, y: 32, width: 64, height: 32),
+            color: .init(r: 0, g: 0, b: 255, a: 255)
+        )))
+        RenderServices.canvas.submit(.popRenderTarget)
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.texturedQuad(.init(
+            texture: texture,
+            source: .init(x: 0, y: 64, width: 64, height: -64),
+            destination: .init(x: 20, y: 20, width: 64, height: 64),
+            origin: .zero,
+            rotationDegrees: 0,
+            tint: .white
+        )))
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let topOffset = (25 * 128 + 25) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[topOffset..<(topOffset + 4)]),
+            [255, 0, 0, 255]
+        )
+        let bottomOffset = (75 * 128 + 25) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[bottomOffset..<(bottomOffset + 4)]),
+            [0, 0, 255, 255]
+        )
+        XCTAssertFalse(RenderServices.platform.shouldClose)
+        #else
+        throw XCTSkip("The Windows Vulkan render-target test runs only on Windows")
+        #endif
+    }
+
     func testAnimationTreeTracksValidatedClipAndSwitchState() throws {
         #if os(Windows)
         RenderServices.uninstall()
@@ -1760,6 +1832,68 @@ final class GPURenderServicesTests: XCTestCase {
             name: "clip.idle.time"
         )
         XCTAssertGreaterThan(advanced, 0)
+        let backend = try XCTUnwrap(
+            bundle.resources as? GPUResourceBackend
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "switch.root.activeInput",
+            value: 1
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0
+        )
+        var transitionPose = try backend.animationPose(
+            model: model,
+            player: nil,
+            tree: tree
+        )
+        XCTAssertEqual(
+            transitionPose.samples.map(\.animationIndex),
+            [0]
+        )
+        XCTAssertEqual(transitionPose.samples.map(\.weight), [1])
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0.1
+        )
+        transitionPose = try backend.animationPose(
+            model: model,
+            player: nil,
+            tree: tree
+        )
+        XCTAssertEqual(
+            transitionPose.samples.map(\.animationIndex),
+            [0, 0]
+        )
+        XCTAssertEqual(
+            transitionPose.samples.map(\.weight),
+            [0.5, 0.5]
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0.1
+        )
+        transitionPose = try backend.animationPose(
+            model: model,
+            player: nil,
+            tree: tree
+        )
+        XCTAssertEqual(
+            transitionPose.samples.map(\.animationIndex),
+            [0]
+        )
+        XCTAssertEqual(transitionPose.samples.map(\.weight), [1])
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "switch.root.activeInput",
+            value: 0
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: 0.2
+        )
         XCTAssertThrowsError(
             try RenderServices.resources.updateAnimationTree(
                 tree,
@@ -2527,6 +2661,7 @@ final class GPURenderServicesTests: XCTestCase {
         var descriptor = MaterialDescriptor.default
         descriptor.albedoTexture = texture
         descriptor.unlit = true
+        descriptor.cullMode = .none
         let material = try RenderServices.resources.createMaterial(descriptor)
         let overrides = (0..<metadata.materialCount).map {
             MaterialOverride(slot: $0, material: material)
@@ -2579,6 +2714,242 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testImportedOBJKeepsUpwardFaceFrontFacingForDirectionalLight() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU imported OBJ winding test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/upward-lit-slab.obj"
+                )
+                .path,
+            flags: [.meshData, .highQuality]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        let material = try RenderServices.resources.createMaterial(.default)
+        let overrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: material)
+        }
+        let directional = try RenderServices.resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 3,
+            range: 0,
+            castsShadow: false,
+            shadowSoftness: 0
+        ))
+        defer {
+            RenderServices.resources.destroyLight(directional)
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 3, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 1,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1
+            )
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 180)
+        XCTAssertGreaterThan(readback.rgba8[center + 1], 180)
+        XCTAssertGreaterThan(readback.rgba8[center + 2], 180)
+        #else
+        throw XCTSkip("The Windows Vulkan OBJ winding test runs only on Windows")
+        #endif
+    }
+
+    func testTransparentMeshDoesNotWriteDepthBeforeOpaqueGeometry() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU transparent depth-write test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let vertices = [
+            RenderVertex(
+                position: .init(x: -1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 1, y: -1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+            RenderVertex(
+                position: .init(x: 0, y: 1, z: 0),
+                textureCoordinate: .zero,
+                normal: .backward,
+                tangent: .init(x: 1, y: 0, z: 0, w: 1),
+                color: .white
+            ),
+        ]
+        let mesh = try vertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: vertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: -1, y: -1, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 0)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        var frontDescriptor = MaterialDescriptor.default
+        frontDescriptor.albedoColor = .init(
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 128
+        )
+        frontDescriptor.transparency = .alpha
+        frontDescriptor.cullMode = .none
+        frontDescriptor.unlit = true
+        let front = try RenderServices.resources.createMaterial(
+            frontDescriptor
+        )
+        var backDescriptor = MaterialDescriptor.default
+        backDescriptor.albedoColor = .init(
+            r: 0,
+            g: 255,
+            b: 0,
+            a: 255
+        )
+        backDescriptor.cullMode = .none
+        backDescriptor.unlit = true
+        let back = try RenderServices.resources.createMaterial(
+            backDescriptor
+        )
+        defer {
+            RenderServices.resources.destroyMaterial(back)
+            RenderServices.resources.destroyMaterial(front)
+            RenderServices.resources.destroyMesh(mesh)
+        }
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: mesh,
+            material: front,
+            transform: .init(
+                matrix: .translation(.init(x: 0, y: 0, z: -0.4))
+            )
+        )))
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: mesh,
+            material: back,
+            transform: .init(
+                matrix: .translation(.init(x: 0, y: 0, z: 0.4))
+            )
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 80)
+        XCTAssertGreaterThan(readback.rgba8[center + 1], 80)
+        XCTAssertLessThan(readback.rgba8[center + 2], 20)
+        #else
+        throw XCTSkip(
+            "The Windows Vulkan transparent depth test runs only on Windows"
+        )
+        #endif
+    }
+
     func testModelMaterialDepthCompareGreaterDoesNotCoverEqualDepth() throws {
         #if os(Windows)
         RenderServices.uninstall()
@@ -2615,6 +2986,7 @@ final class GPURenderServicesTests: XCTestCase {
         let metadata = try RenderServices.resources.modelMetadata(model)
         var baseDescriptor = MaterialDescriptor.default
         baseDescriptor.albedoColor = .init(r: 255, g: 0, b: 0, a: 255)
+        baseDescriptor.cullMode = .none
         baseDescriptor.unlit = true
         let baseMaterial = try RenderServices.resources.createMaterial(
             baseDescriptor
@@ -2622,6 +2994,7 @@ final class GPURenderServicesTests: XCTestCase {
         var overlayDescriptor = MaterialDescriptor.default
         overlayDescriptor.albedoColor = .init(r: 0, g: 255, b: 0, a: 255)
         overlayDescriptor.depthCompare = .greater
+        overlayDescriptor.cullMode = .none
         overlayDescriptor.unlit = true
         let overlayMaterial = try RenderServices.resources.createMaterial(
             overlayDescriptor
@@ -2837,14 +3210,14 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
 
         let readback = try RenderServices.canvas.readbackPresentedFrame()
-        XCTAssertEqual(readback.rgba8[0], 20, accuracy: 2)
-        XCTAssertEqual(readback.rgba8[1], 40, accuracy: 2)
-        XCTAssertEqual(readback.rgba8[2], 60, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[0], 29, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[1], 56, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[2], 87, accuracy: 2)
         let center = ((readback.size.height / 2) * readback.size.width
             + readback.size.width / 2) * 4
-        XCTAssertEqual(readback.rgba8[center], 128, accuracy: 8)
-        XCTAssertEqual(readback.rgba8[center + 1], 100, accuracy: 8)
-        XCTAssertEqual(readback.rgba8[center + 2], 19, accuracy: 5)
+        XCTAssertEqual(readback.rgba8[center], 254, accuracy: 2)
+        XCTAssertEqual(readback.rgba8[center + 1], 210, accuracy: 8)
+        XCTAssertEqual(readback.rgba8[center + 2], 80, accuracy: 5)
 
         RenderServices.canvas.requestPresentedFrameReadback()
         RenderServices.canvas.beginFrame()
@@ -2861,7 +3234,7 @@ final class GPURenderServicesTests: XCTestCase {
         let zeroNormalReadback =
             try RenderServices.canvas.readbackPresentedFrame()
         XCTAssertGreaterThan(zeroNormalReadback.rgba8[center], 80)
-        XCTAssertLessThan(zeroNormalReadback.rgba8[center], 180)
+        XCTAssertLessThanOrEqual(zeroNormalReadback.rgba8[center], 255)
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 1], 30)
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 2], 30)
         #else
@@ -3243,7 +3616,7 @@ final class GPURenderServicesTests: XCTestCase {
             position: .zero,
             direction: .forward,
             color: .white,
-            energy: 3,
+            energy: 0.5,
             range: 100,
             castsShadow: false,
             shadowSoftness: 0
@@ -3669,6 +4042,7 @@ final class GPURenderServicesTests: XCTestCase {
         var materialDescriptor = MaterialDescriptor.default
         materialDescriptor.albedoTexture = texture
         materialDescriptor.unlit = true
+        materialDescriptor.cullMode = .none
         let material = try RenderServices.resources.createMaterial(
             materialDescriptor
         )

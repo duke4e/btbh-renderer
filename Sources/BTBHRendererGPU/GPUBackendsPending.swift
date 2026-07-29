@@ -1,8 +1,137 @@
 import BTBHRenderer
+import BTBHRendererGPUCore
 import Foundation
 
 public enum GPUBackendUnsupportedError: Error, Equatable {
     case operation(String)
+}
+
+enum GPUCustomMeshProjection {
+    static func textureCoordinate(
+        _ coordinate: RenderVec2
+    ) -> RenderVec2 {
+        coordinate
+    }
+
+    static func triangleIndices(
+        _ indices: [UInt32]
+    ) -> [UInt32] {
+        var projected = indices
+        for triangleStart in stride(
+            from: 0,
+            to: projected.count,
+            by: 3
+        ) {
+            projected.swapAt(triangleStart + 1, triangleStart + 2)
+        }
+        return projected
+    }
+}
+
+enum GPUSceneSurfaceVariant: UInt32, Equatable {
+    case none = 0
+    case glitterStatic = 1
+    case water = 2
+    case dissolve = 3
+    case shatter = 4
+    case glitter = 5
+}
+
+struct GPUSceneSurfaceProjection: Equatable {
+    static let none = Self(
+        variant: .none,
+        parameters0: .init(x: 0, y: 0, z: 0, w: 0),
+        parameters1: .init(x: 0, y: 0, z: 0, w: 0)
+    )
+
+    let variant: GPUSceneSurfaceVariant
+    let parameters0: RenderVec4
+    let parameters1: RenderVec4
+
+    static func classify(
+        fragmentPath: String,
+        parameters: [String: ShaderParameterValue]
+    ) throws -> Self {
+        let name = URL(fileURLWithPath: fragmentPath)
+            .deletingPathExtension()
+            .lastPathComponent
+            .lowercased()
+        func float(_ key: String, default fallback: Float) -> Float {
+            guard case .float(let value)? = parameters[key] else {
+                return fallback
+            }
+            return value
+        }
+        func vec3(_ key: String, default fallback: RenderVec3) -> RenderVec3 {
+            guard case .vec3(let value)? = parameters[key] else {
+                return fallback
+            }
+            return value
+        }
+        switch name {
+        case "glitter_static":
+            let color = vec3("u_color", default: .one)
+            return .init(
+                variant: .glitterStatic,
+                parameters0: .init(
+                    x: color.x,
+                    y: color.y,
+                    z: color.z,
+                    w: 0
+                ),
+                parameters1: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        case "water_surface":
+            return .init(
+                variant: .water,
+                parameters0: .init(x: 0, y: 0, z: 0, w: 0),
+                parameters1: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        case "dissolve":
+            return .init(
+                variant: .dissolve,
+                parameters0: .init(x: 0, y: 0, z: 0, w: 0),
+                parameters1: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        case "shatter":
+            return .init(
+                variant: .shatter,
+                parameters0: .init(
+                    x: float("u_shatterDuration", default: 1.8),
+                    y: float("u_cellSize", default: 0.6),
+                    z: float("u_gravity", default: 6),
+                    w: float("u_spreadSpeed", default: 1)
+                ),
+                parameters1: .init(
+                    x: float("u_spinSpeed", default: 2),
+                    y: 0,
+                    z: 0,
+                    w: 0
+                )
+            )
+        case "glitter":
+            let player = vec3("u_playerPos", default: .zero)
+            return .init(
+                variant: .glitter,
+                parameters0: .init(
+                    x: player.x,
+                    y: player.y,
+                    z: player.z,
+                    w: float("u_glitterRadius", default: 1)
+                ),
+                parameters1: .init(
+                    x: float("u_glitterSoftness", default: 0.5),
+                    y: float("u_maxLevel", default: 0),
+                    z: 0,
+                    w: 0
+                )
+            )
+        default:
+            throw GPUBackendUnsupportedError.operation(
+                "Unsupported production GPU surface shader: \(name)"
+            )
+        }
+    }
 }
 
 enum GPUResourceStagingError: Error, Equatable {
@@ -59,6 +188,7 @@ private struct GPUAnimationSwitchState {
     let synchronized: Bool
     var activeInput: Int
     var previousInput: Int
+    var weights: [Float]
 }
 
 private struct GPUAnimationTreeResource {
@@ -66,6 +196,7 @@ private struct GPUAnimationTreeResource {
     let library: AnimationLibraryHandle
     let rootNode: String
     let rootBone: Int?
+    let pose: OpaquePointer
     var clips: [String: GPUAnimationClipState]
     var switches: [String: GPUAnimationSwitchState]
 }
@@ -90,6 +221,7 @@ fileprivate final class GPUInstanceBufferResource {
     let storage: GPUInstanceBufferProbeResource
     let descriptor: InstanceBufferDescriptor
     var semanticInstances: [RenderInstance] = []
+    var semanticRevision: UInt64?
 
     init(
         storage: GPUInstanceBufferProbeResource,
@@ -291,12 +423,8 @@ struct GPUProceduralEnvironmentProjection {
             ) * descriptor.groundEnergy
         }
 
-        let authoredSunDirection = descriptor.sunDirection
-        let sunDirection = RenderVec3(
-            x: -authoredSunDirection.x,
-            y: -authoredSunDirection.y,
-            z: -authoredSunDirection.z
-        ).normalized()
+        let sunDirection =
+            (descriptor.sunDirection * -1).normalized()
         guard sunDirection.lengthSquared > 0,
               descriptor.sunSizeRadians > 0 else {
             return color
@@ -326,9 +454,9 @@ struct GPUProceduralEnvironmentProjection {
 
     private static func rgb(_ color: RenderColor) -> RenderVec3 {
         .init(
-            x: Float(color.r) / 255,
-            y: Float(color.g) / 255,
-            z: Float(color.b) / 255
+            x: GPUColorSpace.linearComponent(color.r),
+            y: GPUColorSpace.linearComponent(color.g),
+            z: GPUColorSpace.linearComponent(color.b)
         )
     }
 
@@ -348,6 +476,11 @@ private struct GPUAmbientMapResource {
 
 private struct GPURenderTargetResource {
     let colorTexture: TextureHandle
+}
+
+private struct GPUSceneModelMaterialsCacheKey: Hashable {
+    let model: ModelHandle
+    let overrides: [MaterialOverride]
 }
 
 @MainActor
@@ -377,6 +510,13 @@ final class GPUResourceBackend: RenderResourceBackend {
     private var models: [ModelHandle: GPUModelProbeResource] = [:]
     private var meshes: [MeshHandle: GPUCustomMeshResource] = [:]
     private var materials: [MaterialHandle: GPUMaterialResource] = [:]
+    private var sceneModelMaterialsCache: [
+        GPUSceneModelMaterialsCacheKey: [(
+            materialSlot: Int?,
+            material: GPUSceneMaterialProbe?
+        )]
+    ] = [:]
+    private(set) var sceneModelMaterialResolutionCount = 0
     private var instanceBuffers: [
         InstanceBufferHandle: GPUInstanceBufferResource
     ] = [:]
@@ -737,7 +877,8 @@ final class GPUResourceBackend: RenderResourceBackend {
         let ormTexture = descriptor.ormTexture.isValid
             ? try canvasTexture(descriptor.ormTexture).pointer
             : nil
-        return .init(
+        let surface = try sceneSurface(descriptor.surfaceShader)
+        var material = GPUSceneMaterialProbe(
             albedoTexture: texture,
             albedoColor: descriptor.albedoColor,
             normalTexture: normalTexture,
@@ -749,11 +890,39 @@ final class GPUResourceBackend: RenderResourceBackend {
             emissionTexture: emissionTexture,
             emissionColor: descriptor.emissionColor,
             emissionEnergy: descriptor.emissionEnergy,
+            alphaCutoff: descriptor.alphaCutoff,
             blendMode: descriptor.blend,
             billboardMode: descriptor.billboard,
             depthCompare: descriptor.depthCompare,
+            stencilCompare: descriptor.stencilCompare,
+            stencilReference: descriptor.stencilReference,
+            stencilMask: descriptor.stencilMask,
+            stencilFail: descriptor.stencilFail,
+            stencilDepthFail: descriptor.stencilDepthFail,
+            stencilPass: descriptor.stencilPass,
+            cullMode: descriptor.cullMode,
             transparency: descriptor.transparency,
-            unlit: descriptor.unlit
+            unlit: descriptor.unlit,
+            surface: surface
+        )
+        material.legacySortKey = .init(descriptor: descriptor)
+        return material
+    }
+
+    private func sceneSurface(
+        _ handle: SurfaceShaderHandle?
+    ) throws -> GPUSceneSurfaceProjection {
+        guard let handle, handle.isValid else {
+            return .none
+        }
+        guard let resource = surfaceShaders[handle] else {
+            throw GPUResourceStagingError.invalidSurfaceShader(
+                handle.rawValue
+            )
+        }
+        return try .classify(
+            fragmentPath: resource.fragmentPath,
+            parameters: resource.parameters
         )
     }
 
@@ -770,15 +939,25 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             throw GPUResourceStagingError.invalidModel(model.rawValue)
         }
+        let cacheKey = GPUSceneModelMaterialsCacheKey(
+            model: model,
+            overrides: overrides
+        )
+        if let cached = sceneModelMaterialsCache[cacheKey] {
+            return cached
+        }
+        sceneModelMaterialResolutionCount += 1
         let usedSlots = Set(modelResource.metadata.meshMaterialSlots)
             .sorted()
         guard !overrides.isEmpty else {
-            return usedSlots.map { slot in
+            let resolved = usedSlots.map { slot in
                 (
                     materialSlot: Optional(slot),
                     material: modelResource.materials[slot]
                 )
             }
+            sceneModelMaterialsCache[cacheKey] = resolved
+            return resolved
         }
 
         var materialsBySlot: [Int: GPUSceneMaterialProbe] = [:]
@@ -820,6 +999,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                     try canvasTexture($0).pointer
                 }
                 let base = modelResource.materials[override.slot]
+                let surface = try sceneSurface(patch.surfaceShader)
                 material = .init(
                     albedoTexture: texture ?? base.albedoTexture,
                     albedoColor:
@@ -840,17 +1020,27 @@ final class GPUResourceBackend: RenderResourceBackend {
                         patch.emissionEnergy ?? base.emissionEnergy,
                         patch.minimumEmissionEnergy ?? -.infinity
                     ),
+                    alphaCutoff: base.alphaCutoff,
                     blendMode: base.blendMode,
                     billboardMode: base.billboardMode,
                     depthCompare: base.depthCompare,
+                    stencilCompare: base.stencilCompare,
+                    stencilReference:
+                        patch.stencilReference ?? base.stencilReference,
+                    stencilMask: base.stencilMask,
+                    stencilFail: base.stencilFail,
+                    stencilDepthFail: base.stencilDepthFail,
+                    stencilPass: base.stencilPass,
+                    cullMode: patch.cullMode ?? base.cullMode,
                     transparency: base.transparency,
-                    unlit: base.unlit
+                    unlit: base.unlit,
+                    surface: surface
                 )
             }
             materialsBySlot[override.slot] = material
         }
 
-        return usedSlots.map { slot in
+        let resolved = usedSlots.map { slot in
                 (
                     materialSlot: Optional(slot),
                     material:
@@ -858,6 +1048,8 @@ final class GPUResourceBackend: RenderResourceBackend {
                         modelResource.materials[slot]
                 )
             }
+        sceneModelMaterialsCache[cacheKey] = resolved
+        return resolved
     }
 
     func sceneLighting(
@@ -888,6 +1080,14 @@ final class GPUResourceBackend: RenderResourceBackend {
             }
         let primary = directionals.first
         let secondary = directionals.dropFirst().first
+        let spot = lights
+            .sorted { $0.key.rawValue < $1.key.rawValue }
+            .map(\.value)
+            .first {
+                $0.active &&
+                $0.kind == .spot &&
+                $0.energy > 0
+            }
         return .init(
             ambientColor: environment.ambientColor,
             ambientEnergy: environment.ambientEnergy,
@@ -900,6 +1100,16 @@ final class GPUResourceBackend: RenderResourceBackend {
                 secondary?.direction.normalized() ?? .down,
             secondaryDirectionalColor: secondary?.color ?? .white,
             secondaryDirectionalEnergy: secondary?.energy ?? 0,
+            spotPosition: spot?.position ?? .zero,
+            spotDirection: spot?.direction.normalized() ?? .forward,
+            spotColor: spot?.color ?? .white,
+            spotEnergy: spot?.energy ?? 0,
+            spotRange: spot?.range ?? 50,
+            spotFalloff: 1,
+            spotInnerCutoff:
+                GPUSceneLightingProbe.legacySpotInnerCutoff,
+            spotOuterCutoff:
+                GPUSceneLightingProbe.legacySpotOuterCutoff,
             directionalShadow: Self.directionalShadow(
                 primary,
                 camera: camera,
@@ -909,7 +1119,105 @@ final class GPUResourceBackend: RenderResourceBackend {
                 secondary,
                 camera: camera,
                 aspect: aspect
-            )
+            ),
+            spotShadow: Self.spotShadow(spot)
+        )
+    }
+
+    func scenePost(
+        environment: EnvironmentDescriptor,
+        chain: PostChainDescriptor,
+        antiAliasing: AntiAliasing
+    ) throws -> GPUScenePostProbe {
+        var lutTexture: OpaquePointer?
+        var casEnabled = false
+        var tiltShiftEnabled = false
+        var focusPoint = RenderVec2(x: 0.5, y: 0.55)
+        var focusDirection = RenderVec2(x: 1, y: 0)
+        var focusHalfWidth: Float = 0.05
+        var maximumRadiusPixels: Float = 12
+        var blurCurve: Float = 1
+        var highlightThreshold: Float = 0.7
+        var highlightGain: Float = 3
+
+        for handle in chain.screenShaders {
+            guard let shader = screenShaders[handle] else {
+                throw GPUResourceStagingError.invalidScreenShader(
+                    handle.rawValue
+                )
+            }
+            let name = URL(fileURLWithPath: shader.fragmentPath)
+                .deletingPathExtension()
+                .lastPathComponent
+                .lowercased()
+            switch name {
+            case "lut":
+                if case .texture(let handle)? =
+                    shader.parameters["u_texture"]
+                {
+                    lutTexture = try canvasTexture(handle).pointer
+                }
+            case "cas":
+                casEnabled = true
+            case "tiltshift":
+                tiltShiftEnabled = chain.tiltShiftEnabled
+                if case .vec2(let value)? =
+                    shader.parameters["uFocusPoint"]
+                {
+                    focusPoint = value
+                }
+                if case .vec2(let value)? =
+                    shader.parameters["uFocusDir"]
+                {
+                    focusDirection = value
+                }
+                if case .float(let value)? =
+                    shader.parameters["uFocusHalfWidth"]
+                {
+                    focusHalfWidth = value
+                }
+                if case .float(let value)? =
+                    shader.parameters["uMaxRadiusPx"]
+                {
+                    maximumRadiusPixels = value
+                }
+                if case .float(let value)? =
+                    shader.parameters["uBlurCurve"]
+                {
+                    blurCurve = value
+                }
+                if case .float(let value)? =
+                    shader.parameters["uHighlightThreshold"]
+                {
+                    highlightThreshold = value
+                }
+                if case .float(let value)? =
+                    shader.parameters["uHighlightGain"]
+                {
+                    highlightGain = value
+                }
+            default:
+                throw GPUBackendUnsupportedError.operation(
+                    "Unsupported production GPU screen shader: \(name)"
+                )
+            }
+        }
+        return .init(
+            lutTexture: lutTexture,
+            tonemapWhite: environment.tonemapWhite,
+            casSharpness: chain.casSharpness,
+            focusPoint: focusPoint,
+            focusDirection: focusDirection,
+            focusHalfWidth: focusHalfWidth,
+            maximumRadiusPixels: maximumRadiusPixels,
+            blurCurve: blurCurve,
+            highlightThreshold: highlightThreshold,
+            highlightGain: highlightGain,
+            lutEnabled: lutTexture != nil,
+            casEnabled: casEnabled,
+            tiltShiftEnabled: tiltShiftEnabled,
+            ssaoEnabled: environment.ssaoEnabled,
+            antiAliasing: antiAliasing
         )
     }
 
@@ -1018,6 +1326,65 @@ final class GPUResourceBackend: RenderResourceBackend {
         )
     }
 
+    private static func spotShadow(
+        _ descriptor: LightDescriptor?
+    ) -> GPUSceneDirectionalShadowProbe {
+        guard let descriptor else { return .disabled }
+        let disabled = GPUSceneDirectionalShadowProbe(
+            enabled: false,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            viewProjection:
+                GPUSceneDirectionalShadowProbe.disabled.viewProjection
+        )
+        let direction = descriptor.direction.normalized()
+        guard descriptor.castsShadow,
+              descriptor.energy > 0,
+              descriptor.range > 0.05,
+              direction.lengthSquared > 0 else {
+            return disabled
+        }
+
+        var authoredUp = RenderVec3.up
+        if abs(direction.dot(authoredUp)) > 0.99 {
+            authoredUp = .right
+        }
+        let right = direction.cross(authoredUp).normalized()
+        let up = right.cross(direction).normalized()
+        guard right.lengthSquared > 0, up.lengthSquared > 0 else {
+            return disabled
+        }
+        let position = descriptor.position
+        let view: [Float] = [
+            right.x, up.x, direction.x, 0,
+            right.y, up.y, direction.y, 0,
+            right.z, up.z, direction.z, 0,
+            -position.dot(right),
+            -position.dot(up),
+            -position.dot(direction),
+            1,
+        ]
+        let near: Float = 0.05
+        let depthScale = descriptor.range / (descriptor.range - near)
+        let depthBias = -near * depthScale
+        let projection: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, depthScale, 1,
+            0, 0, depthBias, 0,
+        ]
+        let viewProjection = multiplyShadowMatrix(projection, view)
+        guard viewProjection.allSatisfy(\.isFinite) else {
+            return disabled
+        }
+        return .init(
+            enabled: true,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            viewProjection: viewProjection
+        )
+    }
+
     private static func multiplyShadowMatrix(
         _ lhs: [Float],
         _ rhs: [Float]
@@ -1052,7 +1419,10 @@ final class GPUResourceBackend: RenderResourceBackend {
             source = environment.backgroundColor
             energy = environment.backgroundEnergy
         }
-        return Self.scaled(source, by: energy)
+        return Self.scaled(
+            GPUColorSpace.linearized(source),
+            by: energy
+        )
     }
 
     private static func scaled(
@@ -1079,20 +1449,62 @@ final class GPUResourceBackend: RenderResourceBackend {
               let treeHandle,
               let tree = animationTrees[treeHandle],
               tree.model == model,
-              let clip = activeAnimationClip(
-                named: tree.rootNode,
-                tree: tree,
-                visited: []
-              ),
               let library = animationLibraries[tree.library] else {
             throw GPUResourceStagingError.invalidAnimationTree(
                 treeHandle?.rawValue ?? 0
             )
         }
+        let samples = weightedAnimationClips(
+            named: tree.rootNode,
+            tree: tree,
+            weight: 1,
+            visited: []
+        )
+        let weightSum = samples.reduce(Float.zero) {
+            $0 + $1.weight
+        }
+        guard !samples.isEmpty,
+              weightSum.isFinite,
+              weightSum > 0 else {
+            throw GPUResourceStagingError.invalidAnimationTree(
+                treeHandle.rawValue
+            )
+        }
+        let normalizedSamples = samples.map {
+            GPUAnimationSampleProbe(
+                animationIndex: $0.animationIndex,
+                time: $0.time,
+                weight: $0.weight / weightSum
+            )
+        }
+        let indices = normalizedSamples.map {
+            UInt32($0.animationIndex)
+        }
+        let times = normalizedSamples.map(\.time)
+        let weights = normalizedSamples.map(\.weight)
+        let updated = indices.withUnsafeBufferPointer {
+            indexBuffer in
+            times.withUnsafeBufferPointer { timeBuffer in
+                weights.withUnsafeBufferPointer { weightBuffer in
+                    btbh_gpu_animation_pose_set_samples(
+                        tree.pose,
+                        indexBuffer.baseAddress,
+                        timeBuffer.baseAddress,
+                        weightBuffer.baseAddress,
+                        UInt32(normalizedSamples.count)
+                    )
+                }
+            }
+        }
+        guard updated != 0 else {
+            throw GPUResourceStagingError.invalidAnimationTree(
+                treeHandle.rawValue
+            )
+        }
         return .init(
+            pointer: tree.pose,
             library: library.pointer,
-            animationIndex: clip.animationIndex,
-            time: clip.time
+            samples: normalizedSamples
         )
     }
 
@@ -1112,6 +1524,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             return
         }
+        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
         platform.destroyModel(resource.pointer)
         pendingModelDestruction.remove(handle)
     }
@@ -1298,6 +1711,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
         let replacement = try materialResource(descriptor)
         materials[handle] = replacement
+        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
         collectMaterialDependencies(previous)
     }
 
@@ -1309,6 +1723,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             return
         }
+        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
         collectMaterialDependencies(resource)
     }
     func createInstanceBuffer(
@@ -1400,7 +1815,8 @@ final class GPUResourceBackend: RenderResourceBackend {
 
     fileprivate func instanceBufferResource(
         _ handle: InstanceBufferHandle,
-        semanticInstances: [RenderInstance]
+        semanticInstances: [RenderInstance],
+        semanticRevision: UInt64?
     ) throws -> GPUInstanceBufferResource {
         guard let resource = instanceBuffers[handle] else {
             throw GPUResourceStagingError.invalidInstanceBuffer(
@@ -1416,18 +1832,28 @@ final class GPUResourceBackend: RenderResourceBackend {
                 "Persistent scene instances require a semantic buffer within capacity"
             )
         }
+        if let semanticRevision,
+           semanticRevision == resource.semanticRevision {
+            return resource
+        }
         if Self.sharesStorage(
             semanticInstances,
             resource.semanticInstances
         ) || semanticInstances == resource.semanticInstances {
+            resource.semanticRevision = semanticRevision
             return resource
         }
-        try uploadSemanticInstances(semanticInstances, to: resource)
+        try uploadSemanticInstances(
+            semanticInstances,
+            revision: semanticRevision,
+            to: resource
+        )
         return resource
     }
 
     private func uploadSemanticInstances(
         _ instances: [RenderInstance],
+        revision: UInt64? = nil,
         to resource: GPUInstanceBufferResource
     ) throws {
         semanticInstanceUploadScratch.removeAll(keepingCapacity: true)
@@ -1447,6 +1873,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             )
         }
         resource.semanticInstances = instances
+        resource.semanticRevision = revision
         semanticInstanceUploadCount += 1
     }
 
@@ -1561,26 +1988,45 @@ final class GPUResourceBackend: RenderResourceBackend {
         })
         let switches = Dictionary(
             uniqueKeysWithValues: descriptor.switches.map {
-                (
-                    $0.name,
+                let descriptor = $0
+                return (
+                    descriptor.name,
                     GPUAnimationSwitchState(
-                        inputs: $0.inputs,
-                        crossfadeSeconds: $0.crossfadeSeconds,
-                        synchronized: $0.synchronized,
-                        activeInput: $0.activeInput,
-                        previousInput: 0
+                        inputs: descriptor.inputs,
+                        crossfadeSeconds:
+                            descriptor.crossfadeSeconds,
+                        synchronized: descriptor.synchronized,
+                        activeInput: descriptor.activeInput,
+                        previousInput: 0,
+                        weights: descriptor.inputs.indices.map {
+                            $0 == descriptor.activeInput ? 1 : 0
+                        }
                     )
                 )
             }
         )
-        let handle = try animationTreeHandles.acquire(
-            AnimationTreeHandle.self
-        )
+        guard let pose = btbh_gpu_animation_pose_create(
+            library.pointer
+        ) else {
+            throw GPUResourceStagingError.invalidAnimationTreeDescriptor(
+                "Could not allocate the GPU animation pose"
+            )
+        }
+        let handle: AnimationTreeHandle
+        do {
+            handle = try animationTreeHandles.acquire(
+                AnimationTreeHandle.self
+            )
+        } catch {
+            btbh_gpu_animation_pose_destroy(pose)
+            throw error
+        }
         animationTrees[handle] = .init(
             model: descriptor.model,
             library: descriptor.library,
             rootNode: descriptor.rootNode,
             rootBone: descriptor.rootBone,
+            pose: pose,
             clips: clips,
             switches: switches
         )
@@ -1704,6 +2150,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             return
         }
+        btbh_gpu_animation_pose_destroy(tree.pose)
         collectPendingModel(tree.model)
         collectPendingAnimationLibrary(tree.library)
     }
@@ -1852,6 +2299,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         )
         resource.parameters[parameter] = value
         surfaceShaders[handle] = resource
+        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
         collectPendingTextures(oldDependencies)
     }
 
@@ -1993,6 +2441,28 @@ final class GPUResourceBackend: RenderResourceBackend {
                 tree: &tree
             )
         }
+        if animationSwitch.crossfadeSeconds <= deltaSeconds {
+            animationSwitch.weights =
+                animationSwitch.inputs.indices.map {
+                    $0 == animationSwitch.activeInput ? 1 : 0
+                }
+        } else if animationSwitch.crossfadeSeconds > 0 {
+            let fade =
+                deltaSeconds /
+                animationSwitch.crossfadeSeconds
+            for index in animationSwitch.weights.indices {
+                let direction: Float =
+                    index == animationSwitch.activeInput ? 1 : -1
+                animationSwitch.weights[index] = min(
+                    1,
+                    max(
+                        0,
+                        animationSwitch.weights[index] +
+                            direction * fade
+                    )
+                )
+            }
+        }
         animationSwitch.previousInput = animationSwitch.activeInput
         tree.switches[name] = animationSwitch
     }
@@ -2014,28 +2484,37 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
     }
 
-    private func activeAnimationClip(
+    private func weightedAnimationClips(
         named name: String,
         tree: GPUAnimationTreeResource,
+        weight: Float,
         visited: Set<String>
-    ) -> GPUAnimationClipState? {
-        guard !visited.contains(name) else { return nil }
-        if let clip = tree.clips[name] {
-            return clip
+    ) -> [GPUAnimationSampleProbe] {
+        guard weight > 0, !visited.contains(name) else {
+            return []
         }
-        guard let animationSwitch = tree.switches[name],
-              animationSwitch.inputs.indices.contains(
-                animationSwitch.activeInput
-              ) else {
-            return nil
+        if let clip = tree.clips[name] {
+            return [
+                .init(
+                    animationIndex: clip.animationIndex,
+                    time: clip.time,
+                    weight: weight
+                )
+            ]
+        }
+        guard let animationSwitch = tree.switches[name] else {
+            return []
         }
         var visited = visited
         visited.insert(name)
-        return activeAnimationClip(
-            named: animationSwitch.inputs[animationSwitch.activeInput],
-            tree: tree,
-            visited: visited
-        )
+        return animationSwitch.inputs.indices.flatMap { index in
+            weightedAnimationClips(
+                named: animationSwitch.inputs[index],
+                tree: tree,
+                weight: weight * animationSwitch.weights[index],
+                visited: visited
+            )
+        }
     }
 
     private func materialResource(
@@ -2329,6 +2808,10 @@ final class GPUResourceBackend: RenderResourceBackend {
         var packedVertices: [Float] = []
         packedVertices.reserveCapacity(descriptor.vertexCount * 24)
         for vertex in vertexValues {
+            let textureCoordinate =
+                GPUCustomMeshProjection.textureCoordinate(
+                    vertex.textureCoordinate
+                )
             let scalars = [
                 vertex.position.x,
                 vertex.position.y,
@@ -2336,8 +2819,8 @@ final class GPUResourceBackend: RenderResourceBackend {
                 vertex.normal.x,
                 vertex.normal.y,
                 vertex.normal.z,
-                vertex.textureCoordinate.x,
-                vertex.textureCoordinate.y,
+                textureCoordinate.x,
+                textureCoordinate.y,
                 vertex.tangent.x,
                 vertex.tangent.y,
                 vertex.tangent.z,
@@ -2370,7 +2853,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             values.withUnsafeMutableBytes {
                 $0.copyBytes(from: indices)
             }
-            indexValues = values
+            indexValues = GPUCustomMeshProjection.triangleIndices(values)
         } else {
             throw GPUResourceStagingError.invalidMeshUpload(
                 "Indexed mesh upload is missing its index bytes"
@@ -2725,7 +3208,8 @@ final class GPUSceneBackend: SceneBackend {
                 let persistentResource = try draw.persistentBuffer.map {
                     try resources.instanceBufferResource(
                         $0,
-                        semanticInstances: draw.instances
+                        semanticInstances: draw.instances,
+                        semanticRevision: draw.persistentRevision
                     )
                 }
                 let availableCount = draw.instances.count
@@ -2757,6 +3241,7 @@ final class GPUSceneBackend: SceneBackend {
                     model: draw.model,
                     overrides: draw.overrides,
                     animation: nil,
+                    legacyInstanced: true,
                     instanceBuffer: persistentResource?.storage.pointer,
                     firstInstance: firstInstance,
                     instanceCount: draw.count,
@@ -2813,6 +3298,7 @@ final class GPUSceneBackend: SceneBackend {
                     model: draw.model,
                     overrides: draw.overrides,
                     animation: nil,
+                    legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.count,
                     to: &batches
@@ -2850,7 +3336,8 @@ final class GPUSceneBackend: SceneBackend {
                 let persistentResource = try draw.persistentBuffer.map {
                     try resources.instanceBufferResource(
                         $0,
-                        semanticInstances: draw.instances
+                        semanticInstances: draw.instances,
+                        semanticRevision: draw.persistentRevision
                     )
                 }
                 guard persistentResource == nil ||
@@ -2881,6 +3368,7 @@ final class GPUSceneBackend: SceneBackend {
                     animation: nil,
                     material: material,
                     materialSlot: nil,
+                    legacyInstanced: true,
                     instanceBuffer: persistentResource?.storage.pointer,
                     firstInstance: firstInstance,
                     instanceCount: draw.instances.count
@@ -2928,6 +3416,7 @@ final class GPUSceneBackend: SceneBackend {
                     animation: nil,
                     material: material,
                     materialSlot: nil,
+                    legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.count
                 ))
@@ -2978,6 +3467,7 @@ final class GPUSceneBackend: SceneBackend {
                         player: draw.player,
                         tree: draw.tree
                     ),
+                    legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.instances.count,
                     to: &batches
@@ -3033,6 +3523,7 @@ final class GPUSceneBackend: SceneBackend {
                         player: draw.player,
                         tree: draw.tree
                     ),
+                    legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.count,
                     to: &batches
@@ -3109,6 +3600,13 @@ final class GPUSceneBackend: SceneBackend {
         let clearColor = try resources.sceneClearColor(
             environment: currentFrame.environment
         )
+        let post = try resources.scenePost(
+            environment: currentFrame.environment,
+            chain: currentFrame.postChain,
+            antiAliasing: currentFrame.antiAliasing
+        )
+        let orderedBatches =
+            GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(batches)
         _ = frameCoordinator.claimScreenClearForScene()
         lastPresentationReport = try platform.presentModelInstances(
             viewProjection: viewProjection,
@@ -3116,9 +3614,10 @@ final class GPUSceneBackend: SceneBackend {
             cameraUp: cameraUp,
             cameraPosition: currentFrame.camera.position,
             lighting: lighting,
+            post: post,
             instances: packedInstances,
             logicalInstanceCount: logicalInstanceCount,
-            batches: batches,
+            batches: orderedBatches,
             clearColor: clearColor
         )
     }
@@ -3127,6 +3626,7 @@ final class GPUSceneBackend: SceneBackend {
         model: ModelHandle,
         overrides: [MaterialOverride],
         animation: GPUAnimationPoseProbe?,
+        legacyInstanced: Bool = false,
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
         instanceCount: Int,
@@ -3144,6 +3644,7 @@ final class GPUSceneBackend: SceneBackend {
                 animation: animation,
                 material: entry.material,
                 materialSlot: entry.materialSlot,
+                legacyInstanced: legacyInstanced,
                 instanceBuffer: instanceBuffer,
                 firstInstance: firstInstance,
                 instanceCount: instanceCount
@@ -3717,32 +4218,58 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     private func validatePersistentInstanceReuse() throws {
-        var snapshots: [InstanceBufferHandle: [RenderInstance]] = [:]
+        var snapshots: [
+            InstanceBufferHandle: (
+                instances: [RenderInstance],
+                revision: UInt64?
+            )
+        ] = [:]
         for pendingDraw in pendingModelDraws {
             let persistent: (
                 handle: InstanceBufferHandle?,
-                instances: [RenderInstance]
+                instances: [RenderInstance],
+                revision: UInt64?
             )
             switch pendingDraw {
             case .instances(let draw):
-                persistent = (draw.persistentBuffer, draw.instances)
+                persistent = (
+                    draw.persistentBuffer,
+                    draw.instances,
+                    draw.persistentRevision
+                )
             case .meshInstances(let draw):
-                persistent = (draw.persistentBuffer, draw.instances)
+                persistent = (
+                    draw.persistentBuffer,
+                    draw.instances,
+                    draw.persistentRevision
+                )
             default:
                 continue
             }
             guard let handle = persistent.handle else { continue }
             if let existing = snapshots[handle] {
+                if let existingRevision = existing.revision,
+                   let revision = persistent.revision {
+                    guard existingRevision == revision else {
+                        throw GPUSceneProbeError.operationFailed(
+                            message: "Persistent GPU instance buffer revision changed within one frame"
+                        )
+                    }
+                    continue
+                }
                 guard Self.sharesStorage(
-                    existing,
+                    existing.instances,
                     persistent.instances
-                ) || existing == persistent.instances else {
+                ) || existing.instances == persistent.instances else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Persistent GPU instance buffer data changed within one frame"
                     )
                 }
             } else {
-                snapshots[handle] = persistent.instances
+                snapshots[handle] = (
+                    persistent.instances,
+                    persistent.revision
+                )
             }
         }
     }

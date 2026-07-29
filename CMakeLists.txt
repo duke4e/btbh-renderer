@@ -588,6 +588,16 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_shadow.frag|fragment"
         "production_model.frag|fragment"
         "production_model_unshadowed.frag|fragment"
+        "production_post.vert|vertex"
+        "production_ssao.frag|fragment"
+        "production_ssao_denoise.frag|fragment"
+        "production_ssao_resolve.frag|fragment"
+        "production_post.frag|fragment"
+        "production_smaa_edge_medium.frag|fragment"
+        "production_smaa_edge_high.frag|fragment"
+        "production_smaa_weights_medium.frag|fragment"
+        "production_smaa_weights_high.frag|fragment"
+        "production_smaa_blend.frag|fragment"
         "production_canvas.vert|vertex"
         "production_canvas.frag|fragment"
         "production_canvas_textured.frag|fragment"
@@ -613,12 +623,25 @@ if(BTBH_BUILD_GPU_SPIKE)
             _shader_reflection
             "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.json"
         )
-        set(_shader_dependencies shadercross "${_shader_source}")
+        set(
+            _shader_dependencies
+            shadercross
+            "${_shader_source}"
+            "${R3D_ROOT_PATH}/shaders/gpu_spike/production_surface.hlsli"
+        )
         if(_shader_name STREQUAL "production_model_unshadowed.frag")
             list(
                 APPEND
                 _shader_dependencies
                 "${R3D_ROOT_PATH}/shaders/gpu_spike/production_model.frag.hlsl"
+            )
+        endif()
+        if(_shader_name MATCHES "^production_smaa_")
+            list(
+                APPEND
+                _shader_dependencies
+                "${R3D_ROOT_PATH}/shaders/gpu_spike/production_smaa_common.hlsli"
+                "${R3D_ROOT_PATH}/shaders/external/SMAA.hlsl"
             )
         endif()
 
@@ -704,9 +727,42 @@ if(BTBH_BUILD_GPU_SPIKE)
         endif()
     endforeach()
 
+    set(BTBH_GPU_RUNTIME_ASSET_ARTIFACTS)
+    foreach(_asset_name IN ITEMS
+        "brdf_lut_512_rg16_float.raw"
+        "smaa_area_160x560_rg8.raw"
+        "smaa_search_64x16_r8.raw"
+    )
+        set(_asset_source "${R3D_ROOT_PATH}/assets/${_asset_name}")
+        set(
+            _asset_destination
+            "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_asset_name}"
+        )
+        add_custom_command(
+            OUTPUT "${_asset_destination}"
+            COMMAND
+                ${CMAKE_COMMAND} -E make_directory
+                "${BTBH_GPU_SHADER_OUTPUT_DIR}"
+            COMMAND
+                ${CMAKE_COMMAND} -E copy_if_different
+                "${_asset_source}"
+                "${_asset_destination}"
+            DEPENDS "${_asset_source}"
+            COMMENT "Staging GPU runtime asset ${_asset_name}"
+            VERBATIM
+        )
+        list(
+            APPEND
+            BTBH_GPU_RUNTIME_ASSET_ARTIFACTS
+            "${_asset_destination}"
+        )
+    endforeach()
+
     add_custom_target(
         btbh_gpu_shaders
-        DEPENDS ${BTBH_GPU_SHADER_ARTIFACTS}
+        DEPENDS
+            ${BTBH_GPU_SHADER_ARTIFACTS}
+            ${BTBH_GPU_RUNTIME_ASSET_ARTIFACTS}
     )
 
     add_library(btbh_gpu STATIC
@@ -761,6 +817,75 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
     target_link_libraries(btbh_gpu_contract_test PRIVATE btbh_gpu)
     add_test(NAME btbh_gpu_contract COMMAND btbh_gpu_contract_test)
+
+    add_executable(btbh_gpu_scene_blend_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_scene_blend_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_scene_blend_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(
+        btbh_gpu_scene_blend_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    add_test(
+        NAME btbh_gpu_scene_blend
+        COMMAND btbh_gpu_scene_blend_test
+    )
+
+    add_executable(btbh_gpu_animation_math_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_animation_math_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_animation_math_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_compile_definitions(
+        btbh_gpu_animation_math_test
+        PRIVATE
+            BTBH_GPU_ANIMATION_FIXTURE_PATH="${R3D_ROOT_PATH}/Tests/Fixtures/blended-animation.gltf"
+    )
+    target_link_libraries(
+        btbh_gpu_animation_math_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    add_test(
+        NAME btbh_gpu_animation_math
+        COMMAND btbh_gpu_animation_math_test
+    )
+
+    add_executable(btbh_gpu_model_orm_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_model_orm_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_model_orm_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(
+        btbh_gpu_model_orm_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    add_test(
+        NAME btbh_gpu_model_orm
+        COMMAND btbh_gpu_model_orm_test
+    )
+
+    add_executable(btbh_gpu_model_skinning_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_model_skinning_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_model_skinning_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(
+        btbh_gpu_model_skinning_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    add_test(
+        NAME btbh_gpu_model_skinning
+        COMMAND btbh_gpu_model_skinning_test
+    )
 
     add_executable(btbh_gpu_public_header_test
         "${R3D_ROOT_PATH}/tests/btbh_gpu_public_header_test.c"

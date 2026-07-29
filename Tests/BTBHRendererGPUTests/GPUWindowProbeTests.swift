@@ -5,6 +5,845 @@ import BTBHRendererGPUCore
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testProductionGPUColorInputsUseSRGBToLinearConversion() {
+        XCTAssertEqual(
+            GPUColorSpace.linearComponent(0.5),
+            0.214_041_14,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(GPUColorSpace.linearComponent(Float(0)), 0)
+        XCTAssertEqual(GPUColorSpace.linearComponent(Float(1)), 1)
+
+        let color = GPUColorSpace.linearized(
+            .init(r: 128, g: 64, b: 32, a: 127)
+        )
+        XCTAssertEqual(color.r, 55)
+        XCTAssertEqual(color.g, 13)
+        XCTAssertEqual(color.b, 4)
+        XCTAssertEqual(color.a, 127)
+    }
+
+    func testLegacyEnvironmentAmbientPreservesAuthoredComponents() {
+        XCTAssertEqual(
+            GPUColorSpace.legacyAmbientComponent(205),
+            Float(205) / 255,
+            accuracy: 0.000_001
+        )
+        XCTAssertNotEqual(
+            GPUColorSpace.legacyAmbientComponent(205),
+            GPUColorSpace.linearComponent(UInt8(205))
+        )
+    }
+
+    func testProductionTextureColorSpaceIsFormatDriven() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let modelImporter = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_model.c"
+            ),
+            encoding: .utf8
+        )
+        let textureLoader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_texture.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(shader.contains("srgb_to_linear"))
+        XCTAssertTrue(modelImporter.contains(
+            "SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB"
+        ))
+        XCTAssertTrue(modelImporter.contains(
+            "SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM"
+        ))
+        XCTAssertTrue(textureLoader.contains(
+            "btbh_gpu_window_texture_load_format("
+        ))
+        XCTAssertTrue(textureLoader.contains(
+            "SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,"
+        ))
+    }
+
+    func testImportedNormalTexturesUseLinearUNORM() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelImporter = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_model.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(modelImporter.contains(
+            "&source->normal_texture,\n" +
+                "                    model_path,\n" +
+                "                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,"
+        ))
+    }
+
+    func testImportedEmissionTexturesUseSRGB() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelImporter = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_model.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(modelImporter.contains(
+            "&source->emissive_texture,\n" +
+                "                model_path,\n" +
+                "                SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,"
+        ))
+    }
+
+    func testProductionPBRUsesLegacyBRDFLookupTexture() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let scene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(shader.contains(
+            "Texture2D<float2> brdf_lut_texture"
+        ))
+        XCTAssertTrue(shader.contains(
+            "brdf_lut_texture.Sample("
+        ))
+        XCTAssertTrue(scene.contains(
+            "SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT"
+        ))
+        XCTAssertTrue(scene.contains(
+            "samplers[4].texture = runtime->brdf_lut_texture;"
+        ))
+    }
+
+    func testImportedModelTexturesUseLegacyTrilinearMipChain() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelImporter = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_model.c"
+            ),
+            encoding: .utf8
+        )
+        let textureLoader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_texture.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(modelImporter.contains(
+            "btbh_gpu_window_texture_create_rgba8_mipmapped("
+        ))
+        XCTAssertGreaterThanOrEqual(
+            modelImporter.components(
+                separatedBy: "BTBH_GPU_TEXTURE_FILTER_TRILINEAR"
+            ).count - 1,
+            3
+        )
+        XCTAssertTrue(textureLoader.contains(
+            "btbh_gpu_window_texture_create_rgba8_mipmapped("
+        ))
+        XCTAssertTrue(textureLoader.contains(
+            "SDL_GenerateMipmapsForGPUTexture(command, resource->texture);"
+        ))
+    }
+
+    func testTextureLoadDefaultSamplingMatchesLegacyPointFilter() {
+        XCTAssertEqual(
+            GPUTextureSamplingProjection.filter(
+                .init(path: "implicit-filter.png")
+            ).rawValue,
+            TextureFilter.nearest.rawValue
+        )
+        XCTAssertEqual(
+            GPUTextureSamplingProjection.filter(
+                .init(path: "explicit-bilinear.png", filter: .bilinear)
+            ).rawValue,
+            TextureFilter.bilinear.rawValue
+        )
+        XCTAssertEqual(
+            GPUTextureSamplingProjection.filter(
+                .init(path: "explicit-trilinear.png", filter: .trilinear)
+            ).rawValue,
+            TextureFilter.trilinear.rawValue
+        )
+    }
+
+    func testCustomMeshTextureCoordinatesPreserveLegacyAuthoredValues() {
+        let projected = GPUCustomMeshProjection.textureCoordinate(
+            .init(x: 0.25, y: 0.75)
+        )
+
+        XCTAssertEqual(projected.x, 0.25, accuracy: 0.000_001)
+        XCTAssertEqual(projected.y, 0.75, accuracy: 0.000_001)
+    }
+
+    func testCustomMeshTriangleWindingProjectsLegacyOrderToGPUFrontFace() {
+        XCTAssertEqual(
+            GPUCustomMeshProjection.triangleIndices([
+                0, 1, 2,
+                2, 1, 3,
+            ]),
+            [
+                0, 2, 1,
+                2, 3, 1,
+            ]
+        )
+    }
+
+    func testScenePostProjectsRequestedAntiAliasingQuality() {
+        XCTAssertEqual(GPUAntiAliasingProjection.native(.off), 0)
+        XCTAssertEqual(GPUAntiAliasingProjection.native(.smaaMedium), 1)
+        XCTAssertEqual(GPUAntiAliasingProjection.native(.smaaHigh), 2)
+    }
+
+    func testProductionFontAtlasUsesLegacyRaylibRasterizationContract() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_font.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("BTBH_GPU_FONT_GLYPH_PADDING 4u"))
+        XCTAssertTrue(source.contains("stbtt_GetCodepointBitmap("))
+        XCTAssertTrue(source.contains(
+            "font->ascent = (float)((int)((float)ascent * metric_scale));"
+        ))
+        XCTAssertTrue(source.contains(
+            "BTBH_GPU_TEXTURE_FILTER_NEAREST,\n" +
+            "        BTBH_GPU_TEXTURE_WRAP_CLAMP"
+        ))
+    }
+
+    func testProductionPostDoesNotMultiplyComposedSceneByDepthOnlyAO() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_post.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(shader.contains(
+            "* ambient_occlusion(uv)"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float3 post_color = tilt_shift(uv);"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float3 center = cas_sample(uv);"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float3 e = grade_lut(scene_sample(uv));"
+        ))
+    }
+
+    func testProductionSSAOResolvesAmbientBeforePostProcessing() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let modelShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let postShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_post.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let resolveShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_ssao_resolve.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(modelShader.contains(
+            "float4 ambient : SV_Target1;"
+        ))
+        XCTAssertTrue(modelShader.contains(
+            "float4 normal : SV_Target2;"
+        ))
+        XCTAssertTrue(modelShader.contains(
+            "float4 ambient_specular : SV_Target3;"
+        ))
+        XCTAssertTrue(modelShader.contains(
+            "ambient_diffuse_lighting"
+        ))
+        XCTAssertTrue(modelShader.contains(
+            "ambient_specular_lighting"
+        ))
+        XCTAssertFalse(postShader.contains(
+            "Texture2D<float4> ambient_texture"
+        ))
+        XCTAssertFalse(postShader.contains(
+            "Texture2D<float4> normal_texture"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "ambient_diffuse * ambient_occlusion"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "specular_occlusion("
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "ambient_specular * specular_ratio"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUColorTargetDescription color_targets[4];"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUTextureSamplerBinding resolve_samplers[6];"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->ambient_specular_texture"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "color_targets[3].blend_state.color_write_mask =\n" +
+                "        transparent ? 0u : 0x0fu;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUTextureSamplerBinding post_samplers[2];"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "depth_target.store_op = SDL_GPU_STOREOP_STORE;"
+        ))
+    }
+
+    func testProductionSSAOUsesLegacyWorldSpaceObscurance() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let resolveShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_ssao_resolve.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let denoiseShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_ssao_denoise.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let ssaoShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_ssao.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(ssaoShader.contains(
+            "float4x4 inverse_view_projection;"
+        ))
+        XCTAssertTrue(ssaoShader.contains(
+            "const float world_radius = 1.0f;"
+        ))
+        XCTAssertTrue(ssaoShader.contains(
+            "const float world_bias = 0.03f;"
+        ))
+        XCTAssertTrue(ssaoShader.contains(
+            "const float legacy_intensity = 0.4f;"
+        ))
+        XCTAssertTrue(ssaoShader.contains(
+            "const float radius_falloff = max(radius_squared - vv, 0.0f);"
+        ))
+        XCTAssertTrue(ssaoShader.contains(
+            "max((vn - world_bias) / (0.02f + vv), 0.0f)"
+        ))
+        XCTAssertFalse(ssaoShader.contains(
+            "smoothstep(0.0002f, 0.0045f, depth_delta)"
+        ))
+        XCTAssertTrue(denoiseShader.contains(
+            "const float blur_radius = 4.0f;"
+        ))
+        XCTAssertTrue(denoiseShader.contains(
+            "plane_distance * plane_distance * 100.0f"
+        ))
+        XCTAssertTrue(denoiseShader.contains(
+            "normal_difference * normal_difference * 20.0f"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "const float depth_edge_tolerance = 0.05f;"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "float depth_aware_upsample("
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "btbh_gpu_scene_invert_matrix4("
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "const float projection_scale_y = sqrtf("
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->ssao_texture"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->ssao_denoised_texture"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->ssao_denoise_pipeline"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "\"production_ssao_denoise.frag.%s\""
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "(width + 1u) / 2u"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUTextureSamplerBinding resolve_samplers[6];"
+        ))
+    }
+
+    func testProductionShadowMapsUseValidatedResolutionBudget() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(GPUSceneDirectionalShadowProbe.mapSize, 2_048)
+        XCTAssertTrue(nativeScene.contains(
+            "#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 2048u"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 2048u"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "BTBH_GPU_SPOT_SHADOW_MAP_SIZE"
+        ))
+        XCTAssertGreaterThanOrEqual(
+            shader.components(separatedBy: "2048.0f").count - 1,
+            3
+        )
+    }
+
+    func testProductionAmbientMatchesLegacyFinalAlbedoApplication() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(shader.contains(
+            "irradiance * ambient_diffuse"
+        ))
+        XCTAssertTrue(shader.contains(
+            "radiance * single_scattering"
+        ))
+    }
+
+    func testProductionNormalMappingFlipsLegacyDoubleSidedBackfaces() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(shader.contains(
+            "bool is_front_face : SV_IsFrontFace;"
+        ))
+        XCTAssertTrue(shader.contains(
+            "if (!input.is_front_face)"
+        ))
+        XCTAssertTrue(shader.contains(
+            "normal = -normal;"
+        ))
+    }
+
+    func testProductionNormalMappingPreservesLegacyInterpolatedTBN() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let fragmentShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let staticVertexShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let animatedVertexShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        for shader in [staticVertexShader, animatedVertexShader] {
+            XCTAssertTrue(shader.contains(
+                "float3 world_bitangent : TEXCOORD6;"
+            ))
+            XCTAssertTrue(shader.contains(
+                "transform_normal(instance_linear, "
+            ))
+            XCTAssertTrue(shader.contains(
+                "cross(world_normal, world_tangent) * tangent_handedness"
+            ))
+            XCTAssertFalse(shader.contains("orthogonal_tangent"))
+        }
+        XCTAssertTrue(animatedVertexShader.contains(
+            "transform_normal(skin_linear, input.tangent.xyz)"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "float3 world_bitangent : TEXCOORD6;"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "input.world_tangent * mapped_normal.x +"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "input.world_bitangent * mapped_normal.y +"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "mapped_normal.z = sqrt("
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "1.0f - saturate(dot(mapped_normal.xy, mapped_normal.xy))"
+        ))
+        XCTAssertFalse(fragmentShader.contains("orthogonal_tangent"))
+    }
+
+    func testProductionDirectionalSpecularMatchesLegacyLightDefault() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(shader.contains(
+            "legacy_default_light_specular = 0.5f"
+        ))
+        XCTAssertTrue(shader.contains(
+            "geometry * legacy_default_light_specular"
+        ))
+    }
+
+    func testProductionWaterMatchesLegacyDeferredNormalDecode() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        let waterStart = try XCTUnwrap(
+            shader.range(of: "else if (surface_variant == 2u)")
+        )
+        let waterEnd = try XCTUnwrap(
+            shader.range(
+                of: "else if (surface_variant == 3u",
+                range: waterStart.upperBound..<shader.endIndex
+            )
+        )
+        let waterSource = shader[waterStart.lowerBound..<waterEnd.lowerBound]
+        XCTAssertTrue(waterSource.contains("normal_map = normalize("))
+        XCTAssertTrue(waterSource.contains(") * 2.0f - 1.0f;"))
+    }
+
+    func testProductionSurfaceVertexAndShadowPassesShareDeformationContract()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shaderDirectory = packageRoot.appendingPathComponent(
+            "shaders/gpu_spike"
+        )
+        let vertexShaders = [
+            "production_model.vert.hlsl",
+            "production_animated_model.vert.hlsl",
+            "production_shadow.vert.hlsl",
+            "production_animated_shadow.vert.hlsl",
+        ]
+
+        for name in vertexShaders {
+            let shader = try String(
+                contentsOf: shaderDirectory.appendingPathComponent(name),
+                encoding: .utf8
+            )
+            XCTAssertTrue(
+                shader.contains("#include \"production_surface.hlsli\""),
+                "\(name) must use the shared production surface contract"
+            )
+            XCTAssertTrue(
+                shader.contains("btbh_apply_surface_vertex("),
+                "\(name) must apply production surface deformation"
+            )
+        }
+
+        let shadowFragment = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_shadow.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertTrue(shadowFragment.contains(
+            "btbh_surface_shadow_visible"
+        ))
+        XCTAssertTrue(shadowFragment.contains("discard;"))
+    }
+
+    func testTransparentSceneBatchesUseLegacyMaterialStateOrderAfterOpaqueBatches() {
+        func material(
+            descriptor: MaterialDescriptor
+        ) -> GPUSceneMaterialProbe {
+            var result = GPUSceneMaterialProbe(
+                albedoTexture: nil,
+                albedoColor: .white,
+                normalTexture: nil,
+                ormTexture: nil,
+                normalScale: 1,
+                occlusion: 1,
+                roughness: 1,
+                metalness: 0,
+                emissionTexture: nil,
+                emissionColor: .white,
+                emissionEnergy: 0,
+                alphaCutoff: 0.01,
+                blendMode: .mix,
+                billboardMode: .disabled,
+                depthCompare: descriptor.depthCompare,
+                stencilCompare: .always,
+                stencilReference: 0,
+                stencilMask: 0xFF,
+                stencilFail: .keep,
+                stencilDepthFail: .keep,
+                stencilPass: .replace,
+                cullMode: descriptor.cullMode,
+                transparency: descriptor.transparency,
+                unlit: descriptor.unlit,
+                surface: .none
+            )
+            result.legacySortKey = .init(descriptor: descriptor)
+            return result
+        }
+        var opaqueDescriptor = MaterialDescriptor.default
+        opaqueDescriptor.albedoTexture = .init(rawValue: 1)
+        var textureOneProjectile = opaqueDescriptor
+        textureOneProjectile.transparency = .alpha
+        textureOneProjectile.unlit = true
+        var textureOneShadow = textureOneProjectile
+        textureOneShadow.depthCompare = .always
+        textureOneShadow.cullMode = .none
+        var textureTwoProjectile = textureOneProjectile
+        textureTwoProjectile.albedoTexture = .init(rawValue: 2)
+
+        XCTAssertEqual(
+            GPULegacyMaterialSortKey(descriptor: textureOneProjectile)
+                .depthHash,
+            0x8c3bced8
+        )
+        XCTAssertEqual(
+            GPULegacyMaterialSortKey(descriptor: textureOneShadow).depthHash,
+            0x5126607a
+        )
+
+        let pointer = OpaquePointer(bitPattern: 1)!
+        let opaque = GPUSceneGeometryProbeBatch(
+            geometry: .customMesh(pointer),
+            animation: nil,
+            material: material(descriptor: opaqueDescriptor),
+            materialSlot: nil,
+            firstInstance: 0,
+            instanceCount: 1
+        )
+        let textureTwo = GPUSceneGeometryProbeBatch(
+            geometry: .customMesh(pointer),
+            animation: nil,
+            material: material(descriptor: textureTwoProjectile),
+            materialSlot: nil,
+            legacyInstanced: true,
+            firstInstance: 1,
+            instanceCount: 1
+        )
+        let textureOneSprite = GPUSceneGeometryProbeBatch(
+            geometry: .customMesh(pointer),
+            animation: nil,
+            material: material(descriptor: textureOneProjectile),
+            materialSlot: nil,
+            legacyInstanced: true,
+            firstInstance: 2,
+            instanceCount: 1
+        )
+        let textureOneGroundShadow = GPUSceneGeometryProbeBatch(
+            geometry: .customMesh(pointer),
+            animation: nil,
+            material: material(descriptor: textureOneShadow),
+            materialSlot: nil,
+            legacyInstanced: true,
+            firstInstance: 3,
+            instanceCount: 1
+        )
+        let importedTransparent = GPUSceneGeometryProbeBatch(
+            geometry: .model(pointer),
+            animation: nil,
+            material: material(descriptor: textureOneProjectile),
+            materialSlot: 0,
+            legacyInstanced: false,
+            firstInstance: 4,
+            instanceCount: 1
+        )
+        let ordered = GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(
+            [
+                importedTransparent,
+                textureTwo,
+                textureOneSprite,
+                opaque,
+                textureOneGroundShadow,
+            ]
+        )
+
+        XCTAssertEqual(ordered[0].firstInstance, 0)
+        XCTAssertEqual(ordered[1].firstInstance, 3)
+        XCTAssertEqual(ordered[2].firstInstance, 2)
+        XCTAssertEqual(ordered[3].firstInstance, 1)
+        XCTAssertEqual(ordered[4].firstInstance, 4)
+    }
+
+    func testProductionSurfaceShadersClassifyKnownVariantsAndParameters()
+        throws
+    {
+        let glitter = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "C:/game/Shaders/glitter_static.glsl",
+            parameters: [
+                "u_color": .vec3(.init(x: 1, y: 0.5, z: 0.25))
+            ]
+        )
+        XCTAssertEqual(glitter.variant, .glitterStatic)
+        XCTAssertEqual(glitter.parameters0.x, 1)
+        XCTAssertEqual(glitter.parameters0.y, 0.5)
+        XCTAssertEqual(glitter.parameters0.z, 0.25)
+
+        let shatter = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "C:/game/Shaders/shatter.glsl",
+            parameters: [
+                "u_shatterDuration": .float(2.5),
+                "u_cellSize": .float(0.4),
+                "u_gravity": .float(8),
+                "u_spreadSpeed": .float(1.5),
+                "u_spinSpeed": .float(3),
+            ]
+        )
+        XCTAssertEqual(shatter.variant, .shatter)
+        XCTAssertEqual(shatter.parameters0.x, 2.5)
+        XCTAssertEqual(shatter.parameters0.y, 0.4)
+        XCTAssertEqual(shatter.parameters0.z, 8)
+        XCTAssertEqual(shatter.parameters0.w, 1.5)
+        XCTAssertEqual(shatter.parameters1.x, 3)
+
+        XCTAssertEqual(
+            try GPUSceneSurfaceProjection.classify(
+                fragmentPath: "water_surface.glsl",
+                parameters: [:]
+            ).variant,
+            .water
+        )
+        XCTAssertEqual(
+            try GPUSceneSurfaceProjection.classify(
+                fragmentPath: "dissolve.glsl",
+                parameters: [:]
+            ).variant,
+            .dissolve
+        )
+        XCTAssertThrowsError(
+            try GPUSceneSurfaceProjection.classify(
+                fragmentPath: "unknown.glsl",
+                parameters: [:]
+            )
+        )
+    }
+
     func testDirectionalLightingProjectionKeepsShadowContractWithSortedSlot()
         throws
     {
@@ -101,6 +940,81 @@ final class GPUWindowProbeTests: XCTestCase {
         #endif
     }
 
+    func testSpotLightingProjectionPreservesLegacyDefaultsAndShadowMatrix()
+        throws
+    {
+        #if os(Windows)
+        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH spot shadow projection",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        _ = try resources.createLight(.init(
+            kind: .spot,
+            active: true,
+            position: .init(x: 2, y: 5, z: -3),
+            direction: .init(x: 0, y: -1, z: 0.25),
+            color: .init(r: 128, g: 192, b: 255, a: 255),
+            energy: 3,
+            range: 50,
+            castsShadow: true,
+            shadowSoftness: 4
+        ))
+        let projection = try resources.sceneLighting(
+            environment: .default,
+            camera: .init(
+                position: .init(x: 0, y: 4, z: -8),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            aspect: 320 / 180
+        )
+
+        XCTAssertEqual(projection.spotPosition, .init(x: 2, y: 5, z: -3))
+        XCTAssertEqual(
+            projection.spotDirection,
+            RenderVec3(x: 0, y: -1, z: 0.25).normalized()
+        )
+        XCTAssertEqual(
+            projection.spotColor,
+            .init(r: 128, g: 192, b: 255, a: 255)
+        )
+        XCTAssertEqual(projection.spotEnergy, 3)
+        XCTAssertEqual(projection.spotRange, 50)
+        XCTAssertEqual(projection.spotFalloff, 1)
+        XCTAssertEqual(
+            projection.spotInnerCutoff,
+            cos(22.5 * .pi / 180),
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            projection.spotOuterCutoff,
+            cos(45 * .pi / 180),
+            accuracy: 0.000_001
+        )
+        XCTAssertTrue(projection.spotShadow.enabled)
+        XCTAssertEqual(projection.spotShadow.range, 50)
+        XCTAssertEqual(projection.spotShadow.softness, 4)
+        XCTAssertEqual(projection.spotShadow.viewProjection.count, 16)
+        XCTAssertTrue(
+            projection.spotShadow.viewProjection.allSatisfy(\.isFinite)
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
     func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
         #if os(Windows)
         let platform = GPUPlatform(request: .vulkan, debugMode: true)
@@ -136,6 +1050,14 @@ final class GPUWindowProbeTests: XCTestCase {
         descriptor.occlusion = 0.83
         descriptor.roughness = 0.27
         descriptor.metalness = 0.91
+        descriptor.alphaCutoff = 0.37
+        descriptor.stencilCompare = .notEqual
+        descriptor.stencilReference = 7
+        descriptor.stencilMask = 0x3F
+        descriptor.stencilFail = .incrementClamp
+        descriptor.stencilDepthFail = .decrementClamp
+        descriptor.stencilPass = .zero
+        descriptor.cullMode = .front
         let standaloneHandle = try resources.createMaterial(descriptor)
         let standalone = try resources.sceneMaterial(standaloneHandle)
 
@@ -145,6 +1067,14 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(standalone.occlusion, 0.83, accuracy: 0.0001)
         XCTAssertEqual(standalone.roughness, 0.27, accuracy: 0.0001)
         XCTAssertEqual(standalone.metalness, 0.91, accuracy: 0.0001)
+        XCTAssertEqual(standalone.alphaCutoff, 0.37, accuracy: 0.0001)
+        XCTAssertEqual(standalone.stencilCompare, .notEqual)
+        XCTAssertEqual(standalone.stencilReference, 7)
+        XCTAssertEqual(standalone.stencilMask, 0x3F)
+        XCTAssertEqual(standalone.stencilFail, .incrementClamp)
+        XCTAssertEqual(standalone.stencilDepthFail, .decrementClamp)
+        XCTAssertEqual(standalone.stencilPass, .zero)
+        XCTAssertEqual(standalone.cullMode, .front)
 
         let model = try resources.loadModel(
             path: packageRoot
@@ -159,12 +1089,24 @@ final class GPUWindowProbeTests: XCTestCase {
             materialIndex: 1,
             patch: .init(
                 normalTexture: texture,
-                ormTexture: texture
+                ormTexture: texture,
+                stencilReference: 9,
+                cullMode: CullMode.none
             )
         )
         let patchedEntries = try resources.sceneModelMaterials(
             model: model,
             overrides: [.init(slot: 1, material: patchHandle)]
+        )
+        XCTAssertEqual(resources.sceneModelMaterialResolutionCount, 1)
+        _ = try resources.sceneModelMaterials(
+            model: model,
+            overrides: [.init(slot: 1, material: patchHandle)]
+        )
+        XCTAssertEqual(
+            resources.sceneModelMaterialResolutionCount,
+            1,
+            "Identical model material projections should reuse cached results"
         )
         let patched = try XCTUnwrap(patchedEntries.first {
             $0.materialSlot == 1
@@ -176,8 +1118,14 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(patched.occlusion, 0.66, accuracy: 0.0001)
         XCTAssertEqual(patched.roughness, 0.31, accuracy: 0.0001)
         XCTAssertEqual(patched.metalness, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(patched.stencilReference, 9)
+        XCTAssertEqual(patched.cullMode, .none)
 
         resources.destroyMaterial(patchHandle)
+        XCTAssertThrowsError(try resources.sceneModelMaterials(
+            model: model,
+            overrides: [.init(slot: 1, material: patchHandle)]
+        ))
         resources.destroyModel(model)
         resources.destroyMaterial(standaloneHandle)
         resources.destroyTexture(texture)
@@ -219,6 +1167,17 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(material.occlusion, 0.66, accuracy: 0.0001)
         XCTAssertEqual(material.roughness, 0.31, accuracy: 0.0001)
         XCTAssertEqual(material.metalness, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(material.alphaCutoff, 0.42, accuracy: 0.0001)
+        XCTAssertEqual(material.cullMode, .none)
+        XCTAssertEqual(material.transparency, .disabled)
+
+        let transparentMaterial = try XCTUnwrap(
+            model.materials.indices.contains(2)
+                ? model.materials[2]
+                : nil
+        )
+        XCTAssertEqual(transparentMaterial.cullMode, .back)
+        XCTAssertEqual(transparentMaterial.transparency, .alpha)
 
         let implicitModel = try probe.loadModel(
             path: packageRoot
@@ -243,6 +1202,80 @@ final class GPUWindowProbeTests: XCTestCase {
             1,
             accuracy: 0.0001
         )
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
+    func testAssimpOBJImportPreservesLegacyMaterialFactors() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH imported OBJ material factors",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/vertical-uv-flip.obj"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+
+        let material = try XCTUnwrap(model.materials.first)
+        XCTAssertEqual(material.albedoColor.r, 63)
+        XCTAssertEqual(material.albedoColor.g, 127)
+        XCTAssertEqual(material.albedoColor.b, 191)
+        XCTAssertEqual(material.albedoColor.a, 204)
+        XCTAssertEqual(material.roughness, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(material.metalness, 0, accuracy: 0.0001)
+        XCTAssertEqual(material.emissionColor.r, 25)
+        XCTAssertEqual(material.emissionColor.g, 51)
+        XCTAssertEqual(material.emissionColor.b, 76)
+        XCTAssertEqual(material.emissionEnergy, 1, accuracy: 0.0001)
+        #else
+        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
+        #endif
+    }
+
+    func testAssimpOBJImportExtractsConcaveFloorFootprint() throws {
+        #if os(Windows)
+        let probe = try GPUWindowProbe(
+            request: .vulkan,
+            title: "BTBH imported model footprint",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/concave-floor-footprint.obj"
+                )
+                .path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+
+        XCTAssertEqual(model.metadata.footprintKind, .raster)
+        XCTAssertGreaterThanOrEqual(model.metadata.baseFootprint.count, 6)
+        let first = try XCTUnwrap(model.metadata.baseFootprint.first)
+        XCTAssertEqual(first.x, 0, accuracy: 0.0001)
+        XCTAssertEqual(first.y, 0, accuracy: 0.0001)
         #else
         throw XCTSkip("The Windows Vulkan probe runs only on Windows")
         #endif
@@ -413,6 +1446,12 @@ final class GPUWindowProbeTests: XCTestCase {
                         "production_model_unshadowed.frag.spv"
                     )
                     .path,
+                postVertexShaderPath: shaderDirectory
+                    .appendingPathComponent("production_post.vert.spv")
+                    .path,
+                postFragmentShaderPath: shaderDirectory
+                    .appendingPathComponent("production_post.frag.spv")
+                    .path,
                 shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
                 viewProjection: [
                     1, 0, 0, 0,
@@ -424,6 +1463,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 cameraUp: .up,
                 cameraPosition: cameraPosition,
                 lighting: testLighting,
+                post: .default,
                 instances: [],
                 logicalInstanceCount: 2,
                 batches: [
@@ -468,6 +1508,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(report.transientInstanceCount, 0)
         XCTAssertEqual(report.persistentBatchCount, 1)
         XCTAssertFalse(report.shadowResourcesReady)
+        XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
         XCTAssertThrowsError(try present(.init(
             x: .nan,
             y: 0,
@@ -635,6 +1676,12 @@ final class GPUWindowProbeTests: XCTestCase {
                     "production_model_unshadowed.frag.spv"
                 )
                 .path,
+            postVertexShaderPath: shaderDirectory
+                .appendingPathComponent("production_post.vert.spv")
+                .path,
+            postFragmentShaderPath: shaderDirectory
+                .appendingPathComponent("production_post.frag.spv")
+                .path,
             shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
             viewProjection: [
                 1, 0, 0, 0,
@@ -666,6 +1713,7 @@ final class GPUWindowProbeTests: XCTestCase {
                     ]
                 )
             ),
+            post: .default,
             instances: instances,
             batches: batches,
             clearColor: .black
@@ -673,6 +1721,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(report.primitiveDrawCount, 4)
         XCTAssertEqual(report.preparedGeometryCount, 4)
         XCTAssertTrue(report.shadowResourcesReady)
+        XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")

@@ -20,6 +20,8 @@ public final class GPUPlatform: GamePlatform {
     private var targetFramesPerSecond = 0
     private var previousFrameStart: TimeInterval?
     private var frameTelemetrySamples: [GPUFrameTelemetrySample] = []
+    private var sceneEncodeTelemetryMilliseconds: [Double] = []
+    private var canvasPresentTelemetryMilliseconds: [Double] = []
 
     public init(
         request: GPUBackendRequest = .platformDefault,
@@ -66,6 +68,14 @@ public final class GPUPlatform: GamePlatform {
         if frameTelemetryEnabled {
             frameTelemetrySamples.removeAll(keepingCapacity: false)
             frameTelemetrySamples.reserveCapacity(512)
+            sceneEncodeTelemetryMilliseconds.removeAll(
+                keepingCapacity: false
+            )
+            sceneEncodeTelemetryMilliseconds.reserveCapacity(512)
+            canvasPresentTelemetryMilliseconds.removeAll(
+                keepingCapacity: false
+            )
+            canvasPresentTelemetryMilliseconds.reserveCapacity(512)
         }
         self.window = window
         forcedClose = false
@@ -436,6 +446,7 @@ public final class GPUPlatform: GamePlatform {
         cameraUp: RenderVec3,
         cameraPosition: RenderVec3,
         lighting: GPUSceneLightingProbe,
+        post: GPUScenePostProbe,
         instances: [Float],
         logicalInstanceCount: Int,
         batches: [GPUSceneGeometryProbeBatch],
@@ -467,7 +478,7 @@ public final class GPUPlatform: GamePlatform {
             extensionName = "metallib"
             shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
         }
-        return try window.presentModelInstances(
+        let report = try window.presentModelInstances(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_model.vert.\(extensionName)"
@@ -503,17 +514,34 @@ public final class GPUPlatform: GamePlatform {
                     "production_model_unshadowed.frag.\(extensionName)"
                 )
                 .path,
+            postVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_post.vert.\(extensionName)"
+                )
+                .path,
+            postFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_post.frag.\(extensionName)"
+                )
+                .path,
             shaderFormat: shaderFormat,
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,
             cameraPosition: cameraPosition,
             lighting: lighting,
+            post: post,
             instances: instances,
             logicalInstanceCount: logicalInstanceCount,
             batches: batches,
             clearColor: clearColor
         )
+        if frameTelemetryEnabled {
+            sceneEncodeTelemetryMilliseconds.append(
+                report.cpuEncodeMilliseconds
+            )
+        }
+        return report
     }
 
     func presentCanvas(
@@ -547,6 +575,7 @@ public final class GPUPlatform: GamePlatform {
             extensionName = "metallib"
             shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
         }
+        let presentStarted = GPUWindowProbe.monotonicElapsedSeconds
         try window.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent(
@@ -568,6 +597,12 @@ public final class GPUPlatform: GamePlatform {
             batches: batches,
             passes: passes
         )
+        if frameTelemetryEnabled {
+            canvasPresentTelemetryMilliseconds.append(
+                (GPUWindowProbe.monotonicElapsedSeconds - presentStarted)
+                    * 1_000
+            )
+        }
         collectFrameTelemetry()
     }
 
@@ -630,11 +665,13 @@ public final class GPUPlatform: GamePlatform {
 
     private func emitFrameTelemetry() {
         guard frameTelemetryEnabled,
-              !frameTelemetrySamples.isEmpty else {
+              !frameTelemetrySamples.isEmpty ||
+              !sceneEncodeTelemetryMilliseconds.isEmpty ||
+              !canvasPresentTelemetryMilliseconds.isEmpty else {
             return
         }
         let locale = Locale(identifier: "en_US_POSIX")
-        let lines = frameTelemetrySamples.map { sample in
+        var lines = frameTelemetrySamples.map { sample in
             String(
                 format:
                     "BTBH_GPU_FRAME_TELEMETRY frame=%llu cpu_submit_ms=%.6f fence_completion_ms=%.6f\n",
@@ -644,8 +681,34 @@ public final class GPUPlatform: GamePlatform {
                 sample.fenceCompletionMilliseconds
             )
         }.joined()
+        lines += sceneEncodeTelemetryMilliseconds.enumerated().map {
+            index, milliseconds in
+            String(
+                format:
+                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu cpu_encode_ms=%.6f\n",
+                locale: locale,
+                UInt64(index + 1),
+                milliseconds
+            )
+        }.joined()
+        lines += canvasPresentTelemetryMilliseconds.enumerated().map {
+            index, milliseconds in
+            String(
+                format:
+                    "BTBH_GPU_CANVAS_PRESENT_TELEMETRY sample=%llu cpu_present_ms=%.6f\n",
+                locale: locale,
+                UInt64(index + 1),
+                milliseconds
+            )
+        }.joined()
         FileHandle.standardError.write(Data(lines.utf8))
         frameTelemetrySamples.removeAll(keepingCapacity: false)
+        sceneEncodeTelemetryMilliseconds.removeAll(
+            keepingCapacity: false
+        )
+        canvasPresentTelemetryMilliseconds.removeAll(
+            keepingCapacity: false
+        )
     }
 
     private func throttleIfNeeded() {

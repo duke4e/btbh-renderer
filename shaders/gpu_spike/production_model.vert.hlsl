@@ -1,3 +1,5 @@
+#include "production_surface.hlsli"
+
 struct InstanceData
 {
     float4x4 model;
@@ -22,7 +24,10 @@ cbuffer SceneUniforms : register(b0, space1)
     uint bone_offset;
     uint billboard_mode;
     uint unlit_enabled;
-    uint scene_padding;
+    uint surface_variant;
+    float4 surface_controls;
+    float4 surface_parameters0;
+    float4 surface_parameters1;
 };
 
 struct VertexInput
@@ -41,7 +46,10 @@ struct VertexOutput
     float2 texture_coordinate : TEXCOORD1;
     float3 world_position : TEXCOORD2;
     float3 world_normal : TEXCOORD3;
-    float4 world_tangent : TEXCOORD4;
+    float3 world_tangent : TEXCOORD4;
+    float4 instance_custom : TEXCOORD5;
+    float3 world_bitangent : TEXCOORD6;
+    float4 surface_data : TEXCOORD7;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -73,9 +81,17 @@ float3 transform_normal(float3x3 matrix, float3 normal)
 VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
 {
     const InstanceData instance = instances[instance_id];
+    const BTBHSurfaceVertexResult surface =
+        btbh_apply_surface_vertex(
+            input.position,
+            input.normal,
+            instance.custom,
+            surface_variant,
+            surface_controls.x,
+            surface_parameters0,
+            surface_parameters1
+        );
     const float3x3 instance_linear = (float3x3)instance.model;
-    const float instance_handedness =
-        matrix_handedness(instance_linear);
     float4 world_position;
     float3 raw_world_normal;
     float3 raw_world_tangent;
@@ -83,12 +99,12 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     {
         world_position = mul(
             instance.model,
-            float4(input.position, 1.0f)
+            float4(surface.position, 1.0f)
         );
         raw_world_normal =
-            transform_normal(instance_linear, input.normal);
+            transform_normal(instance_linear, surface.normal);
         raw_world_tangent =
-            mul(instance_linear, input.tangent.xyz);
+            transform_normal(instance_linear, input.tangent.xyz);
     }
     else
     {
@@ -98,11 +114,11 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         ).xyz;
         const float3 local_offset = mul(
             (float3x3)instance.model,
-            input.position
+            surface.position
         );
         const float3 local_normal =
-            transform_normal(instance_linear, input.normal);
-        const float3 local_tangent = mul(
+            transform_normal(instance_linear, surface.normal);
+        const float3 local_tangent = transform_normal(
             instance_linear,
             input.tangent.xyz
         );
@@ -141,15 +157,22 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         raw_world_normal,
         float3(0.0f, 0.0f, 1.0f)
     );
-    const float3 orthogonal_tangent =
-        raw_world_tangent -
-        world_normal * dot(raw_world_tangent, world_normal);
     const float3 tangent_fallback = abs(world_normal.z) < 0.999f
         ? stable_normalize(
             cross(float3(0.0f, 0.0f, 1.0f), world_normal),
             float3(1.0f, 0.0f, 0.0f)
         )
         : float3(1.0f, 0.0f, 0.0f);
+    const float3 world_tangent = stable_normalize(
+        raw_world_tangent,
+        tangent_fallback
+    );
+    const float tangent_handedness =
+        input.tangent.w < 0.0f ? -1.0f : 1.0f;
+    const float3 world_bitangent = stable_normalize(
+        cross(world_normal, world_tangent) * tangent_handedness,
+        float3(0.0f, 1.0f, 0.0f)
+    );
 
     VertexOutput output;
     output.position = mul(view_projection, world_position);
@@ -160,10 +183,9 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.texture_coordinate = input.texture_coordinate;
     output.world_position = world_position.xyz;
     output.world_normal = world_normal;
-    output.world_tangent = float4(
-        stable_normalize(orthogonal_tangent, tangent_fallback),
-        (input.tangent.w < 0.0f ? -1.0f : 1.0f) *
-            instance_handedness
-    );
+    output.world_tangent = world_tangent;
+    output.instance_custom = instance.custom;
+    output.world_bitangent = world_bitangent;
+    output.surface_data = surface.data;
     return output;
 }

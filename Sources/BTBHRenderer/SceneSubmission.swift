@@ -47,6 +47,7 @@ public struct ModelInstancesDraw: Sendable {
     public let instances: [RenderInstance]
     public let overrides: [MaterialOverride]
     public let persistentBuffer: InstanceBufferHandle?
+    public let persistentRevision: UInt64?
     public let sourceStart: Int
     public let count: Int
 
@@ -55,6 +56,7 @@ public struct ModelInstancesDraw: Sendable {
         instances: [RenderInstance],
         overrides: [MaterialOverride],
         persistentBuffer: InstanceBufferHandle?,
+        persistentRevision: UInt64? = nil,
         sourceStart: Int = 0,
         count: Int? = nil
     ) {
@@ -62,6 +64,7 @@ public struct ModelInstancesDraw: Sendable {
         self.instances = instances
         self.overrides = overrides
         self.persistentBuffer = persistentBuffer
+        self.persistentRevision = persistentRevision
         self.sourceStart = sourceStart
         self.count = count ?? max(0, instances.count - sourceStart)
     }
@@ -126,17 +129,20 @@ public struct MeshInstancesDraw: Sendable {
     public let material: MaterialHandle
     public let instances: [RenderInstance]
     public let persistentBuffer: InstanceBufferHandle?
+    public let persistentRevision: UInt64?
 
     public init(
         mesh: MeshHandle,
         material: MaterialHandle,
         instances: [RenderInstance],
-        persistentBuffer: InstanceBufferHandle?
+        persistentBuffer: InstanceBufferHandle?,
+        persistentRevision: UInt64? = nil
     ) {
         self.mesh = mesh
         self.material = material
         self.instances = instances
         self.persistentBuffer = persistentBuffer
+        self.persistentRevision = persistentRevision
     }
 }
 

@@ -832,6 +832,7 @@ final class RenderServicesTests: XCTestCase {
             instances: [instance, instance],
             overrides: [override],
             persistentBuffer: instances,
+            persistentRevision: 42,
             sourceStart: 1,
             count: 1
         )
@@ -839,8 +840,15 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(modelInstances.instances, [instance, instance])
         XCTAssertEqual(modelInstances.overrides, [override])
         XCTAssertEqual(modelInstances.persistentBuffer, instances)
+        XCTAssertEqual(modelInstances.persistentRevision, 42)
         XCTAssertEqual(modelInstances.sourceStart, 1)
         XCTAssertEqual(modelInstances.count, 1)
+        XCTAssertNil(ModelInstancesDraw(
+            model: model,
+            instances: [instance],
+            overrides: [],
+            persistentBuffer: nil
+        ).persistentRevision)
 
         let meshDraw = MeshDraw(mesh: mesh, material: material, transform: transform)
         XCTAssertEqual(meshDraw.mesh, mesh)
@@ -848,12 +856,17 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(meshDraw.transform, transform)
 
         let meshInstances = MeshInstancesDraw(
-            mesh: mesh, material: material, instances: [instance], persistentBuffer: instances
+            mesh: mesh,
+            material: material,
+            instances: [instance],
+            persistentBuffer: instances,
+            persistentRevision: 43
         )
         XCTAssertEqual(meshInstances.mesh, mesh)
         XCTAssertEqual(meshInstances.material, material)
         XCTAssertEqual(meshInstances.instances, [instance])
         XCTAssertEqual(meshInstances.persistentBuffer, instances)
+        XCTAssertEqual(meshInstances.persistentRevision, 43)
 
         let meshTransformStreams = MeshTransformStreamsDraw(
             mesh: mesh,

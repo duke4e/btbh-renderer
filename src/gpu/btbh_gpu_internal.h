@@ -10,6 +10,8 @@
 typedef struct BTBHGPUModelPrimitive {
     SDL_GPUBuffer *vertex_buffer;
     SDL_GPUBuffer *index_buffer;
+    float *positions;
+    uint32_t *indices;
     uint32_t vertex_count;
     uint32_t index_count;
     int32_t material_slot;
@@ -122,6 +124,31 @@ struct BTBHGPUCustomMesh {
     uint32_t vertex_byte_count;
 };
 
+bool btbh_gpu_scene_uses_transparent_pass(
+    BTBHGPUSceneBlendMode mode,
+    bool transparency_enabled
+);
+void btbh_gpu_scene_resolve_blend_state(
+    BTBHGPUSceneBlendMode mode,
+    bool transparency_enabled,
+    SDL_GPUColorTargetBlendState *state
+);
+void btbh_gpu_animation_slerp_shortest(
+    const float lower[4],
+    const float upper[4],
+    float amount,
+    float output[4]
+);
+bool btbh_gpu_model_assign_bone_weight(
+    float joints[4],
+    float weights[4],
+    uint32_t bone_index,
+    float influence
+);
+void btbh_gpu_model_normalize_bone_weights(
+    float joints[4],
+    float weights[4]
+);
 void btbh_gpu_window_release_textures(BTBHGPUWindow *window);
 void btbh_gpu_window_release_fonts(BTBHGPUWindow *window);
 void btbh_gpu_window_release_models(BTBHGPUWindow *window);
@@ -151,7 +178,44 @@ bool btbh_gpu_animation_library_sample_skin(
     float *matrices,
     uint32_t matrix_capacity
 );
+bool btbh_gpu_animation_pose_sample_skin(
+    const BTBHGPUAnimationPose *pose,
+    uint32_t skin_index,
+    float *matrices,
+    uint32_t matrix_capacity
+);
+uint32_t btbh_gpu_animation_pose_skin_joint_count(
+    const BTBHGPUAnimationPose *pose,
+    uint32_t skin_index
+);
+bool btbh_gpu_model_compose_orm_rgba8(
+    const uint8_t *occlusion_pixels,
+    uint32_t occlusion_width,
+    uint32_t occlusion_height,
+    const uint8_t *metallic_roughness_pixels,
+    uint32_t metallic_roughness_width,
+    uint32_t metallic_roughness_height,
+    uint8_t **composed_pixels,
+    uint32_t *composed_width,
+    uint32_t *composed_height
+);
+bool btbh_gpu_texture_decode_memory_rgba8(
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint8_t **pixels,
+    uint32_t *width,
+    uint32_t *height
+);
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_mipmapped(
     BTBHGPUWindow *window,
     const uint8_t *pixels,
     uint32_t width,
@@ -166,6 +230,25 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_memory(
     size_t encoded_size,
     BTBHGPUTextureFilter filter,
     BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUTexture *btbh_gpu_window_texture_load_memory_format(
+    BTBHGPUWindow *window,
+    const uint8_t *encoded,
+    size_t encoded_size,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    SDL_GPUTextureFormat format,
+    BTBHGPUTextureReport *report
+);
+BTBHGPUTexture *btbh_gpu_window_texture_load_format(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    SDL_GPUTextureFormat format,
     BTBHGPUTextureReport *report
 );
 BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
