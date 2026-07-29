@@ -373,12 +373,6 @@ bool btbh_gpu_scene_uses_transparent_pass(
         mode != BTBH_GPU_SCENE_BLEND_ALPHA;
 }
 
-SDL_GPUFrontFace btbh_gpu_scene_model_front_face(bool animated) {
-    return animated
-        ? SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE
-        : SDL_GPU_FRONTFACE_CLOCKWISE;
-}
-
 void btbh_gpu_scene_resolve_blend_state(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled,
@@ -633,7 +627,7 @@ static bool btbh_gpu_scene_create_model_pipeline(
     info.rasterizer_state.cull_mode =
         btbh_gpu_scene_cull_mode(batch->cull_mode);
     info.rasterizer_state.front_face =
-        btbh_gpu_scene_model_front_face(animated);
+        SDL_GPU_FRONTFACE_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.enable_depth_test = true;
     info.depth_stencil_state.enable_depth_write =
