@@ -2941,6 +2941,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
 
 static bool btbh_gpu_scene_render_fullscreen(
     SDL_GPUCommandBuffer *command,
+    const char *debug_label,
     SDL_GPUGraphicsPipeline *pipeline,
     SDL_GPUTexture *target,
     const void *uniforms,
@@ -2948,6 +2949,7 @@ static bool btbh_gpu_scene_render_fullscreen(
     SDL_GPUTextureSamplerBinding *samplers,
     uint32_t sampler_count
 ) {
+    SDL_InsertGPUDebugLabel(command, debug_label);
     SDL_GPUColorTargetInfo color_target;
     SDL_zero(color_target);
     color_target.texture = target;
@@ -3303,6 +3305,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
     if (transfer_bytes > 0u) {
+        SDL_InsertGPUDebugLabel(command, "BTBH Scene Upload");
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
         if (copy == NULL) {
             (void)SDL_CancelGPUCommandBuffer(command);
@@ -3338,12 +3341,21 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         lighting->secondary_directional_shadow_view_projection,
         lighting->spot_shadow_view_projection
     };
+    static const char *shadow_debug_labels[3] = {
+        "BTBH Shadow Primary",
+        "BTBH Shadow Secondary",
+        "BTBH Shadow Spot"
+    };
     for (uint32_t shadow_index = 0u;
          shadow_index < 3u;
          ++shadow_index) {
         if (shadow_enabled[shadow_index] == 0u) {
             continue;
         }
+        SDL_InsertGPUDebugLabel(
+            command,
+            shadow_debug_labels[shadow_index]
+        );
         if (!btbh_gpu_scene_render_directional_shadow(
                 command,
                 runtime,
@@ -3472,6 +3484,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     depth_target.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth_target.cycle = true;
 
+    SDL_InsertGPUDebugLabel(command, "BTBH Scene Geometry");
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
         command,
         color_targets,
@@ -3492,6 +3505,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     for (uint32_t transparency_phase = 0u;
          transparency_phase < BTBH_GPU_SCENE_TRANSPARENCY_COUNT;
          ++transparency_phase) {
+        SDL_InsertGPUDebugLabel(
+            command,
+            transparency_phase == 0u
+                ? "BTBH Opaque Draws"
+                : "BTBH Transparent Draws"
+        );
         uint32_t geometry_cursor = 0u;
         for (uint32_t batch_index = 0u;
              batch_index < batch_count;
@@ -4049,6 +4068,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             runtime->scene_color_sampler;
         fullscreen_ok = btbh_gpu_scene_render_fullscreen(
             command,
+            "BTBH SSAO",
             runtime->ssao_pipeline,
             runtime->ssao_texture,
             &post_uniforms,
@@ -4070,6 +4090,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         if (fullscreen_ok) {
             fullscreen_ok = btbh_gpu_scene_render_fullscreen(
                 command,
+                "BTBH SSAO Denoise",
                 runtime->ssao_denoise_pipeline,
                 runtime->ssao_denoised_texture,
                 &post_uniforms,
@@ -4104,6 +4125,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         if (fullscreen_ok) {
             fullscreen_ok = btbh_gpu_scene_render_fullscreen(
                 command,
+                "BTBH SSAO Resolve",
                 runtime->ssao_resolve_pipeline,
                 runtime->ssao_resolved_texture,
                 &post_uniforms,
@@ -4131,6 +4153,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     if (fullscreen_ok) {
         fullscreen_ok = btbh_gpu_scene_render_fullscreen(
             command,
+            "BTBH Production Post",
             runtime->post_pipeline,
             post_target,
             &post_uniforms,
@@ -4152,6 +4175,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         fxaa_sampler.sampler = runtime->scene_color_sampler;
         fullscreen_ok = btbh_gpu_scene_render_fullscreen(
             command,
+            "BTBH FXAA",
             runtime->fxaa_pipeline,
             swapchain,
             &fxaa_uniforms,
@@ -4177,6 +4201,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         edge_sampler.sampler = runtime->scene_color_sampler;
         fullscreen_ok = btbh_gpu_scene_render_fullscreen(
             command,
+            "BTBH SMAA Edge",
             runtime->smaa_edge_pipelines[quality_index],
             runtime->smaa_edges_texture,
             &smaa_uniforms,
@@ -4200,6 +4225,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         if (fullscreen_ok) {
             fullscreen_ok = btbh_gpu_scene_render_fullscreen(
                 command,
+                "BTBH SMAA Weights",
                 runtime->smaa_weight_pipelines[quality_index],
                 runtime->smaa_weights_texture,
                 &smaa_uniforms,
@@ -4218,6 +4244,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         if (fullscreen_ok) {
             fullscreen_ok = btbh_gpu_scene_render_fullscreen(
                 command,
+                "BTBH SMAA Blend",
                 runtime->smaa_blend_pipeline,
                 swapchain,
                 &smaa_uniforms,

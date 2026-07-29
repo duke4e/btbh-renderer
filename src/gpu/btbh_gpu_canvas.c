@@ -1106,6 +1106,10 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         }
         (void)memcpy(mapped, vertices, byte_count);
         SDL_UnmapGPUTransferBuffer(device, transfer);
+        SDL_InsertGPUDebugLabel(
+            window->pending_command,
+            "BTBH Canvas Upload"
+        );
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
             window->pending_command
         );
@@ -1161,6 +1165,12 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             (float)canvas_pass->clear_blue / 255.0f;
         color_target.clear_color.a =
             (float)canvas_pass->clear_alpha / 255.0f;
+        SDL_InsertGPUDebugLabel(
+            window->pending_command,
+            is_screen
+                ? "BTBH Canvas Screen Pass"
+                : "BTBH Canvas Target Pass"
+        );
         SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
             window->pending_command,
             &color_target,
@@ -1250,6 +1260,10 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         }
     }
     if (!screen_touched) {
+        SDL_InsertGPUDebugLabel(
+            window->pending_command,
+            "BTBH Canvas Clear Screen"
+        );
         SDL_GPUColorTargetInfo screen_target;
         SDL_zero(screen_target);
         screen_target.texture = window->pending_swapchain;
