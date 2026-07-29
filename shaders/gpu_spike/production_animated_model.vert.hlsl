@@ -53,6 +53,7 @@ struct VertexOutput
     float4 instance_custom : TEXCOORD5;
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
+    nointerpolation float animated_model : TEXCOORD8;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -63,22 +64,35 @@ float3 stable_normalize(float3 value, float3 fallback)
         : fallback;
 }
 
-float matrix_handedness(float3x3 matrix)
-{
-    return determinant(matrix) < 0.0f ? -1.0f : 1.0f;
-}
-
 float3 transform_normal(float3x3 matrix, float3 normal)
 {
     const float3 row0 = matrix[0];
     const float3 row1 = matrix[1];
     const float3 row2 = matrix[2];
-    const float3 cofactor_normal = float3(
-        dot(cross(row1, row2), normal),
-        dot(cross(row2, row0), normal),
-        dot(cross(row0, row1), normal)
+    const float matrix_scale = max(
+        max(max(abs(row0.x), abs(row0.y)), abs(row0.z)),
+        max(
+            max(max(abs(row1.x), abs(row1.y)), abs(row1.z)),
+            max(max(abs(row2.x), abs(row2.y)), abs(row2.z))
+        )
     );
-    return cofactor_normal * matrix_handedness(matrix);
+    if (matrix_scale <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float3 scaled_row0 = row0 / matrix_scale;
+    const float3 scaled_row1 = row1 / matrix_scale;
+    const float3 scaled_row2 = row2 / matrix_scale;
+    const float3 cofactor_normal = float3(
+        dot(cross(scaled_row1, scaled_row2), normal),
+        dot(cross(scaled_row2, scaled_row0), normal),
+        dot(cross(scaled_row0, scaled_row1), normal)
+    );
+    const float handedness =
+        dot(scaled_row0, cross(scaled_row1, scaled_row2)) < 0.0f
+            ? -1.0f
+            : 1.0f;
+    return cofactor_normal * handedness;
 }
 
 VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
@@ -147,5 +161,6 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.instance_custom = instance.custom;
     output.world_bitangent = world_bitangent;
     output.surface_data = surface.data;
+    output.animated_model = 1.0f;
     return output;
 }

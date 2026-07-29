@@ -50,6 +50,7 @@ struct VertexOutput
     float4 instance_custom : TEXCOORD5;
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
+    nointerpolation float animated_model : TEXCOORD8;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -187,5 +188,6 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.instance_custom = instance.custom;
     output.world_bitangent = world_bitangent;
     output.surface_data = surface.data;
+    output.animated_model = 0.0f;
     return output;
 }

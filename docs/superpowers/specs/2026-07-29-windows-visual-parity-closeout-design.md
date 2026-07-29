@@ -79,3 +79,22 @@ Visual parity is the current priority. Shadow batching/caching and the final
 10-run FPS comparison resume only after the three remaining visual gates are
 closed or a residual is proven to be solely the already documented
 cross-platform text/antialiasing issue.
+
+## Confirmed target post-processing path
+
+The shipping performance target is the FXAA path without the legacy SSAO pass.
+SMAA and SSAO remain available only as diagnostic references while migration
+parity is being isolated:
+
+- SMAA cost is not a release-performance blocker because FXAA replaces it;
+- SSAO cost is not a release-performance blocker because Radiance Cascades
+  replaces the current ambient-occlusion approach;
+- neither substitution excuses unrelated geometry, material, normal, lighting,
+  compositing, or UI defects;
+- the final Windows A/B performance gate measures the target FXAA/no-SSAO path;
+- Radiance Cascades receives its own visual and performance acceptance work
+  when that pass is integrated.
+
+This decision changes benchmark scope, not the unchanged golden images, cue
+bounds, entity signatures, or SSIM thresholds used to identify current visual
+regressions.

@@ -504,26 +504,53 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
-    func testProductionNormalMappingFlipsLegacyDoubleSidedBackfaces() throws {
+    func testProductionNormalMappingMatchesLegacyDoubleSidedBackfaces() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let shader = try String(
+        let fragmentShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "shaders/gpu_spike/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
+        let staticVertexShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_model.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let animatedVertexShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(shader.contains(
+        XCTAssertTrue(fragmentShader.contains(
             "bool is_front_face : SV_IsFrontFace;"
         ))
-        XCTAssertTrue(shader.contains(
-            "if (!input.is_front_face)"
+        XCTAssertTrue(fragmentShader.contains(
+            "nointerpolation float animated_model : TEXCOORD8;"
         ))
-        XCTAssertTrue(shader.contains(
+        XCTAssertTrue(fragmentShader.contains(
+            "input.animated_model > 0.5f"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            "? input.is_front_face"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
+            ": !input.is_front_face"
+        ))
+        XCTAssertTrue(fragmentShader.contains(
             "normal = -normal;"
+        ))
+        XCTAssertTrue(staticVertexShader.contains(
+            "output.animated_model = 0.0f;"
+        ))
+        XCTAssertTrue(animatedVertexShader.contains(
+            "output.animated_model = 1.0f;"
         ))
     }
 
@@ -582,6 +609,32 @@ final class GPUWindowProbeTests: XCTestCase {
             "1.0f - saturate(dot(mapped_normal.xy, mapped_normal.xy))"
         ))
         XCTAssertFalse(fragmentShader.contains("orthogonal_tangent"))
+    }
+
+    func testProductionNormalTransformsRemainStableAtSmallModelScales() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shaderPaths = [
+            "shaders/gpu_spike/production_animated_model.vert.hlsl",
+        ]
+
+        for shaderPath in shaderPaths {
+            let shader = try String(
+                contentsOf: packageRoot.appendingPathComponent(shaderPath),
+                encoding: .utf8
+            )
+            XCTAssertTrue(shader.contains(
+                "const float matrix_scale = max("
+            ))
+            XCTAssertTrue(shader.contains(
+                "const float3 scaled_row0 = row0 / matrix_scale;"
+            ))
+            XCTAssertTrue(shader.contains(
+                "dot(cross(scaled_row1, scaled_row2), normal)"
+            ))
+        }
     }
 
     func testProductionDirectionalSpecularMatchesLegacyLightDefault() throws {

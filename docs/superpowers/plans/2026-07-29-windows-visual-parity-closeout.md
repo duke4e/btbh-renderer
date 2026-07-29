@@ -46,5 +46,16 @@ timing.
 ## Task 5: Resume performance phase
 
 - Resume shadow draw-call consolidation only after visual closeout.
-- Re-run the Windows 10-run A/B benchmark and compare median/p95 to Run 3/4.
+- Re-run the Windows 10-run A/B benchmark on the target FXAA/no-SSAO path and
+  compare median/p95 to Run 3/4.
+- Keep SMAA and SSAO measurements diagnostic-only; do not treat their cost as a
+  release blocker because FXAA and Radiance Cascades are their approved
+  replacements.
 - Diagnose any remaining regression above 5% before Windows `.exe` closeout.
+
+## Task 6: Replace the ambient pass
+
+- Integrate Radiance Cascades as separately scoped follow-up work after the
+  current renderer migration is visually and functionally closed.
+- Establish dedicated visual and performance acceptance for that pass instead
+  of weakening the current parity thresholds or goldens.

@@ -73,6 +73,7 @@ struct FragmentInput
     float4 instance_custom : TEXCOORD5;
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
+    nointerpolation float animated_model : TEXCOORD8;
     bool is_front_face : SV_IsFrontFace;
 };
 
@@ -864,7 +865,11 @@ FragmentOutput main(FragmentInput input)
         input.world_normal * mapped_normal.z,
         geometric_normal
     );
-    if (!input.is_front_face)
+    const bool flip_normal =
+        input.animated_model > 0.5f
+            ? input.is_front_face
+            : !input.is_front_face;
+    if (flip_normal)
     {
         normal = -normal;
     }
