@@ -433,6 +433,9 @@ final class GPUCanvas: Canvas2DBackend {
                 ))
             }
         }
+        if let first = boundary.first {
+            boundary.append(first)
+        }
         appendPolygonFan(
             center: center,
             boundary: boundary,

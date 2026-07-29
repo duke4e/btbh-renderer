@@ -1530,6 +1530,46 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testCanvasRoundedRectClosesTopFanSegment() throws {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU rounded rect test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.roundedRect(.init(
+            rect: .init(x: 20, y: 15, width: 280, height: 150),
+            roundness: 0.2,
+            segments: 8,
+            color: .white
+        )))
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let topCenter = (30 * readback.size.width + 160) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[topCenter..<(topCenter + 4)]),
+            [255, 255, 255, 255]
+        )
+        #else
+        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
+        #endif
+    }
+
     func testCanvasPresentsTextureAndFontAtlasBatches() throws {
         #if os(Windows)
         RenderServices.uninstall()
