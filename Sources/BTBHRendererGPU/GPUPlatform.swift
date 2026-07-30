@@ -66,6 +66,14 @@ public final class GPUPlatform: GamePlatform {
         )
         window.setFrameTelemetryEnabled(frameTelemetryEnabled)
         if frameTelemetryEnabled {
+            let diagnostics = window.windowDiagnostics
+            let configuredFramesInFlight =
+                ProcessInfo.processInfo.environment[
+                    "BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT"
+                ] ?? "2"
+            let line =
+                "BTBH_GPU_SWAPCHAIN_TELEMETRY present_mode=\(diagnostics.presentMode) allowed_frames_in_flight=\(configuredFramesInFlight)\n"
+            FileHandle.standardError.write(Data(line.utf8))
             frameTelemetrySamples.removeAll(keepingCapacity: false)
             frameTelemetrySamples.reserveCapacity(512)
             sceneEncodeTelemetry.removeAll(

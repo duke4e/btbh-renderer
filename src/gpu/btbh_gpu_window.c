@@ -188,6 +188,26 @@ static SDL_GPUPresentMode btbh_gpu_choose_present_mode(
     return SDL_GPU_PRESENTMODE_VSYNC;
 }
 
+static uint32_t btbh_gpu_allowed_frames_in_flight(void) {
+    const char *value = SDL_getenv("BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT");
+    if (value == NULL || value[0] == '\0') {
+        return 2u;
+    }
+
+    char *end = NULL;
+    const unsigned long parsed = strtoul(value, &end, 10);
+    if (
+        end == value ||
+        end == NULL ||
+        end[0] != '\0' ||
+        parsed < 1ul ||
+        parsed > 3ul
+    ) {
+        return 2u;
+    }
+    return (uint32_t) parsed;
+}
+
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
     BTBHGPUWindowReport *report
@@ -307,6 +327,8 @@ BTBHGPUResult btbh_gpu_window_claim(
         window,
         &project_present_mode
     );
+    const uint32_t allowed_frames_in_flight =
+        btbh_gpu_allowed_frames_in_flight();
     if (
         !SDL_WindowSupportsGPUSwapchainComposition(
             device->gpu,
@@ -318,6 +340,10 @@ BTBHGPUResult btbh_gpu_window_claim(
             window->window,
             SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
             present_mode
+        ) ||
+        !SDL_SetGPUAllowedFramesInFlight(
+            device->gpu,
+            allowed_frames_in_flight
         )
     ) {
         btbh_gpu_set_window_error(
