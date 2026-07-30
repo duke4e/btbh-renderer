@@ -799,7 +799,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shadowFragment.contains("discard;"))
     }
 
-    func testProductionStaticShadowFastPathIsRestrictedToPlainMeshes()
+    func testProductionShadowFastPathsPreserveDeformationAndDiscardVariants()
         throws
     {
         let packageRoot = URL(fileURLWithPath: #filePath)
@@ -832,13 +832,28 @@ final class GPUWindowProbeTests: XCTestCase {
             .joined(separator: " ")
 
         XCTAssertTrue(normalizedNativeScene.contains(
-            "batch->surface_variant == BTBH_GPU_SCENE_SURFACE_NONE"
+            "surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC"
+        ))
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER"
         ))
         XCTAssertTrue(normalizedNativeScene.contains(
             "batch->billboard_mode == BTBH_GPU_SCENE_BILLBOARD_DISABLED"
         ))
         XCTAssertTrue(nativeScene.contains(
             "runtime->fast_shadow_pipelines["
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "non_discard_shadow_pipelines["
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "animated_non_discard_shadow_pipelines["
+        ))
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "surface_variant == BTBH_GPU_SCENE_SURFACE_DISSOLVE"
+        ))
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "surface_variant == BTBH_GPU_SCENE_SURFACE_SHATTER"
         ))
         XCTAssertTrue(vertexShader.contains(
             "output.position = mul(light_view_projection, world_position);"
