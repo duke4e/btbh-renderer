@@ -344,6 +344,8 @@ struct GPUSceneGeometryProbeBatch {
     let instanceBuffer: OpaquePointer?
     let firstInstance: Int
     let instanceCount: Int
+    var shadowBounds: RenderBounds3?
+    var spotShadowVisible: Bool
 
     init(
         geometry: GPUSceneGeometryProbe,
@@ -353,7 +355,9 @@ struct GPUSceneGeometryProbeBatch {
         legacyInstanced: Bool = false,
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
-        instanceCount: Int
+        instanceCount: Int,
+        shadowBounds: RenderBounds3? = nil,
+        spotShadowVisible: Bool = true
     ) {
         self.geometry = geometry
         self.animation = animation
@@ -363,6 +367,8 @@ struct GPUSceneGeometryProbeBatch {
         self.instanceBuffer = instanceBuffer
         self.firstInstance = firstInstance
         self.instanceCount = instanceCount
+        self.shadowBounds = shadowBounds
+        self.spotShadowVisible = spotShadowVisible
     }
 }
 
@@ -420,7 +426,8 @@ enum GPUSceneBatchConsolidation {
                 instanceBuffer: previous.instanceBuffer,
                 firstInstance: previous.firstInstance,
                 instanceCount:
-                    previous.instanceCount + batch.instanceCount
+                    previous.instanceCount + batch.instanceCount,
+                spotShadowVisible: previous.spotShadowVisible
             )
         }
         return consolidated
@@ -439,9 +446,88 @@ enum GPUSceneBatchConsolidation {
             right.animation == nil &&
             left.material == right.material &&
             left.materialSlot == right.materialSlot &&
+            left.spotShadowVisible == right.spotShadowVisible &&
             left.firstInstance <= Int.max - left.instanceCount &&
             left.firstInstance + left.instanceCount == right.firstInstance &&
             left.instanceCount <= Int.max - right.instanceCount
+    }
+}
+
+enum GPUSceneBatchShadowCulling {
+    static func applyingSpotFrustum(
+        to batches: [GPUSceneGeometryProbeBatch],
+        shadow: GPUSceneDirectionalShadowProbe
+    ) -> [GPUSceneGeometryProbeBatch] {
+        guard shadow.enabled, shadow.viewProjection.count == 16 else {
+            return batches
+        }
+        return batches.map { batch in
+            var result = batch
+            if let bounds = batch.shadowBounds {
+                result.spotShadowVisible = intersectsClipFrustum(
+                    bounds,
+                    viewProjection: shadow.viewProjection
+                )
+            }
+            result.shadowBounds = nil
+            return result
+        }
+    }
+
+    private static func intersectsClipFrustum(
+        _ bounds: RenderBounds3,
+        viewProjection matrix: [Float]
+    ) -> Bool {
+        let minimum = bounds.minimum
+        let maximum = bounds.maximum
+        let values = [
+            minimum.x, minimum.y, minimum.z,
+            maximum.x, maximum.y, maximum.z,
+        ]
+        guard values.allSatisfy(\.isFinite),
+              minimum.x <= maximum.x,
+              minimum.y <= maximum.y,
+              minimum.z <= maximum.z,
+              matrix.allSatisfy(\.isFinite) else {
+            return true
+        }
+
+        var allLeft = true
+        var allRight = true
+        var allBottom = true
+        var allTop = true
+        var allNear = true
+        var allFar = true
+        for x in [minimum.x, maximum.x] {
+            for y in [minimum.y, maximum.y] {
+                for z in [minimum.z, maximum.z] {
+                    let clipX =
+                        matrix[0] * x + matrix[4] * y +
+                        matrix[8] * z + matrix[12]
+                    let clipY =
+                        matrix[1] * x + matrix[5] * y +
+                        matrix[9] * z + matrix[13]
+                    let clipZ =
+                        matrix[2] * x + matrix[6] * y +
+                        matrix[10] * z + matrix[14]
+                    let clipW =
+                        matrix[3] * x + matrix[7] * y +
+                        matrix[11] * z + matrix[15]
+                    guard clipX.isFinite, clipY.isFinite,
+                          clipZ.isFinite, clipW.isFinite else {
+                        return true
+                    }
+                    allLeft = allLeft && clipX < -clipW
+                    allRight = allRight && clipX > clipW
+                    allBottom = allBottom && clipY < -clipW
+                    allTop = allTop && clipY > clipW
+                    allNear = allNear && clipZ < 0
+                    allFar = allFar && clipZ > clipW
+                }
+            }
+        }
+        return !(allLeft || allRight || allBottom || allTop ||
+                 allNear || allFar)
     }
 }
 
@@ -1957,6 +2043,7 @@ public final class GPUWindowProbe {
                     (batch.material == nil &&
                      kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
                         ? 1 : 0,
+                spot_shadow_visible: batch.spotShadowVisible ? 1 : 0,
                 surface_variant: Self.sceneSurfaceVariant(
                     batch.material?.surface.variant ?? .none
                 ),

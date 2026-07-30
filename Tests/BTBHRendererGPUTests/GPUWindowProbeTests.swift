@@ -959,6 +959,109 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(consolidated[2].instanceCount, 1)
     }
 
+    func testSpotShadowCullingUsesOnlyAuthoredClusterBounds() {
+        let geometry = OpaquePointer(bitPattern: 1)!
+        func batch(
+            firstInstance: Int,
+            shadowBounds: RenderBounds3?
+        ) -> GPUSceneGeometryProbeBatch {
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(geometry),
+                animation: nil,
+                material: nil,
+                materialSlot: 0,
+                firstInstance: firstInstance,
+                instanceCount: 1,
+                shadowBounds: shadowBounds
+            )
+        }
+        let inside = batch(
+            firstInstance: 0,
+            shadowBounds: .init(
+                minimum: .init(x: -0.5, y: -0.5, z: 0.1),
+                maximum: .init(x: 0.5, y: 0.5, z: 0.9)
+            )
+        )
+        let outside = batch(
+            firstInstance: 1,
+            shadowBounds: .init(
+                minimum: .init(x: 2, y: -0.5, z: 0.1),
+                maximum: .init(x: 3, y: 0.5, z: 0.9)
+            )
+        )
+        let unbounded = batch(firstInstance: 2, shadowBounds: nil)
+        let shadow = GPUSceneDirectionalShadowProbe(
+            enabled: true,
+            range: 10,
+            softness: 0,
+            viewProjection: [
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1,
+            ]
+        )
+
+        let culled = GPUSceneBatchShadowCulling
+            .applyingSpotFrustum(
+                to: [inside, outside, unbounded],
+                shadow: shadow
+            )
+
+        XCTAssertTrue(culled[0].spotShadowVisible)
+        XCTAssertFalse(culled[1].spotShadowVisible)
+        XCTAssertTrue(culled[2].spotShadowVisible)
+    }
+
+    func testPersistentRangesWithDifferentSpotVisibilityDoNotMerge() {
+        let geometry = OpaquePointer(bitPattern: 1)!
+        let instanceBuffer = OpaquePointer(bitPattern: 2)!
+        func batch(
+            firstInstance: Int,
+            visible: Bool
+        ) -> GPUSceneGeometryProbeBatch {
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(geometry),
+                animation: nil,
+                material: nil,
+                materialSlot: 0,
+                legacyInstanced: true,
+                instanceBuffer: instanceBuffer,
+                firstInstance: firstInstance,
+                instanceCount: 1,
+                spotShadowVisible: visible
+            )
+        }
+
+        let consolidated =
+            GPUSceneBatchConsolidation.adjacentPersistentRanges([
+                batch(firstInstance: 0, visible: true),
+                batch(firstInstance: 1, visible: false),
+            ])
+
+        XCTAssertEqual(consolidated.count, 2)
+    }
+
+    func testProductionSpotShadowSkipsCulledClusterBatches() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(nativeScene.contains(
+            "shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "batch->spot_shadow_visible == 0u"
+        ))
+    }
+
     func testProductionSurfaceShadersClassifyKnownVariantsAndParameters()
         throws
     {

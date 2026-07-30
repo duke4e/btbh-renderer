@@ -3301,6 +3301,7 @@ final class GPUSceneBackend: SceneBackend {
                     legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.count,
+                    shadowBounds: draw.clusterBounds,
                     to: &batches
                 )
                 logicalInstanceCount += draw.count
@@ -3605,6 +3606,10 @@ final class GPUSceneBackend: SceneBackend {
             chain: currentFrame.postChain,
             antiAliasing: currentFrame.antiAliasing
         )
+        batches = GPUSceneBatchShadowCulling.applyingSpotFrustum(
+            to: batches,
+            shadow: lighting.spotShadow
+        )
         let orderedBatches =
             GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(batches)
         let consolidatedBatches =
@@ -3634,6 +3639,7 @@ final class GPUSceneBackend: SceneBackend {
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
         instanceCount: Int,
+        shadowBounds: RenderBounds3? = nil,
         to batches: inout [GPUSceneGeometryProbeBatch]
     ) throws {
         let geometry = GPUSceneGeometryProbe.model(
@@ -3651,7 +3657,8 @@ final class GPUSceneBackend: SceneBackend {
                 legacyInstanced: legacyInstanced,
                 instanceBuffer: instanceBuffer,
                 firstInstance: firstInstance,
-                instanceCount: instanceCount
+                instanceCount: instanceCount,
+                shadowBounds: shadowBounds
             ))
         }
     }

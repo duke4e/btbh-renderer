@@ -462,6 +462,7 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t stencil_mask;
     uint8_t transparency_enabled;
     uint8_t unlit_enabled;
+    uint8_t spot_shadow_visible;
     BTBHGPUSceneSurfaceVariant surface_variant;
     float surface_time;
     float surface_parameters0[4];

@@ -23,6 +23,7 @@
 #define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_MAX 3u
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
+#define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 
 typedef enum BTBHGPUSceneStencilVariant {
     BTBH_GPU_SCENE_STENCIL_DISABLED = 0,
@@ -2391,6 +2392,7 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT &&
             batch->transparency_enabled <= 1u &&
             batch->unlit_enabled <= 1u &&
+            batch->spot_shadow_visible <= 1u &&
             batch->surface_variant >=
                 BTBH_GPU_SCENE_SURFACE_NONE &&
             batch->surface_variant <
@@ -2785,6 +2787,7 @@ static bool btbh_gpu_scene_post_valid(
 static bool btbh_gpu_scene_render_directional_shadow(
     SDL_GPUCommandBuffer *command,
     BTBHGPUSceneRuntime *runtime,
+    uint32_t shadow_index,
     SDL_GPUTexture *shadow_texture,
     const float light_view_projection[16],
     const float camera_right[3],
@@ -2839,7 +2842,13 @@ static bool btbh_gpu_scene_render_directional_shadow(
             const uint32_t bone_offset =
                 bone_offsets[geometry_cursor];
             geometry_cursor += 1u;
-            if (batch->transparency_enabled != 0u) {
+            if (
+                batch->transparency_enabled != 0u ||
+                (
+                    shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT &&
+                    batch->spot_shadow_visible == 0u
+                )
+            ) {
                 continue;
             }
             const bool animated = bone_offset != UINT32_MAX;
@@ -3396,6 +3405,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         if (!btbh_gpu_scene_render_directional_shadow(
                 command,
                 runtime,
+                shadow_index,
                 runtime->directional_shadow_textures[shadow_index],
                 shadow_matrices[shadow_index],
                 camera_right,
