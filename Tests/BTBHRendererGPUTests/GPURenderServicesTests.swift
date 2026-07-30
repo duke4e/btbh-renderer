@@ -141,11 +141,73 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(Array(packed[20..<24]), [11, 12, 13, 14])
     }
 
+    func testSemanticInstanceRecordMatchesNativeTwentyFourFloatLayout() {
+        let record = GPUInstanceRecordPacking.record(
+            matrix: .identity,
+            color: .init(r: 0, g: 127, b: 255, a: 64),
+            custom: .init(x: 11, y: 12, z: 13, w: 14)
+        )
+
+        XCTAssertEqual(
+            MemoryLayout<GPUInstanceRecord>.stride,
+            GPUInstanceRecordPacking.byteStride
+        )
+        XCTAssertEqual(record.matrix0, SIMD4(1, 0, 0, 0))
+        XCTAssertEqual(record.matrix3, SIMD4(0, 0, 0, 1))
+        XCTAssertEqual(record.color.y, Float(127) / 255, accuracy: 0.000_001)
+        XCTAssertEqual(record.custom, SIMD4(11, 12, 13, 14))
+    }
+
+    func testTransformStreamsPackDirectlyIntoNativeInstanceRecords() {
+        var records: [GPUInstanceRecord] = []
+        let positions = [
+            RenderVec3(x: 1, y: 2, z: 3),
+            RenderVec3(x: 4, y: 5, z: 6),
+        ]
+        let rotations = [RenderQuaternion.identity, .identity]
+        let scales = [
+            RenderVec3(x: 1, y: 1, z: 1),
+            RenderVec3(x: 2, y: 3, z: 4),
+        ]
+        let colors = [
+            RenderColor.white,
+            RenderColor(r: 0, g: 127, b: 255, a: 64),
+        ]
+        let customs = [
+            RenderVec4(x: 0, y: 0, z: 0, w: 0),
+            RenderVec4(x: 11, y: 12, z: 13, w: 14),
+        ]
+        XCTAssertTrue(GPUInstanceRecordPacking.appendTransformStreams(
+            positions: positions,
+            rotations: rotations,
+            scales: scales,
+            colors: colors,
+            customs: customs,
+            sourceStart: 0,
+            count: 2,
+            to: &records
+        ))
+
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records[0].matrix3, SIMD4(1, 2, 3, 1))
+        XCTAssertEqual(records[1].matrix0, SIMD4(2, 0, 0, 0))
+        XCTAssertEqual(records[1].matrix1, SIMD4(0, 3, 0, 0))
+        XCTAssertEqual(records[1].matrix2, SIMD4(0, 0, 4, 0))
+        XCTAssertEqual(records[1].color.y, Float(127) / 255, accuracy: 0.000_001)
+        XCTAssertEqual(records[1].custom, SIMD4(11, 12, 13, 14))
+    }
+
     func testSceneSubmissionScratchRetainsWarmCapacityAcrossFrames() {
         let scratch = GPUSceneSubmissionScratch()
-        scratch.packedInstances.reserveCapacity(96)
+        scratch.packedInstances.reserveCapacity(4)
         scratch.batches.reserveCapacity(8)
-        scratch.packedInstances.append(contentsOf: repeatElement(0, count: 96))
+        scratch.packedInstances.append(
+            GPUInstanceRecordPacking.record(
+                matrix: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        )
         scratch.batches.append(.init(
             geometry: .customMesh(OpaquePointer(bitPattern: 1)!),
             animation: nil,

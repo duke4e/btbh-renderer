@@ -260,6 +260,116 @@ void btbh_gpu_instance_buffer_destroy(
     free(buffer);
 }
 
+uint8_t btbh_gpu_pack_transform_stream_instances(
+    float *destination,
+    const void *positions,
+    uint32_t position_stride,
+    const void *rotations,
+    uint32_t rotation_stride,
+    const void *scales,
+    uint32_t scale_stride,
+    const void *colors,
+    uint32_t color_stride,
+    const void *customs,
+    uint32_t custom_stride,
+    uint32_t source_start,
+    uint32_t count
+) {
+    if (
+        destination == NULL ||
+        positions == NULL ||
+        position_stride < sizeof(float) * 3u ||
+        rotations == NULL ||
+        rotation_stride < sizeof(float) * 4u ||
+        scales == NULL ||
+        scale_stride < sizeof(float) * 3u ||
+        (colors != NULL && color_stride < sizeof(uint8_t) * 4u) ||
+        (customs != NULL && custom_stride < sizeof(float) * 4u)
+    ) {
+        return 0u;
+    }
+
+    const uint8_t *position_bytes = (const uint8_t *)positions;
+    const uint8_t *rotation_bytes = (const uint8_t *)rotations;
+    const uint8_t *scale_bytes = (const uint8_t *)scales;
+    const uint8_t *color_bytes = (const uint8_t *)colors;
+    const uint8_t *custom_bytes = (const uint8_t *)customs;
+    for (uint32_t output_index = 0u;
+         output_index < count;
+         ++output_index) {
+        const uint32_t source_index = source_start + output_index;
+        const float *position = (const float *)(
+            position_bytes + (size_t)source_index * position_stride
+        );
+        const float *rotation = (const float *)(
+            rotation_bytes + (size_t)source_index * rotation_stride
+        );
+        const float *scale = (const float *)(
+            scale_bytes + (size_t)source_index * scale_stride
+        );
+        const float x = rotation[0];
+        const float y = rotation[1];
+        const float z = rotation[2];
+        const float w = rotation[3];
+        const float xx = x * x;
+        const float yy = y * y;
+        const float zz = z * z;
+        const float xy = x * y;
+        const float xz = x * z;
+        const float yz = y * z;
+        const float wx = w * x;
+        const float wy = w * y;
+        const float wz = w * z;
+        float *record = destination + (size_t)output_index * 24u;
+
+        record[0] = (1.0f - 2.0f * (yy + zz)) * scale[0];
+        record[1] = 2.0f * (xy + wz) * scale[0];
+        record[2] = 2.0f * (xz - wy) * scale[0];
+        record[3] = 0.0f;
+        record[4] = 2.0f * (xy - wz) * scale[1];
+        record[5] = (1.0f - 2.0f * (xx + zz)) * scale[1];
+        record[6] = 2.0f * (yz + wx) * scale[1];
+        record[7] = 0.0f;
+        record[8] = 2.0f * (xz + wy) * scale[2];
+        record[9] = 2.0f * (yz - wx) * scale[2];
+        record[10] = (1.0f - 2.0f * (xx + yy)) * scale[2];
+        record[11] = 0.0f;
+        record[12] = position[0];
+        record[13] = position[1];
+        record[14] = position[2];
+        record[15] = 1.0f;
+
+        if (color_bytes != NULL) {
+            const uint8_t *color =
+                color_bytes + (size_t)source_index * color_stride;
+            record[16] = (float)color[0] / 255.0f;
+            record[17] = (float)color[1] / 255.0f;
+            record[18] = (float)color[2] / 255.0f;
+            record[19] = (float)color[3] / 255.0f;
+        } else {
+            record[16] = 1.0f;
+            record[17] = 1.0f;
+            record[18] = 1.0f;
+            record[19] = 1.0f;
+        }
+        if (custom_bytes != NULL) {
+            const float *custom = (const float *)(
+                custom_bytes + (size_t)source_index * custom_stride
+            );
+            record[20] = custom[0];
+            record[21] = custom[1];
+            record[22] = custom[2];
+            record[23] = custom[3];
+        } else {
+            record[20] = 0.0f;
+            record[21] = 0.0f;
+            record[22] = 0.0f;
+            record[23] = 0.0f;
+        }
+    }
+    return 1u;
+}
+
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;

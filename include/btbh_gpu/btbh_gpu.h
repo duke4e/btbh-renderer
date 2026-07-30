@@ -810,6 +810,21 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     BTBHGPUInstanceBufferReport *report
 );
 void btbh_gpu_instance_buffer_destroy(BTBHGPUInstanceBuffer *buffer);
+uint8_t btbh_gpu_pack_transform_stream_instances(
+    float *destination,
+    const void *positions,
+    uint32_t position_stride,
+    const void *rotations,
+    uint32_t rotation_stride,
+    const void *scales,
+    uint32_t scale_stride,
+    const void *colors,
+    uint32_t color_stride,
+    const void *customs,
+    uint32_t custom_stride,
+    uint32_t source_start,
+    uint32_t count
+);
 BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
     BTBHGPUWindow *window,
     const void *vertices,

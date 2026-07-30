@@ -511,19 +511,23 @@ final class GPUWindowProbeTests: XCTestCase {
             encoding: .utf8
         )
 
-        XCTAssertEqual(GPUSceneDirectionalShadowProbe.mapSize, 2_048)
+        XCTAssertEqual(GPUSceneDirectionalShadowProbe.mapSize, 512)
         XCTAssertTrue(nativeScene.contains(
-            "#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 2048u"
+            "#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 2048u"
+            "#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 1024u"
         ))
         XCTAssertTrue(nativeScene.contains(
             "BTBH_GPU_SPOT_SHADOW_MAP_SIZE"
         ))
-        XCTAssertGreaterThanOrEqual(
-            shader.components(separatedBy: "2048.0f").count - 1,
-            3
+        XCTAssertEqual(
+            shader.components(separatedBy: "512.0f").count - 1,
+            2
+        )
+        XCTAssertEqual(
+            shader.components(separatedBy: "1024.0f").count - 1,
+            1
         )
     }
 
@@ -538,6 +542,7 @@ final class GPUWindowProbeTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        let compactScene = nativeScene.filter { !$0.isWhitespace }
 
         XCTAssertTrue(nativeScene.contains(
             "shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT]"
@@ -548,11 +553,20 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(nativeScene.contains(
             "btbh_gpu_scene_cull_mode((BTBHGPUSceneCullMode)cull_index)"
         ))
-        XCTAssertTrue(nativeScene.contains(
+        XCTAssertTrue(compactScene.contains(
             "runtime->shadow_pipelines[batch->cull_mode]"
         ))
-        XCTAssertTrue(nativeScene.contains(
+        XCTAssertTrue(compactScene.contains(
+            "runtime->fast_shadow_pipelines[batch->cull_mode]"
+        ))
+        XCTAssertTrue(compactScene.contains(
+            "runtime->non_discard_shadow_pipelines[batch->cull_mode]"
+        ))
+        XCTAssertTrue(compactScene.contains(
             "runtime->animated_shadow_pipelines[batch->cull_mode]"
+        ))
+        XCTAssertTrue(compactScene.contains(
+            "runtime->animated_non_discard_shadow_pipelines[batch->cull_mode]"
         ))
     }
 
@@ -1022,6 +1036,84 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(consolidated[2].instanceCount, 1)
     }
 
+    func testAdjacentPersistentModelDrawsCoalesceBeforeBatchResolution() {
+        let instances = (0..<8).map { _ in
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        }
+        let buffer = InstanceBufferHandle(rawValue: 7)
+        let left = ModelInstancesDraw(
+            model: ModelHandle(rawValue: 3),
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            persistentRevision: 11,
+            sourceStart: 1,
+            count: 3
+        )
+        let right = ModelInstancesDraw(
+            model: ModelHandle(rawValue: 3),
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            persistentRevision: 11,
+            sourceStart: 4,
+            count: 2
+        )
+
+        let merged = GPUModelInstanceDrawCoalescing.merge(left, right)
+
+        XCTAssertEqual(merged?.sourceStart, 1)
+        XCTAssertEqual(merged?.count, 5)
+        XCTAssertEqual(merged?.persistentBuffer, buffer)
+        XCTAssertEqual(merged?.persistentRevision, 11)
+    }
+
+    func testPersistentModelDrawsDoNotCoalesceAcrossRevisionOrRangeGap() {
+        let instances = (0..<8).map { _ in
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        }
+        let left = ModelInstancesDraw(
+            model: ModelHandle(rawValue: 3),
+            instances: instances,
+            overrides: [],
+            persistentBuffer: InstanceBufferHandle(rawValue: 7),
+            persistentRevision: 11,
+            sourceStart: 0,
+            count: 2
+        )
+        let revisionChanged = ModelInstancesDraw(
+            model: left.model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: left.persistentBuffer,
+            persistentRevision: 12,
+            sourceStart: 2,
+            count: 2
+        )
+        let rangeGap = ModelInstancesDraw(
+            model: left.model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: left.persistentBuffer,
+            persistentRevision: left.persistentRevision,
+            sourceStart: 3,
+            count: 2
+        )
+
+        XCTAssertNil(
+            GPUModelInstanceDrawCoalescing.merge(left, revisionChanged)
+        )
+        XCTAssertNil(GPUModelInstanceDrawCoalescing.merge(left, rangeGap))
+    }
+
     func testSpotShadowCullingUsesOnlyAuthoredClusterBounds() {
         let geometry = OpaquePointer(bitPattern: 1)!
         func batch(
@@ -1441,6 +1533,21 @@ final class GPUWindowProbeTests: XCTestCase {
             resources.sceneModelMaterialResolutionCount,
             1,
             "Identical model material projections should reuse cached results"
+        )
+        var unrelatedDescriptor = descriptor
+        unrelatedDescriptor.roughness = 0.12
+        try resources.updateMaterial(
+            standaloneHandle,
+            descriptor: unrelatedDescriptor
+        )
+        _ = try resources.sceneModelMaterials(
+            model: model,
+            overrides: [.init(slot: 1, material: patchHandle)]
+        )
+        XCTAssertEqual(
+            resources.sceneModelMaterialResolutionCount,
+            1,
+            "Updating an unrelated material must preserve cached projections"
         )
         let patched = try XCTUnwrap(patchedEntries.first {
             $0.materialSlot == 1
@@ -1973,13 +2080,12 @@ final class GPUWindowProbeTests: XCTestCase {
             .appendingPathComponent(
                 "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
             )
-        let instances: [Float] = [
-            1, 0, 0, 0,
-            0, 1, 0, 0,
-            0, 0, 1, 0,
-            0, 0, 0, 1,
-            1, 1, 1, 1,
-            0, 0, 0, 0,
+        let instances = [
+            GPUInstanceRecordPacking.record(
+                matrix: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            ),
         ]
         let batches = [0, 1].map { slot in
             GPUSceneGeometryProbeBatch(

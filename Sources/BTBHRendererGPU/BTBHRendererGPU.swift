@@ -453,6 +453,57 @@ enum GPUSceneBatchConsolidation {
     }
 }
 
+enum GPUModelInstanceDrawCoalescing {
+    static func merge(
+        _ left: ModelInstancesDraw,
+        _ right: ModelInstancesDraw
+    ) -> ModelInstancesDraw? {
+        guard
+            left.model == right.model,
+            left.overrides == right.overrides,
+            let persistentBuffer = left.persistentBuffer,
+            persistentBuffer == right.persistentBuffer,
+            let persistentRevision = left.persistentRevision,
+            persistentRevision == right.persistentRevision,
+            left.sourceStart >= 0,
+            left.count > 0,
+            left.sourceStart <= Int.max - left.count,
+            left.sourceStart + left.count == right.sourceStart,
+            right.count > 0,
+            left.count <= Int.max - right.count,
+            shareStorage(left.instances, right.instances),
+            left.sourceStart <= left.instances.count,
+            left.count + right.count <=
+                left.instances.count - left.sourceStart
+        else {
+            return nil
+        }
+        return .init(
+            model: left.model,
+            instances: left.instances,
+            overrides: left.overrides,
+            persistentBuffer: persistentBuffer,
+            persistentRevision: persistentRevision,
+            sourceStart: left.sourceStart,
+            count: left.count + right.count
+        )
+    }
+
+    private static func shareStorage(
+        _ left: [RenderInstance],
+        _ right: [RenderInstance]
+    ) -> Bool {
+        guard left.count == right.count, !left.isEmpty else {
+            return false
+        }
+        return left.withUnsafeBufferPointer { leftBuffer in
+            right.withUnsafeBufferPointer { rightBuffer in
+                leftBuffer.baseAddress == rightBuffer.baseAddress
+            }
+        }
+    }
+}
+
 enum GPUSceneBatchShadowCulling {
     static func applyingSpotFrustum(
         to batches: [GPUSceneGeometryProbeBatch],
@@ -661,7 +712,7 @@ struct GPULegacyMaterialSortKey: Equatable {
 }
 
 final class GPUSceneSubmissionScratch {
-    var packedInstances: [Float] = []
+    var packedInstances: [GPUInstanceRecord] = []
     var batches: [GPUSceneGeometryProbeBatch] = []
 
     func reset() {
@@ -674,8 +725,8 @@ final class GPUSceneSubmissionScratch {
         batches = []
     }
 
-    func takePackedInstances() -> [Float] {
-        var result: [Float] = []
+    func takePackedInstances() -> [GPUInstanceRecord] {
+        var result: [GPUInstanceRecord] = []
         swap(&result, &packedInstances)
         return result
     }
@@ -687,7 +738,7 @@ final class GPUSceneSubmissionScratch {
     }
 
     func reclaim(
-        packedInstances: inout [Float],
+        packedInstances: inout [GPUInstanceRecord],
         batches: inout [GPUSceneGeometryProbeBatch]
     ) {
         swap(&self.packedInstances, &packedInstances)
@@ -834,7 +885,7 @@ struct GPUScenePostProbe {
 }
 
 struct GPUSceneDirectionalShadowProbe: Equatable {
-    static let mapSize: Float = 2_048
+    static let mapSize: Float = 512
     static let disabled = Self(
         enabled: false,
         range: 0,
@@ -1754,17 +1805,18 @@ public final class GPUWindowProbe {
         cameraPosition: RenderVec3,
         lighting: GPUSceneLightingProbe,
         post: GPUScenePostProbe,
-        instances: [Float],
+        instances: [GPUInstanceRecord],
         logicalInstanceCount: Int? = nil,
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
     ) throws -> GPUScenePresentationProbeReport {
-        let transientInstanceCount = instances.count / 24
+        let transientInstanceCount = instances.count
         let resolvedLogicalInstanceCount =
             logicalInstanceCount ?? transientInstanceCount
         guard let window, !isShutdown,
               viewProjection.count == 16,
-              instances.count.isMultiple(of: 24),
+              MemoryLayout<GPUInstanceRecord>.stride ==
+                GPUInstanceRecordPacking.byteStride,
               transientInstanceCount <= Int(UInt32.max),
               resolvedLogicalInstanceCount > 0,
               resolvedLogicalInstanceCount <= Int(UInt32.max),
@@ -2100,7 +2152,14 @@ public final class GPUWindowProbe {
                                                     position in
                                             instances.withUnsafeBufferPointer {
                                                 instanceData in
-                                            nativeSceneBatches
+                                            let instanceFloats =
+                                                instanceData.baseAddress.map {
+                                                    UnsafeRawPointer($0)
+                                                        .assumingMemoryBound(
+                                                            to: Float.self
+                                                        )
+                                                }
+                                            return nativeSceneBatches
                                                 .withUnsafeBufferPointer {
                                                     batchData in
                                                 btbh_gpu_window_scene_present_instances(
@@ -2123,7 +2182,7 @@ public final class GPUWindowProbe {
                                                     position.baseAddress,
                                                     &nativeLighting,
                                                     &nativePost,
-                                                    instanceData.baseAddress,
+                                                    instanceFloats,
                                                     UInt32(
                                                         transientInstanceCount
                                                     ),

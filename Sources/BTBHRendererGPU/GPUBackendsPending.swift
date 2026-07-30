@@ -232,6 +232,15 @@ fileprivate final class GPUInstanceBufferResource {
     }
 }
 
+struct GPUInstanceRecord {
+    let matrix0: SIMD4<Float>
+    let matrix1: SIMD4<Float>
+    let matrix2: SIMD4<Float>
+    let matrix3: SIMD4<Float>
+    let color: SIMD4<Float>
+    let custom: SIMD4<Float>
+}
+
 enum GPUInstanceRecordPacking {
     static let floatCount = 24
     static let byteStride = floatCount * MemoryLayout<Float>.stride
@@ -247,6 +256,168 @@ enum GPUInstanceRecordPacking {
             custom: instance.custom,
             to: &instances
         )
+    }
+
+    static func append(
+        _ instance: RenderInstance,
+        to instances: inout [GPUInstanceRecord]
+    ) {
+        instances.append(record(
+            matrix: instance.transform.matrix,
+            color: instance.color,
+            custom: instance.custom
+        ))
+    }
+
+    static func append(
+        matrix: RenderMatrix4,
+        color: RenderColor,
+        custom: RenderVec4,
+        to instances: inout [GPUInstanceRecord]
+    ) {
+        instances.append(record(
+            matrix: matrix,
+            color: color,
+            custom: custom
+        ))
+    }
+
+    static func record(
+        matrix: RenderMatrix4,
+        color: RenderColor,
+        custom: RenderVec4
+    ) -> GPUInstanceRecord {
+        GPUInstanceRecord(
+            matrix0: matrix.c0,
+            matrix1: matrix.c1,
+            matrix2: matrix.c2,
+            matrix3: matrix.c3,
+            color: SIMD4(
+                Float(color.r) / 255,
+                Float(color.g) / 255,
+                Float(color.b) / 255,
+                Float(color.a) / 255
+            ),
+            custom: SIMD4(custom.x, custom.y, custom.z, custom.w)
+        )
+    }
+
+    static func appendTransformStreams(
+        positions: [RenderVec3],
+        rotations: [RenderQuaternion],
+        scales: [RenderVec3],
+        colors: [RenderColor]?,
+        customs: [RenderVec4]?,
+        sourceStart: Int,
+        count: Int,
+        to instances: inout [GPUInstanceRecord]
+    ) -> Bool {
+        guard sourceStart >= 0,
+              count > 0,
+              sourceStart <= positions.count,
+              count <= positions.count - sourceStart,
+              sourceStart <= rotations.count,
+              count <= rotations.count - sourceStart,
+              sourceStart <= scales.count,
+              count <= scales.count - sourceStart,
+              colors == nil || (
+                sourceStart <= colors!.count &&
+                count <= colors!.count - sourceStart
+              ),
+              customs == nil || (
+                sourceStart <= customs!.count &&
+                count <= customs!.count - sourceStart
+              ),
+              sourceStart <= Int(UInt32.max),
+              count <= Int(UInt32.max) else {
+            return false
+        }
+
+        let firstInstance = instances.count
+        let placeholder = record(
+            matrix: .identity,
+            color: .white,
+            custom: zeroCustom
+        )
+        instances.append(
+            contentsOf: repeatElement(placeholder, count: count)
+        )
+        let succeeded = instances.withUnsafeMutableBufferPointer {
+            destination in
+            positions.withUnsafeBufferPointer { positionBuffer in
+                rotations.withUnsafeBufferPointer { rotationBuffer in
+                    scales.withUnsafeBufferPointer { scaleBuffer in
+                        func pack(
+                            colorBuffer: UnsafeBufferPointer<RenderColor>?,
+                            customBuffer: UnsafeBufferPointer<RenderVec4>?
+                        ) -> Bool {
+                            guard let destinationBase =
+                                    destination.baseAddress,
+                                  let positionBase =
+                                    positionBuffer.baseAddress,
+                                  let rotationBase =
+                                    rotationBuffer.baseAddress,
+                                  let scaleBase =
+                                    scaleBuffer.baseAddress else {
+                                return false
+                            }
+                            let destinationFloats = UnsafeMutableRawPointer(
+                                destinationBase.advanced(by: firstInstance)
+                            ).assumingMemoryBound(to: Float.self)
+                            return btbh_gpu_pack_transform_stream_instances(
+                                destinationFloats,
+                                positionBase,
+                                UInt32(MemoryLayout<RenderVec3>.stride),
+                                rotationBase,
+                                UInt32(MemoryLayout<RenderQuaternion>.stride),
+                                scaleBase,
+                                UInt32(MemoryLayout<RenderVec3>.stride),
+                                colorBuffer?.baseAddress,
+                                UInt32(MemoryLayout<RenderColor>.stride),
+                                customBuffer?.baseAddress,
+                                UInt32(MemoryLayout<RenderVec4>.stride),
+                                UInt32(sourceStart),
+                                UInt32(count)
+                            ) != 0
+                        }
+
+                        if let colors {
+                            return colors.withUnsafeBufferPointer {
+                                colorBuffer in
+                                if let customs {
+                                    return customs.withUnsafeBufferPointer {
+                                        pack(
+                                            colorBuffer: colorBuffer,
+                                            customBuffer: $0
+                                        )
+                                    }
+                                }
+                                return pack(
+                                    colorBuffer: colorBuffer,
+                                    customBuffer: nil
+                                )
+                            }
+                        }
+                        if let customs {
+                            return customs.withUnsafeBufferPointer {
+                                pack(
+                                    colorBuffer: nil,
+                                    customBuffer: $0
+                                )
+                            }
+                        }
+                        return pack(
+                            colorBuffer: nil,
+                            customBuffer: nil
+                        )
+                    }
+                }
+            }
+        }
+        if !succeeded {
+            instances.removeLast(count)
+        }
+        return succeeded
     }
 
     static func append(
@@ -1524,7 +1695,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             return
         }
-        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
+        invalidateSceneModelMaterials(model: handle)
         platform.destroyModel(resource.pointer)
         pendingModelDestruction.remove(handle)
     }
@@ -1711,7 +1882,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         }
         let replacement = try materialResource(descriptor)
         materials[handle] = replacement
-        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
+        invalidateSceneModelMaterials(using: handle)
         collectMaterialDependencies(previous)
     }
 
@@ -1723,7 +1894,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         else {
             return
         }
-        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
+        invalidateSceneModelMaterials(using: handle)
         collectMaterialDependencies(resource)
     }
     func createInstanceBuffer(
@@ -2299,7 +2470,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         )
         resource.parameters[parameter] = value
         surfaceShaders[handle] = resource
-        sceneModelMaterialsCache.removeAll(keepingCapacity: true)
+        invalidateSceneModelMaterials(surfaceShader: handle)
         collectPendingTextures(oldDependencies)
     }
 
@@ -2323,6 +2494,44 @@ final class GPUResourceBackend: RenderResourceBackend {
         collectPendingTextures(
             Self.textureDependencies(in: resource.parameters)
         )
+    }
+
+    private func invalidateSceneModelMaterials(model: ModelHandle) {
+        let keys = sceneModelMaterialsCache.keys.filter {
+            $0.model == model
+        }
+        for key in keys {
+            sceneModelMaterialsCache.removeValue(forKey: key)
+        }
+    }
+
+    private func invalidateSceneModelMaterials(using material: MaterialHandle) {
+        let keys = sceneModelMaterialsCache.keys.filter { key in
+            key.overrides.contains { $0.material == material }
+        }
+        for key in keys {
+            sceneModelMaterialsCache.removeValue(forKey: key)
+        }
+    }
+
+    private func invalidateSceneModelMaterials(
+        surfaceShader: SurfaceShaderHandle
+    ) {
+        let dependentMaterials = Set(materials.compactMap {
+            handle, resource in
+            resource.surfaceShaderDependency == surfaceShader
+                ? handle
+                : nil
+        })
+        guard !dependentMaterials.isEmpty else { return }
+        let keys = sceneModelMaterialsCache.keys.filter { key in
+            key.overrides.contains {
+                dependentMaterials.contains($0.material)
+            }
+        }
+        for key in keys {
+            sceneModelMaterialsCache.removeValue(forKey: key)
+        }
     }
     func createScreenShader(
         _ descriptor: ScreenShaderDescriptor
@@ -3091,6 +3300,8 @@ final class GPUSceneBackend: SceneBackend {
     private var pendingModelDraws: [PendingModelDraw] = []
     private var pendingDebugDraws: [DebugDraw] = []
     private let submissionScratch = GPUSceneSubmissionScratch()
+    private var modelBatchBuildSeconds = 0.0
+    private var modelBatchOverrideEntryCount = 0
     private(set) var lastPresentationReport:
         GPUScenePresentationProbeReport?
 
@@ -3117,6 +3328,8 @@ final class GPUSceneBackend: SceneBackend {
         pendingModelDraws.removeAll(keepingCapacity: true)
         pendingDebugDraws.removeAll(keepingCapacity: true)
         submissionScratch.reset()
+        modelBatchBuildSeconds = 0
+        modelBatchOverrideEntryCount = 0
         lastPresentationReport = nil
     }
 
@@ -3125,7 +3338,17 @@ final class GPUSceneBackend: SceneBackend {
         case .model(let model):
             pendingModelDraws.append(.model(model))
         case .modelInstances(let modelInstances):
-            pendingModelDraws.append(.instances(modelInstances))
+            if let last = pendingModelDraws.last,
+               case .instances(let previous) = last,
+               let merged = GPUModelInstanceDrawCoalescing.merge(
+                previous,
+                modelInstances
+               ) {
+                pendingModelDraws[pendingModelDraws.count - 1] =
+                    .instances(merged)
+            } else {
+                pendingModelDraws.append(.instances(modelInstances))
+            }
         case .modelTransformStreams(let streams):
             pendingModelDraws.append(.transformStreams(streams))
         case .mesh(let mesh):
@@ -3164,6 +3387,10 @@ final class GPUSceneBackend: SceneBackend {
         guard !pendingModelDraws.isEmpty || !pendingDebugDraws.isEmpty else {
             return
         }
+        let telemetryEnabled = platform.isFrameTelemetryEnabled
+        let adapterStarted = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         guard let currentFrame,
               let viewProjection = viewProjection(
                 camera: currentFrame.camera,
@@ -3186,9 +3413,7 @@ final class GPUSceneBackend: SceneBackend {
         for pendingDraw in pendingModelDraws {
             switch pendingDraw {
             case .model(let draw):
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
+                let firstInstance = packedInstances.count
                 GPUInstanceRecordPacking.append(
                     matrix: draw.transform.matrix,
                     color: .white,
@@ -3225,9 +3450,7 @@ final class GPUSceneBackend: SceneBackend {
                 if persistentResource != nil {
                     firstInstance = draw.sourceStart
                 } else {
-                    firstInstance =
-                        packedInstances.count /
-                        GPUInstanceRecordPacking.floatCount
+                    firstInstance = packedInstances.count
                     for instance in draw.instances[
                         draw.sourceStart..<(draw.sourceStart + draw.count)
                     ] {
@@ -3278,20 +3501,19 @@ final class GPUSceneBackend: SceneBackend {
                    !intersectsFrustum(bounds) {
                     continue
                 }
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
-                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
-                    GPUInstanceRecordPacking.append(
-                        matrix: Self.transformMatrix(
-                            position: draw.positions[index],
-                            rotation: draw.rotations[index],
-                            scale: draw.scales[index]
-                        ),
-                        color: draw.colors?[index] ?? .white,
-                        custom: draw.customs?[index] ??
-                            GPUInstanceRecordPacking.zeroCustom,
-                        to: &packedInstances
+                let firstInstance = packedInstances.count
+                guard GPUInstanceRecordPacking.appendTransformStreams(
+                    positions: draw.positions,
+                    rotations: draw.rotations,
+                    scales: draw.scales,
+                    colors: draw.colors,
+                    customs: draw.customs,
+                    sourceStart: draw.sourceStart,
+                    count: draw.count,
+                    to: &packedInstances
+                ) else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Could not pack GPU model transform streams"
                     )
                 }
                 try appendModelBatches(
@@ -3307,9 +3529,7 @@ final class GPUSceneBackend: SceneBackend {
                 logicalInstanceCount += draw.count
             case .mesh(let draw):
                 let material = try resources.sceneMaterial(draw.material)
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
+                let firstInstance = packedInstances.count
                 GPUInstanceRecordPacking.append(
                     matrix: draw.transform.matrix,
                     color: .white,
@@ -3352,9 +3572,7 @@ final class GPUSceneBackend: SceneBackend {
                 if persistentResource != nil {
                     firstInstance = 0
                 } else {
-                    firstInstance =
-                        packedInstances.count /
-                        GPUInstanceRecordPacking.floatCount
+                    firstInstance = packedInstances.count
                     for instance in draw.instances {
                         GPUInstanceRecordPacking.append(
                             instance,
@@ -3395,19 +3613,19 @@ final class GPUSceneBackend: SceneBackend {
                     )
                 }
                 let material = try resources.sceneMaterial(draw.material)
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
-                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
-                    GPUInstanceRecordPacking.append(
-                        matrix: Self.transformMatrix(
-                            position: draw.positions[index],
-                            rotation: draw.rotations[index],
-                            scale: draw.scales[index]
-                        ),
-                        color: draw.colors[index],
-                        custom: GPUInstanceRecordPacking.zeroCustom,
-                        to: &packedInstances
+                let firstInstance = packedInstances.count
+                guard GPUInstanceRecordPacking.appendTransformStreams(
+                    positions: draw.positions,
+                    rotations: draw.rotations,
+                    scales: draw.scales,
+                    colors: draw.colors,
+                    customs: nil,
+                    sourceStart: draw.sourceStart,
+                    count: draw.count,
+                    to: &packedInstances
+                ) else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Could not pack GPU mesh transform streams"
                     )
                 }
                 batches.append(.init(
@@ -3423,9 +3641,7 @@ final class GPUSceneBackend: SceneBackend {
                 ))
                 logicalInstanceCount += draw.count
             case .animated(let draw):
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
+                let firstInstance = packedInstances.count
                 GPUInstanceRecordPacking.append(
                     matrix: draw.transform.matrix,
                     color: .white,
@@ -3451,9 +3667,7 @@ final class GPUSceneBackend: SceneBackend {
                         message: "GPU animated model instance draw is empty"
                     )
                 }
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
+                let firstInstance = packedInstances.count
                 for instance in draw.instances {
                     GPUInstanceRecordPacking.append(
                         instance,
@@ -3500,20 +3714,19 @@ final class GPUSceneBackend: SceneBackend {
                         message: "Invalid GPU animated transform stream range"
                     )
                 }
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
-                for index in draw.sourceStart..<(draw.sourceStart + draw.count) {
-                    GPUInstanceRecordPacking.append(
-                        matrix: Self.transformMatrix(
-                            position: draw.positions[index],
-                            rotation: draw.rotations[index],
-                            scale: draw.scales[index]
-                        ),
-                        color: draw.colors?[index] ?? .white,
-                        custom: draw.customs?[index] ??
-                            GPUInstanceRecordPacking.zeroCustom,
-                        to: &packedInstances
+                let firstInstance = packedInstances.count
+                guard GPUInstanceRecordPacking.appendTransformStreams(
+                    positions: draw.positions,
+                    rotations: draw.rotations,
+                    scales: draw.scales,
+                    colors: draw.colors,
+                    customs: draw.customs,
+                    sourceStart: draw.sourceStart,
+                    count: draw.count,
+                    to: &packedInstances
+                ) else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message: "Could not pack GPU animated transform streams"
                     )
                 }
                 try appendModelBatches(
@@ -3559,9 +3772,7 @@ final class GPUSceneBackend: SceneBackend {
                     )
                 }
                 transientDebugMesh = mesh
-                let firstInstance =
-                    packedInstances.count /
-                    GPUInstanceRecordPacking.floatCount
+                let firstInstance = packedInstances.count
                 GPUInstanceRecordPacking.append(
                     matrix: .identity,
                     color: .white,
@@ -3582,6 +3793,9 @@ final class GPUSceneBackend: SceneBackend {
             }
         }
         guard !batches.isEmpty else { return }
+        let packingFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let cameraForward = (
             currentFrame.camera.target - currentFrame.camera.position
         ).normalized()
@@ -3617,6 +3831,9 @@ final class GPUSceneBackend: SceneBackend {
                 orderedBatches
             )
         _ = frameCoordinator.claimScreenClearForScene()
+        let preparationFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         lastPresentationReport = try platform.presentModelInstances(
             viewProjection: viewProjection,
             cameraRight: cameraRight,
@@ -3629,6 +3846,23 @@ final class GPUSceneBackend: SceneBackend {
             batches: consolidatedBatches,
             clearColor: clearColor
         )
+        if telemetryEnabled {
+            let presentationFinished = platform.monotonicElapsedSeconds
+            platform.recordSceneAdapterTelemetry(
+                packMilliseconds: (packingFinished - adapterStarted) * 1_000,
+                modelBatchBuildMilliseconds: modelBatchBuildSeconds * 1_000,
+                prepareMilliseconds:
+                    (preparationFinished - packingFinished) * 1_000,
+                nativePresentMilliseconds:
+                    (presentationFinished - preparationFinished) * 1_000,
+                pendingDrawCount: pendingModelDraws.count,
+                packedInstanceCount: packedInstances.count,
+                batchCount: consolidatedBatches.count,
+                materialResolutionCount:
+                    resources.sceneModelMaterialResolutionCount,
+                overrideEntryCount: modelBatchOverrideEntryCount
+            )
+        }
     }
 
     private func appendModelBatches(
@@ -3642,6 +3876,12 @@ final class GPUSceneBackend: SceneBackend {
         shadowBounds: RenderBounds3? = nil,
         to batches: inout [GPUSceneGeometryProbeBatch]
     ) throws {
+        let batchBuildStarted = platform.isFrameTelemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : nil
+        if platform.isFrameTelemetryEnabled {
+            modelBatchOverrideEntryCount += overrides.count
+        }
         let geometry = GPUSceneGeometryProbe.model(
             try resources.modelPointer(model)
         )
@@ -3660,6 +3900,10 @@ final class GPUSceneBackend: SceneBackend {
                 instanceCount: instanceCount,
                 shadowBounds: shadowBounds
             ))
+        }
+        if let batchBuildStarted {
+            modelBatchBuildSeconds +=
+                platform.monotonicElapsedSeconds - batchBuildStarted
         }
     }
 

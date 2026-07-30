@@ -9,17 +9,31 @@ public enum GPUPlatformError: Error, Equatable {
     case invalidWindowDescriptor(String)
 }
 
+struct GPUSceneAdapterTelemetrySample {
+    let packMilliseconds: Double
+    let modelBatchBuildMilliseconds: Double
+    let prepareMilliseconds: Double
+    let nativePresentMilliseconds: Double
+    let pendingDrawCount: Int
+    let packedInstanceCount: Int
+    let batchCount: Int
+    let materialResolutionCount: Int
+    let overrideEntryCount: Int
+}
+
 @MainActor
 public final class GPUPlatform: GamePlatform {
     private let request: GPUBackendRequest
     private let debugMode: Bool
     private let frameTelemetryEnabled: Bool
+    var isFrameTelemetryEnabled: Bool { frameTelemetryEnabled }
     private var window: GPUWindowProbe?
     private var state = GPUPlatformState.empty
     private var forcedClose = false
     private var targetFramesPerSecond = 0
     private var previousFrameStart: TimeInterval?
     private var frameTelemetrySamples: [GPUFrameTelemetrySample] = []
+    private var sceneAdapterTelemetry: [GPUSceneAdapterTelemetrySample] = []
     private var sceneEncodeTelemetry: [GPUScenePresentationProbeReport] = []
     private var canvasPresentTelemetryMilliseconds: [Double] = []
 
@@ -70,12 +84,14 @@ public final class GPUPlatform: GamePlatform {
             let configuredFramesInFlight =
                 ProcessInfo.processInfo.environment[
                     "BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT"
-                ] ?? "2"
+                ] ?? "3"
             let line =
                 "BTBH_GPU_SWAPCHAIN_TELEMETRY present_mode=\(diagnostics.presentMode) allowed_frames_in_flight=\(configuredFramesInFlight)\n"
             FileHandle.standardError.write(Data(line.utf8))
             frameTelemetrySamples.removeAll(keepingCapacity: false)
             frameTelemetrySamples.reserveCapacity(512)
+            sceneAdapterTelemetry.removeAll(keepingCapacity: false)
+            sceneAdapterTelemetry.reserveCapacity(512)
             sceneEncodeTelemetry.removeAll(
                 keepingCapacity: false
             )
@@ -455,7 +471,7 @@ public final class GPUPlatform: GamePlatform {
         cameraPosition: RenderVec3,
         lighting: GPUSceneLightingProbe,
         post: GPUScenePostProbe,
-        instances: [Float],
+        instances: [GPUInstanceRecord],
         logicalInstanceCount: Int,
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor
@@ -558,6 +574,31 @@ public final class GPUPlatform: GamePlatform {
             sceneEncodeTelemetry.append(report)
         }
         return report
+    }
+
+    func recordSceneAdapterTelemetry(
+        packMilliseconds: Double,
+        modelBatchBuildMilliseconds: Double,
+        prepareMilliseconds: Double,
+        nativePresentMilliseconds: Double,
+        pendingDrawCount: Int,
+        packedInstanceCount: Int,
+        batchCount: Int,
+        materialResolutionCount: Int,
+        overrideEntryCount: Int
+    ) {
+        guard frameTelemetryEnabled else { return }
+        sceneAdapterTelemetry.append(.init(
+            packMilliseconds: packMilliseconds,
+            modelBatchBuildMilliseconds: modelBatchBuildMilliseconds,
+            prepareMilliseconds: prepareMilliseconds,
+            nativePresentMilliseconds: nativePresentMilliseconds,
+            pendingDrawCount: pendingDrawCount,
+            packedInstanceCount: packedInstanceCount,
+            batchCount: batchCount,
+            materialResolutionCount: materialResolutionCount,
+            overrideEntryCount: overrideEntryCount
+        ))
     }
 
     func presentCanvas(
@@ -682,6 +723,7 @@ public final class GPUPlatform: GamePlatform {
     private func emitFrameTelemetry() {
         guard frameTelemetryEnabled,
               !frameTelemetrySamples.isEmpty ||
+              !sceneAdapterTelemetry.isEmpty ||
               !sceneEncodeTelemetry.isEmpty ||
               !canvasPresentTelemetryMilliseconds.isEmpty else {
             return
@@ -695,6 +737,24 @@ public final class GPUPlatform: GamePlatform {
                 sample.frameSerial,
                 sample.cpuSubmitMilliseconds,
                 sample.fenceCompletionMilliseconds
+            )
+        }.joined()
+        lines += sceneAdapterTelemetry.enumerated().map {
+            index, sample in
+            String(
+                format:
+                    "BTBH_GPU_SCENE_ADAPTER_TELEMETRY sample=%llu pack_ms=%.6f model_batch_build_ms=%.6f prepare_ms=%.6f native_present_ms=%.6f pending_draws=%llu packed_instances=%llu batches=%llu material_resolutions=%llu override_entries=%llu\n",
+                locale: locale,
+                UInt64(index + 1),
+                sample.packMilliseconds,
+                sample.modelBatchBuildMilliseconds,
+                sample.prepareMilliseconds,
+                sample.nativePresentMilliseconds,
+                UInt64(sample.pendingDrawCount),
+                UInt64(sample.packedInstanceCount),
+                UInt64(sample.batchCount),
+                UInt64(sample.materialResolutionCount),
+                UInt64(sample.overrideEntryCount)
             )
         }.joined()
         lines += sceneEncodeTelemetry.enumerated().map {
@@ -726,6 +786,7 @@ public final class GPUPlatform: GamePlatform {
         }.joined()
         FileHandle.standardError.write(Data(lines.utf8))
         frameTelemetrySamples.removeAll(keepingCapacity: false)
+        sceneAdapterTelemetry.removeAll(keepingCapacity: false)
         sceneEncodeTelemetry.removeAll(
             keepingCapacity: false
         )

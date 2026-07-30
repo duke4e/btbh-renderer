@@ -494,7 +494,7 @@ float primary_directional_visibility(
     const float bias =
         0.001f + 0.0015f * (1.0f - normal_dot_light);
     const float texel_radius =
-        max(directional_shadow_controls.y, 0.0f) / 2048.0f;
+        max(directional_shadow_controls.y, 0.0f) / 512.0f;
     float visibility = 0.0f;
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -552,7 +552,7 @@ float secondary_directional_visibility(
         0.001f + 0.0015f * (1.0f - normal_dot_light);
     const float texel_radius =
         max(secondary_directional_shadow_controls.y, 0.0f) /
-        2048.0f;
+        512.0f;
     float visibility = 0.0f;
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -610,7 +610,7 @@ float spot_visibility(
     const float bias =
         0.0001f + 0.0005f * (1.0f - normal_dot_light);
     const float texel_radius =
-        max(spot_shadow_controls.y, 0.0f) / 2048.0f;
+        max(spot_shadow_controls.y, 0.0f) / 1024.0f;
     float visibility = 0.0f;
     [unroll]
     for (int y = -1; y <= 1; ++y)

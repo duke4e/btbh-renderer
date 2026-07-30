@@ -188,10 +188,9 @@ static SDL_GPUPresentMode btbh_gpu_choose_present_mode(
     return SDL_GPU_PRESENTMODE_VSYNC;
 }
 
-static uint32_t btbh_gpu_allowed_frames_in_flight(void) {
-    const char *value = SDL_getenv("BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT");
+uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value) {
     if (value == NULL || value[0] == '\0') {
-        return 2u;
+        return 3u;
     }
 
     char *end = NULL;
@@ -203,9 +202,15 @@ static uint32_t btbh_gpu_allowed_frames_in_flight(void) {
         parsed < 1ul ||
         parsed > 3ul
     ) {
-        return 2u;
+        return 3u;
     }
     return (uint32_t) parsed;
+}
+
+static uint32_t btbh_gpu_allowed_frames_in_flight(void) {
+    return btbh_gpu_parse_allowed_frames_in_flight(
+        SDL_getenv("BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT")
+    );
 }
 
 BTBHGPUWindow *btbh_gpu_window_create(

@@ -16,8 +16,9 @@
 #define BTBH_GPU_MODEL_WEIGHTS_OFFSET 80u
 #define BTBH_GPU_SCENE_INSTANCE_FLOATS 24u
 #define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u
-#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 2048u
+#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 1024u
 #define BTBH_GPU_SCENE_TRANSPARENCY_COUNT 2u
+#define BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT 2u
 #define BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT 3u
 #define BTBH_GPU_SCENE_SMAA_QUALITY_COUNT 2u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
@@ -128,25 +129,29 @@ struct BTBHGPUSceneRuntime {
     ][BTBH_GPU_SCENE_DEPTH_COUNT]
     [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
     [BTBH_GPU_SCENE_CULL_COUNT]
-    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline *animated_model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
     ][BTBH_GPU_SCENE_DEPTH_COUNT]
     [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
     [BTBH_GPU_SCENE_CULL_COUNT]
-    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline *unshadowed_model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
     ][BTBH_GPU_SCENE_DEPTH_COUNT]
     [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
     [BTBH_GPU_SCENE_CULL_COUNT]
-    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline *unshadowed_animated_model_pipelines[
         BTBH_GPU_SCENE_BLEND_COUNT
     ][BTBH_GPU_SCENE_DEPTH_COUNT]
     [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
     [BTBH_GPU_SCENE_CULL_COUNT]
-    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
@@ -398,6 +403,18 @@ bool btbh_gpu_scene_uses_transparent_pass(
 ) {
     return transparency_enabled ||
         mode != BTBH_GPU_SCENE_BLEND_ALPHA;
+}
+
+bool btbh_gpu_scene_uses_fast_unlit_pipeline(
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+    return batch != NULL &&
+        batch->unlit_enabled != 0u &&
+        batch->surface_variant == 0u &&
+        btbh_gpu_scene_uses_transparent_pass(
+            batch->blend_mode,
+            batch->transparency_enabled != 0u
+        );
 }
 
 void btbh_gpu_scene_resolve_blend_state(
@@ -1491,18 +1508,20 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         (uint32_t)batch->transparency_enabled;
     const uint32_t cull = (uint32_t)batch->cull_mode;
     const uint32_t stencil = (uint32_t)stencil_variant;
+    const uint32_t fast_unlit =
+        btbh_gpu_scene_uses_fast_unlit_pipeline(batch) ? 1u : 0u;
     if (shadows_active) {
         return animated
             ? &runtime->animated_model_pipelines
-                [blend][depth][transparent][cull][stencil]
+                [blend][depth][transparent][cull][stencil][fast_unlit]
             : &runtime->model_pipelines
-                [blend][depth][transparent][cull][stencil];
+                [blend][depth][transparent][cull][stencil][fast_unlit];
     }
     return animated
         ? &runtime->unshadowed_animated_model_pipelines
-            [blend][depth][transparent][cull][stencil]
+            [blend][depth][transparent][cull][stencil][fast_unlit]
         : &runtime->unshadowed_model_pipelines
-            [blend][depth][transparent][cull][stencil];
+            [blend][depth][transparent][cull][stencil][fast_unlit];
 }
 
 static bool btbh_gpu_scene_ensure_model_pipeline(
@@ -1536,15 +1555,49 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     if (*slot != NULL) {
         return true;
     }
+    const bool fast_unlit =
+        btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+    const char *selected_fragment_shader_path =
+        shadows_active
+            ? fragment_shader_path
+            : unshadowed_fragment_shader_path;
+    char fast_unlit_fragment_shader_path[
+        BTBH_GPU_SCENE_PATH_CAPACITY
+    ];
+    if (fast_unlit) {
+        const char *extension =
+            project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+                ? "metallib"
+                : "spv";
+        char filename[128];
+        (void)snprintf(
+            filename,
+            sizeof(filename),
+            "production_model_unlit.frag.%s",
+            extension
+        );
+        if (!btbh_gpu_scene_sibling_path(
+                selected_fragment_shader_path,
+                filename,
+                fast_unlit_fragment_shader_path
+            )) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "Fast unlit fragment shader path is too long"
+            );
+            return false;
+        }
+        selected_fragment_shader_path =
+            fast_unlit_fragment_shader_path;
+    }
     return btbh_gpu_scene_create_model_pipeline(
         window,
         animated ? animated_vertex_shader_path : vertex_shader_path,
-        shadows_active
-            ? fragment_shader_path
-            : unshadowed_fragment_shader_path,
+        selected_fragment_shader_path,
         project_format,
         animated,
-        shadows_active ? 8u : 5u,
+        fast_unlit ? 2u : (shadows_active ? 8u : 5u),
         batch,
         stencil_variant,
         slot,
@@ -4152,7 +4205,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
                 pass,
                 0u,
                 samplers,
-                shadows_active ? 8u : 5u
+                btbh_gpu_scene_uses_fast_unlit_pipeline(batch)
+                    ? 2u
+                    : (shadows_active ? 8u : 5u)
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -4752,28 +4807,29 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             BTBH_GPU_SCENE_DEPTH_COUNT *
             BTBH_GPU_SCENE_TRANSPARENCY_COUNT *
             BTBH_GPU_SCENE_CULL_COUNT *
-            BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT;
+            BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT *
+            BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT;
         btbh_gpu_scene_release_pipeline_array(
             device,
-            &window->scene_runtime->model_pipelines[0][0][0][0][0],
+            &window->scene_runtime->model_pipelines[0][0][0][0][0][0],
             pipeline_count
         );
         btbh_gpu_scene_release_pipeline_array(
             device,
             &window->scene_runtime
-                ->animated_model_pipelines[0][0][0][0][0],
+                ->animated_model_pipelines[0][0][0][0][0][0],
             pipeline_count
         );
         btbh_gpu_scene_release_pipeline_array(
             device,
             &window->scene_runtime
-                ->unshadowed_model_pipelines[0][0][0][0][0],
+                ->unshadowed_model_pipelines[0][0][0][0][0][0],
             pipeline_count
         );
         btbh_gpu_scene_release_pipeline_array(
             device,
             &window->scene_runtime
-                ->unshadowed_animated_model_pipelines[0][0][0][0][0],
+                ->unshadowed_animated_model_pipelines[0][0][0][0][0][0],
             pipeline_count
         );
     }

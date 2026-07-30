@@ -590,6 +590,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_shadow.frag|fragment"
         "production_model.frag|fragment"
         "production_model_unshadowed.frag|fragment"
+        "production_model_unlit.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
@@ -837,6 +838,22 @@ if(BTBH_BUILD_GPU_SPIKE)
         COMMAND btbh_gpu_scene_blend_test
     )
 
+    add_executable(btbh_gpu_window_config_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_window_config_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_window_config_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(
+        btbh_gpu_window_config_test
+        PRIVATE btbh_gpu SDL3::SDL3-static
+    )
+    add_test(
+        NAME btbh_gpu_window_config
+        COMMAND btbh_gpu_window_config_test
+    )
+
     add_executable(btbh_gpu_animation_math_test
         "${R3D_ROOT_PATH}/tests/btbh_gpu_animation_math_test.c"
     )
@@ -962,6 +979,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_shadow.vert.json"
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
+            BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
     )
     add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
     add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)

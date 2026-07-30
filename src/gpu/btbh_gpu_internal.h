@@ -128,6 +128,9 @@ bool btbh_gpu_scene_uses_transparent_pass(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled
 );
+bool btbh_gpu_scene_uses_fast_unlit_pipeline(
+    const BTBHGPUSceneGeometryBatch *batch
+);
 void btbh_gpu_scene_resolve_blend_state(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled,
@@ -156,6 +159,7 @@ void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
+uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit

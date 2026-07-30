@@ -24,6 +24,20 @@ static void assert_factors(
 }
 
 int main(void) {
+    BTBHGPUSceneGeometryBatch batch = {0};
+    batch.unlit_enabled = 1u;
+    batch.transparency_enabled = 1u;
+    assert(btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.surface_variant = 1u;
+    assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.surface_variant = 0u;
+    batch.transparency_enabled = 0u;
+    assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+    assert(btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.unlit_enabled = 0u;
+    assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+
     assert(!btbh_gpu_scene_uses_transparent_pass(
         BTBH_GPU_SCENE_BLEND_ALPHA,
         false
