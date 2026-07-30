@@ -777,6 +777,13 @@ struct GPUScenePresentationProbeReport {
     let persistentBatchCount: Int
     let shadowResourcesReady: Bool
     let cpuEncodeMilliseconds: Double
+    let cpuPrepareMilliseconds: Double
+    let cpuUploadMilliseconds: Double
+    let cpuShadowEncodeMilliseconds: Double
+    let cpuSwapchainAcquireMilliseconds: Double
+    let cpuTargetEnsureMilliseconds: Double
+    let cpuGeometryEncodeMilliseconds: Double
+    let cpuPostEncodeMilliseconds: Double
 }
 
 struct GPUFrameTelemetrySample: Equatable {
@@ -2071,7 +2078,19 @@ public final class GPUWindowProbe {
             persistentBatchCount: Int(report.persistent_batch_count),
             shadowResourcesReady:
                 btbh_gpu_window_scene_shadow_resources_ready(window) != 0,
-            cpuEncodeMilliseconds: cpuEncodeMilliseconds
+            cpuEncodeMilliseconds: cpuEncodeMilliseconds,
+            cpuPrepareMilliseconds: report.cpu_prepare_milliseconds,
+            cpuUploadMilliseconds: report.cpu_upload_milliseconds,
+            cpuShadowEncodeMilliseconds:
+                report.cpu_shadow_encode_milliseconds,
+            cpuSwapchainAcquireMilliseconds:
+                report.cpu_swapchain_acquire_milliseconds,
+            cpuTargetEnsureMilliseconds:
+                report.cpu_target_ensure_milliseconds,
+            cpuGeometryEncodeMilliseconds:
+                report.cpu_geometry_encode_milliseconds,
+            cpuPostEncodeMilliseconds:
+                report.cpu_post_encode_milliseconds
         )
     }
 

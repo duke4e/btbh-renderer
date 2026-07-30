@@ -20,7 +20,7 @@ public final class GPUPlatform: GamePlatform {
     private var targetFramesPerSecond = 0
     private var previousFrameStart: TimeInterval?
     private var frameTelemetrySamples: [GPUFrameTelemetrySample] = []
-    private var sceneEncodeTelemetryMilliseconds: [Double] = []
+    private var sceneEncodeTelemetry: [GPUScenePresentationProbeReport] = []
     private var canvasPresentTelemetryMilliseconds: [Double] = []
 
     public init(
@@ -68,10 +68,10 @@ public final class GPUPlatform: GamePlatform {
         if frameTelemetryEnabled {
             frameTelemetrySamples.removeAll(keepingCapacity: false)
             frameTelemetrySamples.reserveCapacity(512)
-            sceneEncodeTelemetryMilliseconds.removeAll(
+            sceneEncodeTelemetry.removeAll(
                 keepingCapacity: false
             )
-            sceneEncodeTelemetryMilliseconds.reserveCapacity(512)
+            sceneEncodeTelemetry.reserveCapacity(512)
             canvasPresentTelemetryMilliseconds.removeAll(
                 keepingCapacity: false
             )
@@ -537,9 +537,7 @@ public final class GPUPlatform: GamePlatform {
             clearColor: clearColor
         )
         if frameTelemetryEnabled {
-            sceneEncodeTelemetryMilliseconds.append(
-                report.cpuEncodeMilliseconds
-            )
+            sceneEncodeTelemetry.append(report)
         }
         return report
     }
@@ -666,7 +664,7 @@ public final class GPUPlatform: GamePlatform {
     private func emitFrameTelemetry() {
         guard frameTelemetryEnabled,
               !frameTelemetrySamples.isEmpty ||
-              !sceneEncodeTelemetryMilliseconds.isEmpty ||
+              !sceneEncodeTelemetry.isEmpty ||
               !canvasPresentTelemetryMilliseconds.isEmpty else {
             return
         }
@@ -681,14 +679,21 @@ public final class GPUPlatform: GamePlatform {
                 sample.fenceCompletionMilliseconds
             )
         }.joined()
-        lines += sceneEncodeTelemetryMilliseconds.enumerated().map {
-            index, milliseconds in
+        lines += sceneEncodeTelemetry.enumerated().map {
+            index, report in
             String(
                 format:
-                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu cpu_encode_ms=%.6f\n",
+                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu cpu_encode_ms=%.6f cpu_prepare_ms=%.6f cpu_upload_ms=%.6f cpu_shadow_encode_ms=%.6f cpu_swapchain_acquire_ms=%.6f cpu_target_ensure_ms=%.6f cpu_geometry_encode_ms=%.6f cpu_post_encode_ms=%.6f\n",
                 locale: locale,
                 UInt64(index + 1),
-                milliseconds
+                report.cpuEncodeMilliseconds,
+                report.cpuPrepareMilliseconds,
+                report.cpuUploadMilliseconds,
+                report.cpuShadowEncodeMilliseconds,
+                report.cpuSwapchainAcquireMilliseconds,
+                report.cpuTargetEnsureMilliseconds,
+                report.cpuGeometryEncodeMilliseconds,
+                report.cpuPostEncodeMilliseconds
             )
         }.joined()
         lines += canvasPresentTelemetryMilliseconds.enumerated().map {
@@ -703,7 +708,7 @@ public final class GPUPlatform: GamePlatform {
         }.joined()
         FileHandle.standardError.write(Data(lines.utf8))
         frameTelemetrySamples.removeAll(keepingCapacity: false)
-        sceneEncodeTelemetryMilliseconds.removeAll(
+        sceneEncodeTelemetry.removeAll(
             keepingCapacity: false
         )
         canvasPresentTelemetryMilliseconds.removeAll(

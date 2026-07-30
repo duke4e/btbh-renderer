@@ -1648,6 +1648,19 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(report.persistentBatchCount, 1)
         XCTAssertFalse(report.shadowResourcesReady)
         XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
+        XCTAssertGreaterThan(report.cpuPrepareMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(report.cpuUploadMilliseconds, 0)
+        XCTAssertEqual(report.cpuShadowEncodeMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(
+            report.cpuSwapchainAcquireMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuTargetEnsureMilliseconds,
+            0
+        )
+        XCTAssertGreaterThan(report.cpuGeometryEncodeMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(report.cpuPostEncodeMilliseconds, 0)
         XCTAssertThrowsError(try present(.init(
             x: .nan,
             y: 0,
@@ -1861,6 +1874,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(report.preparedGeometryCount, 4)
         XCTAssertTrue(report.shadowResourcesReady)
         XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
+        XCTAssertGreaterThan(report.cpuShadowEncodeMilliseconds, 0)
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")

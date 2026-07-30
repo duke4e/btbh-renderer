@@ -3023,6 +3023,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
     (void)memset(report, 0, sizeof(*report));
+    const uint64_t prepare_started_ticks = SDL_GetTicksNS();
     if (window != NULL && window->pending_command != NULL) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_scene_error(
@@ -3267,6 +3268,10 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         ? runtime->bone_buffer
         : NULL;
     SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
+    report->cpu_prepare_milliseconds =
+        (double)(SDL_GetTicksNS() - prepare_started_ticks) /
+        1000000.0;
+    const uint64_t upload_started_ticks = SDL_GetTicksNS();
     if (transfer_bytes > 0u) {
         void *mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
         if (mapped == NULL) {
@@ -3335,6 +3340,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         }
         SDL_EndGPUCopyPass(copy);
     }
+    report->cpu_upload_milliseconds =
+        (double)(SDL_GetTicksNS() - upload_started_ticks) /
+        1000000.0;
 
     const float *shadow_matrices[3] = {
         lighting->directional_shadow_view_projection,
@@ -3346,6 +3354,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         "BTBH Shadow Secondary",
         "BTBH Shadow Spot"
     };
+    const uint64_t shadow_started_ticks = SDL_GetTicksNS();
     for (uint32_t shadow_index = 0u;
          shadow_index < 3u;
          ++shadow_index) {
@@ -3379,56 +3388,73 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             return report->result;
         }
     }
+    if (shadows_active) {
+        report->cpu_shadow_encode_milliseconds =
+            (double)(SDL_GetTicksNS() - shadow_started_ticks) /
+            1000000.0;
+    }
 
     SDL_GPUTexture *swapchain = NULL;
     uint32_t drawable_width = 0u;
     uint32_t drawable_height = 0u;
-    if (!SDL_WaitAndAcquireGPUSwapchainTexture(
+    const uint64_t swapchain_started_ticks = SDL_GetTicksNS();
+    const bool swapchain_acquired =
+        SDL_WaitAndAcquireGPUSwapchainTexture(
             command,
             window->window,
             &swapchain,
             &drawable_width,
             &drawable_height
-        ) ||
-        swapchain == NULL ||
-        drawable_width == 0u ||
-        drawable_height == 0u ||
-        !btbh_gpu_scene_ensure_depth(
+        );
+    report->cpu_swapchain_acquire_milliseconds =
+        (double)(SDL_GetTicksNS() - swapchain_started_ticks) /
+        1000000.0;
+    const uint64_t target_ensure_started_ticks = SDL_GetTicksNS();
+    const bool targets_ready =
+        swapchain_acquired &&
+        swapchain != NULL &&
+        drawable_width != 0u &&
+        drawable_height != 0u &&
+        btbh_gpu_scene_ensure_depth(
             window,
             drawable_width,
             drawable_height,
             report
-        ) ||
-        !btbh_gpu_scene_ensure_color(
+        ) &&
+        btbh_gpu_scene_ensure_color(
             window,
             drawable_width,
             drawable_height,
             report
-        ) ||
-        (post->anti_aliasing != 0u &&
-         !btbh_gpu_scene_ensure_anti_aliasing_targets(
+        ) &&
+        (post->anti_aliasing == 0u ||
+         btbh_gpu_scene_ensure_anti_aliasing_targets(
              window,
              drawable_width,
              drawable_height,
              post->anti_aliasing <=
                  BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
              report
-         )) ||
-        (post->ssao_enabled != 0u &&
-         !btbh_gpu_scene_ensure_ssao_resolve_pipeline(
+         )) &&
+        (post->ssao_enabled == 0u ||
+         btbh_gpu_scene_ensure_ssao_resolve_pipeline(
              window,
              post_vertex_shader_path,
              post_fragment_shader_path,
              shader_format,
              report
-         )) ||
-        !btbh_gpu_scene_ensure_post_pipeline(
+         )) &&
+        btbh_gpu_scene_ensure_post_pipeline(
             window,
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
             report
-        )) {
+        );
+    report->cpu_target_ensure_milliseconds =
+        (double)(SDL_GetTicksNS() - target_ensure_started_ticks) /
+        1000000.0;
+    if (!targets_ready) {
         if (report->result == BTBH_GPU_OK) {
             btbh_gpu_scene_error(
                 report,
@@ -3445,6 +3471,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         return report->result;
     }
 
+    const uint64_t geometry_started_ticks = SDL_GetTicksNS();
     SDL_GPUColorTargetInfo color_targets[4];
     SDL_GPUDepthStencilTargetInfo depth_target;
     SDL_zeroa(color_targets);
@@ -4024,7 +4051,11 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         }
     }
     SDL_EndGPURenderPass(pass);
+    report->cpu_geometry_encode_milliseconds =
+        (double)(SDL_GetTicksNS() - geometry_started_ticks) /
+        1000000.0;
 
+    const uint64_t post_started_ticks = SDL_GetTicksNS();
     BTBHGPUPostUniforms post_uniforms;
     (void)memset(&post_uniforms, 0, sizeof(post_uniforms));
     post_uniforms.inverse_resolution[0] =
@@ -4254,6 +4285,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
             );
         }
     }
+    report->cpu_post_encode_milliseconds =
+        (double)(SDL_GetTicksNS() - post_started_ticks) /
+        1000000.0;
     if (!fullscreen_ok) {
         (void)SDL_SubmitGPUCommandBuffer(command);
         free(bone_offsets);

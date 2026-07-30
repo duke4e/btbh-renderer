@@ -574,6 +574,13 @@ typedef struct BTBHGPUSceneReport {
     uint32_t instance_count;
     uint32_t transient_instance_count;
     uint32_t persistent_batch_count;
+    double cpu_prepare_milliseconds;
+    double cpu_upload_milliseconds;
+    double cpu_shadow_encode_milliseconds;
+    double cpu_swapchain_acquire_milliseconds;
+    double cpu_target_ensure_milliseconds;
+    double cpu_geometry_encode_milliseconds;
+    double cpu_post_encode_milliseconds;
     char message[256];
 } BTBHGPUSceneReport;
 
