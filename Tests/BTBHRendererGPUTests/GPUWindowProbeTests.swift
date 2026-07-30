@@ -799,6 +799,54 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shadowFragment.contains("discard;"))
     }
 
+    func testProductionStaticShadowFastPathIsRestrictedToPlainMeshes()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+        let shaderDirectory = packageRoot.appendingPathComponent(
+            "shaders/gpu_spike"
+        )
+        let vertexShader = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_shadow_fast.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let fragmentShader = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_shadow_fast.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let normalizedNativeScene = nativeScene
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "batch->surface_variant == BTBH_GPU_SCENE_SURFACE_NONE"
+        ))
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "batch->billboard_mode == BTBH_GPU_SCENE_BILLBOARD_DISABLED"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->fast_shadow_pipelines["
+        ))
+        XCTAssertTrue(vertexShader.contains(
+            "output.position = mul(light_view_projection, world_position);"
+        ))
+        XCTAssertFalse(vertexShader.contains("btbh_apply_surface_vertex"))
+        XCTAssertFalse(fragmentShader.contains("discard"))
+    }
+
     func testTransparentSceneBatchesUseLegacyMaterialStateOrderAfterOpaqueBatches() {
         func material(
             descriptor: MaterialDescriptor

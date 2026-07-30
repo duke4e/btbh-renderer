@@ -150,6 +150,8 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
+        *fast_shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
+    SDL_GPUGraphicsPipeline
         *animated_shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline *ssao_pipeline;
     SDL_GPUGraphicsPipeline *ssao_denoise_pipeline;
@@ -214,6 +216,7 @@ static bool btbh_gpu_scene_shadow_resources_ready(
          ++cull_index) {
         if (
             runtime->shadow_pipelines[cull_index] == NULL ||
+            runtime->fast_shadow_pipelines[cull_index] == NULL ||
             runtime->animated_shadow_pipelines[cull_index] == NULL
         ) {
             return false;
@@ -1541,6 +1544,8 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
 
 static bool btbh_gpu_scene_create_shadow_pipelines(
     BTBHGPUWindow *window,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
     const char *shadow_vertex_shader_path,
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
@@ -1604,6 +1609,43 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         SDL_ReleaseGPUShader(device, shadow_vertex_shader);
         return false;
     }
+    SDL_GPUShader *fast_shadow_vertex_shader =
+        btbh_gpu_scene_load_shader(
+            device,
+            fast_shadow_vertex_shader_path,
+            entrypoint,
+            format,
+            SDL_GPU_SHADERSTAGE_VERTEX,
+            1u,
+            0u,
+            1u,
+            report
+        );
+    if (fast_shadow_vertex_shader == NULL) {
+        SDL_ReleaseGPUShader(device, shadow_fragment_shader);
+        SDL_ReleaseGPUShader(device, animated_shadow_vertex_shader);
+        SDL_ReleaseGPUShader(device, shadow_vertex_shader);
+        return false;
+    }
+    SDL_GPUShader *fast_shadow_fragment_shader =
+        btbh_gpu_scene_load_shader(
+            device,
+            fast_shadow_fragment_shader_path,
+            entrypoint,
+            format,
+            SDL_GPU_SHADERSTAGE_FRAGMENT,
+            0u,
+            0u,
+            0u,
+            report
+        );
+    if (fast_shadow_fragment_shader == NULL) {
+        SDL_ReleaseGPUShader(device, fast_shadow_vertex_shader);
+        SDL_ReleaseGPUShader(device, shadow_fragment_shader);
+        SDL_ReleaseGPUShader(device, animated_shadow_vertex_shader);
+        SDL_ReleaseGPUShader(device, shadow_vertex_shader);
+        return false;
+    }
 
     SDL_GPUVertexBufferDescription vertex_buffer;
     SDL_GPUVertexAttribute shadow_attributes[3];
@@ -1655,10 +1697,16 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         info.rasterizer_state.cull_mode =
             btbh_gpu_scene_cull_mode((BTBHGPUSceneCullMode)cull_index);
         info.vertex_shader = shadow_vertex_shader;
+        info.fragment_shader = shadow_fragment_shader;
         info.vertex_input_state.num_vertex_attributes = 1u;
         window->scene_runtime->shadow_pipelines[cull_index] =
             SDL_CreateGPUGraphicsPipeline(device, &info);
+        info.vertex_shader = fast_shadow_vertex_shader;
+        info.fragment_shader = fast_shadow_fragment_shader;
+        window->scene_runtime->fast_shadow_pipelines[cull_index] =
+            SDL_CreateGPUGraphicsPipeline(device, &info);
         info.vertex_shader = animated_shadow_vertex_shader;
+        info.fragment_shader = shadow_fragment_shader;
         info.vertex_input_state.num_vertex_attributes = 3u;
         window->scene_runtime
             ->animated_shadow_pipelines[cull_index] =
@@ -1666,8 +1714,15 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         if (
             window->scene_runtime->shadow_pipelines[cull_index] == NULL ||
             window->scene_runtime
+                ->fast_shadow_pipelines[cull_index] == NULL ||
+            window->scene_runtime
                 ->animated_shadow_pipelines[cull_index] == NULL
         ) {
+            SDL_ReleaseGPUShader(
+                device,
+                fast_shadow_fragment_shader
+            );
+            SDL_ReleaseGPUShader(device, fast_shadow_vertex_shader);
             SDL_ReleaseGPUShader(
                 device,
                 animated_shadow_vertex_shader
@@ -1682,6 +1737,8 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
             return false;
         }
     }
+    SDL_ReleaseGPUShader(device, fast_shadow_fragment_shader);
+    SDL_ReleaseGPUShader(device, fast_shadow_vertex_shader);
     SDL_ReleaseGPUShader(device, animated_shadow_vertex_shader);
     SDL_ReleaseGPUShader(device, shadow_vertex_shader);
     SDL_ReleaseGPUShader(device, shadow_fragment_shader);
@@ -1819,6 +1876,8 @@ static bool btbh_gpu_scene_ensure_runtime(
 
 static bool btbh_gpu_scene_ensure_shadow_resources(
     BTBHGPUWindow *window,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
     const char *shadow_vertex_shader_path,
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
@@ -1831,6 +1890,8 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
     }
     if (!btbh_gpu_scene_create_shadow_pipelines(
             window,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
             shadow_vertex_shader_path,
             animated_shadow_vertex_shader_path,
             shadow_fragment_shader_path,
@@ -2907,9 +2968,18 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     2u
                 );
             } else {
+                const bool uses_fast_shadow =
+                    batch->surface_variant ==
+                        BTBH_GPU_SCENE_SURFACE_NONE &&
+                    batch->billboard_mode ==
+                        BTBH_GPU_SCENE_BILLBOARD_DISABLED;
                 SDL_BindGPUGraphicsPipeline(
                     pass,
-                    runtime->shadow_pipelines[batch->cull_mode]
+                    uses_fast_shadow
+                        ? runtime->fast_shadow_pipelines[
+                            batch->cull_mode
+                        ]
+                        : runtime->shadow_pipelines[batch->cull_mode]
                 );
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
@@ -3031,6 +3101,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
     const char *shadow_vertex_shader_path,
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
@@ -3077,6 +3149,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         !window->claimed ||
         vertex_shader_path == NULL ||
         animated_vertex_shader_path == NULL ||
+        fast_shadow_vertex_shader_path == NULL ||
+        fast_shadow_fragment_shader_path == NULL ||
         shadow_vertex_shader_path == NULL ||
         animated_shadow_vertex_shader_path == NULL ||
         shadow_fragment_shader_path == NULL ||
@@ -3158,6 +3232,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     if (shadows_active &&
         !btbh_gpu_scene_ensure_shadow_resources(
             window,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
             shadow_vertex_shader_path,
             animated_shadow_vertex_shader_path,
             shadow_fragment_shader_path,
@@ -4521,6 +4597,16 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                     device,
                     window->scene_runtime
                         ->shadow_pipelines[cull_index]
+                );
+            }
+            if (
+                window->scene_runtime
+                    ->fast_shadow_pipelines[cull_index] != NULL
+            ) {
+                SDL_ReleaseGPUGraphicsPipeline(
+                    device,
+                    window->scene_runtime
+                        ->fast_shadow_pipelines[cull_index]
                 );
             }
             if (

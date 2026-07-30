@@ -1738,6 +1738,8 @@ public final class GPUWindowProbe {
     func presentModelInstances(
         vertexShaderPath: String,
         animatedVertexShaderPath: String,
+        fastShadowVertexShaderPath: String? = nil,
+        fastShadowFragmentShaderPath: String? = nil,
         shadowVertexShaderPath: String,
         animatedShadowVertexShaderPath: String,
         shadowFragmentShaderPath: String,
@@ -2063,9 +2065,17 @@ public final class GPUWindowProbe {
             ))
         }
         var report = BTBHGPUSceneReport()
+        let resolvedFastShadowVertexShaderPath =
+            fastShadowVertexShaderPath ?? shadowVertexShaderPath
+        let resolvedFastShadowFragmentShaderPath =
+            fastShadowFragmentShaderPath ?? shadowFragmentShaderPath
         let encodeStarted = Self.monotonicElapsedSeconds
         let result = vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
+                resolvedFastShadowVertexShaderPath.withCString {
+                    fastShadowVertexPath in
+                    resolvedFastShadowFragmentShaderPath.withCString {
+                        fastShadowFragmentPath in
                 shadowVertexShaderPath.withCString { shadowVertexPath in
                     animatedShadowVertexShaderPath.withCString {
                         animatedShadowVertexPath in
@@ -2097,6 +2107,8 @@ public final class GPUWindowProbe {
                                                     window,
                                                     vertexPath,
                                                     animatedVertexPath,
+                                                    fastShadowVertexPath,
+                                                    fastShadowFragmentPath,
                                                     shadowVertexPath,
                                                     animatedShadowVertexPath,
                                                     shadowFragmentPath,
@@ -2141,6 +2153,8 @@ public final class GPUWindowProbe {
                     }
                 }
             }
+        }
+        }
         }
         }
         let cpuEncodeMilliseconds =

@@ -497,6 +497,16 @@ public final class GPUPlatform: GamePlatform {
                     "production_animated_model.vert.\(extensionName)"
                 )
                 .path,
+            fastShadowVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow_fast.vert.\(extensionName)"
+                )
+                .path,
+            fastShadowFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow_fast.frag.\(extensionName)"
+                )
+                .path,
             shadowVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_shadow.vert.\(extensionName)"

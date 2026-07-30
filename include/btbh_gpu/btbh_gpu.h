@@ -832,6 +832,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
     const char *shadow_vertex_shader_path,
     const char *animated_shadow_vertex_shader_path,
     const char *shadow_fragment_shader_path,
