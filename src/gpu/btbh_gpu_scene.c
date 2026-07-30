@@ -146,8 +146,10 @@ struct BTBHGPUSceneRuntime {
     [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
     [BTBH_GPU_SCENE_CULL_COUNT]
     [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
-    SDL_GPUGraphicsPipeline *shadow_pipeline;
-    SDL_GPUGraphicsPipeline *animated_shadow_pipeline;
+    SDL_GPUGraphicsPipeline
+        *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
+    SDL_GPUGraphicsPipeline
+        *animated_shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline *ssao_pipeline;
     SDL_GPUGraphicsPipeline *ssao_denoise_pipeline;
     SDL_GPUGraphicsPipeline *ssao_resolve_pipeline;
@@ -200,13 +202,21 @@ static bool btbh_gpu_scene_shadow_resources_ready(
     const BTBHGPUSceneRuntime *runtime
 ) {
     if (runtime == NULL ||
-        runtime->shadow_pipeline == NULL ||
-        runtime->animated_shadow_pipeline == NULL ||
         runtime->directional_shadow_textures[0] == NULL ||
         runtime->directional_shadow_textures[1] == NULL ||
         runtime->directional_shadow_textures[2] == NULL ||
         runtime->directional_shadow_sampler == NULL) {
         return false;
+    }
+    for (uint32_t cull_index = 0u;
+         cull_index < BTBH_GPU_SCENE_CULL_COUNT;
+         ++cull_index) {
+        if (
+            runtime->shadow_pipelines[cull_index] == NULL ||
+            runtime->animated_shadow_pipelines[cull_index] == NULL
+        ) {
+            return false;
+        }
     }
     return true;
 }
@@ -1629,7 +1639,7 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face =
-        SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+        SDL_GPU_FRONTFACE_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS;
     info.depth_stencil_state.enable_depth_test = true;
@@ -1638,24 +1648,42 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
     info.target_info.depth_stencil_format =
         SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     info.target_info.has_depth_stencil_target = true;
-    window->scene_runtime->shadow_pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
-    info.vertex_shader = animated_shadow_vertex_shader;
-    info.vertex_input_state.num_vertex_attributes = 3u;
-    window->scene_runtime->animated_shadow_pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
+    for (uint32_t cull_index = 0u;
+         cull_index < BTBH_GPU_SCENE_CULL_COUNT;
+         ++cull_index) {
+        info.rasterizer_state.cull_mode =
+            btbh_gpu_scene_cull_mode((BTBHGPUSceneCullMode)cull_index);
+        info.vertex_shader = shadow_vertex_shader;
+        info.vertex_input_state.num_vertex_attributes = 1u;
+        window->scene_runtime->shadow_pipelines[cull_index] =
+            SDL_CreateGPUGraphicsPipeline(device, &info);
+        info.vertex_shader = animated_shadow_vertex_shader;
+        info.vertex_input_state.num_vertex_attributes = 3u;
+        window->scene_runtime
+            ->animated_shadow_pipelines[cull_index] =
+                SDL_CreateGPUGraphicsPipeline(device, &info);
+        if (
+            window->scene_runtime->shadow_pipelines[cull_index] == NULL ||
+            window->scene_runtime
+                ->animated_shadow_pipelines[cull_index] == NULL
+        ) {
+            SDL_ReleaseGPUShader(
+                device,
+                animated_shadow_vertex_shader
+            );
+            SDL_ReleaseGPUShader(device, shadow_vertex_shader);
+            SDL_ReleaseGPUShader(device, shadow_fragment_shader);
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return false;
+        }
+    }
     SDL_ReleaseGPUShader(device, animated_shadow_vertex_shader);
     SDL_ReleaseGPUShader(device, shadow_vertex_shader);
     SDL_ReleaseGPUShader(device, shadow_fragment_shader);
-    if (window->scene_runtime->shadow_pipeline == NULL ||
-        window->scene_runtime->animated_shadow_pipeline == NULL) {
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
     return true;
 }
 
@@ -2857,7 +2885,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
             if (animated) {
                 SDL_BindGPUGraphicsPipeline(
                     pass,
-                    runtime->animated_shadow_pipeline
+                    runtime->animated_shadow_pipelines[batch->cull_mode]
                 );
                 SDL_GPUBuffer *storage_buffers[2] = {
                     batch_instance_buffer,
@@ -2872,7 +2900,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
             } else {
                 SDL_BindGPUGraphicsPipeline(
                     pass,
-                    runtime->shadow_pipeline
+                    runtime->shadow_pipelines[batch->cull_mode]
                 );
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
@@ -4472,19 +4500,29 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 );
             }
         }
-        if (window->scene_runtime->shadow_pipeline != NULL) {
-            SDL_ReleaseGPUGraphicsPipeline(
-                device,
-                window->scene_runtime->shadow_pipeline
-            );
-        }
-        if (
-            window->scene_runtime->animated_shadow_pipeline != NULL
-        ) {
-            SDL_ReleaseGPUGraphicsPipeline(
-                device,
-                window->scene_runtime->animated_shadow_pipeline
-            );
+        for (uint32_t cull_index = 0u;
+             cull_index < BTBH_GPU_SCENE_CULL_COUNT;
+             ++cull_index) {
+            if (
+                window->scene_runtime
+                    ->shadow_pipelines[cull_index] != NULL
+            ) {
+                SDL_ReleaseGPUGraphicsPipeline(
+                    device,
+                    window->scene_runtime
+                        ->shadow_pipelines[cull_index]
+                );
+            }
+            if (
+                window->scene_runtime
+                    ->animated_shadow_pipelines[cull_index] != NULL
+            ) {
+                SDL_ReleaseGPUGraphicsPipeline(
+                    device,
+                    window->scene_runtime
+                        ->animated_shadow_pipelines[cull_index]
+                );
+            }
         }
         if (window->scene_runtime->post_pipeline != NULL) {
             SDL_ReleaseGPUGraphicsPipeline(

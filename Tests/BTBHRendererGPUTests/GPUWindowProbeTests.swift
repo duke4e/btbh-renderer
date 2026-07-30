@@ -527,6 +527,35 @@ final class GPUWindowProbeTests: XCTestCase {
         )
     }
 
+    func testProductionShadowPipelinesRespectMaterialCullMode() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(nativeScene.contains(
+            "shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT]"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "animated_shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT]"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "btbh_gpu_scene_cull_mode((BTBHGPUSceneCullMode)cull_index)"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->shadow_pipelines[batch->cull_mode]"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->animated_shadow_pipelines[batch->cull_mode]"
+        ))
+    }
+
     func testProductionAmbientMatchesLegacyFinalAlbedoApplication() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
