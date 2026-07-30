@@ -790,6 +790,97 @@ and race review found no HIGH/MEDIUM issue.
 This slice changes no renderer selection, visual golden, threshold, shader,
 or performance authority.
 
+### Final-source Vulkan performance profile
+
+The final-source Windows profile used 1920x1080, seed `424242`, the shipping
+FXAA/no-SSAO configuration, and identical deterministic Game entity
+signatures:
+
+- projectiles `13185`;
+- beams `1416`;
+- fields `35224`;
+- effects `15077`;
+- active hazards `35321`.
+
+The retained legacy controls and the pre-fix Vulkan controls were:
+
+| Series | Median / p95 / worst ms |
+| --- | ---: |
+| Legacy W165 | 30.891 / 36.582 / 40.553 |
+| Legacy W166 | 31.240 / 37.140 / 42.470 |
+| Vulkan W167 | 43.750 / 45.350 / 48.680 |
+| Vulkan W168 | 43.780 / 45.770 / 49.020 |
+
+Warmed RenderDoc capture W194 attributed approximately `42.25 ms` of GPU
+work as follows:
+
+| Vulkan work | GPU time |
+| --- | ---: |
+| Spot shadow | 26.34 ms |
+| Transparent draws | 9.57 ms |
+| Primary shadow | 2.44 ms |
+| Opaque draws | 1.76 ms |
+| Production post | 1.74 ms |
+
+This disproved CPU submission, opaque shading, FXAA, and SSAO as the primary
+cause of the current Game regression. The production path does not enable
+SSAO, and post is a small fixed fraction of the measured frame. The dominant
+cost is shadow rasterization, followed by transparent fill/blend overdraw.
+
+Renderer commits `21a3c99`, `104a447`, `96f57a6`, and `55367c9` added
+measured shadow culling and safe static-shadow shader specialization. The
+specialized W189/W191 series measured `39.625 / 43.180` and
+`39.070 / 42.910` ms median/p95. Its paired controls averaged `41.455 ms`
+median, so the retained specialization recovered approximately `5.1%`
+without changing the approved visual authority. Paired SSIM values were
+`0.999950724` and `0.999735646`.
+
+The hottest remaining W194 draw was a 9,126-index animated mesh rendered as
+16 instances. Asset inspection identified it as the closed fusion-drone
+model, whose imported double-sided flag unnecessarily selected the no-cull
+pipeline. A game-side material override now selects back-face culling only
+for that body style; turret and absent-body policies remain unchanged. The
+two warmed W198/W199 results were:
+
+| Series | Median / p95 / worst ms |
+| --- | ---: |
+| Fusion cull W198 | 36.292 / 41.968 / 48.209 |
+| Fusion cull W199 | 36.723 / 39.910 / 43.491 |
+
+The paired screenshots retained SSIM `0.999670057` and `0.999625806`,
+identical cue/entity JSON, 1920x1080 output, and clean shutdown. RenderDoc
+W200 directly confirmed the predicted GPU movement:
+
+- total captured GPU time fell from approximately `42.25` to `38.67 ms`;
+- spot shadow fell from `26.34` to `22.79 ms`;
+- the fusion draw fell from `5.18` to `2.05 ms`;
+- primary shadow fell from `2.44` to `2.16 ms`;
+- opaque, transparent, and post costs were effectively unchanged.
+
+Across the pre-fix W167/W168 and retained W198/W199 pairs, mean Vulkan Game
+median improved from `43.765` to `36.507 ms` (`-16.58%`) and p95 from
+`45.560` to `40.939 ms` (`-10.14%`). The remaining gap against the W165/W166
+legacy mean is `+17.52%` median and `+11.06%` p95.
+
+A D16 shadow-depth experiment was also rejected rather than retained. W195
+and W196 measured `39.105 / 42.461` and `39.104 / 42.794 ms`; W197 changed
+spot-shadow GPU time by only about `0.03 ms`. It therefore did not explain
+the regression despite matching the legacy depth precision more closely.
+
+After the fusion fix, the remaining spot-shadow cost is distributed over
+many one-instance, 30k-70k-index, no-cull meshes rather than one dominant
+draw. An exact-index scan did not match the sampled counts to individually
+imported assets, making runtime-generated city geometry the leading
+hypothesis rather than a proven mapping. A blanket shadow-culling override
+would change two-sided material semantics and is not justified without
+mapping those draws to closed source meshes. Transparent work remains the
+second-ranked target: the hottest draws contain 26,524 and 12,004 instances
+and are fill/blend limited.
+
+No golden or threshold changed. The historical Windows-to-Apple text and
+antialiasing SSIM problem remains documented and unresolved; none of these
+Windows-local performance results closes that platform gate.
+
 ## Remaining Windows work
 
 The following work remains before Windows visual/performance parity can be
