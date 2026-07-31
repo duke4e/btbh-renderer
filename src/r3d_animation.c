@@ -95,6 +95,9 @@ void R3D_UnloadAnimationLib(R3D_AnimationLib animLib)
     for (int i = 0; i < animLib.count; ++i) {
         R3D_Animation* anim = &animLib.animations[i];
 
+        MemFree(anim->name);
+        anim->name = NULL;
+
         for (int j = 0; j < anim->channelCount; ++j) {
             R3D_AnimationChannel* channel = &anim->channels[j];
 

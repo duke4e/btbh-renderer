@@ -42,6 +42,17 @@
       }
     },
     {
+      "name": "x64-gpu-debug",
+      "displayName": "x64 SDL_GPU Phase 2 Debug",
+      "inherits": "x64-debug",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "installDir": "${sourceDir}/out/install/${presetName}",
+      "cacheVariables": {
+        "BTBH_BUILD_GPU_SPIKE": "ON",
+        "R3D_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
       "name": "x86-debug",
       "displayName": "x86 Debug",
       "inherits": "windows-base",

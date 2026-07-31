@@ -61,7 +61,7 @@ typedef struct R3D_Animation {
     float ticksPerSecond;               ///< Playback rate; number of animation ticks per second.
     float duration;                     ///< Total length of the animation, in ticks.
     int boneCount;                      ///< Number of bones in the target skeleton.
-    char name[32];                      ///< Animation name (null-terminated string).
+    char* name;                         ///< Full null-terminated animation name owned by R3D_AnimationLib.
 } R3D_Animation;
 
 /**

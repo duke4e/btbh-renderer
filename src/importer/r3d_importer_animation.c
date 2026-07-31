@@ -119,6 +119,8 @@ fail:
 
 static bool load_animation(R3D_Animation* animation, const R3D_Importer* importer, const struct aiAnimation* aiAnim)
 {
+    *animation = (R3D_Animation) {0};
+
     // Basic validation
     if (!aiAnim || aiAnim->mNumChannels == 0) {
         R3D_TRACELOG(LOG_ERROR, "Invalid animation or no channels");
@@ -139,10 +141,11 @@ static bool load_animation(R3D_Animation* animation, const R3D_Importer* importe
         ? (float)aiAnim->mTicksPerSecond 
         : 24.0f;
 
-    // Copy animation name
-    size_t nameLen = strlen(aiAnim->mName.data);
-    if (nameLen >= sizeof(animation->name)) {
-        nameLen = sizeof(animation->name) - 1;
+    size_t nameLen = aiAnim->mName.length;
+    animation->name = MemAlloc(nameLen + 1);
+    if (!animation->name) {
+        R3D_TRACELOG(LOG_ERROR, "Failed to allocate animation name");
+        return false;
     }
     memcpy(animation->name, aiAnim->mName.data, nameLen);
     animation->name[nameLen] = '\0';
@@ -152,6 +155,8 @@ static bool load_animation(R3D_Animation* animation, const R3D_Importer* importe
     animation->channels = MemAlloc(animation->channelCount * sizeof(R3D_AnimationChannel));
     if (!animation->channels) {
         R3D_TRACELOG(LOG_ERROR, "Failed to allocate animation channels");
+        MemFree(animation->name);
+        animation->name = NULL;
         return false;
     }
 
@@ -168,6 +173,9 @@ static bool load_animation(R3D_Animation* animation, const R3D_Importer* importe
     if (successChannels == 0) {
         R3D_TRACELOG(LOG_ERROR, "No channels were successfully loaded");
         MemFree(animation->channels);
+        animation->channels = NULL;
+        MemFree(animation->name);
+        animation->name = NULL;
         return false;
     }
 

@@ -93,7 +93,7 @@ typedef struct {
  * Animation is a leaf node, holding the R3D_Animation structure.
  */
 typedef struct {
-    char name[32];                          ///< Animation name (null-terminated string).
+    const char* name;                       ///< Canonical library-owned animation name; NULL for by-index creation input.
     R3D_AnimationState state;               ///< Animation state.
     bool looper;                            ///< Flag to control whether the animation is considered done when looped; yes when true.
 
@@ -277,6 +277,22 @@ R3DAPI R3D_AnimationTreeNode* R3D_CreateAnimationNode(R3D_AnimationTree* tree, R
  */
 R3DAPI R3D_AnimationTreeNode* R3D_CreateAnimationNodeEx(R3D_AnimationTree* tree, R3D_AnimationNodeParams params,
                                                         bool setTime);
+
+/**
+ * @brief Creates an animation leaf node from an exact zero-based library index.
+ *
+ * The returned node stores the canonical library-owned animation name.
+ *
+ * @param tree Animation tree whose player owns the animation library.
+ * @param animationIndex Zero-based index in tree->player.animLib.
+ * @param params Playback, loop, and callback parameters; params.name is ignored.
+ * @return Created node, or NULL when tree/library/index is invalid.
+ */
+R3DAPI R3D_AnimationTreeNode* R3D_CreateAnimationNodeByIndex(
+    R3D_AnimationTree* tree,
+    int animationIndex,
+    R3D_AnimationNodeParams params
+);
 
 /**
  * @brief Creates animation node of type Blend2.

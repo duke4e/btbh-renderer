@@ -953,28 +953,31 @@ static bool atree_switch_add(r3d_animtree_switch_t* parent, R3D_AnimationTreeNod
     return false;
 }
 
-static R3D_AnimationTreeNode* atree_anim_create(R3D_AnimationTree* atree, R3D_AnimationNodeParams params, bool reset)
+static R3D_AnimationTreeNode* atree_anim_create_resolved(
+    R3D_AnimationTree* atree,
+    const R3D_Animation* animation,
+    R3D_AnimationNodeParams params,
+    bool reset
+)
 {
-    const R3D_Animation* a = R3D_GetAnimation(atree->player.animLib, params.name);
-    if (!a) {
-        R3D_TRACELOG(LOG_WARNING, "Failed to create animation node: animation \"%s\" not found", params.name);
-        return NULL;
-    }
+    if (!atree || !animation) return NULL;
+
     R3D_AnimationTreeNode* anode = anode_create(atree, R3D_ANIMTREE_ANIM, sizeof(r3d_animtree_anim_t));
     if (!anode) return NULL;
 
+    params.name = animation->name;
     r3d_animtree_anim_t* anim = anode->anim;
-    anim->animation = a;
+    anim->animation = animation;
     anim->params = params;
     if (reset) anode_reset_anim(anim);
 
     int boneIdx = atree->rootBone;
     if (valid_root_bone(boneIdx)) {
-        const R3D_AnimationState* s = &anim->params.state;
-        const R3D_AnimationChannel* c = r3d_anim_channel_find(a, boneIdx);
-        if (c) {
+        const R3D_AnimationState* state = &anim->params.state;
+        const R3D_AnimationChannel* channel = r3d_anim_channel_find(animation, boneIdx);
+        if (channel) {
             anim->root.last = r3d_anim_channel_lerp(
-                c, s->currentTime * a->ticksPerSecond,
+                channel, state->currentTime * animation->ticksPerSecond,
                 &anim->root.rest0, &anim->root.restN
             );
         }
@@ -992,6 +995,28 @@ static R3D_AnimationTreeNode* atree_anim_create(R3D_AnimationTree* atree, R3D_An
     }
 
     return anode;
+}
+
+static R3D_AnimationTreeNode* atree_anim_create(
+    R3D_AnimationTree* atree,
+    R3D_AnimationNodeParams params,
+    bool reset
+)
+{
+    if (!atree || !params.name) {
+        R3D_TRACELOG(LOG_WARNING, "Failed to create animation node: missing tree or name");
+        return NULL;
+    }
+    const R3D_Animation* animation = R3D_GetAnimation(atree->player.animLib, params.name);
+    if (!animation) {
+        R3D_TRACELOG(
+            LOG_WARNING,
+            "Failed to create animation node: animation \"%s\" not found",
+            params.name
+        );
+        return NULL;
+    }
+    return atree_anim_create_resolved(atree, animation, params, reset);
 }
 
 static R3D_AnimationTreeNode* atree_blend2_create(R3D_AnimationTree* atree, R3D_Blend2NodeParams params)
@@ -1281,6 +1306,31 @@ R3D_AnimationTreeNode* R3D_CreateAnimationNodeEx(R3D_AnimationTree* tree, R3D_An
     return atree_anim_create(tree, params, setTime);
 }
 
+R3D_AnimationTreeNode* R3D_CreateAnimationNodeByIndex(
+    R3D_AnimationTree* tree,
+    int animationIndex,
+    R3D_AnimationNodeParams params
+)
+{
+    if (!tree ||
+        !tree->player.animLib.animations ||
+        animationIndex < 0 ||
+        animationIndex >= tree->player.animLib.count) {
+        R3D_TRACELOG(
+            LOG_WARNING,
+            "Failed to create animation node: invalid animation index %d",
+            animationIndex
+        );
+        return NULL;
+    }
+    return atree_anim_create_resolved(
+        tree,
+        &tree->player.animLib.animations[animationIndex],
+        params,
+        true
+    );
+}
+
 R3D_AnimationTreeNode* R3D_CreateBlend2Node(R3D_AnimationTree* tree, R3D_Blend2NodeParams params)
 {
     return atree_blend2_create(tree, params);
@@ -1324,6 +1374,8 @@ R3D_AnimationStmIndex R3D_CreateStmNodeEdge(R3D_AnimationTreeNode* stmNode, R3D_
 
 void R3D_SetAnimationNodeParams(R3D_AnimationTreeNode* node, R3D_AnimationNodeParams params)
 {
+    if (!node || node->base->type != R3D_ANIMTREE_ANIM) return;
+    params.name = node->anim->animation->name;
     node->anim->params = params;
 }
 

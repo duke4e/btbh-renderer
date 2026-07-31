@@ -63,11 +63,11 @@ int main(void)
 
     R3D_AnimationTreeNode* leftRightStmNode = R3D_CreateStmNode(&animTree, 4, 4);
     {
-        TextCopy(loopingAnimParams.name, "walk left");
+        loopingAnimParams.name = "walk left";
         R3D_AnimationTreeNode* animNode0 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
         R3D_AnimationTreeNode* animNode1 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
 
-        TextCopy(loopingAnimParams.name, "walk right");
+        loopingAnimParams.name = "walk right";
         R3D_AnimationTreeNode* animNode2 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
         R3D_AnimationTreeNode* animNode3 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
 
@@ -83,11 +83,11 @@ int main(void)
 
     R3D_AnimationTreeNode* forwBackStmNode = R3D_CreateStmNode(&animTree, 4, 4);
     {
-        TextCopy(loopingAnimParams.name, "walk forward");
+        loopingAnimParams.name = "walk forward";
         R3D_AnimationTreeNode* animNode0 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
         R3D_AnimationTreeNode* animNode1 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
 
-        TextCopy(loopingAnimParams.name, "walk backward");
+        loopingAnimParams.name = "walk backward";
         R3D_AnimationTreeNode* animNode2 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
         R3D_AnimationTreeNode* animNode3 = R3D_CreateAnimationNode(&animTree, loopingAnimParams);
 

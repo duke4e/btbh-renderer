@@ -1,0 +1,13 @@
+hardware=Apple M4 Pro
+graphics=Apple M4 Pro
+os=macOS 26.5.2 (25F84)
+commit=35285608b68a166834cf9c5d2b2e121f14d8f573
+renderer_commit=e05f233a7a4d62626cf1e47b791440ccc0f77777
+resolution=1920x1080
+seed=424242
+manifest=/private/tmp/btbh-game-phase-0-1/City Generator (r3d)/Tests/RenderGoldens/legacy/manifest.json
+mode=game seed=424242 samples=120 median_ms=33.37606228888035 p95_ms=40.57050123810768 worst_ms=42.387623339891434 sha256=0383942571c1935cce9bf92cc8b37149180880c4ad8e47bf594c9e46ede3d252 entities=BTBH_RENDER_BASELINE_ENTITIES mode=game beams=1416 effects=15077 fields=35224 projectile_proxies=0 projectiles=13185
+mode=combat-lab seed=424242 samples=120 median_ms=34.436166286468506 p95_ms=39.4250825047493 worst_ms=44.31258514523506 sha256=ebe439194f272dd3f24e9377b70031f68050a5e651764e87a58047a4227f4062 entities=BTBH_RENDER_BASELINE_ENTITIES mode=combat-lab beams=1416 effects=15077 fields=35224 projectile_proxies=0 projectiles=13185
+mode=particle-editor seed=424242 samples=120 median_ms=7.076583337038755 p95_ms=7.2588748298585415 worst_ms=9.229166433215141 sha256=1f09d1c29c87e612dde5a09173d5e5c70085dd7e6c0defc918266e85cf8a51c4 entities=BTBH_RENDER_BASELINE_ENTITIES mode=particle-editor particles=51
+mode=city-block-editor seed=424242 samples=120 median_ms=7.097291527315974 p95_ms=7.248249836266041 worst_ms=9.174250066280365 sha256=df64337277342970bb45ddbd6bd5977c022b1091f850d3c75e05f6b011c6fdf3 entities=BTBH_RENDER_BASELINE_ENTITIES mode=city-block-editor scene_objects=64
+mode=unified-city seed=424242 samples=120 median_ms=7.096395827829838 p95_ms=7.207124959677458 worst_ms=7.2189997881650925 sha256=353e5b72bb13d8ead4628e7c55779fca5fb329bceb25345aa210559866f08156 entities=BTBH_RENDER_BASELINE_ENTITIES mode=unified-city assets=154 districts=9 road_meshes=3

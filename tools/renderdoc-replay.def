@@ -1,0 +1,9 @@
+LIBRARY renderdoc.dll
+EXPORTS
+    RENDERDOC_AllocArrayMem
+    RENDERDOC_CreateTargetControl
+    RENDERDOC_EnumerateRemoteTargets
+    RENDERDOC_FreeArrayMem
+    RENDERDOC_InitialiseReplay
+    RENDERDOC_OpenCaptureFile
+    RENDERDOC_ShutdownReplay
