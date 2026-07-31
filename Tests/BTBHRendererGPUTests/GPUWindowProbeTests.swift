@@ -88,25 +88,25 @@ final class GPUWindowProbeTests: XCTestCase {
                 "src/gpu/btbh_gpu_scene.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let canvasSource = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_canvas.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let windowSource = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_window.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let sceneAdapterSource = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "Sources/BTBHRendererGPU/BTBHRendererGPU.swift"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let sceneSubmission = try XCTUnwrap(
             sceneSource.range(
                 of: "btbh_gpu_window_scene_present_instances_internal("
