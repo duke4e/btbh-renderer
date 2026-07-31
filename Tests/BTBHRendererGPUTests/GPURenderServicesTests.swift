@@ -919,6 +919,118 @@ final class GPURenderServicesTests: XCTestCase {
         #endif
     }
 
+    func testPersistentModelRangeListQueuesOnceAndCullsRangesInGPUBackend()
+        throws
+    {
+        #if os(Windows)
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .vulkan,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH persistent model range-list integration",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/sparse-attributes-and-indices.gltf"
+                )
+                .path,
+            flags: [.meshData]
+        )
+        let buffer = try RenderServices.resources.createInstanceBuffer(.init(
+            capacity: 2,
+            stride: 0,
+            includesColor: true,
+            customFloatCount: 4
+        ))
+        let instances = (0..<2).map { index in
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(
+                    x: Float(index),
+                    y: 0,
+                    z: 0,
+                    w: 0
+                )
+            )
+        }
+        let frame = FrameDescriptor(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        )
+
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(frame)
+        RenderServices.scene.submitPersistentModelRanges(.init(
+            model: model,
+            instances: instances,
+            overrides: [],
+            persistentBuffer: buffer,
+            persistentRevision: 1,
+            ranges: [
+                .init(
+                    sourceStart: 0,
+                    count: 1,
+                    bounds: .init(
+                        minimum: .init(x: 0, y: 0, z: 0),
+                        maximum: .init(x: 1, y: 1, z: 1)
+                    )
+                ),
+                .init(
+                    sourceStart: 1,
+                    count: 1,
+                    bounds: .init(
+                        minimum: .init(x: 100, y: 0, z: 0),
+                        maximum: .init(x: 101, y: 1, z: 1)
+                    )
+                ),
+            ]
+        ))
+
+        let scene = try XCTUnwrap(bundle.scene as? GPUSceneBackend)
+        XCTAssertEqual(scene.pendingModelDrawCountForTesting, 1)
+        try RenderServices.scene.endFrame()
+
+        let resources = try XCTUnwrap(
+            bundle.resources as? GPUResourceBackend
+        )
+        let report = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(report.instanceCount, 1)
+        XCTAssertEqual(report.transientInstanceCount, 0)
+        XCTAssertGreaterThan(report.persistentBatchCount, 0)
+        XCTAssertEqual(resources.semanticInstanceUploadCount, 1)
+        RenderServices.canvas.endFrame()
+
+        RenderServices.resources.destroyInstanceBuffer(buffer)
+        RenderServices.resources.destroyModel(model)
+        #else
+        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
+        #endif
+    }
+
     func testSkyAmbientAndLightResourcesValidateDependenciesAndStaleHandles() throws {
         #if os(Windows)
         RenderServices.uninstall()
@@ -996,6 +1108,21 @@ final class GPURenderServicesTests: XCTestCase {
         )
         XCTAssertThrowsError(
             try RenderServices.resources.createLight(invalidLight)
+        )
+        let invalidShadowPeriod = LightDescriptor(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 1,
+            range: 100,
+            castsShadow: true,
+            shadowSoftness: 0.25,
+            shadowUpdatePeriodFrames: 0
+        )
+        XCTAssertThrowsError(
+            try RenderServices.resources.createLight(invalidShadowPeriod)
         )
 
         RenderServices.resources.destroyCubemap(replacementSky)
@@ -1147,6 +1274,10 @@ final class GPURenderServicesTests: XCTestCase {
         try RenderServices.scene.initialize(
             drawableSize: .init(width: 1920, height: 1080)
         )
+        XCTAssertFalse(RenderServices.scene.intersectsFrustum(.init(
+            minimum: .init(x: 1, y: -1, z: 9),
+            maximum: .init(x: -1, y: 1, z: 11)
+        )))
         RenderServices.scene.beginFrame(.init(
             camera: .init(
                 position: .zero,
@@ -1175,6 +1306,32 @@ final class GPURenderServicesTests: XCTestCase {
             maximum: .init(x: 1, y: 1, z: 10_001)
         )))
         try RenderServices.scene.endFrame()
+    }
+
+    func testSceneFrustumStatePrecomputesPerspectiveCameraGeometry() {
+        let state = GPUSceneFrustumCullingState(
+            frame: .init(
+                camera: .init(
+                    position: .zero,
+                    target: .forward,
+                    up: .up,
+                    verticalFOVDegrees: 90,
+                    projection: .perspective
+                ),
+                environment: .default
+            ),
+            drawableSize: .init(width: 1920, height: 1080)
+        )
+
+        XCTAssertNotNil(state)
+        XCTAssertTrue(state!.intersects(.init(
+            minimum: .init(x: -1, y: -1, z: 9),
+            maximum: .init(x: 1, y: 1, z: 11)
+        )))
+        XCTAssertFalse(state!.intersects(.init(
+            minimum: .init(x: 99, y: -1, z: 9),
+            maximum: .init(x: 101, y: 1, z: 11)
+        )))
     }
 
     func testSceneProjectAndUnprojectUseDrawableCameraGeometry() throws {
@@ -2716,6 +2873,37 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center], 200)
         XCTAssertLessThan(readback.rgba8[center + 1], 80)
         XCTAssertLessThan(readback.rgba8[center + 2], 80)
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0.5, y: 0.5, z: -3),
+                target: .init(x: 0.5, y: 0.5, z: 0),
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .default
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let sceneOnlyReadback = try RenderServices.canvas
+            .readbackPresentedFrame()
+        XCTAssertGreaterThan(sceneOnlyReadback.rgba8[center], 200)
+        XCTAssertLessThan(sceneOnlyReadback.rgba8[center + 1], 80)
+        XCTAssertLessThan(sceneOnlyReadback.rgba8[center + 2], 80)
         #else
         throw XCTSkip("The Windows Vulkan material override test runs only on Windows")
         #endif

@@ -496,6 +496,11 @@ public struct LightDescriptor: Sendable {
     public let range: Float
     public let castsShadow: Bool
     public let shadowSoftness: Float
+    /// Requested number of presented frames between shadow-map updates.
+    ///
+    /// A value of one requests continuous updates. Backends may update more
+    /// frequently, but must not retain a shadow map beyond this frame budget.
+    public let shadowUpdatePeriodFrames: UInt32
 
     public init(
         kind: LightKind,
@@ -506,7 +511,8 @@ public struct LightDescriptor: Sendable {
         energy: Float,
         range: Float,
         castsShadow: Bool,
-        shadowSoftness: Float
+        shadowSoftness: Float,
+        shadowUpdatePeriodFrames: UInt32 = 1
     ) {
         self.kind = kind
         self.active = active
@@ -517,6 +523,7 @@ public struct LightDescriptor: Sendable {
         self.range = range
         self.castsShadow = castsShadow
         self.shadowSoftness = shadowSoftness
+        self.shadowUpdatePeriodFrames = shadowUpdatePeriodFrames
     }
 }
 

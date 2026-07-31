@@ -13,6 +13,14 @@ struct GPUSceneAdapterTelemetrySample {
     let packMilliseconds: Double
     let modelBatchBuildMilliseconds: Double
     let prepareMilliseconds: Double
+    let cameraPrepareMilliseconds: Double
+    let lightingPrepareMilliseconds: Double
+    let lightingResolveMilliseconds: Double
+    let clearColorResolveMilliseconds: Double
+    let postResolveMilliseconds: Double
+    let shadowCullMilliseconds: Double
+    let batchOrderingMilliseconds: Double
+    let batchConsolidationMilliseconds: Double
     let nativePresentMilliseconds: Double
     let pendingDrawCount: Int
     let packedInstanceCount: Int
@@ -21,11 +29,96 @@ struct GPUSceneAdapterTelemetrySample {
     let overrideEntryCount: Int
 }
 
+struct GPUFramePacing {
+    static func delayNanoseconds(
+        targetFramesPerSecond: Int,
+        previousFrameStart: Double?,
+        currentTime: Double
+    ) -> UInt64? {
+        guard targetFramesPerSecond > 0,
+              let previousFrameStart,
+              previousFrameStart.isFinite,
+              currentTime.isFinite else {
+            return nil
+        }
+        let interval = 1.0 / Double(targetFramesPerSecond)
+        let remaining = interval - (currentTime - previousFrameStart)
+        guard remaining > 0 else { return nil }
+        let nanoseconds = UInt64(
+            (remaining * 1_000_000_000).rounded(.down)
+        )
+        return nanoseconds > 0 ? nanoseconds : nil
+    }
+}
+
+struct GPUSceneShaderPaths {
+    let vertexShaderPath: String
+    let animatedVertexShaderPath: String
+    let fastShadowVertexShaderPath: String
+    let fastShadowFragmentShaderPath: String
+    let shadowVertexShaderPath: String
+    let animatedShadowVertexShaderPath: String
+    let shadowFragmentShaderPath: String
+    let fragmentShaderPath: String
+    let unshadowedFragmentShaderPath: String
+    let postVertexShaderPath: String
+    let postFragmentShaderPath: String
+    let shaderFormat: BTBHGPUShaderFormat
+
+    init(
+        request: GPUBackendRequest,
+        environment: [String: String],
+        executablePath: String
+    ) {
+        let shaderDirectory: URL
+        if let override = environment["BTBH_GPU_SHADER_DIR"],
+           !override.isEmpty {
+            shaderDirectory = URL(fileURLWithPath: override)
+        } else {
+            shaderDirectory = URL(fileURLWithPath: executablePath)
+                .standardizedFileURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("GPUShaders")
+        }
+        let extensionName: String
+        switch request {
+        case .vulkan:
+            extensionName = "spv"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_SPIRV
+        case .metal:
+            extensionName = "metallib"
+            shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
+        }
+        func path(_ name: String) -> String {
+            shaderDirectory
+                .appendingPathComponent("\(name).\(extensionName)")
+                .path
+        }
+        vertexShaderPath = path("production_model.vert")
+        animatedVertexShaderPath =
+            path("production_animated_model.vert")
+        fastShadowVertexShaderPath =
+            path("production_shadow_fast.vert")
+        fastShadowFragmentShaderPath =
+            path("production_shadow_fast.frag")
+        shadowVertexShaderPath = path("production_shadow.vert")
+        animatedShadowVertexShaderPath =
+            path("production_animated_shadow.vert")
+        shadowFragmentShaderPath = path("production_shadow.frag")
+        fragmentShaderPath = path("production_model.frag")
+        unshadowedFragmentShaderPath =
+            path("production_model_unshadowed.frag")
+        postVertexShaderPath = path("production_post.vert")
+        postFragmentShaderPath = path("production_post.frag")
+    }
+}
+
 @MainActor
 public final class GPUPlatform: GamePlatform {
     private let request: GPUBackendRequest
     private let debugMode: Bool
     private let frameTelemetryEnabled: Bool
+    private let sceneShaderPaths: GPUSceneShaderPaths
     var isFrameTelemetryEnabled: Bool { frameTelemetryEnabled }
     private var window: GPUWindowProbe?
     private var state = GPUPlatformState.empty
@@ -43,6 +136,11 @@ public final class GPUPlatform: GamePlatform {
     ) {
         self.request = request
         self.debugMode = debugMode
+        sceneShaderPaths = .init(
+            request: request,
+            environment: ProcessInfo.processInfo.environment,
+            executablePath: CommandLine.arguments[0]
+        )
         frameTelemetryEnabled =
             ProcessInfo.processInfo.environment[
                 "BTBH_RENDER_PERF_LOG"
@@ -479,86 +577,28 @@ public final class GPUPlatform: GamePlatform {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
         }
-        let shaderDirectory: URL
-        if let override = ProcessInfo.processInfo.environment[
-            "BTBH_GPU_SHADER_DIR"
-        ], !override.isEmpty {
-            shaderDirectory = URL(fileURLWithPath: override)
-        } else {
-            let executable = URL(
-                fileURLWithPath: CommandLine.arguments[0]
-            ).standardizedFileURL
-            shaderDirectory = executable
-                .deletingLastPathComponent()
-                .appendingPathComponent("GPUShaders")
-        }
-        let extensionName: String
-        let shaderFormat: BTBHGPUShaderFormat
-        switch request {
-        case .vulkan:
-            extensionName = "spv"
-            shaderFormat = BTBH_GPU_SHADER_FORMAT_SPIRV
-        case .metal:
-            extensionName = "metallib"
-            shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
-        }
         let report = try window.presentModelInstances(
-            vertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_model.vert.\(extensionName)"
-                )
-                .path,
-            animatedVertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_animated_model.vert.\(extensionName)"
-                )
-                .path,
-            fastShadowVertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_shadow_fast.vert.\(extensionName)"
-                )
-                .path,
-            fastShadowFragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_shadow_fast.frag.\(extensionName)"
-                )
-                .path,
-            shadowVertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_shadow.vert.\(extensionName)"
-                )
-                .path,
-            animatedShadowVertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_animated_shadow.vert.\(extensionName)"
-                )
-                .path,
-            shadowFragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_shadow.frag.\(extensionName)"
-                )
-                .path,
-            fragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_model.frag.\(extensionName)"
-                )
-                .path,
-            unshadowedFragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_model_unshadowed.frag.\(extensionName)"
-                )
-                .path,
-            postVertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_post.vert.\(extensionName)"
-                )
-                .path,
-            postFragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_post.frag.\(extensionName)"
-                )
-                .path,
-            shaderFormat: shaderFormat,
+            vertexShaderPath: sceneShaderPaths.vertexShaderPath,
+            animatedVertexShaderPath:
+                sceneShaderPaths.animatedVertexShaderPath,
+            fastShadowVertexShaderPath:
+                sceneShaderPaths.fastShadowVertexShaderPath,
+            fastShadowFragmentShaderPath:
+                sceneShaderPaths.fastShadowFragmentShaderPath,
+            shadowVertexShaderPath:
+                sceneShaderPaths.shadowVertexShaderPath,
+            animatedShadowVertexShaderPath:
+                sceneShaderPaths.animatedShadowVertexShaderPath,
+            shadowFragmentShaderPath:
+                sceneShaderPaths.shadowFragmentShaderPath,
+            fragmentShaderPath: sceneShaderPaths.fragmentShaderPath,
+            unshadowedFragmentShaderPath:
+                sceneShaderPaths.unshadowedFragmentShaderPath,
+            postVertexShaderPath:
+                sceneShaderPaths.postVertexShaderPath,
+            postFragmentShaderPath:
+                sceneShaderPaths.postFragmentShaderPath,
+            shaderFormat: sceneShaderPaths.shaderFormat,
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,
@@ -580,6 +620,14 @@ public final class GPUPlatform: GamePlatform {
         packMilliseconds: Double,
         modelBatchBuildMilliseconds: Double,
         prepareMilliseconds: Double,
+        cameraPrepareMilliseconds: Double,
+        lightingPrepareMilliseconds: Double,
+        lightingResolveMilliseconds: Double,
+        clearColorResolveMilliseconds: Double,
+        postResolveMilliseconds: Double,
+        shadowCullMilliseconds: Double,
+        batchOrderingMilliseconds: Double,
+        batchConsolidationMilliseconds: Double,
         nativePresentMilliseconds: Double,
         pendingDrawCount: Int,
         packedInstanceCount: Int,
@@ -592,6 +640,15 @@ public final class GPUPlatform: GamePlatform {
             packMilliseconds: packMilliseconds,
             modelBatchBuildMilliseconds: modelBatchBuildMilliseconds,
             prepareMilliseconds: prepareMilliseconds,
+            cameraPrepareMilliseconds: cameraPrepareMilliseconds,
+            lightingPrepareMilliseconds: lightingPrepareMilliseconds,
+            lightingResolveMilliseconds: lightingResolveMilliseconds,
+            clearColorResolveMilliseconds: clearColorResolveMilliseconds,
+            postResolveMilliseconds: postResolveMilliseconds,
+            shadowCullMilliseconds: shadowCullMilliseconds,
+            batchOrderingMilliseconds: batchOrderingMilliseconds,
+            batchConsolidationMilliseconds:
+                batchConsolidationMilliseconds,
             nativePresentMilliseconds: nativePresentMilliseconds,
             pendingDrawCount: pendingDrawCount,
             packedInstanceCount: packedInstanceCount,
@@ -743,12 +800,20 @@ public final class GPUPlatform: GamePlatform {
             index, sample in
             String(
                 format:
-                    "BTBH_GPU_SCENE_ADAPTER_TELEMETRY sample=%llu pack_ms=%.6f model_batch_build_ms=%.6f prepare_ms=%.6f native_present_ms=%.6f pending_draws=%llu packed_instances=%llu batches=%llu material_resolutions=%llu override_entries=%llu\n",
+                    "BTBH_GPU_SCENE_ADAPTER_TELEMETRY sample=%llu pack_ms=%.6f model_batch_build_ms=%.6f prepare_ms=%.6f camera_prepare_ms=%.6f lighting_prepare_ms=%.6f lighting_resolve_ms=%.6f clear_color_resolve_ms=%.6f post_resolve_ms=%.6f shadow_cull_ms=%.6f batch_ordering_ms=%.6f batch_consolidation_ms=%.6f native_present_ms=%.6f pending_draws=%llu packed_instances=%llu batches=%llu material_resolutions=%llu override_entries=%llu\n",
                 locale: locale,
                 UInt64(index + 1),
                 sample.packMilliseconds,
                 sample.modelBatchBuildMilliseconds,
                 sample.prepareMilliseconds,
+                sample.cameraPrepareMilliseconds,
+                sample.lightingPrepareMilliseconds,
+                sample.lightingResolveMilliseconds,
+                sample.clearColorResolveMilliseconds,
+                sample.postResolveMilliseconds,
+                sample.shadowCullMilliseconds,
+                sample.batchOrderingMilliseconds,
+                sample.batchConsolidationMilliseconds,
                 sample.nativePresentMilliseconds,
                 UInt64(sample.pendingDrawCount),
                 UInt64(sample.packedInstanceCount),
@@ -761,11 +826,26 @@ public final class GPUPlatform: GamePlatform {
             index, report in
             String(
                 format:
-                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu cpu_encode_ms=%.6f cpu_prepare_ms=%.6f cpu_upload_ms=%.6f cpu_shadow_encode_ms=%.6f cpu_swapchain_acquire_ms=%.6f cpu_target_ensure_ms=%.6f cpu_geometry_encode_ms=%.6f cpu_post_encode_ms=%.6f\n",
+                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu prepared_geometry=%llu animated_geometry=%llu animation_samples=%llu bone_matrices=%llu shadow_pipeline_binds=%llu shadow_pipeline_bind_skips=%llu geometry_pipeline_binds=%llu geometry_pipeline_bind_skips=%llu cpu_encode_ms=%.6f cpu_prepare_ms=%.6f cpu_prepare_setup_ms=%.6f cpu_prepare_bones_ms=%.6f cpu_prepare_bone_count_ms=%.6f cpu_prepare_bone_allocate_ms=%.6f cpu_prepare_bone_sample_ms=%.6f cpu_prepare_pipelines_ms=%.6f cpu_prepare_buffers_ms=%.6f cpu_upload_ms=%.6f cpu_shadow_encode_ms=%.6f cpu_swapchain_acquire_ms=%.6f cpu_target_ensure_ms=%.6f cpu_geometry_encode_ms=%.6f cpu_post_encode_ms=%.6f\n",
                 locale: locale,
                 UInt64(index + 1),
+                UInt64(report.preparedGeometryCount),
+                UInt64(report.animatedGeometryCount),
+                UInt64(report.animationSampleCount),
+                UInt64(report.boneMatrixCount),
+                UInt64(report.shadowPipelineBindCount),
+                UInt64(report.shadowPipelineBindSkipCount),
+                UInt64(report.geometryPipelineBindCount),
+                UInt64(report.geometryPipelineBindSkipCount),
                 report.cpuEncodeMilliseconds,
                 report.cpuPrepareMilliseconds,
+                report.cpuPrepareSetupMilliseconds,
+                report.cpuPrepareBonesMilliseconds,
+                report.cpuPrepareBoneCountMilliseconds,
+                report.cpuPrepareBoneAllocateMilliseconds,
+                report.cpuPrepareBoneSampleMilliseconds,
+                report.cpuPreparePipelinesMilliseconds,
+                report.cpuPrepareBuffersMilliseconds,
                 report.cpuUploadMilliseconds,
                 report.cpuShadowEncodeMilliseconds,
                 report.cpuSwapchainAcquireMilliseconds,
@@ -796,18 +876,16 @@ public final class GPUPlatform: GamePlatform {
     }
 
     private func throttleIfNeeded() {
-        let now = ProcessInfo.processInfo.systemUptime
+        let now = GPUWindowProbe.monotonicElapsedSeconds
         defer {
-            previousFrameStart = ProcessInfo.processInfo.systemUptime
+            previousFrameStart = GPUWindowProbe.monotonicElapsedSeconds
         }
-        guard targetFramesPerSecond > 0,
-              let previousFrameStart else {
-            return
-        }
-        let interval = 1.0 / Double(targetFramesPerSecond)
-        let remaining = interval - (now - previousFrameStart)
-        if remaining > 0 {
-            Thread.sleep(forTimeInterval: remaining)
+        if let delayNanoseconds = GPUFramePacing.delayNanoseconds(
+            targetFramesPerSecond: targetFramesPerSecond,
+            previousFrameStart: previousFrameStart,
+            currentTime: now
+        ) {
+            btbh_gpu_delay_precise(delayNanoseconds)
         }
     }
 

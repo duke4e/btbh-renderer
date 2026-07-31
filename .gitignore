@@ -371,3 +371,10 @@ build/
 .worktrees/
 .superpowers/sdd/
 /.tmp-*/
+
+# Local renderer investigation outputs (captures, compiled probes, shader dumps).
+.diagnostics/*
+!.diagnostics/run-final-default-ab.ps1
+!.diagnostics/run-game-swift.ps1
+!.diagnostics/run-renderer-swift-test.ps1
+/tools/*.exe

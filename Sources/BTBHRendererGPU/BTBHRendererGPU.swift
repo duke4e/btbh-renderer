@@ -308,6 +308,28 @@ struct GPUCanvasBatchProbe {
         self.scissor = scissor
         self.texture = texture
     }
+
+    func merged(
+        with next: GPUCanvasBatchProbe,
+        withinSamePass: Bool
+    ) -> GPUCanvasBatchProbe? {
+        guard withinSamePass,
+              vertexCount <= Int.max - firstVertex,
+              firstVertex + vertexCount == next.firstVertex,
+              next.vertexCount <= Int.max - vertexCount,
+              blendMode.rawValue == next.blendMode.rawValue,
+              scissor == next.scissor,
+              texture == next.texture else {
+            return nil
+        }
+        return .init(
+            firstVertex: firstVertex,
+            vertexCount: vertexCount + next.vertexCount,
+            blendMode: blendMode,
+            scissor: scissor,
+            texture: texture
+        )
+    }
 }
 
 struct GPUCanvasPassProbe {
@@ -344,6 +366,8 @@ struct GPUSceneGeometryProbeBatch {
     let instanceBuffer: OpaquePointer?
     let firstInstance: Int
     let instanceCount: Int
+    let sceneVisible: Bool
+    let directionalShadowVisible: Bool
     var shadowBounds: RenderBounds3?
     var spotShadowVisible: Bool
 
@@ -356,6 +380,8 @@ struct GPUSceneGeometryProbeBatch {
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
         instanceCount: Int,
+        sceneVisible: Bool = true,
+        directionalShadowVisible: Bool = true,
         shadowBounds: RenderBounds3? = nil,
         spotShadowVisible: Bool = true
     ) {
@@ -367,6 +393,8 @@ struct GPUSceneGeometryProbeBatch {
         self.instanceBuffer = instanceBuffer
         self.firstInstance = firstInstance
         self.instanceCount = instanceCount
+        self.sceneVisible = sceneVisible
+        self.directionalShadowVisible = directionalShadowVisible
         self.shadowBounds = shadowBounds
         self.spotShadowVisible = spotShadowVisible
     }
@@ -427,6 +455,9 @@ enum GPUSceneBatchConsolidation {
                 firstInstance: previous.firstInstance,
                 instanceCount:
                     previous.instanceCount + batch.instanceCount,
+                sceneVisible: previous.sceneVisible,
+                directionalShadowVisible:
+                    previous.directionalShadowVisible,
                 spotShadowVisible: previous.spotShadowVisible
             )
         }
@@ -446,6 +477,9 @@ enum GPUSceneBatchConsolidation {
             right.animation == nil &&
             left.material == right.material &&
             left.materialSlot == right.materialSlot &&
+            left.sceneVisible == right.sceneVisible &&
+            left.directionalShadowVisible ==
+                right.directionalShadowVisible &&
             left.spotShadowVisible == right.spotShadowVisible &&
             left.firstInstance <= Int.max - left.instanceCount &&
             left.firstInstance + left.instanceCount == right.firstInstance &&
@@ -525,7 +559,7 @@ enum GPUSceneBatchShadowCulling {
         }
     }
 
-    private static func intersectsClipFrustum(
+    static func intersectsClipFrustum(
         _ bounds: RenderBounds3,
         viewProjection matrix: [Float]
     ) -> Bool {
@@ -890,6 +924,7 @@ struct GPUSceneDirectionalShadowProbe: Equatable {
         enabled: false,
         range: 0,
         softness: 0,
+        updatePeriodFrames: 1,
         viewProjection: [
             1, 0, 0, 0,
             0, 1, 0, 0,
@@ -901,7 +936,22 @@ struct GPUSceneDirectionalShadowProbe: Equatable {
     let enabled: Bool
     let range: Float
     let softness: Float
+    let updatePeriodFrames: UInt32
     let viewProjection: [Float]
+
+    init(
+        enabled: Bool,
+        range: Float,
+        softness: Float,
+        updatePeriodFrames: UInt32 = 1,
+        viewProjection: [Float]
+    ) {
+        self.enabled = enabled
+        self.range = range
+        self.softness = softness
+        self.updatePeriodFrames = updatePeriodFrames
+        self.viewProjection = viewProjection
+    }
 }
 
 struct GPUScenePresentationProbeReport {
@@ -909,12 +959,26 @@ struct GPUScenePresentationProbeReport {
     let batchCount: Int
     let primitiveDrawCount: Int
     let preparedGeometryCount: Int
+    let animatedGeometryCount: Int
+    let animationSampleCount: Int
+    let boneMatrixCount: Int
     let instanceCount: Int
     let transientInstanceCount: Int
     let persistentBatchCount: Int
+    let shadowPipelineBindCount: Int
+    let shadowPipelineBindSkipCount: Int
+    let geometryPipelineBindCount: Int
+    let geometryPipelineBindSkipCount: Int
     let shadowResourcesReady: Bool
     let cpuEncodeMilliseconds: Double
     let cpuPrepareMilliseconds: Double
+    let cpuPrepareSetupMilliseconds: Double
+    let cpuPrepareBonesMilliseconds: Double
+    let cpuPrepareBoneCountMilliseconds: Double
+    let cpuPrepareBoneAllocateMilliseconds: Double
+    let cpuPrepareBoneSampleMilliseconds: Double
+    let cpuPreparePipelinesMilliseconds: Double
+    let cpuPrepareBuffersMilliseconds: Double
     let cpuUploadMilliseconds: Double
     let cpuShadowEncodeMilliseconds: Double
     let cpuSwapchainAcquireMilliseconds: Double
@@ -990,6 +1054,8 @@ public final class GPUWindowProbe {
     private let deviceProbe: GPUDeviceProbe
     private var window: OpaquePointer?
     private var nativeSceneBatches: [BTBHGPUSceneGeometryBatch] = []
+    private var nativeSceneVisibility: [UInt8] = []
+    private var nativeDirectionalShadowVisibility: [UInt8] = []
     private var sceneCameraRightValues: [Float] = [0, 0, 0]
     private var sceneCameraUpValues: [Float] = [0, 0, 0]
     private var sceneCameraPositionValues: [Float] = [0, 0, 0]
@@ -1789,8 +1855,8 @@ public final class GPUWindowProbe {
     func presentModelInstances(
         vertexShaderPath: String,
         animatedVertexShaderPath: String,
-        fastShadowVertexShaderPath: String? = nil,
-        fastShadowFragmentShaderPath: String? = nil,
+        fastShadowVertexShaderPath: String,
+        fastShadowFragmentShaderPath: String,
         shadowVertexShaderPath: String,
         animatedShadowVertexShaderPath: String,
         shadowFragmentShaderPath: String,
@@ -1963,6 +2029,16 @@ public final class GPUWindowProbe {
                 lighting: &nativeLighting
             )
         }
+        guard btbh_gpu_window_scene_set_shadow_update_periods(
+            window,
+            lighting.directionalShadow.updatePeriodFrames,
+            lighting.secondaryDirectionalShadow.updatePeriodFrames,
+            lighting.spotShadow.updatePeriodFrames
+        ) != 0 else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Invalid GPU shadow update period"
+            )
+        }
         var nativePost = BTBHGPUScenePost()
         nativePost.lut_texture = post.lutTexture
         nativePost.tonemap_white = post.tonemapWhite
@@ -1984,7 +2060,11 @@ public final class GPUWindowProbe {
         nativePost.anti_aliasing =
             GPUAntiAliasingProjection.native(post.antiAliasing)
         nativeSceneBatches.removeAll(keepingCapacity: true)
+        nativeSceneVisibility.removeAll(keepingCapacity: true)
+        nativeDirectionalShadowVisibility.removeAll(keepingCapacity: true)
         nativeSceneBatches.reserveCapacity(batches.count)
+        nativeSceneVisibility.reserveCapacity(batches.count)
+        nativeDirectionalShadowVisibility.reserveCapacity(batches.count)
         let surfaceTime = Float(Self.monotonicElapsedSeconds)
         for batch in batches {
             guard batch.firstInstance >= 0,
@@ -2025,108 +2105,131 @@ public final class GPUWindowProbe {
                     )
                 }
             }
-            let linearAlbedo = GPUColorSpace.linearized(
-                batch.material?.albedoColor ?? .white
+            let material: GPUSceneMaterialProbe? = batch.material
+            let surface: GPUSceneSurfaceProjection =
+                material?.surface ?? .none
+            let linearAlbedo: RenderColor = GPUColorSpace.linearized(
+                material?.albedoColor ?? .white
             )
-            let linearEmission = GPUColorSpace.linearized(
-                batch.material?.emissionColor ?? .white
+            let linearEmission: RenderColor = GPUColorSpace.linearized(
+                material?.emissionColor ?? .white
             )
-            nativeSceneBatches.append(BTBHGPUSceneGeometryBatch(
-                kind: kind,
-                model: model,
-                custom_mesh: customMesh,
-                animation_library: nil,
-                animation_pose: batch.animation?.pointer,
-                animation_index: 0,
-                animation_time: 0,
-                material_slot: Int32(batch.materialSlot ?? -1),
-                instance_buffer: batch.instanceBuffer,
-                first_instance: UInt32(batch.firstInstance),
-                instance_count: UInt32(batch.instanceCount),
-                albedo_texture: batch.material?.albedoTexture,
-                albedo_red: linearAlbedo.r,
-                albedo_green: linearAlbedo.g,
-                albedo_blue: linearAlbedo.b,
-                albedo_alpha: linearAlbedo.a,
-                normal_texture: batch.material?.normalTexture,
-                orm_texture: batch.material?.ormTexture,
-                normal_scale: batch.material?.normalScale ?? 1,
-                occlusion: batch.material?.occlusion ?? 1,
-                roughness: batch.material?.roughness ?? 1,
-                metalness: batch.material?.metalness ?? 0,
-                emission_texture: batch.material?.emissionTexture,
-                emission_red: linearEmission.r,
-                emission_green: linearEmission.g,
-                emission_blue: linearEmission.b,
-                emission_alpha: linearEmission.a,
-                emission_energy: batch.material?.emissionEnergy ?? 0,
-                blend_mode: Self.sceneBlendMode(
-                    batch.material?.blendMode ?? .mix
-                ),
-                billboard_mode: Self.sceneBillboardMode(
-                    batch.material?.billboardMode ?? .disabled
-                ),
-                depth_compare: Self.sceneDepthCompare(
-                    batch.material?.depthCompare ?? .less
-                ),
-                alpha_cutoff:
-                    batch.material?.alphaCutoff ??
-                    MaterialDescriptor.default.alphaCutoff,
-                stencil_compare: Self.sceneDepthCompare(
-                    batch.material?.stencilCompare ?? .always
-                ),
-                cull_mode: Self.sceneCullMode(
-                    batch.material?.cullMode ?? .back
-                ),
-                stencil_fail: Self.sceneStencilOperation(
-                    batch.material?.stencilFail ?? .keep
-                ),
-                stencil_depth_fail: Self.sceneStencilOperation(
-                    batch.material?.stencilDepthFail ?? .keep
-                ),
-                stencil_pass: Self.sceneStencilOperation(
-                    batch.material?.stencilPass ?? .replace
-                ),
-                stencil_reference:
-                    batch.material?.stencilReference ?? 0,
-                stencil_mask: batch.material?.stencilMask ?? 0xFF,
-                transparency_enabled:
-                    batch.material?.transparency == .alpha ? 1 : 0,
-                unlit_enabled:
-                    batch.material?.unlit == true ||
-                    (batch.material == nil &&
-                     kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
-                        ? 1 : 0,
-                spot_shadow_visible: batch.spotShadowVisible ? 1 : 0,
-                surface_variant: Self.sceneSurfaceVariant(
-                    batch.material?.surface.variant ?? .none
-                ),
-                surface_time: surfaceTime,
-                surface_parameters0: (
-                    batch.material?.surface.parameters0.x ?? 0,
-                    batch.material?.surface.parameters0.y ?? 0,
-                    batch.material?.surface.parameters0.z ?? 0,
-                    batch.material?.surface.parameters0.w ?? 0
-                ),
-                surface_parameters1: (
-                    batch.material?.surface.parameters1.x ?? 0,
-                    batch.material?.surface.parameters1.y ?? 0,
-                    batch.material?.surface.parameters1.z ?? 0,
-                    batch.material?.surface.parameters1.w ?? 0
+            let materialSlot: Int32 = Int32(batch.materialSlot ?? -1)
+            let firstInstance: UInt32 = UInt32(batch.firstInstance)
+            let instanceCount: UInt32 = UInt32(batch.instanceCount)
+            let blendMode: BTBHGPUSceneBlendMode = Self.sceneBlendMode(
+                material?.blendMode ?? .mix
+            )
+            let billboardMode: BTBHGPUSceneBillboardMode =
+                Self.sceneBillboardMode(
+                    material?.billboardMode ?? .disabled
                 )
-            ))
+            let depthCompare: BTBHGPUSceneDepthCompare =
+                Self.sceneDepthCompare(material?.depthCompare ?? .less)
+            let alphaCutoff: Float =
+                material?.alphaCutoff ??
+                MaterialDescriptor.default.alphaCutoff
+            let stencilCompare: BTBHGPUSceneDepthCompare =
+                Self.sceneDepthCompare(
+                    material?.stencilCompare ?? .always
+                )
+            let cullMode: BTBHGPUSceneCullMode = Self.sceneCullMode(
+                material?.cullMode ?? .back
+            )
+            let stencilFail: BTBHGPUSceneStencilOperation =
+                Self.sceneStencilOperation(material?.stencilFail ?? .keep)
+            let stencilDepthFail: BTBHGPUSceneStencilOperation =
+                Self.sceneStencilOperation(
+                    material?.stencilDepthFail ?? .keep
+                )
+            let stencilPass: BTBHGPUSceneStencilOperation =
+                Self.sceneStencilOperation(
+                    material?.stencilPass ?? .replace
+                )
+            let transparencyEnabled: UInt8 =
+                material?.transparency == .alpha ? 1 : 0
+            let unlitEnabled: UInt8 =
+                material?.unlit == true ||
+                (material == nil &&
+                 kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
+                    ? 1 : 0
+            let spotShadowVisible: UInt8 =
+                batch.spotShadowVisible ? 1 : 0
+            let surfaceVariant: BTBHGPUSceneSurfaceVariant =
+                Self.sceneSurfaceVariant(surface.variant)
+            let surfaceParameters0: (Float, Float, Float, Float) = (
+                surface.parameters0.x,
+                surface.parameters0.y,
+                surface.parameters0.z,
+                surface.parameters0.w
+            )
+            let surfaceParameters1: (Float, Float, Float, Float) = (
+                surface.parameters1.x,
+                surface.parameters1.y,
+                surface.parameters1.z,
+                surface.parameters1.w
+            )
+            nativeSceneVisibility.append(batch.sceneVisible ? 1 : 0)
+            nativeDirectionalShadowVisibility.append(
+                batch.directionalShadowVisible ? 1 : 0
+            )
+            var nativeBatch = BTBHGPUSceneGeometryBatch()
+            nativeBatch.kind = kind
+            nativeBatch.model = model
+            nativeBatch.custom_mesh = customMesh
+            nativeBatch.animation_library = nil
+            nativeBatch.animation_pose = batch.animation?.pointer
+            nativeBatch.animation_index = 0
+            nativeBatch.animation_time = 0
+            nativeBatch.material_slot = materialSlot
+            nativeBatch.instance_buffer = batch.instanceBuffer
+            nativeBatch.first_instance = firstInstance
+            nativeBatch.instance_count = instanceCount
+            nativeBatch.albedo_texture = material?.albedoTexture
+            nativeBatch.albedo_red = linearAlbedo.r
+            nativeBatch.albedo_green = linearAlbedo.g
+            nativeBatch.albedo_blue = linearAlbedo.b
+            nativeBatch.albedo_alpha = linearAlbedo.a
+            nativeBatch.normal_texture = material?.normalTexture
+            nativeBatch.orm_texture = material?.ormTexture
+            nativeBatch.normal_scale = material?.normalScale ?? 1
+            nativeBatch.occlusion = material?.occlusion ?? 1
+            nativeBatch.roughness = material?.roughness ?? 1
+            nativeBatch.metalness = material?.metalness ?? 0
+            nativeBatch.emission_texture = material?.emissionTexture
+            nativeBatch.emission_red = linearEmission.r
+            nativeBatch.emission_green = linearEmission.g
+            nativeBatch.emission_blue = linearEmission.b
+            nativeBatch.emission_alpha = linearEmission.a
+            nativeBatch.emission_energy = material?.emissionEnergy ?? 0
+            nativeBatch.blend_mode = blendMode
+            nativeBatch.billboard_mode = billboardMode
+            nativeBatch.depth_compare = depthCompare
+            nativeBatch.alpha_cutoff = alphaCutoff
+            nativeBatch.stencil_compare = stencilCompare
+            nativeBatch.cull_mode = cullMode
+            nativeBatch.stencil_fail = stencilFail
+            nativeBatch.stencil_depth_fail = stencilDepthFail
+            nativeBatch.stencil_pass = stencilPass
+            nativeBatch.stencil_reference =
+                material?.stencilReference ?? 0
+            nativeBatch.stencil_mask = material?.stencilMask ?? 0xFF
+            nativeBatch.transparency_enabled = transparencyEnabled
+            nativeBatch.unlit_enabled = unlitEnabled
+            nativeBatch.spot_shadow_visible = spotShadowVisible
+            nativeBatch.surface_variant = surfaceVariant
+            nativeBatch.surface_time = surfaceTime
+            nativeBatch.surface_parameters0 = surfaceParameters0
+            nativeBatch.surface_parameters1 = surfaceParameters1
+            nativeSceneBatches.append(nativeBatch)
         }
         var report = BTBHGPUSceneReport()
-        let resolvedFastShadowVertexShaderPath =
-            fastShadowVertexShaderPath ?? shadowVertexShaderPath
-        let resolvedFastShadowFragmentShaderPath =
-            fastShadowFragmentShaderPath ?? shadowFragmentShaderPath
         let encodeStarted = Self.monotonicElapsedSeconds
         let result = vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
-                resolvedFastShadowVertexShaderPath.withCString {
+                fastShadowVertexShaderPath.withCString {
                     fastShadowVertexPath in
-                    resolvedFastShadowFragmentShaderPath.withCString {
+                    fastShadowFragmentShaderPath.withCString {
                         fastShadowFragmentPath in
                 shadowVertexShaderPath.withCString { shadowVertexPath in
                     animatedShadowVertexShaderPath.withCString {
@@ -2162,7 +2265,13 @@ public final class GPUWindowProbe {
                                             return nativeSceneBatches
                                                 .withUnsafeBufferPointer {
                                                     batchData in
-                                                btbh_gpu_window_scene_present_instances(
+                                            nativeSceneVisibility
+                                                .withUnsafeBufferPointer {
+                                                    sceneVisibility in
+                                            nativeDirectionalShadowVisibility
+                                                .withUnsafeBufferPointer {
+                                                    directionalVisibility in
+                                                btbh_gpu_window_scene_present_instances_with_visibility(
                                                     window,
                                                     vertexPath,
                                                     animatedVertexPath,
@@ -2190,6 +2299,9 @@ public final class GPUWindowProbe {
                                                         resolvedLogicalInstanceCount
                                                     ),
                                                     batchData.baseAddress,
+                                                    sceneVisibility.baseAddress,
+                                                    directionalVisibility
+                                                        .baseAddress,
                                                     UInt32(
                                                         nativeSceneBatches.count
                                                     ),
@@ -2199,6 +2311,8 @@ public final class GPUWindowProbe {
                                                     clearColor.a,
                                                     &report
                                                 )
+                                            }
+                                            }
                                             }
                                             }
                                         }
@@ -2223,6 +2337,15 @@ public final class GPUWindowProbe {
                 message: GPUDeviceProbe.string(from: &report.message)
             )
         }
+        var telemetry = BTBHGPUSceneTelemetryReport()
+        guard btbh_gpu_window_scene_read_telemetry(
+            window,
+            &telemetry
+        ) != 0 else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "GPU scene telemetry is unavailable"
+            )
+        }
         return .init(
             drawableSize: .init(
                 width: Int(report.drawable_width),
@@ -2231,15 +2354,44 @@ public final class GPUWindowProbe {
             batchCount: Int(report.batch_count),
             primitiveDrawCount: Int(report.primitive_draw_count),
             preparedGeometryCount: Int(report.prepared_geometry_count),
+            animatedGeometryCount: Int(telemetry.animated_geometry_count),
+            animationSampleCount: Int(telemetry.animation_sample_count),
+            boneMatrixCount: Int(telemetry.bone_matrix_count),
             instanceCount: Int(report.instance_count),
             transientInstanceCount: Int(
                 report.transient_instance_count
             ),
             persistentBatchCount: Int(report.persistent_batch_count),
+            shadowPipelineBindCount: Int(
+                telemetry.shadow_pipeline_bind_count
+            ),
+            shadowPipelineBindSkipCount: Int(
+                telemetry.shadow_pipeline_bind_skip_count
+            ),
+            geometryPipelineBindCount: Int(
+                telemetry.geometry_pipeline_bind_count
+            ),
+            geometryPipelineBindSkipCount: Int(
+                telemetry.geometry_pipeline_bind_skip_count
+            ),
             shadowResourcesReady:
                 btbh_gpu_window_scene_shadow_resources_ready(window) != 0,
             cpuEncodeMilliseconds: cpuEncodeMilliseconds,
             cpuPrepareMilliseconds: report.cpu_prepare_milliseconds,
+            cpuPrepareSetupMilliseconds:
+                telemetry.cpu_prepare_setup_milliseconds,
+            cpuPrepareBonesMilliseconds:
+                telemetry.cpu_prepare_bones_milliseconds,
+            cpuPrepareBoneCountMilliseconds:
+                telemetry.cpu_prepare_bone_count_milliseconds,
+            cpuPrepareBoneAllocateMilliseconds:
+                telemetry.cpu_prepare_bone_allocate_milliseconds,
+            cpuPrepareBoneSampleMilliseconds:
+                telemetry.cpu_prepare_bone_sample_milliseconds,
+            cpuPreparePipelinesMilliseconds:
+                telemetry.cpu_prepare_pipelines_milliseconds,
+            cpuPrepareBuffersMilliseconds:
+                telemetry.cpu_prepare_buffers_milliseconds,
             cpuUploadMilliseconds: report.cpu_upload_milliseconds,
             cpuShadowEncodeMilliseconds:
                 report.cpu_shadow_encode_milliseconds,
@@ -2350,6 +2502,8 @@ public final class GPUWindowProbe {
             $0.range >= 0 &&
             $0.softness.isFinite &&
             $0.softness >= 0 &&
+            $0.updatePeriodFrames >= 1 &&
+            $0.updatePeriodFrames <= 60 &&
             $0.viewProjection.count == 16 &&
             $0.viewProjection.allSatisfy(\.isFinite)
         }) else {
@@ -2719,6 +2873,8 @@ public final class GPUWindowProbe {
             self.window = nil
         }
         nativeSceneBatches = []
+        nativeSceneVisibility = []
+        nativeDirectionalShadowVisibility = []
         nativeFrameTelemetrySamples = []
         deviceProbe.shutdown()
         isShutdown = true

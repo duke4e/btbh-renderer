@@ -49,7 +49,11 @@ static void btbh_gpu_instance_buffer_release_handle(
     if (device != NULL && buffer->buffer != NULL) {
         SDL_ReleaseGPUBuffer(device, buffer->buffer);
     }
+    if (device != NULL && buffer->vertex_buffer != NULL) {
+        SDL_ReleaseGPUBuffer(device, buffer->vertex_buffer);
+    }
     buffer->buffer = NULL;
+    buffer->vertex_buffer = NULL;
 }
 
 BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(
@@ -114,6 +118,22 @@ BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(
         free(resource);
         return NULL;
     }
+    info.usage = SDL_GPU_BUFFERUSAGE_VERTEX;
+    resource->vertex_buffer = SDL_CreateGPUBuffer(
+        window->device->gpu,
+        &info
+    );
+    if (resource->vertex_buffer == NULL) {
+        btbh_gpu_instance_buffer_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        SDL_ReleaseGPUBuffer(window->device->gpu, resource->buffer);
+        resource->buffer = NULL;
+        free(resource);
+        return NULL;
+    }
 
     resource->owner = window;
     resource->next = window->instance_buffer_head;
@@ -150,6 +170,7 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
         buffer->owner->device->gpu == NULL ||
         buffer->owner->device->shutdown ||
         buffer->buffer == NULL ||
+        buffer->vertex_buffer == NULL ||
         bytes == NULL ||
         byte_count == 0u ||
         byte_offset > buffer->byte_capacity ||
@@ -214,6 +235,8 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     destination.buffer = buffer->buffer;
     destination.offset = byte_offset;
     destination.size = byte_count;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    destination.buffer = buffer->vertex_buffer;
     SDL_UploadToGPUBuffer(copy, &source, &destination, true);
     SDL_EndGPUCopyPass(copy);
     const bool submitted = SDL_SubmitGPUCommandBuffer(command);

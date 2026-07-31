@@ -1,10 +1,89 @@
 import BTBHRenderer
+import BTBHRendererGPUCore
 import Foundation
 import XCTest
 @testable import BTBHRendererGPU
 
 @preconcurrency @MainActor
 final class GPUPlatformTests: XCTestCase {
+    func testFramePacingComputesResidualDelayAtHighRefreshRate() {
+        let delay = GPUFramePacing.delayNanoseconds(
+            targetFramesPerSecond: 240,
+            previousFrameStart: 10,
+            currentTime: 10.0036
+        )
+
+        XCTAssertEqual(delay, 566_666)
+    }
+
+    func testFramePacingDoesNotDelayFirstLateOrUncappedFrames() {
+        XCTAssertNil(GPUFramePacing.delayNanoseconds(
+            targetFramesPerSecond: 240,
+            previousFrameStart: nil,
+            currentTime: 10
+        ))
+        XCTAssertNil(GPUFramePacing.delayNanoseconds(
+            targetFramesPerSecond: 240,
+            previousFrameStart: 10,
+            currentTime: 10.005
+        ))
+        XCTAssertNil(GPUFramePacing.delayNanoseconds(
+            targetFramesPerSecond: 0,
+            previousFrameStart: 10,
+            currentTime: 10.001
+        ))
+    }
+
+    func testPreciseDelayBridgeAcceptsZeroDuration() {
+        btbh_gpu_delay_precise(0)
+    }
+
+    func testSceneShaderPathsResolveOnceFromOverride() {
+        let paths = GPUSceneShaderPaths(
+            request: .vulkan,
+            environment: ["BTBH_GPU_SHADER_DIR": "/tmp/btbh-shaders"],
+            executablePath: "/tmp/game/Main"
+        )
+        XCTAssertEqual(
+            paths.vertexShaderPath,
+            URL(fileURLWithPath: "/tmp/btbh-shaders")
+                .appendingPathComponent("production_model.vert.spv")
+                .path
+        )
+        XCTAssertEqual(
+            paths.postFragmentShaderPath,
+            URL(fileURLWithPath: "/tmp/btbh-shaders")
+                .appendingPathComponent("production_post.frag.spv")
+                .path
+        )
+        XCTAssertEqual(paths.shaderFormat, BTBH_GPU_SHADER_FORMAT_SPIRV)
+    }
+
+    func testSceneShaderPathsFallBackBesideExecutable() {
+        let executablePath = "/tmp/game/Main"
+        let paths = GPUSceneShaderPaths(
+            request: .metal,
+            environment: [:],
+            executablePath: executablePath
+        )
+        let expectedDirectory = URL(fileURLWithPath: executablePath)
+            .standardizedFileURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("GPUShaders")
+        XCTAssertEqual(
+            paths.animatedVertexShaderPath,
+            expectedDirectory
+                .appendingPathComponent(
+                    "production_animated_model.vert.metallib"
+                )
+                .path
+        )
+        XCTAssertEqual(
+            paths.shaderFormat,
+            BTBH_GPU_SHADER_FORMAT_METALLIB
+        )
+    }
+
     func testFileDialogConfigurationMapsOpenFiltersAndLocationExactly() throws {
         let directory = URL(
             fileURLWithPath: "C:/tmp/particle-presets",

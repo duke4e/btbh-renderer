@@ -55,6 +55,27 @@ int main(void)
         source,
         "shadow_resources_ready"
     );
+    failed |= contains_forbidden_token(
+        source,
+        "directional_shadow_update_period_frames"
+    );
+    failed |= contains_forbidden_token(source, "scene_visible");
+    failed |= contains_forbidden_token(
+        source,
+        "directional_shadow_visible"
+    );
+    failed |= contains_forbidden_token(
+        source,
+        "animated_geometry_count"
+    );
+    failed |= contains_forbidden_token(
+        source,
+        "shadow_pipeline_bind_count"
+    );
+    failed |= contains_forbidden_token(
+        source,
+        "cpu_prepare_setup_milliseconds"
+    );
     free(source);
     return failed != 0;
 }

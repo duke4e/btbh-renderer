@@ -162,8 +162,32 @@ enum GPUResourceStagingError: Error, Equatable {
     case invalidScreenShader(UInt64)
 }
 
+enum GPUProductionScreenShaderKind: Equatable {
+    case lut
+    case cas
+    case tiltShift
+    case unsupported(String)
+
+    init(fragmentPath: String) {
+        let name = URL(fileURLWithPath: fragmentPath)
+            .deletingPathExtension()
+            .lastPathComponent
+            .lowercased()
+        switch name {
+        case "lut":
+            self = .lut
+        case "cas":
+            self = .cas
+        case "tiltshift":
+            self = .tiltShift
+        default:
+            self = .unsupported(name)
+        }
+    }
+}
+
 private struct GPUScreenShaderResource {
-    let fragmentPath: String
+    let kind: GPUProductionScreenShaderKind
     var parameters: [String: ShaderParameterValue]
 }
 
@@ -1317,20 +1341,16 @@ final class GPUResourceBackend: RenderResourceBackend {
                     handle.rawValue
                 )
             }
-            let name = URL(fileURLWithPath: shader.fragmentPath)
-                .deletingPathExtension()
-                .lastPathComponent
-                .lowercased()
-            switch name {
-            case "lut":
+            switch shader.kind {
+            case .lut:
                 if case .texture(let handle)? =
                     shader.parameters["u_texture"]
                 {
                     lutTexture = try canvasTexture(handle).pointer
                 }
-            case "cas":
+            case .cas:
                 casEnabled = true
-            case "tiltshift":
+            case .tiltShift:
                 tiltShiftEnabled = chain.tiltShiftEnabled
                 if case .vec2(let value)? =
                     shader.parameters["uFocusPoint"]
@@ -1367,7 +1387,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                 {
                     highlightGain = value
                 }
-            default:
+            case .unsupported(let name):
                 throw GPUBackendUnsupportedError.operation(
                     "Unsupported production GPU screen shader: \(name)"
                 )
@@ -1402,6 +1422,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             enabled: false,
             range: descriptor.range,
             softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
             viewProjection:
                 GPUSceneDirectionalShadowProbe.disabled.viewProjection
         )
@@ -1493,6 +1514,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             enabled: true,
             range: descriptor.range,
             softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
             viewProjection: viewProjection
         )
     }
@@ -1505,6 +1527,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             enabled: false,
             range: descriptor.range,
             softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
             viewProjection:
                 GPUSceneDirectionalShadowProbe.disabled.viewProjection
         )
@@ -1552,6 +1575,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             enabled: true,
             range: descriptor.range,
             softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
             viewProjection: viewProjection
         )
     }
@@ -2558,7 +2582,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             ScreenShaderHandle.self
         )
         screenShaders[handle] = .init(
-            fragmentPath: descriptor.fragmentPath,
+            kind: .init(fragmentPath: descriptor.fragmentPath),
             parameters: descriptor.parameters
         )
         return handle
@@ -3097,10 +3121,12 @@ final class GPUResourceBackend: RenderResourceBackend {
             descriptor.range.isFinite,
             descriptor.range >= 0,
             descriptor.shadowSoftness.isFinite,
-            descriptor.shadowSoftness >= 0
+            descriptor.shadowSoftness >= 0,
+            descriptor.shadowUpdatePeriodFrames >= 1,
+            descriptor.shadowUpdatePeriodFrames <= 60
         else {
             throw GPUResourceStagingError.invalidLightDescriptor(
-                "Light vectors and nonnegative scalar fields must be finite"
+                "Light vectors and nonnegative scalar fields must be finite; shadow update period must be 1...60 frames"
             )
         }
     }
@@ -3278,11 +3304,167 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 }
 
+struct GPUSceneFrustumCullingState {
+    private enum Projection {
+        case perspective(
+            horizontalTangent: Float,
+            verticalTangent: Float
+        )
+        case orthographic(halfWidth: Float, halfHeight: Float)
+    }
+
+    private let cameraPosition: RenderVec3
+    private let forward: RenderVec3
+    private let right: RenderVec3
+    private let up: RenderVec3
+    private let projection: Projection
+
+    init?(frame: FrameDescriptor, drawableSize: PixelSize2D) {
+        guard drawableSize.width > 0,
+              drawableSize.height > 0 else {
+            return nil
+        }
+        let camera = frame.camera
+        let forward = (camera.target - camera.position).normalized()
+        let right = forward.cross(camera.up).normalized()
+        let up = right.cross(forward).normalized()
+        guard forward.lengthSquared.isFinite,
+              right.lengthSquared.isFinite,
+              up.lengthSquared.isFinite,
+              forward.lengthSquared > 0,
+              right.lengthSquared > 0,
+              up.lengthSquared > 0 else {
+            return nil
+        }
+        let viewportWidth =
+            Float(drawableSize.width) * frame.viewport.width
+        let viewportHeight =
+            Float(drawableSize.height) * frame.viewport.height
+        guard viewportWidth.isFinite,
+              viewportHeight.isFinite,
+              viewportWidth > 0,
+              viewportHeight > 0,
+              camera.verticalFOVDegrees.isFinite,
+              camera.verticalFOVDegrees > 0 else {
+            return nil
+        }
+        let aspect = viewportWidth / viewportHeight
+        switch camera.projection {
+        case .perspective:
+            guard camera.verticalFOVDegrees < 180 else {
+                return nil
+            }
+            let verticalTangent = tan(
+                camera.verticalFOVDegrees * .pi / 360
+            )
+            let horizontalTangent = verticalTangent * aspect
+            guard verticalTangent.isFinite,
+                  horizontalTangent.isFinite,
+                  verticalTangent > 0,
+                  horizontalTangent > 0 else {
+                return nil
+            }
+            projection = .perspective(
+                horizontalTangent: horizontalTangent,
+                verticalTangent: verticalTangent
+            )
+        case .orthographic:
+            let halfHeight = camera.verticalFOVDegrees * 0.5
+            let halfWidth = halfHeight * aspect
+            guard halfHeight.isFinite,
+                  halfWidth.isFinite,
+                  halfHeight > 0,
+                  halfWidth > 0 else {
+                return nil
+            }
+            projection = .orthographic(
+                halfWidth: halfWidth,
+                halfHeight: halfHeight
+            )
+        }
+        cameraPosition = camera.position
+        self.forward = forward
+        self.right = right
+        self.up = up
+    }
+
+    static func boundsAreValid(_ bounds: RenderBounds3) -> Bool {
+        let minimum = bounds.minimum
+        let maximum = bounds.maximum
+        return minimum.x.isFinite &&
+            minimum.y.isFinite &&
+            minimum.z.isFinite &&
+            maximum.x.isFinite &&
+            maximum.y.isFinite &&
+            maximum.z.isFinite &&
+            minimum.x <= maximum.x &&
+            minimum.y <= maximum.y &&
+            minimum.z <= maximum.z
+    }
+
+    func intersects(_ bounds: RenderBounds3) -> Bool {
+        guard Self.boundsAreValid(bounds) else { return false }
+        return intersectsValidated(bounds)
+    }
+
+    func intersectsValidated(_ bounds: RenderBounds3) -> Bool {
+        let minimum = bounds.minimum
+        let maximum = bounds.maximum
+        let center = (minimum + maximum) * 0.5
+        let extents = (maximum - minimum) * 0.5
+        let relativeCenter = center - cameraPosition
+        let centerDepth = relativeCenter.dot(forward)
+        let centerRight = relativeCenter.dot(right)
+        let centerUp = relativeCenter.dot(up)
+        let depthRadius = Self.projectedRadius(extents, on: forward)
+        let rightRadius = Self.projectedRadius(extents, on: right)
+        let upRadius = Self.projectedRadius(extents, on: up)
+        guard centerDepth + depthRadius >= 0 else {
+            return false
+        }
+        switch projection {
+        case let .perspective(horizontalTangent, verticalTangent):
+            let horizontalPlaneRadius =
+                depthRadius * horizontalTangent + rightRadius
+            if centerDepth * horizontalTangent - centerRight
+                + horizontalPlaneRadius < 0 ||
+                centerDepth * horizontalTangent + centerRight
+                + horizontalPlaneRadius < 0 {
+                return false
+            }
+            let verticalPlaneRadius =
+                depthRadius * verticalTangent + upRadius
+            if centerDepth * verticalTangent - centerUp
+                + verticalPlaneRadius < 0 ||
+                centerDepth * verticalTangent + centerUp
+                + verticalPlaneRadius < 0 {
+                return false
+            }
+        case let .orthographic(halfWidth, halfHeight):
+            guard abs(centerRight) <= halfWidth + rightRadius,
+                  abs(centerUp) <= halfHeight + upRadius else {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func projectedRadius(
+        _ extents: RenderVec3,
+        on axis: RenderVec3
+    ) -> Float {
+        abs(axis.x) * extents.x +
+            abs(axis.y) * extents.y +
+            abs(axis.z) * extents.z
+    }
+}
+
 @MainActor
 final class GPUSceneBackend: SceneBackend {
     private enum PendingModelDraw {
         case model(ModelDraw)
         case instances(ModelInstancesDraw)
+        case persistentRangeList(PersistentModelRangeListDraw)
         case transformStreams(ModelTransformStreamsDraw)
         case mesh(MeshDraw)
         case meshInstances(MeshInstancesDraw)
@@ -3297,6 +3479,7 @@ final class GPUSceneBackend: SceneBackend {
     private let frameCoordinator: GPUFrameCoordinator
     private var drawableSize = PixelSize2D(width: 0, height: 0)
     private var currentFrame: FrameDescriptor?
+    private var frustumCullingState: GPUSceneFrustumCullingState?
     private var pendingModelDraws: [PendingModelDraw] = []
     private var pendingDebugDraws: [DebugDraw] = []
     private let submissionScratch = GPUSceneSubmissionScratch()
@@ -3304,6 +3487,9 @@ final class GPUSceneBackend: SceneBackend {
     private var modelBatchOverrideEntryCount = 0
     private(set) var lastPresentationReport:
         GPUScenePresentationProbeReport?
+    var pendingModelDrawCountForTesting: Int {
+        pendingModelDraws.count
+    }
 
     init(
         platform: GPUPlatform,
@@ -3321,10 +3507,20 @@ final class GPUSceneBackend: SceneBackend {
 
     func resize(drawableSize: PixelSize2D) throws {
         self.drawableSize = drawableSize
+        frustumCullingState = currentFrame.flatMap {
+            GPUSceneFrustumCullingState(
+                frame: $0,
+                drawableSize: drawableSize
+            )
+        }
     }
 
     func beginFrame(_ descriptor: FrameDescriptor) {
         currentFrame = descriptor
+        frustumCullingState = GPUSceneFrustumCullingState(
+            frame: descriptor,
+            drawableSize: drawableSize
+        )
         pendingModelDraws.removeAll(keepingCapacity: true)
         pendingDebugDraws.removeAll(keepingCapacity: true)
         submissionScratch.reset()
@@ -3372,6 +3568,12 @@ final class GPUSceneBackend: SceneBackend {
         }
     }
 
+    func submitPersistentModelRanges(
+        _ draw: PersistentModelRangeListDraw
+    ) {
+        pendingModelDraws.append(.persistentRangeList(draw))
+    }
+
     func endFrame() throws {
         do {
             try endFrameImpl()
@@ -3403,6 +3605,7 @@ final class GPUSceneBackend: SceneBackend {
         try validatePersistentInstanceReuse()
         var packedInstances = submissionScratch.takePackedInstances()
         var batches = submissionScratch.takeBatches()
+        var visiblePersistentRanges: [PersistentModelInstanceRange] = []
         var logicalInstanceCount = 0
         defer {
             submissionScratch.reclaim(
@@ -3471,6 +3674,70 @@ final class GPUSceneBackend: SceneBackend {
                     to: &batches
                 )
                 logicalInstanceCount += draw.count
+            case .persistentRangeList(let draw):
+                let persistentResource =
+                    try resources.instanceBufferResource(
+                        draw.persistentBuffer,
+                        semanticInstances: draw.instances,
+                        semanticRevision: draw.persistentRevision
+                    )
+                guard !draw.instances.isEmpty else {
+                    throw GPUSceneProbeError.operationFailed(
+                        message:
+                            "Persistent GPU model range list requires instances"
+                    )
+                }
+                let batchBuildStarted = telemetryEnabled
+                    ? platform.monotonicElapsedSeconds
+                    : nil
+                if telemetryEnabled {
+                    modelBatchOverrideEntryCount += draw.overrides.count
+                }
+                let geometry = GPUSceneGeometryProbe.model(
+                    try resources.modelPointer(draw.model)
+                )
+                let materials = try resources.sceneModelMaterials(
+                    model: draw.model,
+                    overrides: draw.overrides
+                )
+                visiblePersistentRanges.removeAll(keepingCapacity: true)
+                for range in draw.ranges {
+                    guard range.isValid(
+                        instanceCount: draw.instances.count
+                    ) else {
+                        throw GPUSceneProbeError.operationFailed(
+                            message:
+                                "Invalid GPU persistent model range-list range"
+                        )
+                    }
+                    guard intersectsFrustum(range.bounds) else {
+                        continue
+                    }
+                    visiblePersistentRanges.append(range)
+                    logicalInstanceCount += range.count
+                }
+                for entry in materials {
+                    for range in visiblePersistentRanges {
+                        batches.append(.init(
+                            geometry: geometry,
+                            animation: nil,
+                            material: entry.material,
+                            materialSlot: entry.materialSlot,
+                            legacyInstanced: true,
+                            instanceBuffer:
+                                persistentResource.storage.pointer,
+                            firstInstance: range.sourceStart,
+                            instanceCount: range.count,
+                            shadowBounds: range.bounds,
+                            spotShadowVisible: true
+                        ))
+                    }
+                }
+                if let batchBuildStarted {
+                    modelBatchBuildSeconds +=
+                        platform.monotonicElapsedSeconds -
+                        batchBuildStarted
+                }
             case .transformStreams(let draw):
                 guard draw.sourceStart >= 0,
                       draw.count > 0,
@@ -3805,6 +4072,12 @@ final class GPUSceneBackend: SceneBackend {
         let cameraUp = cameraRight
             .cross(cameraForward)
             .normalized()
+        let cameraPreparationFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
+        let lightingResolveStarted = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let lighting = try resources.sceneLighting(
             environment: currentFrame.environment,
             camera: currentFrame.camera,
@@ -3812,20 +4085,35 @@ final class GPUSceneBackend: SceneBackend {
                 Float(drawableSize.width) /
                 Float(drawableSize.height)
         )
+        let lightingResolveFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let clearColor = try resources.sceneClearColor(
             environment: currentFrame.environment
         )
+        let clearColorResolveFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let post = try resources.scenePost(
             environment: currentFrame.environment,
             chain: currentFrame.postChain,
             antiAliasing: currentFrame.antiAliasing
         )
+        let lightingPreparationFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         batches = GPUSceneBatchShadowCulling.applyingSpotFrustum(
             to: batches,
             shadow: lighting.spotShadow
         )
+        let shadowCullingFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let orderedBatches =
             GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(batches)
+        let batchOrderingFinished = telemetryEnabled
+            ? platform.monotonicElapsedSeconds
+            : 0
         let consolidatedBatches =
             GPUSceneBatchConsolidation.adjacentPersistentRanges(
                 orderedBatches
@@ -3853,6 +4141,46 @@ final class GPUSceneBackend: SceneBackend {
                 modelBatchBuildMilliseconds: modelBatchBuildSeconds * 1_000,
                 prepareMilliseconds:
                     (preparationFinished - packingFinished) * 1_000,
+                cameraPrepareMilliseconds:
+                    (
+                        cameraPreparationFinished -
+                        packingFinished
+                    ) * 1_000,
+                lightingPrepareMilliseconds:
+                    (
+                        lightingPreparationFinished -
+                        cameraPreparationFinished
+                    ) * 1_000,
+                lightingResolveMilliseconds:
+                    (
+                        lightingResolveFinished -
+                        lightingResolveStarted
+                    ) * 1_000,
+                clearColorResolveMilliseconds:
+                    (
+                        clearColorResolveFinished -
+                        lightingResolveFinished
+                    ) * 1_000,
+                postResolveMilliseconds:
+                    (
+                        lightingPreparationFinished -
+                        clearColorResolveFinished
+                    ) * 1_000,
+                shadowCullMilliseconds:
+                    (
+                        shadowCullingFinished -
+                        lightingPreparationFinished
+                    ) * 1_000,
+                batchOrderingMilliseconds:
+                    (
+                        batchOrderingFinished -
+                        shadowCullingFinished
+                    ) * 1_000,
+                batchConsolidationMilliseconds:
+                    (
+                        preparationFinished -
+                        batchOrderingFinished
+                    ) * 1_000,
                 nativePresentMilliseconds:
                     (presentationFinished - preparationFinished) * 1_000,
                 pendingDrawCount: pendingModelDraws.count,
@@ -3873,7 +4201,10 @@ final class GPUSceneBackend: SceneBackend {
         instanceBuffer: OpaquePointer? = nil,
         firstInstance: Int,
         instanceCount: Int,
+        sceneVisible: Bool = true,
+        directionalShadowVisible: Bool = true,
         shadowBounds: RenderBounds3? = nil,
+        spotShadowVisible: Bool = true,
         to batches: inout [GPUSceneGeometryProbeBatch]
     ) throws {
         let batchBuildStarted = platform.isFrameTelemetryEnabled
@@ -3898,7 +4229,11 @@ final class GPUSceneBackend: SceneBackend {
                 instanceBuffer: instanceBuffer,
                 firstInstance: firstInstance,
                 instanceCount: instanceCount,
-                shadowBounds: shadowBounds
+                sceneVisible: sceneVisible,
+                directionalShadowVisible:
+                    directionalShadowVisible,
+                shadowBounds: shadowBounds,
+                spotShadowVisible: spotShadowVisible
             ))
         }
         if let batchBuildStarted {
@@ -4225,103 +4560,11 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool {
-        let minimum = bounds.minimum
-        let maximum = bounds.maximum
-        let boundsScalars = [
-            minimum.x, minimum.y, minimum.z,
-            maximum.x, maximum.y, maximum.z,
-        ]
-        guard boundsScalars.allSatisfy(\.isFinite),
-              minimum.x <= maximum.x,
-              minimum.y <= maximum.y,
-              minimum.z <= maximum.z else {
+        guard GPUSceneFrustumCullingState.boundsAreValid(bounds) else {
             return false
         }
-        guard let frame = currentFrame,
-              drawableSize.width > 0,
-              drawableSize.height > 0 else {
-            return true
-        }
-
-        let camera = frame.camera
-        let forward = (camera.target - camera.position).normalized()
-        let right = forward.cross(camera.up).normalized()
-        let correctedUp = right.cross(forward).normalized()
-        guard forward.lengthSquared.isFinite,
-              right.lengthSquared.isFinite,
-              correctedUp.lengthSquared.isFinite,
-              forward.lengthSquared > 0,
-              right.lengthSquared > 0,
-              correctedUp.lengthSquared > 0 else {
-            return true
-        }
-
-        let center = (minimum + maximum) * 0.5
-        let extents = (maximum - minimum) * 0.5
-        let relativeCenter = center - camera.position
-        let centerDepth = relativeCenter.dot(forward)
-        let centerRight = relativeCenter.dot(right)
-        let centerUp = relativeCenter.dot(correctedUp)
-        let depthRadius = Self.projectedRadius(extents, on: forward)
-        let rightRadius = Self.projectedRadius(extents, on: right)
-        let upRadius = Self.projectedRadius(extents, on: correctedUp)
-        guard centerDepth + depthRadius >= 0 else {
-            return false
-        }
-
-        let viewportWidth =
-            Float(drawableSize.width) * frame.viewport.width
-        let viewportHeight =
-            Float(drawableSize.height) * frame.viewport.height
-        guard viewportWidth.isFinite,
-              viewportHeight.isFinite,
-              viewportWidth > 0,
-              viewportHeight > 0,
-              camera.verticalFOVDegrees.isFinite,
-              camera.verticalFOVDegrees > 0 else {
-            return true
-        }
-        let aspect = viewportWidth / viewportHeight
-        switch camera.projection {
-        case .perspective:
-            guard camera.verticalFOVDegrees < 180 else {
-                return true
-            }
-            let verticalTangent = tan(
-                camera.verticalFOVDegrees * .pi / 360
-            )
-            let horizontalTangent = verticalTangent * aspect
-            guard verticalTangent.isFinite,
-                  horizontalTangent.isFinite,
-                  verticalTangent > 0,
-                  horizontalTangent > 0 else {
-                return true
-            }
-            let horizontalPlaneRadius =
-                depthRadius * horizontalTangent + rightRadius
-            if centerDepth * horizontalTangent - centerRight
-                + horizontalPlaneRadius < 0 ||
-                centerDepth * horizontalTangent + centerRight
-                + horizontalPlaneRadius < 0 {
-                return false
-            }
-            let verticalPlaneRadius =
-                depthRadius * verticalTangent + upRadius
-            if centerDepth * verticalTangent - centerUp
-                + verticalPlaneRadius < 0 ||
-                centerDepth * verticalTangent + centerUp
-                + verticalPlaneRadius < 0 {
-                return false
-            }
-        case .orthographic:
-            let halfHeight = camera.verticalFOVDegrees * 0.5
-            let halfWidth = halfHeight * aspect
-            guard abs(centerRight) <= halfWidth + rightRadius,
-                  abs(centerUp) <= halfHeight + upRadius else {
-                return false
-            }
-        }
-        return true
+        guard let frustumCullingState else { return true }
+        return frustumCullingState.intersectsValidated(bounds)
     }
 
     func readbackWorldFrame() throws -> FrameReadback {
@@ -4338,19 +4581,11 @@ final class GPUSceneBackend: SceneBackend {
 
     func shutdown() {
         currentFrame = nil
+        frustumCullingState = nil
         pendingModelDraws.removeAll(keepingCapacity: false)
         pendingDebugDraws.removeAll(keepingCapacity: false)
         submissionScratch.release()
         drawableSize = .init(width: 0, height: 0)
-    }
-
-    private static func projectedRadius(
-        _ extents: RenderVec3,
-        on axis: RenderVec3
-    ) -> Float {
-        abs(axis.x) * extents.x +
-            abs(axis.y) * extents.y +
-            abs(axis.z) * extents.z
     }
 
     private func cameraGeometry(
@@ -4487,6 +4722,12 @@ final class GPUSceneBackend: SceneBackend {
             )
             switch pendingDraw {
             case .instances(let draw):
+                persistent = (
+                    draw.persistentBuffer,
+                    draw.instances,
+                    draw.persistentRevision
+                )
+            case .persistentRangeList(let draw):
                 persistent = (
                     draw.persistentBuffer,
                     draw.instances,

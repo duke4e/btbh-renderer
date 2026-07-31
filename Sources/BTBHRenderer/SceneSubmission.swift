@@ -70,6 +70,62 @@ public struct ModelInstancesDraw: Sendable {
     }
 }
 
+/// One bounded range inside a persistent semantic instance buffer.
+///
+/// Bounds cover exactly the selected source range and are used for camera and
+/// shadow-frustum rejection without rebuilding one draw value per range.
+public struct PersistentModelInstanceRange: Hashable, Sendable {
+    public let sourceStart: Int
+    public let count: Int
+    public let bounds: RenderBounds3
+
+    public init(
+        sourceStart: Int,
+        count: Int,
+        bounds: RenderBounds3
+    ) {
+        self.sourceStart = sourceStart
+        self.count = count
+        self.bounds = bounds
+    }
+
+    public func isValid(instanceCount: Int) -> Bool {
+        sourceStart >= 0 &&
+            count > 0 &&
+            sourceStart <= instanceCount &&
+            count <= instanceCount - sourceStart
+    }
+}
+
+/// A compact set of spatial ranges sharing one persistent model submission.
+///
+/// Backends can resolve the model, materials, and persistent storage once,
+/// cull the ranges in concrete backend code, and emit only surviving batches.
+public struct PersistentModelRangeListDraw: Sendable {
+    public let model: ModelHandle
+    public let instances: [RenderInstance]
+    public let overrides: [MaterialOverride]
+    public let persistentBuffer: InstanceBufferHandle
+    public let persistentRevision: UInt64?
+    public let ranges: [PersistentModelInstanceRange]
+
+    public init(
+        model: ModelHandle,
+        instances: [RenderInstance],
+        overrides: [MaterialOverride],
+        persistentBuffer: InstanceBufferHandle,
+        persistentRevision: UInt64? = nil,
+        ranges: [PersistentModelInstanceRange]
+    ) {
+        self.model = model
+        self.instances = instances
+        self.overrides = overrides
+        self.persistentBuffer = persistentBuffer
+        self.persistentRevision = persistentRevision
+        self.ranges = ranges
+    }
+}
+
 /// Pre-decomposed model instance streams for allocation-sensitive render paths.
 ///
 /// `sourceStart` and `count` select the same contiguous range in every present
@@ -334,6 +390,7 @@ public protocol SceneBackend: AnyObject {
     func resize(drawableSize: PixelSize2D) throws
     func beginFrame(_ descriptor: FrameDescriptor)
     func submit(_ draw: SceneDraw)
+    func submitPersistentModelRanges(_ draw: PersistentModelRangeListDraw)
     func endFrame() throws
     func project(_ world: RenderVec3, camera: RenderCamera) -> RenderVec2
     func unprojectRay(_ screen: RenderVec2, camera: RenderCamera) -> RenderRay
@@ -341,4 +398,25 @@ public protocol SceneBackend: AnyObject {
     func readbackWorldFrame() throws -> FrameReadback
     func captureWorldFrameTexture() throws -> TextureHandle
     func shutdown()
+}
+
+public extension SceneBackend {
+    /// Source-compatible expansion for backends without a specialized list
+    /// implementation. Specialized backends should queue the list itself.
+    func submitPersistentModelRanges(_ draw: PersistentModelRangeListDraw) {
+        guard !draw.instances.isEmpty else { return }
+        for range in draw.ranges
+        where range.isValid(instanceCount: draw.instances.count) &&
+            intersectsFrustum(range.bounds) {
+            submit(.modelInstances(.init(
+                model: draw.model,
+                instances: draw.instances,
+                overrides: draw.overrides,
+                persistentBuffer: draw.persistentBuffer,
+                persistentRevision: draw.persistentRevision,
+                sourceStart: range.sourceStart,
+                count: range.count
+            )))
+        }
+    }
 }

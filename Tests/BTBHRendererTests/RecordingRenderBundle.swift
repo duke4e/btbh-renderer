@@ -27,6 +27,8 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
 
     private(set) var events: [RecordingRenderEvent] = []
     private(set) var mousePositions: [RenderVec2] = []
+    private(set) var submittedModelInstanceDraws: [ModelInstancesDraw] = []
+    var frustumResult = false
     private var activeFrame: ActiveFrame?
 
     var platform: any GamePlatform { self }
@@ -162,12 +164,15 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
     }
     func submit(_ draw: SceneDraw) {
         if case .model = draw { events.append(.model) }
+        if case .modelInstances(let instances) = draw {
+            submittedModelInstanceDraws.append(instances)
+        }
     }
     func project(_ world: RenderVec3, camera: RenderCamera) -> RenderVec2 { .zero }
     func unprojectRay(_ screen: RenderVec2, camera: RenderCamera) -> RenderRay {
         RenderRay(origin: .zero, direction: .zero)
     }
-    func intersectsFrustum(_ bounds: RenderBounds3) -> Bool { false }
+    func intersectsFrustum(_ bounds: RenderBounds3) -> Bool { frustumResult }
     func readbackWorldFrame() throws -> FrameReadback { throw unexpected() }
     func captureWorldFrameTexture() throws -> TextureHandle { throw unexpected() }
 

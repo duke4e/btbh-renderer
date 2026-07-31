@@ -544,7 +544,7 @@ final class GPUCanvas: Canvas2DBackend {
         for (position, color) in output {
             vertices.append(.init(position: position, color: color))
         }
-        batches.append(.init(
+        appendBatch(.init(
             firstVertex: firstVertex,
             vertexCount: output.count,
             blendMode: blendMode,
@@ -703,13 +703,26 @@ final class GPUCanvas: Canvas2DBackend {
                 color: color
             ))
         }
-        batches.append(.init(
+        appendBatch(.init(
             firstVertex: firstVertex,
             vertexCount: output.count,
             blendMode: blendMode,
             scissor: scissors.last,
             texture: texture
         ))
+    }
+
+    private func appendBatch(_ next: GPUCanvasBatchProbe) {
+        let withinSamePass = batches.count > currentPassFirstBatch
+        if let previous = batches.last,
+           let merged = previous.merged(
+               with: next,
+               withinSamePass: withinSamePass
+           ) {
+            batches[batches.count - 1] = merged
+        } else {
+            batches.append(next)
+        }
     }
 
     private static func point(

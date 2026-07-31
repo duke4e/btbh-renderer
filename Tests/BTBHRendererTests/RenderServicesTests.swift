@@ -46,6 +46,121 @@ final class RenderServicesTests: XCTestCase {
         ])
     }
 
+    func testPersistentModelRangeListDefaultExpandsValidVisibleRanges() {
+        let recording = RecordingRenderBundle()
+        recording.frustumResult = true
+        let instances = [
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            ),
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            ),
+            RenderInstance(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            ),
+        ]
+        let firstBounds = RenderBounds3(
+            minimum: .init(x: -1, y: -1, z: -1),
+            maximum: .init(x: 1, y: 1, z: 1)
+        )
+        let secondBounds = RenderBounds3(
+            minimum: .init(x: 2, y: -1, z: -1),
+            maximum: .init(x: 4, y: 1, z: 1)
+        )
+
+        recording.submitPersistentModelRanges(.init(
+            model: .init(rawValue: 7),
+            instances: instances,
+            overrides: [.init(slot: 0, material: .init(rawValue: 8))],
+            persistentBuffer: .init(rawValue: 9),
+            persistentRevision: 10,
+            ranges: [
+                .init(sourceStart: 0, count: 1, bounds: firstBounds),
+                .init(sourceStart: 1, count: 2, bounds: secondBounds),
+                .init(sourceStart: 3, count: 1, bounds: secondBounds),
+                .init(sourceStart: 0, count: 0, bounds: firstBounds),
+            ]
+        ))
+
+        XCTAssertEqual(recording.submittedModelInstanceDraws.count, 2)
+        XCTAssertEqual(
+            recording.submittedModelInstanceDraws.map(\.sourceStart),
+            [0, 1]
+        )
+        XCTAssertEqual(
+            recording.submittedModelInstanceDraws.map(\.count),
+            [1, 2]
+        )
+        XCTAssertEqual(
+            recording.submittedModelInstanceDraws.map(\.persistentRevision),
+            [10, 10]
+        )
+    }
+
+    func testPersistentModelRangeListDefaultRejectsCulledRanges() {
+        let recording = RecordingRenderBundle()
+        recording.frustumResult = false
+        let bounds = RenderBounds3(
+            minimum: .init(x: -1, y: -1, z: -1),
+            maximum: .init(x: 1, y: 1, z: 1)
+        )
+
+        recording.submitPersistentModelRanges(.init(
+            model: .init(rawValue: 7),
+            instances: [
+                .init(
+                    transform: .identity,
+                    color: .white,
+                    custom: .init(x: 0, y: 0, z: 0, w: 0)
+                )
+            ],
+            overrides: [],
+            persistentBuffer: .init(rawValue: 9),
+            persistentRevision: 10,
+            ranges: [.init(sourceStart: 0, count: 1, bounds: bounds)]
+        ))
+
+        XCTAssertTrue(recording.submittedModelInstanceDraws.isEmpty)
+    }
+
+    func testPersistentModelRangeListRetainsPrimaryRanges() {
+        let primary = PersistentModelInstanceRange(
+            sourceStart: 0,
+            count: 2,
+            bounds: .init(
+                minimum: .init(x: -2, y: -2, z: -2),
+                maximum: .init(x: 2, y: 2, z: 2)
+            )
+        )
+        let draw = PersistentModelRangeListDraw(
+            model: .init(rawValue: 1),
+            instances: [
+                .init(
+                    transform: .identity,
+                    color: .white,
+                    custom: .init(x: 0, y: 0, z: 0, w: 0)
+                ),
+                .init(
+                    transform: .identity,
+                    color: .white,
+                    custom: .init(x: 0, y: 0, z: 0, w: 0)
+                ),
+            ],
+            overrides: [],
+            persistentBuffer: .init(rawValue: 2),
+            ranges: [primary]
+        )
+
+        XCTAssertEqual(draw.ranges, [primary])
+    }
+
     func testDoubleInstallThrowsAlreadyInstalled() throws {
         let recording = RecordingRenderBundle()
         try RenderServices.install(recording)

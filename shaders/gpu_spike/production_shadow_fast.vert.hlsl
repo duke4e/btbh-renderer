@@ -1,12 +1,3 @@
-struct InstanceData
-{
-    float4x4 model;
-    float4 color;
-    float4 custom;
-};
-
-StructuredBuffer<InstanceData> instances : register(t0, space0);
-
 cbuffer ShadowUniforms : register(b0, space1)
 {
     float4x4 light_view_projection;
@@ -15,6 +6,10 @@ cbuffer ShadowUniforms : register(b0, space1)
 struct VertexInput
 {
     float3 position : TEXCOORD0;
+    float4 model_column_0 : TEXCOORD1;
+    float4 model_column_1 : TEXCOORD2;
+    float4 model_column_2 : TEXCOORD3;
+    float4 model_column_3 : TEXCOORD4;
 };
 
 struct VertexOutput
@@ -22,13 +17,13 @@ struct VertexOutput
     float4 position : SV_Position;
 };
 
-VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
+VertexOutput main(VertexInput input)
 {
-    const InstanceData instance = instances[instance_id];
-    const float4 world_position = mul(
-        instance.model,
-        float4(input.position, 1.0f)
-    );
+    const float4 world_position =
+        input.model_column_0 * input.position.x +
+        input.model_column_1 * input.position.y +
+        input.model_column_2 * input.position.z +
+        input.model_column_3;
     VertexOutput output;
     output.position = mul(light_view_projection, world_position);
     return output;

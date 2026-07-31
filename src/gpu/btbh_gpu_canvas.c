@@ -358,6 +358,7 @@ bool btbh_gpu_window_finish_pending_frame(
     const bool must_submit = submit || acquired_swapchain;
     window->pending_command = NULL;
     window->pending_swapchain = NULL;
+    window->pending_scene_ready = false;
     window->pending_drawable_width = 0u;
     window->pending_drawable_height = 0u;
     window->presented_frame_readback_requested = false;
@@ -398,6 +399,10 @@ bool btbh_gpu_window_finish_pending_frame(
             ? SDL_SubmitGPUCommandBuffer(command)
             : SDL_CancelGPUCommandBuffer(command);
     }
+    btbh_gpu_window_scene_submission_finished(
+        window,
+        must_submit && result
+    );
     SDL_GPUDevice *device =
         window->device != NULL && !window->device->shutdown
             ? window->device->gpu
@@ -563,78 +568,6 @@ void btbh_gpu_window_release_frame_telemetry(
         }
     }
     window->frame_telemetry_pending_count = 0u;
-}
-
-BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
-    BTBHGPUWindow *window,
-    BTBHGPUTextureReport *report
-) {
-    if (
-        window == NULL ||
-        window->window == NULL ||
-        window->device == NULL ||
-        window->device->gpu == NULL ||
-        window->pending_command == NULL ||
-        window->pending_swapchain == NULL ||
-        window->pending_drawable_width == 0u ||
-        window->pending_drawable_height == 0u ||
-        report == NULL
-    ) {
-        return NULL;
-    }
-    BTBHGPUTexture *capture = btbh_gpu_window_texture_create_empty(
-        window,
-        window->pending_drawable_width,
-        window->pending_drawable_height,
-        SDL_GetGPUSwapchainTextureFormat(
-            window->device->gpu,
-            window->window
-        ),
-        SDL_GPU_TEXTUREUSAGE_SAMPLER |
-            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
-        BTBH_GPU_TEXTURE_FILTER_LINEAR,
-        BTBH_GPU_TEXTURE_WRAP_CLAMP,
-        report
-    );
-    if (capture == NULL) {
-        return NULL;
-    }
-    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
-        window->pending_command
-    );
-    if (copy == NULL) {
-        btbh_gpu_texture_destroy(capture);
-        report->result = BTBH_GPU_DEVICE_FAILURE;
-        (void)snprintf(
-            report->message,
-            sizeof(report->message),
-            "%s",
-            SDL_GetError()
-        );
-        return NULL;
-    }
-    SDL_GPUTextureLocation source;
-    SDL_GPUTextureLocation destination;
-    SDL_zero(source);
-    SDL_zero(destination);
-    source.texture = window->pending_swapchain;
-    destination.texture = capture->texture;
-    SDL_CopyGPUTextureToTexture(
-        copy,
-        &source,
-        &destination,
-        window->pending_drawable_width,
-        window->pending_drawable_height,
-        1u,
-        false
-    );
-    SDL_EndGPUCopyPass(copy);
-    report->result = BTBH_GPU_OK;
-    report->width = capture->width;
-    report->height = capture->height;
-    report->mip_count = 1u;
-    report->message[0] = '\0';
-    return capture;
 }
 
 void btbh_gpu_window_request_presented_frame_readback(
@@ -1026,6 +959,9 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             batch_count
         )
     ) {
+        if (window != NULL && window->pending_command != NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+        }
         btbh_gpu_canvas_error(
             report,
             BTBH_GPU_INVALID_ARGUMENT,
@@ -1044,35 +980,55 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             report
         )
     ) {
+        if (window->pending_command != NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+        }
         return report->result;
     }
 
     SDL_GPUDevice *device = window->device->gpu;
-    const bool had_scene = window->pending_command != NULL;
-    if (!had_scene) {
+    const bool had_scene = window->pending_scene_ready;
+    if (window->pending_command == NULL) {
         window->pending_command = SDL_AcquireGPUCommandBuffer(device);
-        if (window->pending_command == NULL ||
-            !SDL_WaitAndAcquireGPUSwapchainTexture(
-                window->pending_command,
-                window->window,
-                &window->pending_swapchain,
-                &window->pending_drawable_width,
-                &window->pending_drawable_height
-            ) ||
-            window->pending_swapchain == NULL) {
-            if (window->pending_command != NULL) {
-                (void)btbh_gpu_window_finish_pending_frame(
-                    window,
-                    false
-                );
-            }
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_WINDOW_FAILURE,
-                SDL_GetError()
+    }
+    if (window->pending_command == NULL ||
+        !SDL_WaitAndAcquireGPUSwapchainTexture(
+            window->pending_command,
+            window->window,
+            &window->pending_swapchain,
+            &window->pending_drawable_width,
+            &window->pending_drawable_height
+        ) ||
+        window->pending_swapchain == NULL) {
+        if (window->pending_command != NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(
+                window,
+                false
             );
-            return report->result;
         }
+        window->pending_scene_ready = false;
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_WINDOW_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    if (had_scene &&
+        !btbh_gpu_window_blit_pending_scene(
+            window,
+            window->pending_command,
+            window->pending_swapchain,
+            window->pending_drawable_width,
+            window->pending_drawable_height
+        )) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            "Could not composite submitted GPU scene"
+        );
+        return report->result;
     }
 
     const uint32_t byte_count =
@@ -1206,16 +1162,25 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         }
         const uint32_t last_batch =
             canvas_pass->first_batch + canvas_pass->batch_count;
+        SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
+        SDL_Rect bound_scissor;
+        SDL_zero(bound_scissor);
+        bool has_bound_scissor = false;
         for (uint32_t index = canvas_pass->first_batch;
              index < last_batch;
              ++index) {
             const BTBHGPUCanvasBatch *batch = &batches[index];
-            if (batch->texture != NULL) {
-                SDL_BindGPUGraphicsPipeline(
-                    pass,
-                    window->canvas_runtime
+            SDL_GPUGraphicsPipeline *pipeline =
+                batch->texture != NULL
+                    ? window->canvas_runtime
                         ->textured_pipelines[batch->blend_mode]
-                );
+                    : window->canvas_runtime
+                        ->solid_pipelines[batch->blend_mode];
+            if (pipeline != bound_pipeline) {
+                SDL_BindGPUGraphicsPipeline(pass, pipeline);
+                bound_pipeline = pipeline;
+            }
+            if (batch->texture != NULL) {
                 SDL_GPUTextureSamplerBinding sampler;
                 SDL_zero(sampler);
                 sampler.texture = batch->texture->texture;
@@ -1225,12 +1190,6 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
                     0u,
                     &sampler,
                     1u
-                );
-            } else {
-                SDL_BindGPUGraphicsPipeline(
-                    pass,
-                    window->canvas_runtime
-                        ->solid_pipelines[batch->blend_mode]
                 );
             }
             SDL_Rect scissor;
@@ -1245,7 +1204,15 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
                 scissor.w = (int)target_width;
                 scissor.h = (int)target_height;
             }
-            SDL_SetGPUScissor(pass, &scissor);
+            if (!has_bound_scissor ||
+                scissor.x != bound_scissor.x ||
+                scissor.y != bound_scissor.y ||
+                scissor.w != bound_scissor.w ||
+                scissor.h != bound_scissor.h) {
+                SDL_SetGPUScissor(pass, &scissor);
+                bound_scissor = scissor;
+                has_bound_scissor = true;
+            }
             SDL_DrawGPUPrimitives(
                 pass,
                 batch->vertex_count,

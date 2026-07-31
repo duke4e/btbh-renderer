@@ -1,7 +1,7 @@
 #ifndef BTBH_GPU_INTERNAL_H
 #define BTBH_GPU_INTERNAL_H
 
-#include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_package_internal.h"
 
 #include <SDL3/SDL.h>
 
@@ -60,11 +60,14 @@ struct BTBHGPUWindow {
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
+    BTBHGPUSceneTelemetryReport scene_telemetry;
+    uint32_t scene_shadow_update_period_frames[3];
     BTBHGPUCanvasRuntime *canvas_runtime;
     BTBHGPUTexture *presented_frame;
     bool presented_frame_readback_requested;
     SDL_GPUCommandBuffer *pending_command;
     SDL_GPUTexture *pending_swapchain;
+    bool pending_scene_ready;
     SDL_GPUTransferBuffer *pending_scene_transfer;
     SDL_GPUBuffer *pending_instance_buffer;
     SDL_GPUBuffer *pending_bone_buffer;
@@ -107,6 +110,7 @@ struct BTBHGPUInstanceBuffer {
     BTBHGPUInstanceBuffer *previous;
     BTBHGPUInstanceBuffer *next;
     SDL_GPUBuffer *buffer;
+    SDL_GPUBuffer *vertex_buffer;
     uint32_t capacity;
     uint32_t stride;
     uint32_t byte_capacity;
@@ -163,6 +167,17 @@ uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
+);
+bool btbh_gpu_window_blit_pending_scene(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    SDL_GPUTexture *destination,
+    uint32_t destination_width,
+    uint32_t destination_height
+);
+void btbh_gpu_window_scene_submission_finished(
+    BTBHGPUWindow *window,
+    bool submitted
 );
 void btbh_gpu_window_release_frame_telemetry(
     BTBHGPUWindow *window

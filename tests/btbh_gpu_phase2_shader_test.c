@@ -29,6 +29,9 @@
 #ifndef BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH must be defined"
 #endif
@@ -125,6 +128,30 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH,
             "\"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"storage_buffers\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD1\", \"type\": \"float4\", \"location\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD2\", \"type\": \"float4\", \"location\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD3\", \"type\": \"float4\", \"location\": 3"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD4\", \"type\": \"float4\", \"location\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH,

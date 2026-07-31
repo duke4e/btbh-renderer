@@ -5,6 +5,395 @@ import BTBHRendererGPUCore
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    func testCanvasBatchCoalescingRequiresExactAdjacentPassState() {
+        let texture = OpaquePointer(bitPattern: 0x100)!
+        let otherTexture = OpaquePointer(bitPattern: 0x200)!
+        let scissor = RenderRect(x: 1, y: 2, width: 30, height: 40)
+        let first = GPUCanvasBatchProbe(
+            firstVertex: 0,
+            vertexCount: 6,
+            blendMode: .alpha,
+            scissor: scissor,
+            texture: texture
+        )
+        let adjacent = GPUCanvasBatchProbe(
+            firstVertex: 6,
+            vertexCount: 9,
+            blendMode: .alpha,
+            scissor: scissor,
+            texture: texture
+        )
+
+        let merged = first.merged(
+            with: adjacent,
+            withinSamePass: true
+        )
+        XCTAssertEqual(merged?.firstVertex, 0)
+        XCTAssertEqual(merged?.vertexCount, 15)
+        XCTAssertNil(first.merged(
+            with: adjacent,
+            withinSamePass: false
+        ))
+        XCTAssertNil(first.merged(
+            with: .init(
+                firstVertex: 7,
+                vertexCount: 9,
+                blendMode: .alpha,
+                scissor: scissor,
+                texture: texture
+            ),
+            withinSamePass: true
+        ))
+        XCTAssertNil(first.merged(
+            with: .init(
+                firstVertex: 6,
+                vertexCount: 9,
+                blendMode: .additive,
+                scissor: scissor,
+                texture: texture
+            ),
+            withinSamePass: true
+        ))
+        XCTAssertNil(first.merged(
+            with: .init(
+                firstVertex: 6,
+                vertexCount: 9,
+                blendMode: .alpha,
+                scissor: nil,
+                texture: texture
+            ),
+            withinSamePass: true
+        ))
+        XCTAssertNil(first.merged(
+            with: .init(
+                firstVertex: 6,
+                vertexCount: 9,
+                blendMode: .alpha,
+                scissor: scissor,
+                texture: otherTexture
+            ),
+            withinSamePass: true
+        ))
+    }
+
+    func testNativeSceneAndCanvasShareSingleNormalSubmitLifecycle()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sceneSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+        let canvasSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_canvas.c"
+            ),
+            encoding: .utf8
+        )
+        let windowSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_window.c"
+            ),
+            encoding: .utf8
+        )
+        let sceneAdapterSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BTBHRendererGPU/BTBHRendererGPU.swift"
+            ),
+            encoding: .utf8
+        )
+        let sceneSubmission = try XCTUnwrap(
+            sceneSource.range(
+                of: "btbh_gpu_window_scene_present_instances_internal("
+            ).flatMap { start in
+                sceneSource.range(
+                    of: "\nBTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(",
+                    range: start.lowerBound..<sceneSource.endIndex
+                ).map {
+                    String(sceneSource[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let sceneCapture = try XCTUnwrap(
+            sceneSource.range(
+                of: "btbh_gpu_window_capture_pending_scene_texture("
+            ).flatMap { start in
+                sceneSource.range(
+                    of: "\nbool btbh_gpu_window_blit_pending_scene(",
+                    range: start.lowerBound..<sceneSource.endIndex
+                ).map {
+                    String(sceneSource[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let publicSceneSubmission = try XCTUnwrap(
+            sceneSource.range(
+                of: "\nBTBHGPUResult btbh_gpu_window_scene_present_instances("
+            ).flatMap { start in
+                sceneSource.range(
+                    of: "\nBTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(",
+                    range: start.lowerBound..<sceneSource.endIndex
+                ).map {
+                    String(sceneSource[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let canvasPresentation = try XCTUnwrap(
+            canvasSource.range(
+                of: "btbh_gpu_window_canvas_present("
+            ).flatMap { start in
+                canvasSource.range(
+                    of: "\nvoid btbh_gpu_window_release_canvas(",
+                    range: start.lowerBound..<canvasSource.endIndex
+                ).map {
+                    String(canvasSource[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let clearPresentation = try XCTUnwrap(
+            windowSource.range(
+                of: "btbh_gpu_window_present_clear("
+            ).flatMap { start in
+                windowSource.range(
+                    of: "\nstatic void btbh_gpu_platform_snapshot(",
+                    range: start.lowerBound..<windowSource.endIndex
+                ).map {
+                    String(windowSource[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+
+        XCTAssertFalse(
+            sceneSubmission.contains(
+                "SDL_WaitAndAcquireGPUSwapchainTexture"
+            ),
+            "Scene submission must not wait for presentation availability"
+        )
+        XCTAssertTrue(
+            sceneSubmission.contains("pending_scene_ready = true"),
+            "A recorded offscreen scene must be handed to Canvas2D"
+        )
+        XCTAssertTrue(
+            sceneSubmission.contains("window->pending_command = command"),
+            "Scene submission must retain its command for Canvas2D"
+        )
+        XCTAssertFalse(
+            sceneSubmission.contains("SDL_SubmitGPUCommandBuffer(command)"),
+            "Normal scene submission must not submit before Canvas2D"
+        )
+        XCTAssertTrue(
+            canvasPresentation.contains(
+                "SDL_WaitAndAcquireGPUSwapchainTexture"
+            ),
+            "Canvas owns late swapchain acquisition"
+        )
+        XCTAssertTrue(
+            canvasPresentation.contains(
+                "if (window->pending_command == NULL)"
+            ),
+            "Canvas must reuse a pending scene command when available"
+        )
+        XCTAssertTrue(
+            canvasPresentation.contains(
+                "btbh_gpu_window_blit_pending_scene"
+            ),
+            "Canvas must composite the pending offscreen scene"
+        )
+        XCTAssertTrue(
+            clearPresentation.contains(
+                "btbh_gpu_window_blit_pending_scene"
+            ),
+            "A scene with no 2D batches must still reach the swapchain"
+        )
+        XCTAssertTrue(
+            sceneCapture.contains(
+                "SDL_SubmitGPUCommandBuffer(scene_command)"
+            ),
+            "Explicit capture must flush the pending scene rare path"
+        )
+        XCTAssertTrue(
+            sceneCapture.contains("window->pending_command = NULL"),
+            "Capture must hand Canvas a clean command-buffer slot"
+        )
+        let normalizedPublicSceneSubmission = publicSceneSubmission
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        XCTAssertTrue(
+            normalizedPublicSceneSubmission.contains(
+                "batches, NULL, NULL, batch_count"
+            ),
+            "The stable public C entry point must preserve legacy always-visible scene and directional-shadow behavior"
+        )
+        XCTAssertTrue(
+            sceneSubmission.contains("const uint8_t *scene_visibility") &&
+                sceneSubmission.contains(
+                    "const uint8_t *directional_shadow_visibility"
+                ),
+            "New visibility controls must remain package-internal sidecars"
+        )
+        XCTAssertTrue(
+            sceneAdapterSource.contains(
+                "btbh_gpu_window_scene_present_instances_with_visibility("
+            ),
+            "The Swift adapter must use the package-internal visibility entry point"
+        )
+        let earlyCanvasSetup = try XCTUnwrap(
+            canvasPresentation.range(of: "SDL_GPUDevice *device")
+        ).lowerBound
+        let earlyCanvasFailures = String(
+            canvasPresentation[..<earlyCanvasSetup]
+        )
+        XCTAssertGreaterThanOrEqual(
+            earlyCanvasFailures.components(
+                separatedBy: "btbh_gpu_window_finish_pending_frame"
+            ).count - 1,
+            2,
+            "Invalid input and runtime creation failures must both abandon a pending scene command"
+        )
+        XCTAssertTrue(
+            canvasSource.contains(
+                "btbh_gpu_window_scene_submission_finished(\n" +
+                "        window,\n" +
+                "        must_submit && result\n" +
+                "    )"
+            ),
+            "Final command cancellation or submission failure must invalidate speculative shadow-cache state"
+        )
+        XCTAssertTrue(
+            sceneSubmission.contains(
+                "btbh_gpu_scene_cancel_submission(window, command)"
+            ),
+            "Scene encode failures must invalidate speculative shadow-cache state when cancelling"
+        )
+        XCTAssertFalse(
+            sceneSubmission.contains(
+                "(void)SDL_CancelGPUCommandBuffer(command)"
+            ),
+            "Scene submission must not bypass shadow-cache invalidation when cancelling"
+        )
+        XCTAssertTrue(
+            sceneCapture.contains(
+                "btbh_gpu_window_scene_submission_finished(\n" +
+                "                window,\n" +
+                "                false\n" +
+                "            )"
+            ),
+            "A failed explicit scene submit must invalidate speculative shadow-cache state"
+        )
+    }
+
+    func testSceneAdapterLightingTelemetryBracketsLightingResolution()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BTBHRendererGPU/GPUBackendsPending.swift"
+            ),
+            encoding: .utf8
+        )
+        let endFrame = try XCTUnwrap(
+            source.range(of: "private func endFrameImpl() throws {")
+                .flatMap { start in
+                    source.range(
+                        of: "\n    private func appendModelBatches(",
+                        range: start.lowerBound..<source.endIndex
+                    ).map {
+                        String(source[start.lowerBound..<$0.lowerBound])
+                    }
+                }
+        )
+        let started = try XCTUnwrap(
+            endFrame.range(of: "let lightingResolveStarted")
+        )
+        let resolution = try XCTUnwrap(
+            endFrame.range(of: "let lighting = try resources.sceneLighting(")
+        )
+        let finished = try XCTUnwrap(
+            endFrame.range(of: "let lightingResolveFinished")
+        )
+
+        XCTAssertLessThan(started.lowerBound, resolution.lowerBound)
+        XCTAssertLessThan(resolution.lowerBound, finished.lowerBound)
+    }
+
+    func testNativeCanvasCachesPipelineAndScissorWithinEachPass()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_canvas.c"
+            ),
+            encoding: .utf8
+        )
+        let presentation = try XCTUnwrap(
+            source.range(of: "btbh_gpu_window_canvas_present(")
+                .flatMap { start in
+                    source.range(
+                        of: "\nvoid btbh_gpu_window_release_canvas(",
+                        range: start.lowerBound..<source.endIndex
+                    ).map {
+                        String(source[start.lowerBound..<$0.lowerBound])
+                    }
+                }
+        )
+
+        XCTAssertTrue(presentation.contains(
+            "SDL_GPUGraphicsPipeline *bound_pipeline = NULL"
+        ))
+        XCTAssertTrue(presentation.contains(
+            "if (pipeline != bound_pipeline)"
+        ))
+        XCTAssertTrue(presentation.contains(
+            "bool has_bound_scissor = false"
+        ))
+        XCTAssertTrue(presentation.contains(
+            "if (!has_bound_scissor ||"
+        ))
+        XCTAssertTrue(presentation.contains(
+            "SDL_BindGPUFragmentSamplers("
+        ))
+    }
+
+    func testProductionScreenShaderKindIsDerivedOnceFromFragmentPath() {
+        XCTAssertEqual(
+            GPUProductionScreenShaderKind(
+                fragmentPath: #"C:\shaders\LUT.frag"#
+            ),
+            .lut
+        )
+        XCTAssertEqual(
+            GPUProductionScreenShaderKind(
+                fragmentPath: "/tmp/shaders/cas.frag"
+            ),
+            .cas
+        )
+        XCTAssertEqual(
+            GPUProductionScreenShaderKind(
+                fragmentPath: "/tmp/shaders/TiltShift.frag"
+            ),
+            .tiltShift
+        )
+        XCTAssertEqual(
+            GPUProductionScreenShaderKind(
+                fragmentPath: "/tmp/shaders/custom-pass.frag"
+            ),
+            .unsupported("custom-pass")
+        )
+    }
+
     func testProductionGPUColorInputsUseSRGBToLinearConversion() {
         XCTAssertEqual(
             GPUColorSpace.linearComponent(0.5),
@@ -84,7 +473,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "src/gpu/btbh_gpu_model.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(modelImporter.contains(
             "&source->normal_texture,\n" +
@@ -103,7 +492,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "src/gpu/btbh_gpu_model.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(modelImporter.contains(
             "&source->emissive_texture,\n" +
@@ -281,7 +670,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "src/gpu/btbh_gpu_font.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(source.contains("BTBH_GPU_FONT_GLYPH_PADDING 4u"))
         XCTAssertTrue(source.contains("stbtt_GetCodepointBitmap("))
@@ -348,7 +737,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "src/gpu/btbh_gpu_scene.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(modelShader.contains(
             "float4 ambient : SV_Target1;"
@@ -844,6 +1233,35 @@ final class GPUWindowProbeTests: XCTestCase {
         let normalizedNativeScene = nativeScene
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
+        let shadowFunction = try XCTUnwrap(
+            nativeScene.range(
+                of: "static bool btbh_gpu_scene_render_directional_shadow("
+            ).flatMap { start in
+                nativeScene.range(
+                    of: "\nstatic bool btbh_gpu_scene_render_fullscreen(",
+                    range: start.lowerBound..<nativeScene.endIndex
+                ).map {
+                    String(nativeScene[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let normalizedShadowFunction = shadowFunction
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        let fastUniformBlock = try XCTUnwrap(
+            vertexShader.range(of: "cbuffer ShadowUniforms")
+                .flatMap { start in
+                    vertexShader.range(
+                        of: "};",
+                        range: start.lowerBound..<vertexShader.endIndex
+                    ).map {
+                        String(vertexShader[start.lowerBound..<$0.upperBound])
+                    }
+                }
+        )
+        let normalizedFastUniformBlock = fastUniformBlock
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
 
         XCTAssertTrue(normalizedNativeScene.contains(
             "surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC"
@@ -853,6 +1271,22 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertTrue(normalizedNativeScene.contains(
             "batch->billboard_mode == BTBH_GPU_SCENE_BILLBOARD_DISABLED"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUBuffer *instance_vertex_buffer;"
+        ))
+        XCTAssertTrue(normalizedNativeScene.contains(
+            "buffer_info.usage = SDL_GPU_BUFFERUSAGE_VERTEX; " +
+                "runtime->instance_vertex_buffer = " +
+                "SDL_CreateGPUBuffer(device, &buffer_info);"
+        ))
+        XCTAssertTrue(normalizedShadowFunction.contains(
+            "batch->instance_buffer != NULL ? " +
+                "batch->instance_buffer->vertex_buffer : " +
+                "transient_instance_vertex_buffer"
+        ))
+        XCTAssertTrue(normalizedShadowFunction.contains(
+            "batch->first_instance * BTBH_GPU_SCENE_INSTANCE_STRIDE"
         ))
         XCTAssertTrue(nativeScene.contains(
             "runtime->fast_shadow_pipelines["
@@ -874,6 +1308,69 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertFalse(vertexShader.contains("btbh_apply_surface_vertex"))
         XCTAssertFalse(fragmentShader.contains("discard"))
+        XCTAssertTrue(shadowFunction.contains(
+            "bool shadow_uniform_bound = false"
+        ))
+        XCTAssertTrue(normalizedShadowFunction.contains(
+            "if (uses_fast_shadow) { if (!shadow_uniform_bound)"
+        ))
+        XCTAssertTrue(normalizedShadowFunction.contains(
+            "light_view_projection, sizeof(float) * 16u"
+        ))
+        XCTAssertTrue(normalizedShadowFunction.contains(
+            "} else { BTBHGPUShadowUniforms uniforms;"
+        ))
+        XCTAssertEqual(
+            shadowFunction.components(
+                separatedBy: "SDL_PushGPUVertexUniformData("
+            ).count - 1,
+            2
+        )
+        XCTAssertEqual(
+            shadowFunction.components(
+                separatedBy: "bool shadow_uniform_bound = false"
+            ).count - 1,
+            1
+        )
+        XCTAssertEqual(
+            shadowFunction.components(
+                separatedBy: "shadow_uniform_bound = true"
+            ).count - 1,
+            2
+        )
+        XCTAssertEqual(
+            normalizedFastUniformBlock,
+            "cbuffer ShadowUniforms : register(b0, space1) { " +
+                "float4x4 light_view_projection; };"
+        )
+    }
+
+    func testFastShadowShaderPathsAreRequiredAndNeverAliasRegularShaders()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let probeSource = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "Sources/BTBHRendererGPU/BTBHRendererGPU.swift"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(probeSource.contains(
+            "fastShadowVertexShaderPath: String,"
+        ))
+        XCTAssertTrue(probeSource.contains(
+            "fastShadowFragmentShaderPath: String,"
+        ))
+        XCTAssertFalse(probeSource.contains(
+            "fastShadowVertexShaderPath ?? shadowVertexShaderPath"
+        ))
+        XCTAssertFalse(probeSource.contains(
+            "fastShadowFragmentShaderPath ?? shadowFragmentShaderPath"
+        ))
     }
 
     func testTransparentSceneBatchesUseLegacyMaterialStateOrderAfterOpaqueBatches() {
@@ -1149,6 +1646,7 @@ final class GPUWindowProbeTests: XCTestCase {
             enabled: true,
             range: 10,
             softness: 0,
+            updatePeriodFrames: 2,
             viewProjection: [
                 1, 0, 0, 0,
                 0, 1, 0, 0,
@@ -1215,6 +1713,43 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(nativeScene.contains(
             "batch->spot_shadow_visible == 0u"
         ))
+    }
+
+    func testStaticFastShadowUsesInstanceRateVertexInput() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+        let instanceBuffer = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_instance_buffer.c"
+            ),
+            encoding: .utf8
+        )
+        let fastShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_shadow_fast.vert.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPU_VERTEXINPUTRATE_INSTANCE"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "BTBH_GPU_SCENE_INSTANCE_STRIDE"
+        ))
+        XCTAssertTrue(instanceBuffer.contains(
+            "SDL_GPU_BUFFERUSAGE_VERTEX"
+        ))
+        XCTAssertFalse(fastShader.contains("StructuredBuffer"))
+        XCTAssertTrue(fastShader.contains("model_column_3"))
     }
 
     func testProductionSurfaceShadersClassifyKnownVariantsAndParameters()
@@ -1297,7 +1832,8 @@ final class GPUWindowProbeTests: XCTestCase {
             energy: 2,
             range: 16,
             castsShadow: true,
-            shadowSoftness: 2
+            shadowSoftness: 2,
+            shadowUpdatePeriodFrames: 2
         ))
         _ = try resources.createLight(.init(
             kind: .directional,
@@ -1327,6 +1863,10 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(projection.directionalShadow.enabled)
         XCTAssertEqual(projection.directionalShadow.range, 16)
         XCTAssertEqual(projection.directionalShadow.softness, 2)
+        XCTAssertEqual(
+            projection.directionalShadow.updatePeriodFrames,
+            2
+        )
         XCTAssertEqual(
             projection.directionalShadow.viewProjection.count,
             16
@@ -1393,7 +1933,8 @@ final class GPUWindowProbeTests: XCTestCase {
             energy: 3,
             range: 50,
             castsShadow: true,
-            shadowSoftness: 4
+            shadowSoftness: 4,
+            shadowUpdatePeriodFrames: 3
         ))
         let projection = try resources.sceneLighting(
             environment: .default,
@@ -1418,6 +1959,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         XCTAssertEqual(projection.spotEnergy, 3)
         XCTAssertEqual(projection.spotRange, 50)
+        XCTAssertEqual(projection.spotShadow.updatePeriodFrames, 3)
         XCTAssertEqual(projection.spotFalloff, 1)
         XCTAssertEqual(
             projection.spotInnerCutoff,
@@ -1809,6 +2351,7 @@ final class GPUWindowProbeTests: XCTestCase {
             debugMode: true
         )
         defer { probe.shutdown() }
+        probe.setFrameTelemetryEnabled(true)
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1840,8 +2383,11 @@ final class GPUWindowProbeTests: XCTestCase {
             0, 1, 0, 1,
             21, 22, 23, 24,
         ]
-        let shaderDirectory = packageRoot
-            .appendingPathComponent(
+        let shaderDirectory =
+            ProcessInfo.processInfo.environment[
+                "BTBH_GPU_TEST_SHADER_DIR"
+            ].map { URL(fileURLWithPath: $0) } ??
+            packageRoot.appendingPathComponent(
                 "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
             )
         var testLighting = GPUSceneLightingProbe(
@@ -1862,6 +2408,16 @@ final class GPUWindowProbeTests: XCTestCase {
                 animatedVertexShaderPath: shaderDirectory
                     .appendingPathComponent(
                         "production_animated_model.vert.spv"
+                    )
+                    .path,
+                fastShadowVertexShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_shadow_fast.vert.spv"
+                    )
+                    .path,
+                fastShadowFragmentShaderPath: shaderDirectory
+                    .appendingPathComponent(
+                        "production_shadow_fast.frag.spv"
                     )
                     .path,
                 shadowVertexShaderPath: shaderDirectory
@@ -1951,6 +2507,62 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertFalse(report.shadowResourcesReady)
         XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
         XCTAssertGreaterThan(report.cpuPrepareMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareSetupMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareBonesMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareBoneCountMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareBoneAllocateMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareBoneSampleMilliseconds,
+            0
+        )
+        XCTAssertLessThanOrEqual(
+            report.cpuPrepareBoneCountMilliseconds +
+                report.cpuPrepareBoneAllocateMilliseconds +
+                report.cpuPrepareBoneSampleMilliseconds,
+            report.cpuPrepareBonesMilliseconds + 0.05
+        )
+        XCTAssertGreaterThan(report.preparedGeometryCount, 0)
+        XCTAssertGreaterThanOrEqual(report.animatedGeometryCount, 0)
+        XCTAssertGreaterThanOrEqual(report.animationSampleCount, 0)
+        XCTAssertLessThanOrEqual(
+            report.animationSampleCount,
+            report.animatedGeometryCount
+        )
+        XCTAssertGreaterThanOrEqual(report.boneMatrixCount, 0)
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPreparePipelinesMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            report.cpuPrepareBuffersMilliseconds,
+            0
+        )
+        XCTAssertGreaterThan(
+            report.cpuPrepareSetupMilliseconds +
+                report.cpuPrepareBonesMilliseconds +
+                report.cpuPreparePipelinesMilliseconds +
+                report.cpuPrepareBuffersMilliseconds,
+            0
+        )
+        XCTAssertLessThanOrEqual(
+            report.cpuPrepareSetupMilliseconds +
+                report.cpuPrepareBonesMilliseconds +
+                report.cpuPreparePipelinesMilliseconds +
+                report.cpuPrepareBuffersMilliseconds,
+            report.cpuPrepareMilliseconds + 0.05
+        )
         XCTAssertGreaterThanOrEqual(report.cpuUploadMilliseconds, 0)
         XCTAssertEqual(report.cpuShadowEncodeMilliseconds, 0)
         XCTAssertGreaterThanOrEqual(
@@ -2064,6 +2676,7 @@ final class GPUWindowProbeTests: XCTestCase {
             debugMode: true
         )
         defer { probe.shutdown() }
+        probe.setFrameTelemetryEnabled(true)
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -2076,8 +2689,11 @@ final class GPUWindowProbeTests: XCTestCase {
                 .path
         )
         defer { GPUWindowProbe.destroyModel(model.pointer) }
-        let shaderDirectory = packageRoot
-            .appendingPathComponent(
+        let shaderDirectory =
+            ProcessInfo.processInfo.environment[
+                "BTBH_GPU_TEST_SHADER_DIR"
+            ].map { URL(fileURLWithPath: $0) } ??
+            packageRoot.appendingPathComponent(
                 "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
             )
         let instances = [
@@ -2104,6 +2720,16 @@ final class GPUWindowProbeTests: XCTestCase {
             animatedVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
                     "production_animated_model.vert.spv"
+                )
+                .path,
+            fastShadowVertexShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow_fast.vert.spv"
+                )
+                .path,
+            fastShadowFragmentShaderPath: shaderDirectory
+                .appendingPathComponent(
+                    "production_shadow_fast.frag.spv"
                 )
                 .path,
             shadowVertexShaderPath: shaderDirectory
@@ -2158,6 +2784,7 @@ final class GPUWindowProbeTests: XCTestCase {
                     enabled: true,
                     range: 10,
                     softness: 1,
+                    updatePeriodFrames: 2,
                     viewProjection: [
                         1, 0, 0, 0,
                         0, 1, 0, 0,
@@ -2176,6 +2803,8 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(report.shadowResourcesReady)
         XCTAssertGreaterThan(report.cpuEncodeMilliseconds, 0)
         XCTAssertGreaterThan(report.cpuShadowEncodeMilliseconds, 0)
+        XCTAssertGreaterThan(report.shadowPipelineBindSkipCount, 0)
+        XCTAssertGreaterThan(report.geometryPipelineBindSkipCount, 0)
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
                 .appendingPathComponent("production_canvas.vert.spv")

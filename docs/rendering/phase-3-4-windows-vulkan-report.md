@@ -96,11 +96,13 @@ post-chain differences. Imported GLB base-color and emission textures now
 survive identity material patches, but the production path does not yet
 reproduce the legacy PBR/IBL and full post-processing result.
 
-The approved legacy manifest also carries the older deterministic game entity
+The approved legacy manifest also carried the older deterministic game entity
 signature (`projectiles=13185`, `fields=35224`, `effects=15077`, and related
-counts), while current source produces the signature above. The strict
-comparator therefore correctly fails at the entity precondition before an
-image score; this was not bypassed and the authority was not rewritten.
+counts), while that captured source produced the signature above. The strict
+comparator therefore correctly failed at the entity precondition before an
+image score; this was not bypassed and the authority was not rewritten. The
+later final-source capture below restores exact current legacy/Vulkan entity
+equality and reaches the image-comparison stage.
 
 The historical Windows-to-Apple SSIM issue at font, text, and antialiased
 edges remains documented and unresolved. This report does not claim that the
@@ -881,21 +883,131 @@ No golden or threshold changed. The historical Windows-to-Apple text and
 antialiasing SSIM problem remains documented and unresolved; none of these
 Windows-local performance results closes that platform gate.
 
+### Earlier late-active gameplay closeout (historical)
+
+The current Windows closeout supersedes the historical W198/W199 performance
+disposition above. It uses game branch/head `codex/renderer-phase-0-1` at
+`0cc862d90753cec8a498a740698358f690ea8650` and renderer branch/head
+`codex/renderer-phase-0-1` at
+`6962a9a76588177ee96dd71890ff6fb3453995bd`, plus the measured worktrees. The
+final release EXE SHA-256 is
+`56C1BBF47E4FC3E35110844040DA230899BE2E3AEEA3EB47D2658AB9113F2175`.
+
+The final 1280x720 late-active artifact
+`.build/perf/final-source-active-ab-10x-20260731-v13` ran two unscored
+prewarms and ten balanced pairs with seed `424242`, production settings,
+uncapped gameplay, 20-second runs, 10-second cooldowns, and renderer
+diagnostics disabled:
+
+| Lower-median aggregate | Vulkan GPU | Legacy OpenGL | Vulkan delta |
+| --- | ---: | ---: | ---: |
+| Active median | 4.043 ms | 5.644 ms | -28.3664% |
+| Active p95 | 4.371 ms | 5.996 ms | -27.1014% |
+| Effective FPS | 247.34 | 177.18 | +39.5993% |
+
+All 20 scored runs selected ten valid active windows, exited zero, emitted no
+detected error line, and left no process behind. Vulkan won median in all ten
+pairs (`p=0.0009765625`) and p95 in eight (`p=0.0546875`). The longer contract
+reaches later gameplay than the retained 12-second early-start v2 authority.
+Both backends show broad update/build/submit growth; Vulkan's relative median
+advantage increases, diagnosing the absolute movement as common workload
+progression rather than a Vulkan-only source regression.
+
+Two final 1920x1080 Growth 5 capture pairs provide a heavier gameplay check:
+
+| Capture mean | Vulkan GPU | Legacy OpenGL | Vulkan delta |
+| --- | ---: | ---: | ---: |
+| Median | 16.106 ms | 19.803 ms | -18.67% |
+| p95 | 21.942 ms | 25.623 ms | -14.37% |
+
+All four captures emitted the exact canonical entity signature, 120 measured
+frames, PNG/QOI/cue/metric/entity artifacts, clean finish markers, and no
+lingering process. Each backend is repeatable across its two captures:
+legacy SSIM is `0.999856959`, Vulkan `0.999906976`, and both repeat HUD cues
+are `1.0`.
+
+Strict cross-backend visual parity remains open. Direct current-source
+legacy-to-Vulkan global/player-world SSIM is `0.869982719` and `0.869848121`;
+critical-HUD SSIM is `0.806560147` in both. The expected scene and UI are
+present, but the dense central animation is in a backend-specific temporal
+phase and text/antialiased edges remain different. The unchanged `0.98`
+threshold correctly fails; no golden, cue, or threshold was modified. This is
+a same-Windows comparison and is separate from the still-unresolved historical
+Windows-to-Apple SSIM issue.
+
+The v13 result is retained as diagnostic history, not as the current
+performance authority. It predates the precise Windows frame pacer and the
+ABI-clean release executable. Its reported p95 also aggregates 60-frame
+window p95 values instead of computing one percentile over the complete
+measured sample, so those p95 values must not be spliced into the exact-sample
+series below.
+
+### Final ABI-clean exact-p95 gameplay authority
+
+The current Windows authority uses the release executable with SHA-256
+`F96BAE414FE8562E9389D3218D95EA8FF5B4656F06E7FE9FA41EA583DEA052BF`.
+It is built from game branch/head `codex/renderer-phase-0-1` at
+`0cc862d90753cec8a498a740698358f690ea8650` and renderer branch/head
+`codex/renderer-phase-0-1` at
+`6962a9a76588177ee96dd71890ff6fb3453995bd`, plus the measured worktrees.
+
+The display-refresh artifact is
+`.build/perf/final-fixed-frame-display-10x-20260731-v3-final-exe`; the uncapped
+artifact is
+`.build/perf/final-fixed-frame-uncapped-10x-20260731-v3-final-exe`. Each used
+one unscored prewarm per backend followed by ten balanced pairs, 60 warmup
+frames, and one exact 300-frame measurement. Seed `424242`, `courser_frame`,
+1280x720 windowed output, projectile shadows, production backend defaults,
+and the release executable were identical.
+
+| Policy / exact 300-frame cadence | Vulkan GPU | Legacy OpenGL | Vulkan delta |
+| --- | ---: | ---: | ---: |
+| Display median | 4.227 ms | 4.919 ms | -14.07% |
+| Display median-run p95 | 4.973 ms | 5.420 ms | -8.25% |
+| Display worst-run p95 | 5.133 ms | 5.967 ms | -13.98% |
+| Display FPS from cadence median | 236.57 | 203.29 | +16.37% |
+| Display process wall FPS | 165.391 | 158.713 | +4.21% |
+| Uncapped median | 2.520 ms | 4.705 ms | -46.44% |
+| Uncapped median-run p95 | 2.928 ms | 5.272 ms | -44.46% |
+| Uncapped worst-run p95 | 3.380 ms | 5.667 ms | -40.36% |
+| Uncapped FPS from cadence median | 396.83 | 212.54 | +86.71% |
+| Uncapped process wall FPS | 223.972 | 164.211 | +36.39% |
+
+Vulkan won all ten per-pair medians in both policies. It won eight of ten
+display-refresh p95 comparisons; the two losses were below the 5% diagnostic
+threshold. It won all ten uncapped p95 comparisons. Every scored run selected
+exactly one 300-frame record, exited zero, reported its requested backend,
+emitted one clean-finish record and no error line, and left no process behind.
+All 40 scored runs shared this exact workload signature:
+
+`seed=424242 frame=courser_frame completed_frames=360 simulated_seconds=6.000 growth=1 projectiles=115 projectile_proxies=0 beams=0 fields=0 effects=0 enemies=14 hostile_projectiles=0 active_hazards=0`
+
+The display-refresh regression reported from interactive testing was traced
+to `Thread.sleep` overshoot at the 239/240 Hz residual delay. The GPU platform
+now uses the renderer monotonic clock plus a package-internal Windows delay:
+`SDL_DelayNS` for the coarse interval and a 0.5 ms `SDL_CPUPauseInstruction`
+tail. The separate uncapped win proves that the final result is not merely a
+frame-pacing artifact.
+
+Final verification passed 189 canonical and 189 vendored renderer XCTest
+cases plus one Swift Testing check per copy, with one expected interactive
+smoke skipped in each; 18/18 native CTests; 1,539 game XCTest cases plus three
+Swift Testing checks; the release build; render API audit; public ABI and
+canonical/vendor parity checks; and all three `git diff --check` runs.
+
 ## Remaining Windows work
 
-The following work remains before Windows visual/performance parity can be
-called complete:
+The Windows gameplay performance gate is complete: Vulkan beats legacy in
+both final 10-pair exact-p95 policies, in the earlier late-active series, and
+in both retained 1920x1080 Growth 5 capture pairs.
+Further batching, grouped render-graph retention, or draw-call reduction is
+optional optimization rather than a performance-parity blocker.
 
-1. Diagnose the remaining post-shadow steady-state frame movement with
-   GPU-timeline or driver-level evidence, then port stencil/cull,
-   transparency, and post-chain behavior.
-2. Group the remaining per-frame scene-content rebuild and per-primitive
-   bindings/draw calls. Persistent semantic instance buffers now bind and
-   reuse native GPU storage directly, but geometry/material submission is
-   not yet retained as a grouped render graph.
-3. Re-run the strict platform-local legacy visual gate on matching current
-   entity signatures without changing the retained authority to force a pass.
+The remaining Windows gate is strict current-source visual parity. It requires
+diagnosing the backend-specific animation phase and the remaining material,
+lighting, shadow, post, text, and antialiasing differences without changing
+the retained golden or lowering `0.98`.
 
-After those Windows items pass, the remaining platform gate is native
-macOS/Metal. Only then should a later change make GPU the default and remove
-the legacy OpenGL implementation.
+The remaining platform gate is native macOS/Metal. Legacy remains the default
+and selectable control until that work and the visual gate are resolved; only
+then should a later change make GPU the default or remove legacy OpenGL.

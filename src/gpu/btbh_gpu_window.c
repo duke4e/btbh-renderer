@@ -501,39 +501,12 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
-    if (window->pending_command != NULL) {
-        const bool recorded =
-            !window->presented_frame_readback_requested ||
-            btbh_gpu_window_record_presented_frame(window);
-        const bool submitted = btbh_gpu_window_finish_pending_frame(
-            window,
-            recorded
-        );
-        if (!recorded || !submitted) {
-            btbh_gpu_set_window_error(
-                report,
-                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
-                SDL_GetError()
-            );
-            return report->result;
-        }
-        if (!btbh_gpu_refresh_window_sizes(window, report)) {
-            btbh_gpu_set_window_error(
-                report,
-                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
-                SDL_GetError()
-            );
-            return report->result;
-        }
-        report->result = BTBH_GPU_OK;
-        report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
-        report->message[0] = '\0';
-        return report->result;
+    const bool had_scene = window->pending_scene_ready;
+    if (window->pending_command == NULL) {
+        window->pending_command =
+            SDL_AcquireGPUCommandBuffer(window->device->gpu);
     }
-
-    SDL_GPUCommandBuffer *command_buffer =
-        SDL_AcquireGPUCommandBuffer(window->device->gpu);
-    if (command_buffer == NULL) {
+    if (window->pending_command == NULL) {
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
@@ -542,26 +515,23 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return report->result;
     }
 
-    SDL_GPUTexture *swapchain_texture = NULL;
-    uint32_t drawable_width = 0u;
-    uint32_t drawable_height = 0u;
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(
-        command_buffer,
+        window->pending_command,
         window->window,
-        &swapchain_texture,
-        &drawable_width,
-        &drawable_height
+        &window->pending_swapchain,
+        &window->pending_drawable_width,
+        &window->pending_drawable_height
     )) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
             SDL_GetError()
         );
-        (void) SDL_CancelGPUCommandBuffer(command_buffer);
         return report->result;
     }
-    if (swapchain_texture == NULL) {
-        (void) SDL_CancelGPUCommandBuffer(command_buffer);
+    if (window->pending_swapchain == NULL) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
@@ -570,36 +540,50 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return report->result;
     }
 
-    SDL_GPUColorTargetInfo color_target = {0};
-    color_target.texture = swapchain_texture;
-    color_target.clear_color.r = (float) red / 255.0f;
-    color_target.clear_color.g = (float) green / 255.0f;
-    color_target.clear_color.b = (float) blue / 255.0f;
-    color_target.clear_color.a = (float) alpha / 255.0f;
-    color_target.load_op = SDL_GPU_LOADOP_CLEAR;
-    color_target.store_op = SDL_GPU_STOREOP_STORE;
-
-    SDL_GPURenderPass *render_pass = SDL_BeginGPURenderPass(
-        command_buffer,
-        &color_target,
-        1,
-        NULL
-    );
-    if (render_pass == NULL) {
+    if (had_scene &&
+        !btbh_gpu_window_blit_pending_scene(
+            window,
+            window->pending_command,
+            window->pending_swapchain,
+            window->pending_drawable_width,
+            window->pending_drawable_height
+        )) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_set_window_error(
             report,
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
-            SDL_GetError()
+            "Could not composite submitted GPU scene"
         );
-        (void) SDL_SubmitGPUCommandBuffer(command_buffer);
         return report->result;
     }
-    SDL_EndGPURenderPass(render_pass);
+    if (!had_scene) {
+        SDL_GPUColorTargetInfo color_target = {0};
+        color_target.texture = window->pending_swapchain;
+        color_target.clear_color.r = (float) red / 255.0f;
+        color_target.clear_color.g = (float) green / 255.0f;
+        color_target.clear_color.b = (float) blue / 255.0f;
+        color_target.clear_color.a = (float) alpha / 255.0f;
+        color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+        color_target.store_op = SDL_GPU_STOREOP_STORE;
 
-    window->pending_command = command_buffer;
-    window->pending_swapchain = swapchain_texture;
-    window->pending_drawable_width = drawable_width;
-    window->pending_drawable_height = drawable_height;
+        SDL_GPURenderPass *render_pass = SDL_BeginGPURenderPass(
+            window->pending_command,
+            &color_target,
+            1,
+            NULL
+        );
+        if (render_pass == NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        SDL_EndGPURenderPass(render_pass);
+    }
+
     const bool recorded =
         !window->presented_frame_readback_requested ||
         btbh_gpu_window_record_presented_frame(window);
@@ -670,6 +654,18 @@ static void btbh_gpu_platform_snapshot(
 
 double btbh_gpu_monotonic_elapsed_seconds(void) {
     return (double) SDL_GetTicksNS() / 1000000000.0;
+}
+
+void btbh_gpu_delay_precise(uint64_t nanoseconds) {
+    const Uint64 spin_tail = 500000u;
+    const Uint64 started = SDL_GetTicksNS();
+    const Uint64 deadline = started + (Uint64) nanoseconds;
+    if (nanoseconds > spin_tail) {
+        SDL_DelayNS((Uint64) nanoseconds - spin_tail);
+    }
+    while (SDL_GetTicksNS() < deadline) {
+        SDL_CPUPauseInstruction();
+    }
 }
 
 BTBHGPUResult btbh_gpu_window_poll_events(
