@@ -36,7 +36,7 @@ set "PROFILE=normal"
 set "SHADOWS=enabled"
 set "BENCHMARK_MODE=legacy_external"
 set "FRAME_RATE=display-refresh"
-set "COMBAT_RUNTIME=legacy"
+set "COMBAT_RUNTIME=v2"
 
 if "%~1"=="" goto :interactive
 
@@ -109,13 +109,13 @@ goto :interactive_profile
 :interactive_simulation
 echo.
 echo Combat runtime:
-echo   [1] Legacy oracle ^(default^)
-echo   [2] Runtime V2 ^(development^)
+echo   [1] Runtime V2 ^(default^)
+echo   [2] Legacy oracle ^(fallback^)
 choice /C 12 /N /M "Odaberi combat runtime [1-2]: "
 if errorlevel 2 (
-    set "COMBAT_RUNTIME=v2"
-) else (
     set "COMBAT_RUNTIME=legacy"
+) else (
+    set "COMBAT_RUNTIME=v2"
 )
 goto :interactive_shadows
 
@@ -363,6 +363,7 @@ exit /b 1
 echo Usage:
 echo   %~nx0
 echo   %~nx0 ^<gpu^|legacy^> ^<mode^> [normal^|perf^|diagnostics] [enabled^|disabled] [benchmark-pipeline] [display-refresh^|uncapped] [combat-runtime]
+echo   Combat runtime defaults to v2; pass legacy for the rollback path.
 echo.
 echo Modes:
 echo   game, combat, particle, block, city,
@@ -375,7 +376,7 @@ echo Frame pacing:
 echo   display-refresh ^(default^), uncapped
 echo.
 echo Combat runtimes:
-echo   legacy ^(default/oracle^), v2 ^(development^)
+echo   v2 ^(default^), legacy ^(fallback/oracle^)
 echo.
 echo Examples:
 echo   %~nx0 gpu game normal enabled legacy_external display-refresh v2
