@@ -28,6 +28,7 @@ set "BTBH_START_PROFILE_SECONDS="
 set "BTBH_START_PROFILE_UNCAPPED="
 set "BTBH_PROJECTILE_BENCHMARK_SHADOWS="
 set "BTBH_PROJECTILE_BENCHMARK_MODE="
+set "BTBH_COMBAT_RUNTIME="
 set "BACKEND="
 set "MODE="
 set "MODE_ARGS="
@@ -35,6 +36,7 @@ set "PROFILE=normal"
 set "SHADOWS=enabled"
 set "BENCHMARK_MODE=legacy_external"
 set "FRAME_RATE=display-refresh"
+set "COMBAT_RUNTIME=legacy"
 
 if "%~1"=="" goto :interactive
 
@@ -46,6 +48,7 @@ if not "%~3"=="" set "PROFILE=%~3"
 if not "%~4"=="" set "SHADOWS=%~4"
 if not "%~5"=="" set "BENCHMARK_MODE=%~5"
 if not "%~6"=="" set "FRAME_RATE=%~6"
+if not "%~7"=="" set "COMBAT_RUNTIME=%~7"
 goto :validate_and_run
 
 :interactive
@@ -55,10 +58,10 @@ echo              BE THE BULLET HELL - LAUNCHER
 echo ============================================================
 echo.
 echo Renderer:
-echo   [V] Production GPU renderer - Vulkan on Windows
-echo   [L] Legacy renderer - raylib/r3d/OpenGL
+echo   [1] Production GPU renderer - Vulkan on Windows
+echo   [2] Legacy renderer - raylib/r3d/OpenGL
 echo.
-choice /C VL /N /M "Odaberi renderer [V/L]: "
+choice /C 12 /N /M "Odaberi renderer [1-2]: "
 if errorlevel 2 (
     set "BACKEND=legacy"
 ) else (
@@ -98,14 +101,30 @@ if errorlevel 8 (
 if /I "%MODE%"=="bootstrap" goto :interactive_profile
 if /I "%MODE%"=="projectile-sim" goto :interactive_profile
 
-if /I "%MODE%"=="game" goto :interactive_shadows
+if /I "%MODE%"=="game" goto :interactive_simulation
 if /I "%MODE%"=="combat" goto :interactive_shadows
 if /I "%MODE%"=="projectile-render" goto :interactive_benchmark
 goto :interactive_profile
 
+:interactive_simulation
+echo.
+echo Combat runtime:
+echo   [1] Legacy oracle ^(default^)
+echo   [2] Runtime V2 ^(development^)
+choice /C 12 /N /M "Odaberi combat runtime [1-2]: "
+if errorlevel 2 (
+    set "COMBAT_RUNTIME=v2"
+) else (
+    set "COMBAT_RUNTIME=legacy"
+)
+goto :interactive_shadows
+
 :interactive_shadows
 echo.
-choice /C ED /N /M "Projectile shadows: [E] enabled, [D] disabled: "
+echo Projectile shadows:
+echo   [1] Enabled
+echo   [2] Disabled
+choice /C 12 /N /M "Odaberi shadows [1-2]: "
 if errorlevel 2 (
     set "SHADOWS=disabled"
 ) else (
@@ -128,7 +147,10 @@ if errorlevel 3 (
     set "BENCHMARK_MODE=legacy_external"
 )
 echo.
-choice /C ED /N /M "Benchmark shadows: [E] enabled, [D] disabled: "
+echo Benchmark shadows:
+echo   [1] Enabled
+echo   [2] Disabled
+choice /C 12 /N /M "Odaberi shadows [1-2]: "
 if errorlevel 2 (
     set "SHADOWS=disabled"
 ) else (
@@ -138,10 +160,10 @@ if errorlevel 2 (
 :interactive_profile
 echo.
 echo Logging:
-echo   [N] Normal gameplay
-echo   [P] Performance telemetry
-echo   [D] Detailed renderer diagnostics
-choice /C NPD /N /M "Odaberi logging [N/P/D]: "
+echo   [1] Normal gameplay
+echo   [2] Performance telemetry
+echo   [3] Detailed renderer diagnostics
+choice /C 123 /N /M "Odaberi logging [1-3]: "
 if errorlevel 3 (
     set "PROFILE=diagnostics"
 ) else if errorlevel 2 (
@@ -154,9 +176,9 @@ if /I "%MODE%"=="bootstrap" goto :validate_and_run
 if /I "%MODE%"=="projectile-sim" goto :validate_and_run
 echo.
 echo Frame pacing:
-echo   [D] Display refresh cap ^(normal gameplay^)
-echo   [U] Uncapped ^(renderer throughput comparison^)
-choice /C DU /N /M "Odaberi pacing [D/U]: "
+echo   [1] Display refresh cap ^(normal gameplay^)
+echo   [2] Uncapped ^(renderer throughput comparison^)
+choice /C 12 /N /M "Odaberi pacing [1-2]: "
 if errorlevel 2 (
     set "FRAME_RATE=uncapped"
 ) else (
@@ -167,6 +189,8 @@ if errorlevel 2 (
 call :set_backend "%BACKEND%"
 if errorlevel 1 exit /b 2
 call :set_mode "%MODE%"
+if errorlevel 1 exit /b 2
+call :set_combat_runtime "%COMBAT_RUNTIME%"
 if errorlevel 1 exit /b 2
 
 if /I "%PROFILE%"=="normal" goto :profile_ok
@@ -210,6 +234,8 @@ if /I "%MODE%"=="bootstrap" if /I not "%BACKEND%"=="gpu" (
 )
 
 if /I "%MODE%"=="game" set "MODE_ARGS=%MODE_ARGS% --projectile-shadows=%SHADOWS%"
+if /I "%MODE%"=="game" set "MODE_ARGS=%MODE_ARGS% --combat-runtime=%COMBAT_RUNTIME%"
+if /I "%MODE%"=="combat" set "MODE_ARGS=%MODE_ARGS% --combat-runtime=%COMBAT_RUNTIME%"
 if /I "%MODE%"=="combat" set "MODE_ARGS=%MODE_ARGS% --projectile-shadows=%SHADOWS%"
 if /I "%MODE%"=="projectile-render" (
     set "BTBH_PROJECTILE_BENCHMARK_SHADOWS=%SHADOWS%"
@@ -224,6 +250,8 @@ echo Renderer    : %BTBH_RENDER_BACKEND%
 echo Mode        : %MODE%
 echo Logging     : %PROFILE%
 echo Frame pacing: %FRAME_RATE%
+if /I "%MODE%"=="game" echo Combat RT   : %COMBAT_RUNTIME%
+if /I "%MODE%"=="combat" echo Combat RT   : %COMBAT_RUNTIME%
 if /I "%MODE%"=="game" echo Visual       : FXAA, SSAO off ^(current fixed Game profile^)
 if /I "%MODE%"=="combat" echo Visual       : FXAA, SSAO off ^(current fixed Game profile^)
 if /I "%MODE%"=="game" echo Proj shadows : %SHADOWS%
@@ -301,6 +329,20 @@ if /I "%~1"=="bootstrap" (
 echo ERROR: Nepoznat mode "%~1".
 exit /b 1
 
+:set_combat_runtime
+if /I "%~1"=="legacy" (
+    set "COMBAT_RUNTIME=legacy"
+    set "BTBH_COMBAT_RUNTIME=legacy"
+    exit /b 0
+)
+if /I "%~1"=="v2" (
+    set "COMBAT_RUNTIME=v2"
+    set "BTBH_COMBAT_RUNTIME=v2"
+    exit /b 0
+)
+echo ERROR: Combat runtime mora biti legacy ili v2.
+exit /b 1
+
 :missing_exe
 echo ERROR: Release executable nije pronadjen:
 echo   %GAME_EXE%
@@ -320,7 +362,7 @@ exit /b 1
 :help
 echo Usage:
 echo   %~nx0
-echo   %~nx0 ^<gpu^|legacy^> ^<mode^> [normal^|perf^|diagnostics] [enabled^|disabled] [benchmark-pipeline] [display-refresh^|uncapped]
+echo   %~nx0 ^<gpu^|legacy^> ^<mode^> [normal^|perf^|diagnostics] [enabled^|disabled] [benchmark-pipeline] [display-refresh^|uncapped] [combat-runtime]
 echo.
 echo Modes:
 echo   game, combat, particle, block, city,
@@ -332,10 +374,12 @@ echo.
 echo Frame pacing:
 echo   display-refresh ^(default^), uncapped
 echo.
+echo Combat runtimes:
+echo   legacy ^(default/oracle^), v2 ^(development^)
+echo.
 echo Examples:
-echo   %~nx0 gpu game normal enabled
-echo   %~nx0 legacy game perf disabled
-echo   %~nx0 gpu game normal enabled legacy_external uncapped
+echo   %~nx0 gpu game normal enabled legacy_external display-refresh v2
+echo   %~nx0 legacy game perf disabled legacy_external uncapped legacy
 echo   %~nx0 gpu projectile-render perf disabled compact_fusion
 echo.
 echo Optional:
