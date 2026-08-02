@@ -3,11 +3,11 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPUDeviceProbeTests: XCTestCase {
-    func testWindowsProbeCreatesOnlyTheExactVulkanDevice() throws {
-        #if os(Windows)
-        let probe = try GPUDeviceProbe(request: .vulkan, debugMode: true)
-        XCTAssertEqual(probe.diagnostics.requestedDriver, "vulkan")
-        XCTAssertEqual(probe.diagnostics.actualDriver, "vulkan")
+    func testPlatformProbeCreatesOnlyTheRequestedGPUDevice() throws {
+        let request = GPUBackendRequest.platformDefault
+        let probe = try GPUDeviceProbe(request: request, debugMode: true)
+        XCTAssertEqual(probe.diagnostics.requestedDriver, request.driverName)
+        XCTAssertEqual(probe.diagnostics.actualDriver, request.driverName)
         XCTAssertTrue(probe.diagnostics.hardwareAccelerated)
         XCTAssertEqual(probe.diagnostics.missingFeatureMask, 0)
         XCTAssertNotEqual(probe.diagnostics.supportedFeatureMask, 0)
@@ -15,8 +15,5 @@ final class GPUDeviceProbeTests: XCTestCase {
         probe.shutdown()
         probe.shutdown()
         XCTAssertTrue(probe.isShutdown)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 }

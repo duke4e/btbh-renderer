@@ -30,6 +30,20 @@ struct FragmentInput
     float2 texture_coordinate : TEXCOORD0;
 };
 
+float sample_depth_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return depth_texture.SampleLevel(depth_sampler, uv, 0.0f);
+}
+
+float4 sample_normal_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return normal_texture.SampleLevel(normal_sampler, uv, 0.0f);
+}
+
 float3 world_position(int2 pixel, float depth)
 {
     const float2 uv =
@@ -80,9 +94,7 @@ int2 representative_full_pixel(
         int2(0, 0),
         full_resolution - 1
     );
-    selected_depth = depth_texture.Load(
-        int3(selected_pixel, 0)
-    );
+    selected_depth = sample_depth_at(selected_pixel);
     const bool use_maximum =
         ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
@@ -93,9 +105,7 @@ int2 representative_full_pixel(
             int2(0, 0),
             full_resolution - 1
         );
-        const float candidate_depth = depth_texture.Load(
-            int3(candidate_pixel, 0)
-        );
+        const float candidate_depth = sample_depth_at(candidate_pixel);
         if ((use_maximum && candidate_depth > selected_depth) ||
             (!use_maximum && candidate_depth < selected_depth))
         {
@@ -139,7 +149,7 @@ float main(FragmentInput input) : SV_Target0
         center_depth
     );
     const float3 normal = normalize(
-        normal_texture.Load(int3(center_pixel, 0)).xyz *
+        sample_normal_at(center_pixel).xyz *
             2.0f - 1.0f
     );
     const float linear_depth =

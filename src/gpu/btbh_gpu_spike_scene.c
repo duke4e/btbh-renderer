@@ -47,6 +47,24 @@ static void btbh_scene_identity(float matrix[16])
     matrix[15] = 1.0f;
 }
 
+static float btbh_scene_multiply_add_unfused(
+    float base,
+    float multiplier,
+    float value
+) {
+    volatile float product = multiplier * value;
+    return base + product;
+}
+
+static float btbh_scene_multiply_subtract_unfused(
+    float base,
+    float multiplier,
+    float value
+) {
+    volatile float product = multiplier * value;
+    return base - product;
+}
+
 static void btbh_scene_hash_byte(uint64_t *hash, uint8_t value)
 {
     *hash ^= (uint64_t)value;
@@ -147,19 +165,39 @@ BTBHGPUSceneResult btbh_gpu_spike_scene_build_fixture(
         const uint32_t column = index & 3u;
         const uint32_t row = index >> 2u;
         fixture->instances[index].translation[0] =
-            grid_origin + (float)column * grid_step;
+            btbh_scene_multiply_add_unfused(
+                grid_origin,
+                (float)column,
+                grid_step
+            );
         fixture->instances[index].translation[1] =
-            grid_origin + (float)row * grid_step;
+            btbh_scene_multiply_add_unfused(
+                grid_origin,
+                (float)row,
+                grid_step
+            );
         fixture->instances[index].translation[2] =
             (float)(contract->camera_eye_millimeters[1] -
                     contract->camera_target_millimeters[1]) / 3333.3333f;
         fixture->instances[index].translation[3] = 0.0f;
         fixture->instances[index].color[0] =
-            red_base + (float)column * red_base;
+            btbh_scene_multiply_add_unfused(
+                red_base,
+                (float)column,
+                red_base
+            );
         fixture->instances[index].color[1] =
-            green_base + (float)row * 0.16f;
+            btbh_scene_multiply_add_unfused(
+                green_base,
+                (float)row,
+                0.16f
+            );
         fixture->instances[index].color[2] =
-            blue_base - (float)column * 0.12f;
+            btbh_scene_multiply_subtract_unfused(
+                blue_base,
+                (float)column,
+                0.12f
+            );
         fixture->instances[index].color[3] = 1.0f;
         fixture->intervals[index][0] = (float)index / 32.0f;
         fixture->intervals[index][1] =

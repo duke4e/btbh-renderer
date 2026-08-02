@@ -168,9 +168,21 @@ final class RecordingRenderBundle: RenderBackendBundle, GamePlatform, Canvas2DBa
             submittedModelInstanceDraws.append(instances)
         }
     }
-    func project(_ world: RenderVec3, camera: RenderCamera) -> RenderVec2 { .zero }
-    func unprojectRay(_ screen: RenderVec2, camera: RenderCamera) -> RenderRay {
-        RenderRay(origin: .zero, direction: .zero)
+    func projectNormalized(
+        _ world: RenderVec3,
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> NormalizedViewportPoint {
+        _ = world; _ = camera; _ = viewport
+        return .zero
+    }
+    func unprojectRay(
+        _ point: NormalizedViewportPoint,
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> RenderRay {
+        _ = point; _ = camera; _ = viewport
+        return RenderRay(origin: .zero, direction: .zero)
     }
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool { frustumResult }
     func readbackWorldFrame() throws -> FrameReadback { throw unexpected() }

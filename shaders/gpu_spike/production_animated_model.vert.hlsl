@@ -154,7 +154,12 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         input.color *
         instance.color *
         material_color;
-    output.texture_coordinate = input.texture_coordinate;
+    output.texture_coordinate = float2(
+        f16tof32(f32tof16(input.texture_coordinate.x)),
+        1.0f - f16tof32(
+            f32tof16(1.0f - input.texture_coordinate.y)
+        )
+    );
     output.world_position = world_position.xyz;
     output.world_normal = world_normal;
     output.world_tangent = world_tangent;

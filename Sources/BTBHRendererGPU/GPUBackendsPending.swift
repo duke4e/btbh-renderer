@@ -169,7 +169,11 @@ enum GPUProductionScreenShaderKind: Equatable {
     case unsupported(String)
 
     init(fragmentPath: String) {
-        let name = URL(fileURLWithPath: fragmentPath)
+        let normalizedPath = fragmentPath.replacingOccurrences(
+            of: "\\",
+            with: "/"
+        )
+        let name = URL(fileURLWithPath: normalizedPath)
             .deletingPathExtension()
             .lastPathComponent
             .lowercased()
@@ -1322,7 +1326,8 @@ final class GPUResourceBackend: RenderResourceBackend {
     func scenePost(
         environment: EnvironmentDescriptor,
         chain: PostChainDescriptor,
-        antiAliasing: AntiAliasing
+        antiAliasing: AntiAliasing,
+        upscaleMode: UpscaleMode
     ) throws -> GPUScenePostProbe {
         var lutTexture: OpaquePointer?
         var casEnabled = false
@@ -1408,7 +1413,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             casEnabled: casEnabled,
             tiltShiftEnabled: tiltShiftEnabled,
             ssaoEnabled: environment.ssaoEnabled,
-            antiAliasing: antiAliasing
+            antiAliasing: antiAliasing,
+            upscaleMode: upscaleMode
         )
     }
 
@@ -2627,30 +2633,63 @@ final class GPUResourceBackend: RenderResourceBackend {
     ) {
         if var clip = tree.clips[name] {
             guard clip.play else { return }
-            let duration = Double(clip.duration)
-            let advancedTime = Double(clip.time) +
-                Double(deltaSeconds) * Double(clip.speed)
+            let duration = clip.duration
+            let advancedTime = clip.time + deltaSeconds * clip.speed
+            if !advancedTime.isFinite {
+                let wideDuration = Double(duration)
+                let wideAdvancedTime = Double(clip.time) +
+                    Double(deltaSeconds) * Double(clip.speed)
+                if clip.loop, wideDuration > 0 {
+                    var wrappedTime = wideAdvancedTime
+                        .truncatingRemainder(dividingBy: wideDuration)
+                    if wrappedTime < 0 {
+                        wrappedTime += wideDuration
+                    }
+                    clip.time = Float(wrappedTime)
+                } else {
+                    clip.play = false
+                    clip.time = Float(
+                        min(max(0, wideAdvancedTime), wideDuration)
+                    )
+                }
+                tree.clips[name] = clip
+                return
+            }
             let crossedBoundary =
                 (clip.speed < 0 && advancedTime <= 0) ||
                 (clip.speed > 0 && advancedTime >= duration)
             if crossedBoundary {
                 if clip.loop {
                     if duration > 0 {
-                        var wrappedTime = advancedTime
-                            .truncatingRemainder(dividingBy: duration)
-                        if wrappedTime < 0 {
-                            wrappedTime += duration
+                        let singleWrappedTime = clip.speed < 0
+                            ? advancedTime + duration
+                            : advancedTime - duration
+                        let singleWrapIsSufficient = clip.speed < 0
+                            ? singleWrappedTime > 0 &&
+                                singleWrappedTime <= duration
+                            : singleWrappedTime >= 0 &&
+                                singleWrappedTime < duration
+                        if singleWrapIsSufficient {
+                            clip.time = singleWrappedTime
+                        } else {
+                            var wrappedTime = advancedTime
+                                .truncatingRemainder(
+                                    dividingBy: duration
+                                )
+                            if wrappedTime < 0 {
+                                wrappedTime += duration
+                            }
+                            clip.time = wrappedTime
                         }
-                        clip.time = Float(wrappedTime)
                     } else {
                         clip.time = 0
                     }
                 } else {
                     clip.play = false
-                    clip.time = Float(min(max(0, advancedTime), duration))
+                    clip.time = min(max(0, advancedTime), duration)
                 }
             } else {
-                clip.time = Float(advancedTime)
+                clip.time = advancedTime
             }
             tree.clips[name] = clip
             return
@@ -3304,6 +3343,40 @@ final class GPUResourceBackend: RenderResourceBackend {
     }
 }
 
+struct GPUSceneRenderResolution {
+    static func scaled(
+        drawableSize: PixelSize2D,
+        renderScale: Float
+    ) throws -> PixelSize2D {
+        guard drawableSize.width > 0,
+              drawableSize.height > 0,
+              drawableSize.width <= Int(Int32.max),
+              drawableSize.height <= Int(Int32.max),
+              renderScale.isFinite,
+              renderScale > 0 else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Invalid GPU scene render resolution"
+            )
+        }
+        let clampedScale = min(max(Double(renderScale), 0.1), 2)
+        func scaledDimension(_ value: Int) throws -> Int {
+            let scaled = Double(value) * clampedScale
+            guard scaled.isFinite,
+                  scaled >= 1,
+                  scaled <= Double(Int32.max) else {
+                throw GPUSceneProbeError.operationFailed(
+                    message: "Invalid GPU scene render resolution"
+                )
+            }
+            return Int(scaled)
+        }
+        return try .init(
+            width: scaledDimension(drawableSize.width),
+            height: scaledDimension(drawableSize.height)
+        )
+    }
+}
+
 struct GPUSceneFrustumCullingState {
     private enum Projection {
         case perspective(
@@ -3593,8 +3666,16 @@ final class GPUSceneBackend: SceneBackend {
         let adapterStarted = telemetryEnabled
             ? platform.monotonicElapsedSeconds
             : 0
-        guard let currentFrame,
-              let viewProjection = viewProjection(
+        guard let currentFrame else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Invalid GPU scene camera"
+            )
+        }
+        let renderSize = try GPUSceneRenderResolution.scaled(
+            drawableSize: drawableSize,
+            renderScale: currentFrame.renderScale
+        )
+        guard let viewProjection = viewProjection(
                 camera: currentFrame.camera,
                 viewport: currentFrame.viewport
               ) else {
@@ -4097,7 +4178,8 @@ final class GPUSceneBackend: SceneBackend {
         let post = try resources.scenePost(
             environment: currentFrame.environment,
             chain: currentFrame.postChain,
-            antiAliasing: currentFrame.antiAliasing
+            antiAliasing: currentFrame.antiAliasing,
+            upscaleMode: currentFrame.upscaleMode
         )
         let lightingPreparationFinished = telemetryEnabled
             ? platform.monotonicElapsedSeconds
@@ -4123,6 +4205,7 @@ final class GPUSceneBackend: SceneBackend {
             ? platform.monotonicElapsedSeconds
             : 0
         lastPresentationReport = try platform.presentModelInstances(
+            renderSize: renderSize,
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,
@@ -4491,72 +4574,34 @@ final class GPUSceneBackend: SceneBackend {
         return .init(minimum: minimum, maximum: maximum)
     }
 
-    func project(
+    func projectNormalized(
         _ world: RenderVec3,
-        camera: RenderCamera
-    ) -> RenderVec2 {
-        guard let geometry = cameraGeometry(camera) else {
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> NormalizedViewportPoint {
+        guard let aspectRatio = viewportAspect(viewport) else {
             return .zero
         }
-        let relative = world - camera.position
-        let horizontal = relative.dot(geometry.right)
-        let vertical = relative.dot(geometry.up)
-        let depth = relative.dot(geometry.forward)
-        let normalizedX: Float
-        let normalizedY: Float
-        switch camera.projection {
-        case .perspective:
-            guard depth != 0 else { return .zero }
-            normalizedX =
-                horizontal / (depth * geometry.halfWidth)
-            normalizedY =
-                vertical / (depth * geometry.halfHeight)
-        case .orthographic:
-            normalizedX = horizontal / geometry.halfWidth
-            normalizedY = vertical / geometry.halfHeight
-        }
-        guard normalizedX.isFinite, normalizedY.isFinite else {
-            return .zero
-        }
-        return .init(
-            x: (normalizedX + 1) * 0.5 * Float(drawableSize.width),
-            y: (1 - normalizedY) * 0.5 * Float(drawableSize.height)
+        return RenderCameraProjection.projectNormalized(
+            world,
+            camera: camera,
+            aspectRatio: aspectRatio
         )
     }
 
     func unprojectRay(
-        _ screen: RenderVec2,
-        camera: RenderCamera
+        _ point: NormalizedViewportPoint,
+        camera: RenderCamera,
+        viewport: NormalizedViewport
     ) -> RenderRay {
-        guard let geometry = cameraGeometry(camera),
-              screen.x.isFinite,
-              screen.y.isFinite else {
+        guard let aspectRatio = viewportAspect(viewport) else {
             return .init(origin: .zero, direction: .zero)
         }
-        let normalizedX =
-            2 * screen.x / Float(drawableSize.width) - 1
-        let normalizedY =
-            1 - 2 * screen.y / Float(drawableSize.height)
-        switch camera.projection {
-        case .perspective:
-            let direction = (
-                geometry.forward +
-                geometry.right *
-                    (normalizedX * geometry.halfWidth) +
-                geometry.up *
-                    (normalizedY * geometry.halfHeight)
-            ).normalized()
-            return .init(origin: camera.position, direction: direction)
-        case .orthographic:
-            let origin =
-                camera.position +
-                geometry.right *
-                    (normalizedX * geometry.halfWidth) +
-                geometry.up *
-                    (normalizedY * geometry.halfHeight) +
-                geometry.forward * 0.01
-            return .init(origin: origin, direction: geometry.forward)
-        }
+        return RenderCameraProjection.unprojectRay(
+            point,
+            camera: camera,
+            aspectRatio: aspectRatio
+        )
     }
 
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool {
@@ -4589,7 +4634,8 @@ final class GPUSceneBackend: SceneBackend {
     }
 
     private func cameraGeometry(
-        _ camera: RenderCamera
+        _ camera: RenderCamera,
+        viewport: NormalizedViewport = .full
     ) -> (
         forward: RenderVec3,
         right: RenderVec3,
@@ -4597,8 +4643,7 @@ final class GPUSceneBackend: SceneBackend {
         halfWidth: Float,
         halfHeight: Float
     )? {
-        guard drawableSize.width > 0,
-              drawableSize.height > 0,
+        guard let aspect = viewportAspect(viewport),
               camera.verticalFOVDegrees.isFinite,
               camera.verticalFOVDegrees > 0 else {
             return nil
@@ -4614,8 +4659,6 @@ final class GPUSceneBackend: SceneBackend {
               up.lengthSquared > 0 else {
             return nil
         }
-        let aspect =
-            Float(drawableSize.width) / Float(drawableSize.height)
         let halfHeight: Float
         switch camera.projection {
         case .perspective:
@@ -4636,11 +4679,45 @@ final class GPUSceneBackend: SceneBackend {
         return (forward, right, up, halfWidth, halfHeight)
     }
 
+    private func viewportAspect(
+        _ viewport: NormalizedViewport
+    ) -> Float? {
+        let viewportRight = viewport.x + viewport.width
+        let viewportBottom = viewport.y + viewport.height
+        guard drawableSize.width > 0,
+              drawableSize.height > 0,
+              viewport.x.isFinite,
+              viewport.y.isFinite,
+              viewport.width.isFinite,
+              viewport.height.isFinite,
+              viewport.x >= 0,
+              viewport.y >= 0,
+              viewport.width > 0,
+              viewport.height > 0,
+              viewportRight <= 1,
+              viewportBottom <= 1 else {
+            return nil
+        }
+        let viewportWidth = Float(drawableSize.width) * viewport.width
+        let viewportHeight = Float(drawableSize.height) * viewport.height
+        guard viewportWidth.isFinite,
+              viewportHeight.isFinite,
+              viewportWidth > 0,
+              viewportHeight > 0 else {
+            return nil
+        }
+        let aspect = viewportWidth / viewportHeight
+        return aspect.isFinite && aspect > 0 ? aspect : nil
+    }
+
     private func viewProjection(
         camera: RenderCamera,
         viewport: NormalizedViewport
     ) -> [Float]? {
-        guard let geometry = cameraGeometry(camera) else { return nil }
+        guard let geometry = cameraGeometry(
+            camera,
+            viewport: viewport
+        ) else { return nil }
         let width = Float(drawableSize.width) * viewport.width
         let height = Float(drawableSize.height) * viewport.height
         guard width.isFinite, height.isFinite, width > 0, height > 0 else {

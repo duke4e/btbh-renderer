@@ -152,6 +152,10 @@ bool btbh_gpu_model_assign_bone_weight(
     uint32_t bone_index,
     float influence
 );
+void btbh_gpu_model_pack_gltf_bone_weights(
+    float joints[4],
+    float weights[4]
+);
 void btbh_gpu_model_normalize_bone_weights(
     float joints[4],
     float weights[4]
@@ -183,6 +187,9 @@ void btbh_gpu_window_release_frame_telemetry(
     BTBHGPUWindow *window
 );
 bool btbh_gpu_window_record_presented_frame(
+    BTBHGPUWindow *window
+);
+SDL_GPUTexture *btbh_gpu_window_present_target(
     BTBHGPUWindow *window
 );
 uint32_t btbh_gpu_animation_library_skin_joint_count(

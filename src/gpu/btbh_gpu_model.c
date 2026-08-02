@@ -15,7 +15,7 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
-#if defined(_WIN32)
+#if defined(BTBH_GPU_HAS_ASSIMP)
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wignored-attributes"
@@ -94,6 +94,57 @@ bool btbh_gpu_model_assign_bone_weight(
     joints[destination] = (float) bone_index;
     weights[destination] = (float) quantized;
     return true;
+}
+
+void btbh_gpu_model_pack_gltf_bone_weights(
+    float joints[4],
+    float weights[4]
+) {
+    if (joints == NULL || weights == NULL) {
+        return;
+    }
+    float sorted_joints[4];
+    float sorted_weights[4];
+    memcpy(sorted_joints, joints, sizeof(sorted_joints));
+    memcpy(sorted_weights, weights, sizeof(sorted_weights));
+    for (uint32_t index = 1u; index < 4u; index += 1u) {
+        const float joint = sorted_joints[index];
+        const float weight = sorted_weights[index];
+        uint32_t destination = index;
+        while (
+            destination > 0u &&
+            sorted_joints[destination - 1u] > joint
+        ) {
+            sorted_joints[destination] =
+                sorted_joints[destination - 1u];
+            sorted_weights[destination] =
+                sorted_weights[destination - 1u];
+            destination -= 1u;
+        }
+        sorted_joints[destination] = joint;
+        sorted_weights[destination] = weight;
+    }
+
+    memset(joints, 0, sizeof(float) * 4u);
+    memset(weights, 0, sizeof(float) * 4u);
+    for (uint32_t slot = 0u; slot < 4u; slot += 1u) {
+        const float joint = sorted_joints[slot];
+        if (
+            !isfinite(joint) ||
+            joint < 0.0f ||
+            joint > (float) UINT8_MAX ||
+            floorf(joint) != joint
+        ) {
+            continue;
+        }
+        (void) btbh_gpu_model_assign_bone_weight(
+            joints,
+            weights,
+            (uint32_t) joint,
+            sorted_weights[slot]
+        );
+    }
+    btbh_gpu_model_normalize_bone_weights(joints, weights);
 }
 
 void btbh_gpu_model_normalize_bone_weights(
@@ -1307,6 +1358,10 @@ static bool btbh_gpu_model_decode_vertices(
         btbh_gpu_model_copy_attribute(
             &attributes[6], index, vertex->weights, 4
         );
+        btbh_gpu_model_pack_gltf_bone_weights(
+            vertex->joints,
+            vertex->weights
+        );
         btbh_gpu_model_transform_position(
             vertex->position,
             world_transform
@@ -1497,7 +1552,7 @@ static uint32_t btbh_gpu_model_primitive_count(
     return count;
 }
 
-#if defined(_WIN32)
+#if defined(BTBH_GPU_HAS_ASSIMP)
 static uint8_t btbh_gpu_model_assimp_color_channel(float value) {
     const float clamped = fmaxf(0.0f, fminf(1.0f, value));
     return (uint8_t)(clamped * 255.0f);
@@ -2068,7 +2123,7 @@ BTBHGPUModel *btbh_gpu_window_model_load(
     }
     if (result != cgltf_result_success || data == NULL) {
         cgltf_free(data);
-#if defined(_WIN32)
+#if defined(BTBH_GPU_HAS_ASSIMP)
         return btbh_gpu_window_model_load_assimp(
             window,
             path,
@@ -2709,6 +2764,72 @@ static void btbh_gpu_animation_normalize_quaternion(float rotation[4]) {
     }
 }
 
+static void btbh_gpu_animation_matrix_srt_quaternion(
+    const float scale[3],
+    const float rotation[4],
+    const float translation[3],
+    float output[16]
+) {
+    const float length = sqrtf(
+        rotation[0] * rotation[0] +
+        rotation[1] * rotation[1] +
+        rotation[2] * rotation[2] +
+        rotation[3] * rotation[3]
+    );
+    if (length < 0.000001f) {
+        memset(output, 0, sizeof(float) * 16u);
+        output[0] = scale[0];
+        output[5] = scale[1];
+        output[10] = scale[2];
+        output[12] = translation[0];
+        output[13] = translation[1];
+        output[14] = translation[2];
+        output[15] = 1.0f;
+        return;
+    }
+
+    const float inverse_length = 1.0f / length;
+    const float qx = rotation[0] * inverse_length;
+    const float qy = rotation[1] * inverse_length;
+    const float qz = rotation[2] * inverse_length;
+    const float qw = rotation[3] * inverse_length;
+    const float qx2 = qx * qx;
+    const float qy2 = qy * qy;
+    const float qz2 = qz * qz;
+    const float qxqy = qx * qy;
+    const float qxqz = qx * qz;
+    const float qxqw = qx * qw;
+    const float qyqz = qy * qz;
+    const float qyqw = qy * qw;
+    const float qzqw = qz * qw;
+    const float r00 = 1.0f - 2.0f * (qy2 + qz2);
+    const float r01 = 2.0f * (qxqy - qzqw);
+    const float r02 = 2.0f * (qxqz + qyqw);
+    const float r10 = 2.0f * (qxqy + qzqw);
+    const float r11 = 1.0f - 2.0f * (qx2 + qz2);
+    const float r12 = 2.0f * (qyqz - qxqw);
+    const float r20 = 2.0f * (qxqz - qyqw);
+    const float r21 = 2.0f * (qyqz + qxqw);
+    const float r22 = 1.0f - 2.0f * (qx2 + qy2);
+
+    output[0] = r00 * scale[0];
+    output[1] = r10 * scale[0];
+    output[2] = r20 * scale[0];
+    output[3] = 0.0f;
+    output[4] = r01 * scale[1];
+    output[5] = r11 * scale[1];
+    output[6] = r21 * scale[1];
+    output[7] = 0.0f;
+    output[8] = r02 * scale[2];
+    output[9] = r12 * scale[2];
+    output[10] = r22 * scale[2];
+    output[11] = 0.0f;
+    output[12] = translation[0];
+    output[13] = translation[1];
+    output[14] = translation[2];
+    output[15] = 1.0f;
+}
+
 void btbh_gpu_animation_slerp_shortest(
     const float lower[4],
     const float upper[4],
@@ -2719,8 +2840,6 @@ void btbh_gpu_animation_slerp_shortest(
     float end[4];
     (void)memcpy(start, lower, sizeof(start));
     (void)memcpy(end, upper, sizeof(end));
-    btbh_gpu_animation_normalize_quaternion(start);
-    btbh_gpu_animation_normalize_quaternion(end);
 
     float dot =
         start[0] * end[0] +
@@ -2733,30 +2852,36 @@ void btbh_gpu_animation_slerp_shortest(
             end[component] = -end[component];
         }
     }
-    dot = fminf(fmaxf(dot, -1.0f), 1.0f);
-    const float clamped_amount = fminf(fmaxf(amount, 0.0f), 1.0f);
-    if (dot > 0.9995f) {
+    if (fabsf(dot) >= 1.0f) {
+        (void)memcpy(output, start, sizeof(start));
+        return;
+    }
+    if (dot > 0.95f) {
         for (uint32_t component = 0u; component < 4u; ++component) {
             output[component] =
                 start[component] +
-                (end[component] - start[component]) * clamped_amount;
+                amount * (end[component] - start[component]);
         }
         btbh_gpu_animation_normalize_quaternion(output);
         return;
     }
 
     const float angle = acosf(dot);
-    const float inverse_sine = 1.0f / sinf(angle);
-    const float start_weight =
-        sinf((1.0f - clamped_amount) * angle) * inverse_sine;
-    const float end_weight =
-        sinf(clamped_amount * angle) * inverse_sine;
+    const float sine = sqrtf(1.0f - dot * dot);
+    if (fabsf(sine) < 0.000001f) {
+        for (uint32_t component = 0u; component < 4u; ++component) {
+            output[component] =
+                start[component] * 0.5f + end[component] * 0.5f;
+        }
+        return;
+    }
+    const float start_weight = sinf((1.0f - amount) * angle) / sine;
+    const float end_weight = sinf(amount * angle) / sine;
     for (uint32_t component = 0u; component < 4u; ++component) {
         output[component] =
             start[component] * start_weight +
             end[component] * end_weight;
     }
-    btbh_gpu_animation_normalize_quaternion(output);
 }
 
 static void btbh_gpu_animation_multiply_matrix(
@@ -3013,27 +3138,12 @@ static bool btbh_gpu_animation_build_skin_matrices(
         if (node->has_matrix && animated_nodes[index] == 0u) {
             (void)memcpy(local, node->matrix, sizeof(float) * 16u);
         } else {
-            cgltf_node sampled = *node;
-            sampled.has_matrix = 0;
-            sampled.has_translation = 1;
-            sampled.has_rotation = 1;
-            sampled.has_scale = 1;
-            (void)memcpy(
-                sampled.translation,
-                &translations[index * 3u],
-                sizeof(float) * 3u
-            );
-            (void)memcpy(
-                sampled.rotation,
-                &rotations[index * 4u],
-                sizeof(float) * 4u
-            );
-            (void)memcpy(
-                sampled.scale,
+            btbh_gpu_animation_matrix_srt_quaternion(
                 &scales[index * 3u],
-                sizeof(float) * 3u
+                &rotations[index * 4u],
+                &translations[index * 3u],
+                local
             );
-            cgltf_node_transform_local(&sampled, local);
         }
         valid = btbh_gpu_animation_world_matrix(
             data,
@@ -3080,7 +3190,6 @@ static bool btbh_gpu_animation_build_skin_matrices(
             );
         }
     }
-
     free(states);
     free(world_matrices);
     free(local_matrices);

@@ -46,6 +46,26 @@ int main(void) {
     assert_near(output[2], 0.0f);
     assert_near(output[3], 0.9238795325f);
 
+    const float nearby_rotation_y[4] = {
+        0.0f,
+        0.28f,
+        0.0f,
+        0.96f
+    };
+    btbh_gpu_animation_slerp_shortest(
+        identity,
+        nearby_rotation_y,
+        0.25f,
+        output
+    );
+    const float legacy_nlerp_length = sqrtf(
+        0.07f * 0.07f + 0.99f * 0.99f
+    );
+    assert_near(output[0], 0.0f);
+    assert_near(output[1], 0.07f / legacy_nlerp_length);
+    assert_near(output[2], 0.0f);
+    assert_near(output[3], 0.99f / legacy_nlerp_length);
+
     BTBHGPUAnimationLibraryReport report = {0};
     BTBHGPUAnimationLibrary *library =
         btbh_gpu_animation_library_load(

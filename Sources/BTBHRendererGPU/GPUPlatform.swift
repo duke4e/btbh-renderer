@@ -179,10 +179,15 @@ public final class GPUPlatform: GamePlatform {
         window.setFrameTelemetryEnabled(frameTelemetryEnabled)
         if frameTelemetryEnabled {
             let diagnostics = window.windowDiagnostics
+#if os(macOS)
+            let defaultFramesInFlight = "2"
+#else
+            let defaultFramesInFlight = "3"
+#endif
             let configuredFramesInFlight =
                 ProcessInfo.processInfo.environment[
                     "BTBH_GPU_ALLOWED_FRAMES_IN_FLIGHT"
-                ] ?? "3"
+                ] ?? defaultFramesInFlight
             let line =
                 "BTBH_GPU_SWAPCHAIN_TELEMETRY present_mode=\(diagnostics.presentMode) allowed_frames_in_flight=\(configuredFramesInFlight)\n"
             FileHandle.standardError.write(Data(line.utf8))
@@ -563,6 +568,7 @@ public final class GPUPlatform: GamePlatform {
     }
 
     func presentModelInstances(
+        renderSize: PixelSize2D,
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
@@ -599,6 +605,7 @@ public final class GPUPlatform: GamePlatform {
             postFragmentShaderPath:
                 sceneShaderPaths.postFragmentShaderPath,
             shaderFormat: sceneShaderPaths.shaderFormat,
+            renderSize: renderSize,
             viewProjection: viewProjection,
             cameraRight: cameraRight,
             cameraUp: cameraUp,

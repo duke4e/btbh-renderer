@@ -1,6 +1,10 @@
 ﻿cmake_minimum_required(VERSION 3.8)
 project(r3d VERSION 0.10.0 LANGUAGES C CXX)
 
+if(APPLE)
+    enable_language(OBJC)
+endif()
+
 # ========================================
 # Standards and Policies
 # ========================================
@@ -37,9 +41,13 @@ option(R3D_BUILD_TESTS "Build focused r3d regression tests" ${R3D_IS_MAIN})
 option(BTBH_BUILD_GPU_SPIKE "Build the isolated SDL_GPU Phase 2 spike" OFF)
 option(
     BTBH_BUILD_GPU_PACKAGE_RUNTIME
-    "Build SDL3-static for the production Swift GPU package"
+    "Build native dependencies for the production Swift GPU package"
     OFF
 )
+
+if(APPLE AND BTBH_BUILD_GPU_PACKAGE_RUNTIME)
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+endif()
 
 # ========================================
 # Output Directories
@@ -550,6 +558,13 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${CMAKE_CURRENT_BINARY_DIR}/external/SDL_shadercross"
         EXCLUDE_FROM_ALL
     )
+    if(APPLE)
+        target_link_options(
+            shadercross
+            PRIVATE
+                "-mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}"
+        )
+    endif()
     set(
         BTBH_GPU_SHADER_OUTPUT_DIR
         "${CMAKE_CURRENT_BINARY_DIR}/generated/btbh_gpu/shaders"
@@ -595,6 +610,10 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
+        "production_lut.frag|fragment"
+        "production_cas.frag|fragment"
+        "production_tilt_shift.frag|fragment"
+        "production_upscale_lanczos.frag|fragment"
         "production_post.frag|fragment"
         "production_fxaa.frag|fragment"
         "production_smaa_edge_medium.frag|fragment"
@@ -648,7 +667,6 @@ if(BTBH_BUILD_GPU_SPIKE)
                 "${R3D_ROOT_PATH}/shaders/external/SMAA.hlsl"
             )
         endif()
-
         add_custom_command(
             OUTPUT "${_shader_spirv}"
             COMMAND
@@ -717,6 +735,7 @@ if(BTBH_BUILD_GPU_SPIKE)
                 COMMAND
                     xcrun -sdk macosx metal
                     -std=macos-metal2.4
+                    -x metal
                     -c "${_shader_msl}"
                     -o "${_shader_air}"
                 COMMAND
@@ -794,11 +813,16 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
     target_compile_definitions(btbh_gpu PRIVATE SDL_MAIN_HANDLED)
     target_link_libraries(btbh_gpu PRIVATE SDL3::SDL3-static)
-    if(WIN32)
+    if(R3D_SUPPORT_ASSIMP)
         target_include_directories(
             btbh_gpu
             PRIVATE
                 "${R3D_ASSIMP_INC}"
+        )
+        target_compile_definitions(
+            btbh_gpu
+            PRIVATE
+                BTBH_GPU_HAS_ASSIMP=1
         )
         target_link_libraries(btbh_gpu PRIVATE ${R3D_ASSIMP_LIB})
     endif()
@@ -981,6 +1005,13 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
+            BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
+            BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
+            BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"
+            BTBH_PRODUCTION_LUT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_lut.frag.json"
+            BTBH_PRODUCTION_CAS_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_cas.frag.json"
+            BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_tilt_shift.frag.json"
+            BTBH_PRODUCTION_POST_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_post.frag.json"
     )
     add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
     add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)

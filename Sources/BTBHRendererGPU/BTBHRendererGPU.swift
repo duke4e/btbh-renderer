@@ -53,6 +53,15 @@ enum GPUAntiAliasingProjection {
     }
 }
 
+enum GPUUpscaleModeProjection {
+    static func native(_ upscaleMode: UpscaleMode) -> UInt8 {
+        switch upscaleMode {
+        case .linear: 0
+        case .lanczos: 1
+        }
+    }
+}
+
 public enum GPUBackendRequest: String, Equatable, Sendable {
     case vulkan
     case metal
@@ -405,10 +414,9 @@ enum GPUSceneBatchOrdering {
         _ batches: [GPUSceneGeometryProbeBatch]
     ) -> [GPUSceneGeometryProbeBatch] {
         let keyed = batches.enumerated().map { index, batch in
-            let transparent =
-                batch.material?.transparency == .alpha ||
-                batch.material?.blendMode == .multiplied ||
-                batch.material?.blendMode == .premultipliedAlpha
+            let transparent = batch.material.map {
+                $0.transparency == .alpha || $0.blendMode != .mix
+            } ?? false
             return (
                 index: index,
                 batch: batch,
@@ -898,7 +906,8 @@ struct GPUScenePostProbe {
         casEnabled: false,
         tiltShiftEnabled: false,
         ssaoEnabled: false,
-        antiAliasing: .off
+        antiAliasing: .off,
+        upscaleMode: .linear
     )
 
     let lutTexture: OpaquePointer?
@@ -916,6 +925,7 @@ struct GPUScenePostProbe {
     let tiltShiftEnabled: Bool
     let ssaoEnabled: Bool
     let antiAliasing: AntiAliasing
+    let upscaleMode: UpscaleMode
 }
 
 struct GPUSceneDirectionalShadowProbe: Equatable {
@@ -956,6 +966,7 @@ struct GPUSceneDirectionalShadowProbe: Equatable {
 
 struct GPUScenePresentationProbeReport {
     let drawableSize: PixelSize2D
+    let renderSize: PixelSize2D
     let batchCount: Int
     let primitiveDrawCount: Int
     let preparedGeometryCount: Int
@@ -1865,6 +1876,7 @@ public final class GPUWindowProbe {
         postVertexShaderPath: String,
         postFragmentShaderPath: String,
         shaderFormat: BTBHGPUShaderFormat,
+        renderSize: PixelSize2D,
         viewProjection: [Float],
         cameraRight: RenderVec3,
         cameraUp: RenderVec3,
@@ -1881,6 +1893,10 @@ public final class GPUWindowProbe {
             logicalInstanceCount ?? transientInstanceCount
         guard let window, !isShutdown,
               viewProjection.count == 16,
+              renderSize.width > 0,
+              renderSize.height > 0,
+              renderSize.width <= Int(UInt32.max),
+              renderSize.height <= Int(UInt32.max),
               MemoryLayout<GPUInstanceRecord>.stride ==
                 GPUInstanceRecordPacking.byteStride,
               transientInstanceCount <= Int(UInt32.max),
@@ -2059,6 +2075,8 @@ public final class GPUWindowProbe {
         nativePost.ssao_enabled = post.ssaoEnabled ? 1 : 0
         nativePost.anti_aliasing =
             GPUAntiAliasingProjection.native(post.antiAliasing)
+        nativePost.upscale_mode =
+            GPUUpscaleModeProjection.native(post.upscaleMode)
         nativeSceneBatches.removeAll(keepingCapacity: true)
         nativeSceneVisibility.removeAll(keepingCapacity: true)
         nativeDirectionalShadowVisibility.removeAll(keepingCapacity: true)
@@ -2285,6 +2303,8 @@ public final class GPUWindowProbe {
                                                     postVertexPath,
                                                     postFragmentPath,
                                                     shaderFormat,
+                                                    UInt32(renderSize.width),
+                                                    UInt32(renderSize.height),
                                                     matrix.baseAddress,
                                                     right.baseAddress,
                                                     up.baseAddress,
@@ -2351,6 +2371,7 @@ public final class GPUWindowProbe {
                 width: Int(report.drawable_width),
                 height: Int(report.drawable_height)
             ),
+            renderSize: renderSize,
             batchCount: Int(report.batch_count),
             primitiveDrawCount: Int(report.primitive_draw_count),
             preparedGeometryCount: Int(report.prepared_geometry_count),

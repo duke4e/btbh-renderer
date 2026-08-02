@@ -38,6 +38,27 @@ struct FragmentInput
     float2 texture_coordinate : TEXCOORD0;
 };
 
+float sample_depth_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return depth_texture.SampleLevel(depth_sampler, uv, 0.0f);
+}
+
+float4 sample_normal_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return normal_texture.SampleLevel(normal_sampler, uv, 0.0f);
+}
+
+float sample_ssao_at(int2 pixel, float2 resolution)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) / resolution;
+    return ssao_texture.SampleLevel(ssao_sampler, uv, 0.0f);
+}
+
 float3 world_position(int2 pixel, float depth)
 {
     const float2 uv =
@@ -90,7 +111,7 @@ int2 representative_full_pixel(
         int2(0, 0),
         full_resolution - 1
     );
-    selected_depth = depth_texture.Load(int3(selected_pixel, 0));
+    selected_depth = sample_depth_at(selected_pixel);
     const bool use_maximum =
         ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
@@ -101,8 +122,7 @@ int2 representative_full_pixel(
             int2(0, 0),
             full_resolution - 1
         );
-        const float candidate_depth =
-            depth_texture.Load(int3(candidate_pixel, 0));
+        const float candidate_depth = sample_depth_at(candidate_pixel);
         if ((use_maximum && candidate_depth > selected_depth) ||
             (!use_maximum && candidate_depth < selected_depth))
         {
@@ -127,9 +147,7 @@ float depth_aware_upsample(float2 uv)
         int2(0, 0),
         full_resolution - 1
     );
-    const float center_depth = depth_texture.Load(
-        int3(center_pixel, 0)
-    );
+    const float center_depth = sample_depth_at(center_pixel);
     if (center_depth >= 0.99999f)
     {
         return 1.0f;
@@ -144,7 +162,7 @@ float depth_aware_upsample(float2 uv)
         center_depth
     );
     const float3 center_normal = normalize(
-        normal_texture.Load(int3(center_pixel, 0)).xyz *
+        sample_normal_at(center_pixel).xyz *
             2.0f - 1.0f
     );
     const float3 far_position = world_position(
@@ -193,8 +211,7 @@ float depth_aware_upsample(float2 uv)
             -abs(sample_view_depth - center_view_depth) *
                 depth_sharpness
         );
-        result +=
-            ssao_texture.Load(int3(coordinates[index], 0)) *
+        result += sample_ssao_at(coordinates[index], ssao_resolution) *
             weights[index];
         weight_sum += weights[index];
     }
@@ -240,10 +257,8 @@ float4 main(FragmentInput input) : SV_Target0
         int2(0, 0),
         full_resolution - 1
     );
-    const float center_depth =
-        depth_texture.Load(int3(center_pixel, 0));
-    const float4 encoded_normal =
-        normal_texture.Load(int3(center_pixel, 0));
+    const float center_depth = sample_depth_at(center_pixel);
+    const float4 encoded_normal = sample_normal_at(center_pixel);
     const float3 normal = normalize(
         encoded_normal.xyz * 2.0f - 1.0f
     );

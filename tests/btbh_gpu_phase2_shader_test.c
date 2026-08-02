@@ -44,6 +44,27 @@
 #ifndef BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_SSAO_REFLECTION_PATH
+#error "BTBH_PRODUCTION_SSAO_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH
+#error "BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH
+#error "BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_LUT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_LUT_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_CAS_REFLECTION_PATH
+#error "BTBH_PRODUCTION_CAS_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_POST_REFLECTION_PATH
+#error "BTBH_PRODUCTION_POST_REFLECTION_PATH must be defined"
+#endif
 
 static int require_text(const char *path, const char *needle)
 {
@@ -158,6 +179,14 @@ int main(void)
             "\"storage_buffers\": 2"
         ) ||
         !require_text(
+            BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD4\", \"type\": \"float4\", \"location\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD5\", \"type\": \"float4\", \"location\": 3"
+        ) ||
+        !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 8"
         ) ||
@@ -172,6 +201,34 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_SSAO_REFLECTION_PATH,
+            "\"samplers\": 2, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH,
+            "\"samplers\": 3, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH,
+            "\"samplers\": 6, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_LUT_REFLECTION_PATH,
+            "\"samplers\": 2, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_CAS_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_POST_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,

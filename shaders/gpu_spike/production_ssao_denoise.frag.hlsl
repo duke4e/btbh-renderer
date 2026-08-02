@@ -32,6 +32,27 @@ struct FragmentInput
     float2 texture_coordinate : TEXCOORD0;
 };
 
+float sample_depth_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return depth_texture.SampleLevel(depth_sampler, uv, 0.0f);
+}
+
+float4 sample_normal_at(int2 pixel)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) * inverse_resolution;
+    return normal_texture.SampleLevel(normal_sampler, uv, 0.0f);
+}
+
+float sample_ssao_at(int2 pixel, int2 resolution)
+{
+    const float2 uv =
+        (float2(pixel) + 0.5f) / float2(resolution);
+    return ssao_texture.SampleLevel(ssao_sampler, uv, 0.0f);
+}
+
 static const float2 legacy_denoise_disk[8] = {
     float2( 0.8376f,  0.1478f),
     float2( 0.3502f,  0.2715f),
@@ -78,7 +99,7 @@ int2 representative_full_pixel(
         int2(0, 0),
         full_resolution - 1
     );
-    selected_depth = depth_texture.Load(int3(selected_pixel, 0));
+    selected_depth = sample_depth_at(selected_pixel);
     const bool use_maximum =
         ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
@@ -89,8 +110,7 @@ int2 representative_full_pixel(
             int2(0, 0),
             full_resolution - 1
         );
-        const float candidate_depth =
-            depth_texture.Load(int3(candidate_pixel, 0));
+        const float candidate_depth = sample_depth_at(candidate_pixel);
         if ((use_maximum && candidate_depth > selected_depth) ||
             (!use_maximum && candidate_depth < selected_depth))
         {
@@ -131,12 +151,10 @@ float main(FragmentInput input) : SV_Target0
     const float3 center_position =
         world_position(center_pixel, center_depth);
     const float3 center_normal = normalize(
-        normal_texture.Load(int3(center_pixel, 0)).xyz *
+        sample_normal_at(center_pixel).xyz *
             2.0f - 1.0f
     );
-    float result = ssao_texture.Load(
-        int3(center_half_pixel, 0)
-    );
+    float result = sample_ssao_at(center_half_pixel, half_resolution);
     float weight_sum = 1.0f;
     const float blur_radius = 4.0f;
     [unroll]
@@ -163,7 +181,7 @@ float main(FragmentInput input) : SV_Target0
         const float3 sample_position =
             world_position(sample_pixel, sample_depth);
         const float3 sample_normal = normalize(
-            normal_texture.Load(int3(sample_pixel, 0)).xyz *
+            sample_normal_at(sample_pixel).xyz *
                 2.0f - 1.0f
         );
         const float plane_distance = dot(

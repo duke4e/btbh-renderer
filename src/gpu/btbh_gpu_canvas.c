@@ -10,7 +10,14 @@
 #if defined(_MSC_VER)
 #pragma warning(push, 0)
 #endif
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "stb_image_write.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
@@ -584,7 +591,7 @@ void btbh_gpu_window_request_presented_frame_readback(
     }
 }
 
-bool btbh_gpu_window_record_presented_frame(
+SDL_GPUTexture *btbh_gpu_window_present_target(
     BTBHGPUWindow *window
 ) {
     if (
@@ -597,7 +604,10 @@ bool btbh_gpu_window_record_presented_frame(
         window->pending_drawable_width == 0u ||
         window->pending_drawable_height == 0u
     ) {
-        return false;
+        return NULL;
+    }
+    if (!window->presented_frame_readback_requested) {
+        return window->pending_swapchain;
     }
     const SDL_GPUTextureFormat format =
         SDL_GetGPUSwapchainTextureFormat(
@@ -631,31 +641,39 @@ bool btbh_gpu_window_record_presented_frame(
             &report
         );
         if (window->presented_frame == NULL) {
-            return false;
+            return NULL;
         }
     }
-    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
-        window->pending_command
-    );
-    if (copy == NULL) {
+    return window->presented_frame->texture;
+}
+
+bool btbh_gpu_window_record_presented_frame(
+    BTBHGPUWindow *window
+) {
+    if (
+        window == NULL ||
+        window->pending_command == NULL ||
+        window->pending_swapchain == NULL ||
+        window->presented_frame == NULL ||
+        window->presented_frame->texture == NULL
+    ) {
         return false;
     }
-    SDL_GPUTextureLocation source;
-    SDL_GPUTextureLocation destination;
-    SDL_zero(source);
-    SDL_zero(destination);
-    source.texture = window->pending_swapchain;
-    destination.texture = window->presented_frame->texture;
-    SDL_CopyGPUTextureToTexture(
-        copy,
-        &source,
-        &destination,
-        window->pending_drawable_width,
-        window->pending_drawable_height,
-        1u,
-        true
+    SDL_GPUBlitInfo blit;
+    SDL_zero(blit);
+    blit.source.texture = window->presented_frame->texture;
+    blit.source.w = window->pending_drawable_width;
+    blit.source.h = window->pending_drawable_height;
+    blit.destination.texture = window->pending_swapchain;
+    blit.destination.w = window->pending_drawable_width;
+    blit.destination.h = window->pending_drawable_height;
+    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blit.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_InsertGPUDebugLabel(
+        window->pending_command,
+        "BTBH Presented Frame Composite"
     );
-    SDL_EndGPUCopyPass(copy);
+    SDL_BlitGPUTexture(window->pending_command, &blit);
     return true;
 }
 
@@ -1014,11 +1032,22 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         );
         return report->result;
     }
+    SDL_GPUTexture *present_target =
+        btbh_gpu_window_present_target(window);
+    if (present_target == NULL) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return report->result;
+    }
     if (had_scene &&
         !btbh_gpu_window_blit_pending_scene(
             window,
             window->pending_command,
-            window->pending_swapchain,
+            present_target,
             window->pending_drawable_width,
             window->pending_drawable_height
         )) {
@@ -1096,7 +1125,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         const BTBHGPUCanvasPass *canvas_pass = &passes[pass_index];
         const bool is_screen = canvas_pass->target == NULL;
         SDL_GPUTexture *target_texture = is_screen
-            ? window->pending_swapchain
+            ? present_target
             : canvas_pass->target->texture;
         const uint32_t target_width = is_screen
             ? window->pending_drawable_width
@@ -1233,7 +1262,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         );
         SDL_GPUColorTargetInfo screen_target;
         SDL_zero(screen_target);
-        screen_target.texture = window->pending_swapchain;
+        screen_target.texture = present_target;
         screen_target.load_op = SDL_GPU_LOADOP_CLEAR;
         screen_target.store_op = SDL_GPU_STOREOP_STORE;
         screen_target.clear_color.a = 1.0f;

@@ -2,6 +2,14 @@ import XCTest
 @testable import BTBHRenderer
 
 final class RenderViewportTests: XCTestCase {
+    func testNormalizedViewportPointPreservesTopLeftCoordinates() {
+        XCTAssertEqual(
+            NormalizedViewportPoint(x: 0.25, y: 0.75),
+            .init(x: 0.25, y: 0.75)
+        )
+        XCTAssertEqual(NormalizedViewportPoint.zero, .init(x: 0, y: 0))
+    }
+
     func testFullViewportUsesTopLeftNormalizedBounds() {
         XCTAssertEqual(
             NormalizedViewport.full,

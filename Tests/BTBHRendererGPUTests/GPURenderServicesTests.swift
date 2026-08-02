@@ -5,6 +5,66 @@ import XCTest
 
 @preconcurrency @MainActor
 final class GPURenderServicesTests: XCTestCase {
+    func testSceneRenderResolutionMatchesLegacyRenderScaleContract() throws {
+        XCTAssertEqual(
+            try GPUSceneRenderResolution.scaled(
+                drawableSize: .init(width: 2_560, height: 1_440),
+                renderScale: 0.5
+            ),
+            .init(width: 1_280, height: 720)
+        )
+        XCTAssertEqual(
+            try GPUSceneRenderResolution.scaled(
+                drawableSize: .init(width: 101, height: 51),
+                renderScale: 0.5
+            ),
+            .init(width: 50, height: 25)
+        )
+        XCTAssertEqual(
+            try GPUSceneRenderResolution.scaled(
+                drawableSize: .init(width: 2_560, height: 1_440),
+                renderScale: 0.01
+            ),
+            .init(width: 256, height: 144)
+        )
+        XCTAssertEqual(
+            try GPUSceneRenderResolution.scaled(
+                drawableSize: .init(width: 2_560, height: 1_440),
+                renderScale: 3
+            ),
+            .init(width: 5_120, height: 2_880)
+        )
+    }
+
+    func testSceneRenderResolutionRejectsInvalidInput() {
+        let drawableSize = PixelSize2D(width: 2_560, height: 1_440)
+        for renderScale in [
+            Float.zero,
+            -1,
+            .nan,
+            .infinity,
+        ] {
+            XCTAssertThrowsError(
+                try GPUSceneRenderResolution.scaled(
+                    drawableSize: drawableSize,
+                    renderScale: renderScale
+                )
+            )
+        }
+        for invalidSize in [
+            PixelSize2D(width: 0, height: 720),
+            PixelSize2D(width: 1_280, height: 0),
+            PixelSize2D(width: Int(Int32.max) + 1, height: 720),
+        ] {
+            XCTAssertThrowsError(
+                try GPUSceneRenderResolution.scaled(
+                    drawableSize: invalidSize,
+                    renderScale: 1
+                )
+            )
+        }
+    }
+
     func testProceduralEnvironmentProjectionIsFiniteAndPreservesConstantSky() {
         let descriptor = ProceduralSkyDescriptor(
             color: .init(r: 64, g: 128, b: 192, a: 255),
@@ -244,10 +304,9 @@ final class GPURenderServicesTests: XCTestCase {
     }
 
     func testBundleInstallsPresentsClearAndShutsDownExactlyOnce() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -276,17 +335,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.uninstall()
         RenderServices.uninstall()
         XCTAssertTrue(bundle.isShutdown)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testTextureLoadCreatesARealGPUResourceAndDestroyKeepsWindowAlive() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -314,17 +369,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertTrue(handle.isValid)
         RenderServices.resources.destroyTexture(handle)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testTextureHandleFinishesSafelyAfterOwnerWindowClosesAndReopens() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -355,17 +406,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testTextureWrapperFinishesSafelyAfterOwnerWindowCloses() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -392,17 +439,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.uninstall()
 
         XCTAssertTrue(bundle.isShutdown)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testUnsupportedResourceCallFailsClosedWithExactOperation() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -444,17 +487,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertTrue(RenderServices.platform.shouldClose)
         RenderServices.uninstall()
         XCTAssertTrue(bundle.isShutdown)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testScreenShaderDescriptorStagesTypedParametersAndTextureDependency() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -507,17 +546,13 @@ final class GPURenderServicesTests: XCTestCase {
             )
         }
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testSurfaceShaderStagesPathsParametersAndDependencyLifetimes() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -628,17 +663,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.resources.destroyMaterial(material)
         RenderServices.resources.destroyTexture(finalTexture)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testInstanceBuffersAllocateUploadValidateAndReleaseGPUStorage() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -704,17 +735,13 @@ final class GPURenderServicesTests: XCTestCase {
         })
         RenderServices.resources.destroyInstanceBuffer(semantic)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testInstanceBufferFinishesSafelyAfterOwnerWindowCloses() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -742,17 +769,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testModelInstancesUsePersistentGPUBufferInsteadOfTransientPacking() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -805,7 +828,8 @@ final class GPURenderServicesTests: XCTestCase {
                 verticalFOVDegrees: 60,
                 projection: .perspective
             ),
-            environment: .default
+            environment: .default,
+            renderScale: 0.5
         )
         RenderServices.canvas.beginFrame()
         RenderServices.scene.beginFrame(frame)
@@ -825,6 +849,8 @@ final class GPURenderServicesTests: XCTestCase {
             bundle.resources as? GPUResourceBackend
         )
         let report = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(report.drawableSize, .init(width: 320, height: 180))
+        XCTAssertEqual(report.renderSize, .init(width: 160, height: 90))
         XCTAssertEqual(report.instanceCount, 2)
         XCTAssertEqual(report.transientInstanceCount, 0)
         XCTAssertGreaterThan(report.persistentBatchCount, 0)
@@ -914,19 +940,15 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
         RenderServices.resources.destroyInstanceBuffer(buffer)
         RenderServices.resources.destroyModel(model)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testPersistentModelRangeListQueuesOnceAndCullsRangesInGPUBackend()
         throws
     {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1026,17 +1048,13 @@ final class GPURenderServicesTests: XCTestCase {
 
         RenderServices.resources.destroyInstanceBuffer(buffer)
         RenderServices.resources.destroyModel(model)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testSkyAmbientAndLightResourcesValidateDependenciesAndStaleHandles() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1127,17 +1145,13 @@ final class GPURenderServicesTests: XCTestCase {
 
         RenderServices.resources.destroyCubemap(replacementSky)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testCustomMeshUploadsUpdatesValidatesAndReleasesGPUStorage() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1258,9 +1272,6 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.platform.closeWindow()
         RenderServices.resources.destroyMesh(detachedMesh)
         XCTAssertTrue(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testSceneFrustumQueryUsesCurrentCameraWithoutFailClosing() throws {
@@ -1334,7 +1345,7 @@ final class GPURenderServicesTests: XCTestCase {
         )))
     }
 
-    func testSceneProjectAndUnprojectUseDrawableCameraGeometry() throws {
+    func testSceneProjectAndUnprojectAreDrawableScaleIndependent() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
@@ -1352,12 +1363,12 @@ final class GPURenderServicesTests: XCTestCase {
             verticalFOVDegrees: 90,
             projection: .perspective
         )
-        let center = RenderServices.scene.project(
+        let center = RenderServices.scene.projectNormalized(
             .init(x: 0, y: 0, z: 10),
             camera: perspective
         )
-        XCTAssertEqual(center.x, 400, accuracy: 0.001)
-        XCTAssertEqual(center.y, 200, accuracy: 0.001)
+        XCTAssertEqual(center.x, 0.5, accuracy: 0.001)
+        XCTAssertEqual(center.y, 0.5, accuracy: 0.001)
         let centerRay = RenderServices.scene.unprojectRay(
             center,
             camera: perspective
@@ -1367,6 +1378,21 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(centerRay.direction.y, 0, accuracy: 0.001)
         XCTAssertEqual(centerRay.direction.z, 1, accuracy: 0.001)
 
+        try RenderServices.scene.resize(
+            drawableSize: .init(width: 1600, height: 800)
+        )
+        XCTAssertEqual(
+            RenderServices.scene.projectNormalized(
+                .init(x: 0, y: 0, z: 10),
+                camera: perspective
+            ),
+            center
+        )
+        XCTAssertEqual(
+            RenderServices.scene.unprojectRay(center, camera: perspective),
+            centerRay
+        )
+
         let orthographic = RenderCamera(
             position: .zero,
             target: .forward,
@@ -1375,31 +1401,66 @@ final class GPURenderServicesTests: XCTestCase {
             projection: .orthographic
         )
         let edgeRay = RenderServices.scene.unprojectRay(
-            .init(x: 800, y: 200),
+            .init(x: 1, y: 0.5),
             camera: orthographic
         )
         XCTAssertEqual(edgeRay.origin.x, -20, accuracy: 0.001)
         XCTAssertEqual(edgeRay.origin.y, 0, accuracy: 0.001)
         XCTAssertEqual(edgeRay.origin.z, 0.01, accuracy: 0.001)
         XCTAssertEqual(edgeRay.direction, .forward)
-        try RenderServices.scene.resize(
-            drawableSize: .init(width: 0, height: 0)
+
+        let inset = NormalizedViewport(
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5
+        )
+        XCTAssertEqual(
+            RenderServices.scene.projectNormalized(
+                .init(x: 0, y: 0, z: 10),
+                camera: perspective,
+                viewport: inset
+            ),
+            center
         )
         XCTAssertEqual(
             RenderServices.scene.unprojectRay(
-                .init(x: .infinity, y: 0),
-                camera: perspective
+                center,
+                camera: perspective,
+                viewport: inset
+            ),
+            centerRay
+        )
+
+        let invalid = NormalizedViewport(
+            x: 0.75,
+            y: 0,
+            width: 0.5,
+            height: 1
+        )
+        XCTAssertEqual(
+            RenderServices.scene.projectNormalized(
+                .init(x: 0, y: 0, z: 10),
+                camera: perspective,
+                viewport: invalid
+            ),
+            .zero
+        )
+        XCTAssertEqual(
+            RenderServices.scene.unprojectRay(
+                center,
+                camera: perspective,
+                viewport: invalid
             ),
             .init(origin: .zero, direction: .zero)
         )
     }
 
     func testScenePresentsDebugPrimitivesThroughFXAAWithoutFailClosing() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1440,17 +1501,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.beginFrame()
         RenderServices.canvas.endFrame()
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan debug primitive test runs only on Windows")
-        #endif
     }
 
     func testGLBModelLoadUploadsGPUResourcesAndReportsMetadata() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1496,17 +1553,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.platform.closeWindow()
         RenderServices.resources.destroyModel(detachedModel)
         XCTAssertTrue(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testOBJModelLoadUploadsAssimpMeshAndReportsMetadata() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1546,17 +1599,13 @@ final class GPURenderServicesTests: XCTestCase {
 
         RenderServices.resources.destroyModel(model)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testGLBAnimationLibraryLoadsRealClipData() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1589,17 +1638,13 @@ final class GPURenderServicesTests: XCTestCase {
         )
         XCTAssertTrue(library.isValid)
         RenderServices.resources.destroyAnimationLibrary(library)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testFontLoadRasterizesARealTTFAtlasAndReleasesIt() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1625,17 +1670,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertTrue(font.isValid)
         RenderServices.resources.destroyFont(font)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan font test runs only on Windows")
-        #endif
     }
 
     func testCanvasMeasuresTextFromRasterizedGlyphMetrics() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1676,17 +1717,82 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(normal.y, 32, accuracy: 0.01)
         XCTAssertEqual(doubled.x, normal.x * 2, accuracy: 0.01)
         XCTAssertEqual(doubled.y, normal.y * 2, accuracy: 0.01)
-        #else
-        throw XCTSkip("The Windows Vulkan font test runs only on Windows")
-        #endif
     }
 
-    func testCanvasFillRectPresentsWithoutFailClosing() throws {
-        #if os(Windows)
+    func testLanczosUpscalePresentsDrawableSizedScene() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        let drawableSize = PixelSize2D(width: 320, height: 180)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU Lanczos upscale integration",
+            width: drawableSize.width,
+            height: drawableSize.height,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(drawableSize: drawableSize)
+
+        let environment = EnvironmentDescriptor(
+            backgroundColor: .init(r: 255, g: 0, b: 0, a: 255),
+            backgroundEnergy: 1,
+            ambientColor: .black,
+            ambientEnergy: 0,
+            ambientMap: .invalid,
+            skyCubemap: .invalid,
+            ssaoEnabled: false,
+            tonemap: .reinhard,
+            tonemapWhite: 1
+        )
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 0, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: environment,
+            renderScale: 0.5,
+            antiAliasing: .off,
+            upscaleMode: .lanczos
+        ))
+        RenderServices.scene.submit(.debug(.sphere(
+            center: .zero,
+            radius: 0.25,
+            color: .white
+        )))
+        try RenderServices.scene.endFrame()
+
+        let scene = try XCTUnwrap(bundle.scene as? GPUSceneBackend)
+        let report = try XCTUnwrap(scene.lastPresentationReport)
+        XCTAssertEqual(report.drawableSize, drawableSize)
+        XCTAssertEqual(report.renderSize, .init(width: 160, height: 90))
+
+        RenderServices.canvas.endFrame()
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        XCTAssertEqual(readback.size, drawableSize)
+        let center = ((drawableSize.height / 2) * drawableSize.width
+            + drawableSize.width / 2) * 4
+        XCTAssertGreaterThan(readback.rgba8[center], 150)
+        XCTAssertLessThan(readback.rgba8[center + 1], 10)
+        XCTAssertLessThan(readback.rgba8[center + 2], 10)
+        XCTAssertEqual(readback.rgba8[center + 3], 255)
+    }
+
+    func testCanvasFillRectPresentsWithoutFailClosing() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1745,17 +1851,13 @@ final class GPURenderServicesTests: XCTestCase {
             [137, 80, 78, 71, 13, 10, 26, 10]
         )
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
-        #endif
     }
 
     func testCanvasRoundedRectClosesTopFanSegment() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1785,17 +1887,13 @@ final class GPURenderServicesTests: XCTestCase {
             Array(readback.rgba8[topCenter..<(topCenter + 4)]),
             [255, 255, 255, 255]
         )
-        #else
-        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
-        #endif
     }
 
     func testCanvasPresentsTextureAndFontAtlasBatches() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1853,17 +1951,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.canvas.endFrame()
 
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan canvas test runs only on Windows")
-        #endif
     }
 
     func testCanvasRendersOffscreenTargetBackToPresentedFrame() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1921,17 +2015,13 @@ final class GPURenderServicesTests: XCTestCase {
             [255, 255, 255, 255]
         )
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan render-target test runs only on Windows")
-        #endif
     }
 
     func testCanvasRenderTargetSamplingMatchesLegacyVerticalOrigin() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -1988,17 +2078,13 @@ final class GPURenderServicesTests: XCTestCase {
             [0, 0, 255, 255]
         )
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan render-target test runs only on Windows")
-        #endif
     }
 
     func testAnimationTreeTracksValidatedClipAndSwitchState() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2076,6 +2162,46 @@ final class GPURenderServicesTests: XCTestCase {
             rootNode: "root",
             rootBone: nil
         ))
+        let loopDelta: Float = 1.0 / 60.0
+        let loopStart = clipDuration - loopDelta / 2
+        var legacyWrappedTime = loopStart + loopDelta
+        legacyWrappedTime -= clipDuration
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.speed",
+            value: 1
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.time",
+            value: loopStart
+        )
+        try RenderServices.resources.updateAnimationTree(
+            tree,
+            deltaSeconds: loopDelta
+        )
+        XCTAssertEqual(
+            try RenderServices.resources.animationTreeParameter(
+                tree,
+                name: "clip.idle.time"
+            ).bitPattern,
+            legacyWrappedTime.bitPattern
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.time",
+            value: 0
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.once.time",
+            value: 0
+        )
+        try RenderServices.resources.setAnimationTreeParameter(
+            tree,
+            name: "clip.idle.speed",
+            value: 2
+        )
         XCTAssertEqual(
             try RenderServices.resources.animationTreeParameter(
                 tree,
@@ -2322,17 +2448,13 @@ final class GPURenderServicesTests: XCTestCase {
                 name: "clip.idle.time"
             )
         )
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testModelMaterialOverrideStagesPatchAndPinsModelLifetime() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2429,17 +2551,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertNotEqual(replacementTexture.rawValue, texture.rawValue)
         RenderServices.resources.destroyMaterial(textured)
         RenderServices.resources.destroyTexture(replacementTexture)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testGLTFModelLoadHandlesNodesSparseDataMaterialsAndUnicodePath() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2544,17 +2662,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.resources.destroyModel(sparse)
         RenderServices.resources.destroyModel(instanced)
         XCTAssertFalse(RenderServices.platform.shouldClose)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testCorruptEmbeddedModelTextureFailsClosed() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2580,17 +2694,13 @@ final class GPURenderServicesTests: XCTestCase {
                 flags: [.meshData]
             )
         )
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testExternalModelTextureLoadsRelativeToGLTF() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2615,17 +2725,13 @@ final class GPURenderServicesTests: XCTestCase {
             flags: [.meshData]
         )
         RenderServices.resources.destroyModel(model)
-        #else
-        throw XCTSkip("The Windows Vulkan bundle test runs only on Windows")
-        #endif
     }
 
     func testModelInstancesPresentsLoadedGeometryWithoutFailClosing() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2787,17 +2893,13 @@ final class GPURenderServicesTests: XCTestCase {
         RenderServices.resources.destroyMaterial(material)
         RenderServices.resources.destroyMesh(mesh)
         RenderServices.resources.destroyModel(model)
-        #else
-        throw XCTSkip("The Windows Vulkan scene test runs only on Windows")
-        #endif
     }
 
     func testModelInstanceStandaloneMaterialOverrideColorsItsSlot() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -2904,17 +3006,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(sceneOnlyReadback.rgba8[center], 200)
         XCTAssertLessThan(sceneOnlyReadback.rgba8[center + 1], 80)
         XCTAssertLessThan(sceneOnlyReadback.rgba8[center + 2], 80)
-        #else
-        throw XCTSkip("The Windows Vulkan material override test runs only on Windows")
-        #endif
     }
 
     func testImportedModelFlipsVerticalTextureCoordinateLikeLegacyImporter() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3000,17 +3098,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(readback.rgba8[center], 30)
         XCTAssertLessThan(readback.rgba8[center + 1], 30)
         XCTAssertLessThan(readback.rgba8[center + 2], 30)
-        #else
-        throw XCTSkip("The Windows Vulkan model UV test runs only on Windows")
-        #endif
     }
 
     func testImportedOBJKeepsUpwardFaceFrontFacingForDirectionalLight() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3102,17 +3196,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center], 180)
         XCTAssertGreaterThan(readback.rgba8[center + 1], 180)
         XCTAssertGreaterThan(readback.rgba8[center + 2], 180)
-        #else
-        throw XCTSkip("The Windows Vulkan OBJ winding test runs only on Windows")
-        #endif
     }
 
     func testTransparentMeshDoesNotWriteDepthBeforeOpaqueGeometry() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3234,19 +3324,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center], 80)
         XCTAssertGreaterThan(readback.rgba8[center + 1], 80)
         XCTAssertLessThan(readback.rgba8[center + 2], 20)
-        #else
-        throw XCTSkip(
-            "The Windows Vulkan transparent depth test runs only on Windows"
-        )
-        #endif
     }
 
     func testModelMaterialDepthCompareGreaterDoesNotCoverEqualDepth() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3341,17 +3425,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center], 200)
         XCTAssertLessThan(readback.rgba8[center + 1], 80)
         XCTAssertLessThan(readback.rgba8[center + 2], 80)
-        #else
-        throw XCTSkip("The Windows Vulkan material depth test runs only on Windows")
-        #endif
     }
 
     func testLitMeshUsesFrameAmbientAndDirectionalLight() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3528,17 +3608,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThanOrEqual(zeroNormalReadback.rgba8[center], 255)
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 1], 30)
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 2], 30)
-        #else
-        throw XCTSkip("The Windows Vulkan scene lighting test runs only on Windows")
-        #endif
     }
 
     func testDirectionalShadowDarkensReceiverBehindOpaqueCaster() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -3734,17 +3810,13 @@ final class GPURenderServicesTests: XCTestCase {
         }
         XCTAssertGreaterThan(materiallyDarkerPixels, 100)
         XCTAssertGreaterThan(litPixels, 1_000)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testDirectPBRUsesNormalRoughnessAndMetalnessMaps() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -4007,17 +4079,13 @@ final class GPURenderServicesTests: XCTestCase {
             slantedIdentityLuma + 30,
             "non-uniform scale must use inverse-transpose normals"
         )
-        #else
-        throw XCTSkip("The Windows Vulkan direct PBR test runs only on Windows")
-        #endif
     }
 
     func testProceduralIBLUsesMaterialAOAndMetallicEnvironmentSpecular() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -4245,17 +4313,13 @@ final class GPURenderServicesTests: XCTestCase {
             groundReflectionRGB[0] + 20,
             "view-dependent downward reflection must retain the blue ground"
         )
-        #else
-        throw XCTSkip("The Windows Vulkan procedural IBL test runs only on Windows")
-        #endif
     }
 
     func testSceneMeshSamplesItsMaterialAlbedoTexture() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -4370,17 +4434,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center], 200)
         XCTAssertGreaterThan(readback.rgba8[center + 1], 200)
         XCTAssertLessThan(readback.rgba8[center + 2], 100)
-        #else
-        throw XCTSkip("The Windows Vulkan textured scene test runs only on Windows")
-        #endif
     }
 
     func testSceneMaterialEmissionContributesToPresentedColor() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try RenderServices.install(bundle)
@@ -4492,17 +4552,13 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(unlitReadback.rgba8[center], 10)
         XCTAssertLessThan(unlitReadback.rgba8[center + 1], 10)
         XCTAssertLessThan(unlitReadback.rgba8[center + 2], 10)
-        #else
-        throw XCTSkip("The Windows Vulkan emission test runs only on Windows")
-        #endif
     }
 
     func testModelMaterialPatchPreservesImportedBaseColor() throws {
-        #if os(Windows)
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         try RenderServices.install(GPURenderServices.make(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         ))
         try RenderServices.platform.openWindow(.init(
@@ -4571,8 +4627,5 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(readback.rgba8[center], 50)
         XCTAssertGreaterThan(readback.rgba8[center + 1], 80)
         XCTAssertLessThan(readback.rgba8[center + 2], 60)
-        #else
-        throw XCTSkip("The imported material patch test runs only on Windows")
-        #endif
     }
 }

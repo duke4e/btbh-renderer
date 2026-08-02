@@ -392,8 +392,16 @@ public protocol SceneBackend: AnyObject {
     func submit(_ draw: SceneDraw)
     func submitPersistentModelRanges(_ draw: PersistentModelRangeListDraw)
     func endFrame() throws
-    func project(_ world: RenderVec3, camera: RenderCamera) -> RenderVec2
-    func unprojectRay(_ screen: RenderVec2, camera: RenderCamera) -> RenderRay
+    func projectNormalized(
+        _ world: RenderVec3,
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> NormalizedViewportPoint
+    func unprojectRay(
+        _ point: NormalizedViewportPoint,
+        camera: RenderCamera,
+        viewport: NormalizedViewport
+    ) -> RenderRay
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool
     func readbackWorldFrame() throws -> FrameReadback
     func captureWorldFrameTexture() throws -> TextureHandle
@@ -401,6 +409,20 @@ public protocol SceneBackend: AnyObject {
 }
 
 public extension SceneBackend {
+    func projectNormalized(
+        _ world: RenderVec3,
+        camera: RenderCamera
+    ) -> NormalizedViewportPoint {
+        projectNormalized(world, camera: camera, viewport: .full)
+    }
+
+    func unprojectRay(
+        _ point: NormalizedViewportPoint,
+        camera: RenderCamera
+    ) -> RenderRay {
+        unprojectRay(point, camera: camera, viewport: .full)
+    }
+
     /// Source-compatible expansion for backends without a specialized list
     /// implementation. Specialized backends should queue the list itself.
     func submitPersistentModelRanges(_ draw: PersistentModelRangeListDraw) {

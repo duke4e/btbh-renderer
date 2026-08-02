@@ -188,9 +188,19 @@ static SDL_GPUPresentMode btbh_gpu_choose_present_mode(
     return SDL_GPU_PRESENTMODE_VSYNC;
 }
 
+static uint32_t btbh_gpu_default_allowed_frames_in_flight(void) {
+#if defined(__APPLE__)
+    return 2u;
+#else
+    return 3u;
+#endif
+}
+
 uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value) {
+    const uint32_t platform_default =
+        btbh_gpu_default_allowed_frames_in_flight();
     if (value == NULL || value[0] == '\0') {
-        return 3u;
+        return platform_default;
     }
 
     char *end = NULL;
@@ -202,7 +212,7 @@ uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value) {
         parsed < 1ul ||
         parsed > 3ul
     ) {
-        return 3u;
+        return platform_default;
     }
     return (uint32_t) parsed;
 }
@@ -452,6 +462,37 @@ static BTBHGPUResult btbh_gpu_window_set_minimized(
         );
         return report->result;
     }
+
+#if defined(__APPLE__)
+    /* Cocoa clears its pending-operation marker before the asynchronous
+       deminiaturize notification updates SDL_WINDOW_MINIMIZED. Keep the
+       explicit lifecycle call synchronous at our API boundary without
+       adding any work to the per-frame path. */
+    const Uint64 deadline = SDL_GetTicksNS() + SDL_MS_TO_NS(2500);
+    for (;;) {
+        SDL_PumpEvents();
+        if (!btbh_gpu_refresh_window_sizes(window, report)) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_WINDOW_RESIZE,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        if ((report->minimized != 0) == minimized) {
+            break;
+        }
+        if (SDL_GetTicksNS() >= deadline) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_WINDOW_RESIZE,
+                "Window minimize/restore state did not converge"
+            );
+            return report->result;
+        }
+        SDL_Delay(10);
+    }
+#else
     SDL_PumpEvents();
     if (!btbh_gpu_refresh_window_sizes(window, report) ||
         (report->minimized != 0) != minimized) {
@@ -462,6 +503,7 @@ static BTBHGPUResult btbh_gpu_window_set_minimized(
         );
         return report->result;
     }
+#endif
     report->result = BTBH_GPU_OK;
     report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
     report->message[0] = '\0';
@@ -539,12 +581,23 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         );
         return report->result;
     }
+    SDL_GPUTexture *present_target =
+        btbh_gpu_window_present_target(window);
+    if (present_target == NULL) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        return report->result;
+    }
 
     if (had_scene &&
         !btbh_gpu_window_blit_pending_scene(
             window,
             window->pending_command,
-            window->pending_swapchain,
+            present_target,
             window->pending_drawable_width,
             window->pending_drawable_height
         )) {
@@ -558,7 +611,7 @@ BTBHGPUResult btbh_gpu_window_present_clear(
     }
     if (!had_scene) {
         SDL_GPUColorTargetInfo color_target = {0};
-        color_target.texture = window->pending_swapchain;
+        color_target.texture = present_target;
         color_target.clear_color.r = (float) red / 255.0f;
         color_target.clear_color.g = (float) green / 255.0f;
         color_target.clear_color.b = (float) blue / 255.0f;

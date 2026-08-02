@@ -5,6 +5,29 @@ import BTBHRendererGPUCore
 
 @preconcurrency @MainActor
 final class GPUWindowProbeTests: XCTestCase {
+    private var platformShaderExtension: String {
+        switch GPUBackendRequest.platformDefault {
+        case .vulkan: "spv"
+        case .metal: "metallib"
+        }
+    }
+
+    private var platformShaderFormat: BTBHGPUShaderFormat {
+        switch GPUBackendRequest.platformDefault {
+        case .vulkan: BTBH_GPU_SHADER_FORMAT_SPIRV
+        case .metal: BTBH_GPU_SHADER_FORMAT_METALLIB
+        }
+    }
+
+    private var platformShaderFallbackDirectory: String {
+        switch GPUBackendRequest.platformDefault {
+        case .vulkan:
+            "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
+        case .metal:
+            "out/build/macos-gpu-debug/generated/btbh_gpu/shaders"
+        }
+    }
+
     func testCanvasBatchCoalescingRequiresExactAdjacentPassState() {
         let texture = OpaquePointer(bitPattern: 0x100)!
         let otherTexture = OpaquePointer(bitPattern: 0x200)!
@@ -618,7 +641,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(GPUAntiAliasingProjection.native(.fxaa), 3)
     }
 
-    func testProductionFXAAUsesOneDedicatedFullscreenPass() throws {
+    func testProductionFXAAMatchesLegacyMediumQualityPreset() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -650,11 +673,30 @@ final class GPUWindowProbeTests: XCTestCase {
             "runtime->fxaa_pipeline"
         ))
         XCTAssertTrue(shader.contains(
-            "float3 fxaa(float2 uv)"
+            "float4 fxaa_quality_15(float2 uv)"
         ))
         XCTAssertTrue(shader.contains(
-            "return float4(fxaa(input.texture_coordinate), 1.0f);"
+            "const float luma_center = center.g;"
         ))
+        XCTAssertTrue(shader.contains(
+            "max(1.0f / 16.0f, range_maximum * (1.0f / 8.0f))"
+        ))
+        XCTAssertTrue(shader.contains(
+            "negative_position -= edge_offset * 1.5f;"
+        ))
+        XCTAssertTrue(shader.contains(
+            "negative_position -= edge_offset * 4.0f;"
+        ))
+        XCTAssertTrue(shader.contains(
+            "negative_position -= edge_offset * 12.0f;"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float subpixel_h = subpixel_g * 0.75f;"
+        ))
+        XCTAssertTrue(shader.contains(
+            "return fxaa_quality_15(input.texture_coordinate);"
+        ))
+        XCTAssertFalse(shader.contains("dot(color"))
         XCTAssertTrue(cmake.contains(
             "\"production_fxaa.frag|fragment\""
         ))
@@ -683,29 +725,133 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
-    func testProductionPostDoesNotMultiplyComposedSceneByDepthOnlyAO() throws {
+    func testProductionPostRunsLegacyHDRStagesBeforeOutput() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let lutShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_lut.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let casShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_cas.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let tiltShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let outputShader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_post.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(lutShader.contains("return grade_lut(scene_sample(uv));"))
+        XCTAssertTrue(casShader.contains("const float3 e = scene_sample(uv);"))
+        XCTAssertFalse(casShader.contains("grade_lut("))
+        XCTAssertTrue(tiltShader.contains(
+            "const float3 center = scene_sample(uv);"
+        ))
+        XCTAssertFalse(tiltShader.contains("cas_sample("))
+        XCTAssertTrue(outputShader.contains(
+            "scene_texture.SampleLevel("
+        ))
+        XCTAssertTrue(outputShader.contains(
+            "1.0f / inverse_resolution.y - input.position.y"
+        ))
+        XCTAssertFalse(outputShader.contains("tilt_shift("))
+        XCTAssertFalse(outputShader.contains("grade_lut("))
+        XCTAssertTrue(nativeScene.contains("post_ping_texture"))
+        XCTAssertTrue(nativeScene.contains("post_pong_texture"))
+        XCTAssertTrue(nativeScene.contains("BTBH Post LUT"))
+        XCTAssertTrue(nativeScene.contains("BTBH Post CAS"))
+        XCTAssertTrue(nativeScene.contains("BTBH Post Tilt Shift"))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT"
+        ))
+    }
+
+    func testProductionTiltShiftFusesOutputAtLegacyHalfPrecisionBoundary() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_post.frag.hlsl"
+                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
             ),
             encoding: .utf8
         )
 
-        XCTAssertFalse(shader.contains(
-            "* ambient_occlusion(uv)"
+        XCTAssertTrue(shader.contains("float3 quantize_half3(float3 color)"))
+        XCTAssertTrue(shader.contains(
+            "f16tof32(f32tof16(color.x))"
         ))
         XCTAssertTrue(shader.contains(
-            "const float3 post_color = tilt_shift(uv);"
+            "output_color(\n" +
+            "            quantize_half3(post_tilt_shift(input.texture_coordinate))"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "\"BTBH Post Tilt Shift + Output\""
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "if (fullscreen_ok && !production_output_rendered)"
+        ))
+    }
+
+    func testProductionTiltShiftProjectsLegacyBottomOriginCoordinatesToGPUTextureSpace() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(shader.contains(
+            "float2 legacy_screen_coordinate(float2 gpu_texture_coordinate)"
         ))
         XCTAssertTrue(shader.contains(
-            "const float3 center = cas_sample(uv);"
+            "return float2(gpu_texture_coordinate.x, 1.0f - gpu_texture_coordinate.y);"
         ))
         XCTAssertTrue(shader.contains(
-            "const float3 e = grade_lut(scene_sample(uv));"
+            "float2 gpu_texture_offset(float2 legacy_screen_offset)"
+        ))
+        XCTAssertTrue(shader.contains(
+            "return float2(legacy_screen_offset.x, -legacy_screen_offset.y);"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float2 legacy_uv = legacy_screen_coordinate(uv);"
+        ))
+        XCTAssertTrue(shader.contains(
+            "hash12(legacy_uv / inverse_resolution)"
+        ))
+        XCTAssertTrue(shader.contains(
+            "uv + gpu_texture_offset(rotated) * inverse_resolution * radius"
         ))
     }
 
@@ -783,10 +929,125 @@ final class GPUWindowProbeTests: XCTestCase {
                 "        transparent ? 0u : 0x0fu;"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "SDL_GPUTextureSamplerBinding post_samplers[2];"
+            "post_input = runtime->ssao_resolved_texture;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUTextureSamplerBinding lut_samplers[2];"
         ))
         XCTAssertTrue(nativeScene.contains(
             "depth_target.store_op = SDL_GPU_STOREOP_STORE;"
+        ))
+    }
+
+    func testProductionGeometrySkipsUnusedSSAOTargets() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(nativeScene.contains(
+            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 2u"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "info.target_info.num_color_targets =\n" +
+                "        ssao_enabled ? 4u : 1u;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "const uint32_t color_target_count =\n" +
+                "        post->ssao_enabled != 0u ? 4u : 1u;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "command,\n" +
+                "        color_targets,\n" +
+                "        color_target_count,"
+        ))
+    }
+
+    func testProductionTargetsUseInternalRenderResolutionAndCompositeToDrawable() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(nativeScene.contains(
+            "btbh_gpu_scene_ensure_depth(\n" +
+                "            window,\n" +
+                "            render_width,\n" +
+                "            render_height,"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "post_uniforms.inverse_resolution[0] =\n" +
+                "        1.0f / (float)render_width;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "fxaa_uniforms.metrics[2] = (float)render_width;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "report->drawable_width = drawable_width;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "blit.source.w = window->scene_runtime->composite_width;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "blit.destination.w = destination_width;"
+        ))
+    }
+
+    func testProductionLanczosUpscaleUsesDedicatedDrawableSizedPass() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_upscale_lanczos.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let cmake = try String(
+            contentsOf: packageRoot.appendingPathComponent("CMakeLists.txt"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(cmake.contains(
+            "\"production_upscale_lanczos.frag|fragment\""
+        ))
+        XCTAssertTrue(shader.contains("float4 lanczos(float4 value)"))
+        XCTAssertEqual(
+            shader.components(separatedBy: ".SampleLevel(").count - 1,
+            12
+        )
+        XCTAssertTrue(nativeScene.contains(
+            "post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "\"BTBH Lanczos Upscale\""
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->composite_color_texture =\n" +
+                "            runtime->upscaled_color_texture;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "blit.source.texture =\n" +
+                "        window->scene_runtime->composite_color_texture;"
         ))
     }
 
@@ -1002,7 +1263,6 @@ final class GPUWindowProbeTests: XCTestCase {
             ),
             encoding: .utf8
         )
-
         XCTAssertTrue(fragmentShader.contains(
             "bool is_front_face : SV_IsFrontFace;"
         ))
@@ -1026,6 +1286,44 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertTrue(animatedVertexShader.contains(
             "output.animated_model = 1.0f;"
+        ))
+    }
+
+    func testProductionNeutralNormalFallbackMatchesLegacyBytes() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "const uint8_t normal_pixel[4] = {127u, 127u, 255u, 0u};"
+        ))
+    }
+
+    func testAnimatedModelMatchesLegacyHalfPackedTextureCoordinates() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(shader.contains(
+            "f16tof32(f32tof16(input.texture_coordinate.x))"
+        ))
+        XCTAssertTrue(shader.contains(
+            "1.0f - f16tof32(\n" +
+                "            f32tof16(1.0f - input.texture_coordinate.y)"
         ))
     }
 
@@ -1390,7 +1688,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 emissionColor: .white,
                 emissionEnergy: 0,
                 alphaCutoff: 0.01,
-                blendMode: .mix,
+                blendMode: descriptor.blend,
                 billboardMode: .disabled,
                 depthCompare: descriptor.depthCompare,
                 stencilCompare: .always,
@@ -1417,6 +1715,8 @@ final class GPUWindowProbeTests: XCTestCase {
         textureOneShadow.cullMode = .none
         var textureTwoProjectile = textureOneProjectile
         textureTwoProjectile.albedoTexture = .init(rawValue: 2)
+        var additiveProjectile = opaqueDescriptor
+        additiveProjectile.blend = .additive
 
         XCTAssertEqual(
             GPULegacyMaterialSortKey(descriptor: textureOneProjectile)
@@ -1473,8 +1773,18 @@ final class GPUWindowProbeTests: XCTestCase {
             firstInstance: 4,
             instanceCount: 1
         )
+        let additiveWithTransparencyDisabled = GPUSceneGeometryProbeBatch(
+            geometry: .customMesh(pointer),
+            animation: nil,
+            material: material(descriptor: additiveProjectile),
+            materialSlot: nil,
+            legacyInstanced: false,
+            firstInstance: 5,
+            instanceCount: 1
+        )
         let ordered = GPUSceneBatchOrdering.opaqueThenLegacyMaterialOrder(
             [
+                additiveWithTransparencyDisabled,
                 importedTransparent,
                 textureTwo,
                 textureOneSprite,
@@ -1487,7 +1797,8 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(ordered[1].firstInstance, 3)
         XCTAssertEqual(ordered[2].firstInstance, 2)
         XCTAssertEqual(ordered[3].firstInstance, 1)
-        XCTAssertEqual(ordered[4].firstInstance, 4)
+        XCTAssertEqual(ordered[4].firstInstance, 5)
+        XCTAssertEqual(ordered[5].firstInstance, 4)
     }
 
     func testAdjacentPersistentInstanceRangesConsolidateWithoutCrossingGaps()
@@ -1808,8 +2119,7 @@ final class GPUWindowProbeTests: XCTestCase {
     func testDirectionalLightingProjectionKeepsShadowContractWithSortedSlot()
         throws
     {
-        #if os(Windows)
-        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
         try platform.openWindow(.init(
             title: "BTBH directional shadow projection",
             width: 320,
@@ -1901,16 +2211,12 @@ final class GPUWindowProbeTests: XCTestCase {
             projection.directionalShadow.viewProjection,
             GPUSceneDirectionalShadowProbe.disabled.viewProjection
         )
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testSpotLightingProjectionPreservesLegacyDefaultsAndShadowMatrix()
         throws
     {
-        #if os(Windows)
-        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
         try platform.openWindow(.init(
             title: "BTBH spot shadow projection",
             width: 320,
@@ -1978,14 +2284,10 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(
             projection.spotShadow.viewProjection.allSatisfy(\.isFinite)
         )
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
-        #if os(Windows)
-        let platform = GPUPlatform(request: .vulkan, debugMode: true)
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
         try platform.openWindow(.init(
             title: "BTBH descriptor PBR material channels",
             width: 320,
@@ -2112,15 +2414,11 @@ final class GPUWindowProbeTests: XCTestCase {
         resources.destroyModel(model)
         resources.destroyMaterial(standaloneHandle)
         resources.destroyTexture(texture)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testGLTFImportPreservesPBRMaterialChannels() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH imported PBR material channels",
             width: 320,
             height: 180,
@@ -2185,15 +2483,11 @@ final class GPUWindowProbeTests: XCTestCase {
             1,
             accuracy: 0.0001
         )
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testAssimpOBJImportPreservesLegacyMaterialFactors() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH imported OBJ material factors",
             width: 320,
             height: 180,
@@ -2225,15 +2519,11 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(material.emissionColor.g, 51)
         XCTAssertEqual(material.emissionColor.b, 76)
         XCTAssertEqual(material.emissionEnergy, 1, accuracy: 0.0001)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testAssimpOBJImportExtractsConcaveFloorFootprint() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH imported model footprint",
             width: 320,
             height: 180,
@@ -2259,15 +2549,11 @@ final class GPUWindowProbeTests: XCTestCase {
         let first = try XCTUnwrap(model.metadata.baseFootprint.first)
         XCTAssertEqual(first.x, 0, accuracy: 0.0001)
         XCTAssertEqual(first.y, 0, accuracy: 0.0001)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testFrameTelemetryFinishesPendingFencesAfterMeasuredPath() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH non-blocking frame telemetry",
             width: 320,
             height: 180,
@@ -2296,15 +2582,11 @@ final class GPUWindowProbeTests: XCTestCase {
                 $0.cpuSubmitMilliseconds
         })
         XCTAssertTrue(probe.pollFrameTelemetry().isEmpty)
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testCustomMeshCABIRejectsMismatchedLayoutAndIndices() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH custom mesh ABI validation",
             width: 320,
             height: 180,
@@ -2335,15 +2617,11 @@ final class GPUWindowProbeTests: XCTestCase {
                 )
             }
         })
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
     func testSceneDrawsFromPersistentInstanceBufferWithoutTransientUpload() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH persistent scene instance buffer",
             width: 320,
             height: 180,
@@ -2388,7 +2666,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "BTBH_GPU_TEST_SHADER_DIR"
             ].map { URL(fileURLWithPath: $0) } ??
             packageRoot.appendingPathComponent(
-                "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
+                platformShaderFallbackDirectory
             )
         var testLighting = GPUSceneLightingProbe(
             ambientColor: .white,
@@ -2400,56 +2678,59 @@ final class GPUWindowProbeTests: XCTestCase {
             secondaryDirectionalColor: .white,
             secondaryDirectionalEnergy: 0
         )
+        let shaderExtension = platformShaderExtension
+        let shaderFormat = platformShaderFormat
         let present = { (cameraPosition: RenderVec3) in
             try probe.presentModelInstances(
                 vertexShaderPath: shaderDirectory
-                    .appendingPathComponent("production_model.vert.spv")
+                    .appendingPathComponent("production_model.vert.\(shaderExtension)")
                     .path,
                 animatedVertexShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_animated_model.vert.spv"
+                        "production_animated_model.vert.\(shaderExtension)"
                     )
                     .path,
                 fastShadowVertexShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_shadow_fast.vert.spv"
+                        "production_shadow_fast.vert.\(shaderExtension)"
                     )
                     .path,
                 fastShadowFragmentShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_shadow_fast.frag.spv"
+                        "production_shadow_fast.frag.\(shaderExtension)"
                     )
                     .path,
                 shadowVertexShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_shadow.vert.spv"
+                        "production_shadow.vert.\(shaderExtension)"
                     )
                     .path,
                 animatedShadowVertexShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_animated_shadow.vert.spv"
+                        "production_animated_shadow.vert.\(shaderExtension)"
                     )
                     .path,
                 shadowFragmentShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_shadow.frag.spv"
+                        "production_shadow.frag.\(shaderExtension)"
                     )
                     .path,
                 fragmentShaderPath: shaderDirectory
-                    .appendingPathComponent("production_model.frag.spv")
+                    .appendingPathComponent("production_model.frag.\(shaderExtension)")
                     .path,
                 unshadowedFragmentShaderPath: shaderDirectory
                     .appendingPathComponent(
-                        "production_model_unshadowed.frag.spv"
+                        "production_model_unshadowed.frag.\(shaderExtension)"
                     )
                     .path,
                 postVertexShaderPath: shaderDirectory
-                    .appendingPathComponent("production_post.vert.spv")
+                    .appendingPathComponent("production_post.vert.\(shaderExtension)")
                     .path,
                 postFragmentShaderPath: shaderDirectory
-                    .appendingPathComponent("production_post.frag.spv")
+                    .appendingPathComponent("production_post.frag.\(shaderExtension)")
                     .path,
-                shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+                shaderFormat: shaderFormat,
+                renderSize: .init(width: 320, height: 180),
                 viewProjection: [
                     1, 0, 0, 0,
                     0, 1, 0, 0,
@@ -2602,17 +2883,17 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertThrowsError(try present(validCameraPosition))
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
-                .appendingPathComponent("production_canvas.vert.spv")
+                .appendingPathComponent("production_canvas.vert.\(platformShaderExtension)")
                 .path,
             fragmentShaderPath: shaderDirectory
-                .appendingPathComponent("production_canvas.frag.spv")
+                .appendingPathComponent("production_canvas.frag.\(platformShaderExtension)")
                 .path,
             texturedFragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_canvas_textured.frag.spv"
+                    "production_canvas_textured.frag.\(platformShaderExtension)"
                 )
                 .path,
-            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            shaderFormat: platformShaderFormat,
             vertices: [],
             batches: [],
             passes: [
@@ -2625,22 +2906,21 @@ final class GPUWindowProbeTests: XCTestCase {
                 ),
             ]
         )
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 
-    func testWindowsProbePresentsResizesAndRestoresARealVulkanWindow() throws {
-        #if os(Windows)
+    func testPlatformProbePresentsResizesAndRestoresARealGPUWindow() throws {
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH production GPU package probe",
             width: 640,
             height: 360,
             hidden: false,
             debugMode: true
         )
-        XCTAssertEqual(probe.deviceDiagnostics.actualDriver, "vulkan")
+        XCTAssertEqual(
+            probe.deviceDiagnostics.actualDriver,
+            GPUBackendRequest.platformDefault.driverName
+        )
         XCTAssertTrue(probe.windowDiagnostics.claimed)
         XCTAssertEqual(probe.windowDiagnostics.logicalWidth, 640)
         XCTAssertEqual(probe.windowDiagnostics.logicalHeight, 360)
@@ -2660,15 +2940,11 @@ final class GPUWindowProbeTests: XCTestCase {
         probe.shutdown()
         probe.shutdown()
         XCTAssertTrue(probe.isShutdown)
-        #else
-        throw XCTSkip("The Windows Vulkan window probe runs only on Windows")
-        #endif
     }
 
     func testMaterialSlotBatchesPrepareOnlyDrawnModelPrimitives() throws {
-        #if os(Windows)
         let probe = try GPUWindowProbe(
-            request: .vulkan,
+            request: .platformDefault,
             title: "BTBH material-slot preparation test",
             width: 320,
             height: 180,
@@ -2694,7 +2970,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "BTBH_GPU_TEST_SHADER_DIR"
             ].map { URL(fileURLWithPath: $0) } ??
             packageRoot.appendingPathComponent(
-                "out/build/x64-gpu-debug/generated/btbh_gpu/shaders"
+                platformShaderFallbackDirectory
             )
         let instances = [
             GPUInstanceRecordPacking.record(
@@ -2715,53 +2991,54 @@ final class GPUWindowProbeTests: XCTestCase {
         }
         let report = try probe.presentModelInstances(
             vertexShaderPath: shaderDirectory
-                .appendingPathComponent("production_model.vert.spv")
+                .appendingPathComponent("production_model.vert.\(platformShaderExtension)")
                 .path,
             animatedVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_animated_model.vert.spv"
+                    "production_animated_model.vert.\(platformShaderExtension)"
                 )
                 .path,
             fastShadowVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_shadow_fast.vert.spv"
+                    "production_shadow_fast.vert.\(platformShaderExtension)"
                 )
                 .path,
             fastShadowFragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_shadow_fast.frag.spv"
+                    "production_shadow_fast.frag.\(platformShaderExtension)"
                 )
                 .path,
             shadowVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_shadow.vert.spv"
+                    "production_shadow.vert.\(platformShaderExtension)"
                 )
                 .path,
             animatedShadowVertexShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_animated_shadow.vert.spv"
+                    "production_animated_shadow.vert.\(platformShaderExtension)"
                 )
                 .path,
             shadowFragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_shadow.frag.spv"
+                    "production_shadow.frag.\(platformShaderExtension)"
                 )
                 .path,
             fragmentShaderPath: shaderDirectory
-                .appendingPathComponent("production_model.frag.spv")
+                .appendingPathComponent("production_model.frag.\(platformShaderExtension)")
                 .path,
             unshadowedFragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_model_unshadowed.frag.spv"
+                    "production_model_unshadowed.frag.\(platformShaderExtension)"
                 )
                 .path,
             postVertexShaderPath: shaderDirectory
-                .appendingPathComponent("production_post.vert.spv")
+                .appendingPathComponent("production_post.vert.\(platformShaderExtension)")
                 .path,
             postFragmentShaderPath: shaderDirectory
-                .appendingPathComponent("production_post.frag.spv")
+                .appendingPathComponent("production_post.frag.\(platformShaderExtension)")
                 .path,
-            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            shaderFormat: platformShaderFormat,
+            renderSize: .init(width: 320, height: 180),
             viewProjection: [
                 1, 0, 0, 0,
                 0, 1, 0, 0,
@@ -2807,17 +3084,17 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertGreaterThan(report.geometryPipelineBindSkipCount, 0)
         try probe.presentCanvas(
             vertexShaderPath: shaderDirectory
-                .appendingPathComponent("production_canvas.vert.spv")
+                .appendingPathComponent("production_canvas.vert.\(platformShaderExtension)")
                 .path,
             fragmentShaderPath: shaderDirectory
-                .appendingPathComponent("production_canvas.frag.spv")
+                .appendingPathComponent("production_canvas.frag.\(platformShaderExtension)")
                 .path,
             texturedFragmentShaderPath: shaderDirectory
                 .appendingPathComponent(
-                    "production_canvas_textured.frag.spv"
+                    "production_canvas_textured.frag.\(platformShaderExtension)"
                 )
                 .path,
-            shaderFormat: BTBH_GPU_SHADER_FORMAT_SPIRV,
+            shaderFormat: platformShaderFormat,
             vertices: [],
             batches: [],
             passes: [
@@ -2830,8 +3107,5 @@ final class GPUWindowProbeTests: XCTestCase {
                 ),
             ]
         )
-        #else
-        throw XCTSkip("The Windows Vulkan probe runs only on Windows")
-        #endif
     }
 }

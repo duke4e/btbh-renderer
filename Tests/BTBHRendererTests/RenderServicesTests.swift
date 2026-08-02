@@ -422,7 +422,7 @@ final class RenderServicesTests: XCTestCase {
             position: .zero, target: .up, up: .up,
             verticalFOVDegrees: 45, projection: .perspective
         )
-        XCTAssertEqual(scene.project(.zero, camera: camera), .zero)
+        XCTAssertEqual(scene.projectNormalized(.zero, camera: camera), .zero)
         XCTAssertEqual(scene.unprojectRay(.zero, camera: camera), .init(origin: .zero, direction: .zero))
         XCTAssertFalse(scene.intersectsFrustum(.init(minimum: .zero, maximum: .zero)))
         XCTAssertEqual(recording.events, [])

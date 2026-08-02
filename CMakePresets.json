@@ -99,26 +99,69 @@
       }
     },
     {
-      "name": "macos-debug",
-      "displayName": "macOS Debug",
-      "generator": "Ninja",
+      "name": "macos-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
+        "BUILD_SHARED_LIBS": "OFF",
         "R3D_RAYLIB_VENDORED": "ON",
-        "R3D_ASSIMP_VENDORED": "ON"
+        "R3D_ASSIMP_VENDORED": "ON",
+        "R3D_BUILD_EXAMPLES": "OFF"
       },
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
-      },
-      "vendor": {
-        "microsoft.com/VisualStudioRemoteSettings/CMake/1.0": {
-          "sourceDir": "$env{HOME}/.vs/$ms{projectDirName}"
-        }
       }
+    },
+    {
+      "name": "macos-debug",
+      "displayName": "macOS Debug",
+      "inherits": "macos-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "macOS Release",
+      "inherits": "macos-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "macos-gpu-debug",
+      "displayName": "macOS SDL_GPU Metal Debug",
+      "inherits": "macos-debug",
+      "cacheVariables": {
+        "BTBH_BUILD_GPU_SPIKE": "ON",
+        "BTBH_BUILD_GPU_PACKAGE_RUNTIME": "ON"
+      }
+    },
+    {
+      "name": "macos-gpu-release",
+      "displayName": "macOS SDL_GPU Metal Release",
+      "inherits": "macos-release",
+      "cacheVariables": {
+        "BTBH_BUILD_GPU_SPIKE": "ON",
+        "BTBH_BUILD_GPU_PACKAGE_RUNTIME": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-gpu-debug",
+      "configurePreset": "macos-gpu-debug",
+      "jobs": 10
+    },
+    {
+      "name": "macos-gpu-release",
+      "configurePreset": "macos-gpu-release",
+      "jobs": 10
     }
   ]
 }

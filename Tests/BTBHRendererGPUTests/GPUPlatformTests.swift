@@ -207,10 +207,9 @@ final class GPUPlatformTests: XCTestCase {
         )
     }
 
-    func testWindowsPlatformOwnsWindowTimingAndCleanShutdown() throws {
-        #if os(Windows)
+    func testPlatformOwnsWindowTimingAndCleanShutdown() throws {
         let platform = GPUPlatform(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try platform.openWindow(
@@ -245,13 +244,9 @@ final class GPUPlatformTests: XCTestCase {
 
         platform.closeWindow()
         platform.closeWindow()
-        #else
-        throw XCTSkip("The Windows Vulkan platform test runs only on Windows")
-        #endif
     }
 
     func testProductionFileDialogCancellationSmoke() throws {
-        #if os(Windows)
         guard ProcessInfo.processInfo.environment[
             "BTBH_RUN_GPU_FILE_DIALOG_SMOKE"
         ] == "1" else {
@@ -260,7 +255,7 @@ final class GPUPlatformTests: XCTestCase {
             )
         }
         let platform = GPUPlatform(
-            request: .vulkan,
+            request: .platformDefault,
             debugMode: true
         )
         try platform.openWindow(
@@ -291,11 +286,6 @@ final class GPUPlatformTests: XCTestCase {
 
         wait(for: [completed], timeout: 120)
         XCTAssertEqual(results.values, [.success([])])
-        #else
-        throw XCTSkip(
-            "The production file-dialog smoke runs only on Windows"
-        )
-        #endif
     }
 
     func testCursorVisibilityMutationPreservesTransientFrameState() {

@@ -76,6 +76,8 @@ StyleCopReport.xml
 *.ilk
 *.meta
 *.obj
+!Tests/Fixtures/concave-floor-footprint.obj
+!Tests/Fixtures/upward-lit-slab.obj
 *.iobj
 *.pch
 *.pdb

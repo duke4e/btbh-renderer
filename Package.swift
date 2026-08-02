@@ -24,11 +24,22 @@ var rendererTargets: [Target] = [
             .headerSearchPath("../../external/raylib/src/external"),
             .headerSearchPath("assimp-config"),
             .headerSearchPath("../../external/assimp/include"),
-            .define("ASSIMP_DLL", .when(platforms: [.windows]))
+            .define("ASSIMP_DLL", .when(platforms: [.windows])),
+            .define(
+                "BTBH_GPU_HAS_ASSIMP",
+                .when(platforms: [.macOS, .windows])
+            ),
+            .unsafeFlags(
+                ["-fno-implicit-module-maps"],
+                .when(platforms: [.macOS])
+            )
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),
             .linkedLibrary("SDL3", .when(platforms: [.macOS])),
+            .linkedLibrary("assimp", .when(platforms: [.macOS])),
+            .linkedLibrary("c++", .when(platforms: [.macOS])),
+            .linkedLibrary("z", .when(platforms: [.macOS])),
             .linkedLibrary(
                 "assimp-vc143-mt",
                 .when(platforms: [.windows])
@@ -43,7 +54,26 @@ var rendererTargets: [Target] = [
             .linkedLibrary("imm32", .when(platforms: [.windows])),
             .linkedLibrary("version", .when(platforms: [.windows])),
             .linkedLibrary("setupapi", .when(platforms: [.windows])),
-            .linkedLibrary("uuid", .when(platforms: [.windows]))
+            .linkedLibrary("uuid", .when(platforms: [.windows])),
+            .linkedLibrary("iconv", .when(platforms: [.macOS])),
+            .linkedFramework("Foundation", .when(platforms: [.macOS])),
+            .linkedFramework("Cocoa", .when(platforms: [.macOS])),
+            .linkedFramework("CoreVideo", .when(platforms: [.macOS])),
+            .linkedFramework("CoreMedia", .when(platforms: [.macOS])),
+            .linkedFramework("IOKit", .when(platforms: [.macOS])),
+            .linkedFramework("ForceFeedback", .when(platforms: [.macOS])),
+            .linkedFramework("Carbon", .when(platforms: [.macOS])),
+            .linkedFramework("CoreAudio", .when(platforms: [.macOS])),
+            .linkedFramework("AudioToolbox", .when(platforms: [.macOS])),
+            .linkedFramework("AVFoundation", .when(platforms: [.macOS])),
+            .linkedFramework("GameController", .when(platforms: [.macOS])),
+            .linkedFramework("CoreHaptics", .when(platforms: [.macOS])),
+            .linkedFramework(
+                "UniformTypeIdentifiers",
+                .when(platforms: [.macOS])
+            ),
+            .linkedFramework("Metal", .when(platforms: [.macOS])),
+            .linkedFramework("QuartzCore", .when(platforms: [.macOS]))
         ]
     ),
     .target(
@@ -73,7 +103,7 @@ if ProcessInfo.processInfo.environment["BTBH_ENABLE_GPU_TESTS"] == "1" {
 
 let package = Package(
     name: "BTBHRenderer",
-    platforms: [.macOS(.v11)],
+    platforms: [.macOS(.v12)],
     products: [
         .library(name: "BTBHRenderer", targets: ["BTBHRenderer"]),
         .library(name: "BTBHRendererGPU", targets: ["BTBHRendererGPU"])

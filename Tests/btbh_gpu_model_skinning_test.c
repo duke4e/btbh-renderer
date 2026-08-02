@@ -53,5 +53,20 @@ int main(void) {
     assert_near(fallback_weights[2], 0.0f);
     assert_near(fallback_weights[3], 0.0f);
 
+    float gltf_joints[4] = {11.0f, 4.0f, 9.0f, 7.0f};
+    float gltf_weights[4] = {0.30f, 0.10f, 0.20f, 0.40f};
+    btbh_gpu_model_pack_gltf_bone_weights(
+        gltf_joints,
+        gltf_weights
+    );
+    assert_near(gltf_joints[0], 11.0f);
+    assert_near(gltf_joints[1], 4.0f);
+    assert_near(gltf_joints[2], 7.0f);
+    assert_near(gltf_joints[3], 9.0f);
+    assert_near(gltf_weights[0], 77.0f / 255.0f);
+    assert_near(gltf_weights[1], 26.0f / 255.0f);
+    assert_near(gltf_weights[2], 102.0f / 255.0f);
+    assert_near(gltf_weights[3], 51.0f / 255.0f);
+
     return 0;
 }

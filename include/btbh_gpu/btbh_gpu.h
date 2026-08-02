@@ -420,6 +420,11 @@ typedef enum BTBHGPUSceneStencilOperation {
     BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT = 5
 } BTBHGPUSceneStencilOperation;
 
+typedef enum BTBHGPUSceneUpscaleMode {
+    BTBH_GPU_SCENE_UPSCALE_LINEAR = 0,
+    BTBH_GPU_SCENE_UPSCALE_LANCZOS = 1
+} BTBHGPUSceneUpscaleMode;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -563,6 +568,7 @@ typedef struct BTBHGPUScenePost {
     uint8_t tilt_shift_enabled;
     uint8_t ssao_enabled;
     uint8_t anti_aliasing;
+    uint8_t upscale_mode;
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {
@@ -857,6 +863,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
     const float view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
