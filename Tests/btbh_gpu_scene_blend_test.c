@@ -1,6 +1,7 @@
 #include "btbh_gpu_internal.h"
 
 #include <assert.h>
+#include <math.h>
 
 static void assert_factors(
     BTBHGPUSceneBlendMode mode,
@@ -23,7 +24,37 @@ static void assert_factors(
     assert(state.dst_alpha_blendfactor == destination);
 }
 
+static BTBHGPUSceneLighting valid_lighting(void) {
+    BTBHGPUSceneLighting lighting = {0};
+    lighting.spot_range = 8.0f;
+    lighting.spot_falloff = 1.0f;
+    lighting.spot_inner_cutoff = 1.0f;
+    lighting.spot_outer_cutoff = 0.0f;
+    return lighting;
+}
+
+static void test_omni_shadow_validation(void) {
+    BTBHGPUSceneLighting lighting = valid_lighting();
+    assert(btbh_gpu_scene_lighting_valid(&lighting));
+
+    lighting.spot_shadow_is_omni = 2u;
+    assert(!btbh_gpu_scene_lighting_valid(&lighting));
+
+    lighting.spot_shadow_is_omni = 1u;
+    lighting.spot_shadow_near = 0.05f;
+    assert(btbh_gpu_scene_lighting_valid(&lighting));
+    lighting.spot_shadow_near = 0.0f;
+    assert(!btbh_gpu_scene_lighting_valid(&lighting));
+    lighting.spot_shadow_near = lighting.spot_range;
+    assert(!btbh_gpu_scene_lighting_valid(&lighting));
+
+    lighting = valid_lighting();
+    lighting.omni_shadow_view_projection[5][15] = NAN;
+    assert(!btbh_gpu_scene_lighting_valid(&lighting));
+}
+
 int main(void) {
+    test_omni_shadow_validation();
     BTBHGPUSceneGeometryBatch batch = {0};
     batch.unlit_enabled = 1u;
     batch.transparency_enabled = 1u;

@@ -19,7 +19,16 @@ struct FragmentInput
     float2 texture_coordinate : TEXCOORD1;
 };
 
-float4 main(FragmentInput input) : SV_Target0
+struct FragmentOutput
+{
+    float4 color : SV_Target0;
+    float4 ambient : SV_Target1;
+    float4 normal : SV_Target2;
+    float4 ambient_specular : SV_Target3;
+    float4 emission : SV_Target4;
+};
+
+FragmentOutput main(FragmentInput input)
 {
     const float4 raw_albedo = albedo_texture.Sample(
         albedo_sampler,
@@ -37,5 +46,11 @@ float4 main(FragmentInput input) : SV_Target0
         emission_sampler,
         input.texture_coordinate
     ).rgb * emission_color_energy.rgb * emission_color_energy.w;
-    return float4(albedo.rgb + emission, albedo.a);
+    FragmentOutput output;
+    output.color = float4(albedo.rgb + emission, albedo.a);
+    output.ambient = 0.0f;
+    output.normal = 0.0f;
+    output.ambient_specular = 0.0f;
+    output.emission = float4(emission, 1.0f);
+    return output;
 }

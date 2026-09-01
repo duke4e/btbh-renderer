@@ -3198,6 +3198,451 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(readback.rgba8[center + 2], 180)
     }
 
+    func testRadianceCascadesReuseRegisteredLightForIndirectColor() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU dedicated RC source test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/upward-lit-slab.obj"
+                )
+                .path,
+            flags: [.meshData, .highQuality]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        let material = try RenderServices.resources.createMaterial(.default)
+        let light = try RenderServices.resources.createLight(.init(
+            kind: .omni,
+            active: true,
+            position: .init(x: 2, y: 2, z: 0),
+            direction: .down,
+            color: .init(r: 255, g: 0, b: 0, a: 255),
+            energy: 0.001,
+            range: 6,
+            castsShadow: true,
+            shadowSoftness: 1,
+            indirectEnergy: 20
+        ))
+        let casterVertices = [
+            RenderVec3(x: 1, y: 0.2, z: -1),
+            RenderVec3(x: 1, y: 1.8, z: -1),
+            RenderVec3(x: 1, y: 1.8, z: 1),
+            RenderVec3(x: 1, y: 0.2, z: -1),
+            RenderVec3(x: 1, y: 1.8, z: 1),
+            RenderVec3(x: 1, y: 0.2, z: 1),
+        ].map {
+            RenderVertex(
+                position: $0,
+                textureCoordinate: .zero,
+                normal: .init(x: -1, y: 0, z: 0),
+                tangent: .init(x: 0, y: 0, z: 1, w: 1),
+                color: .white
+            )
+        }
+        let caster = try casterVertices.withUnsafeBytes {
+            try RenderServices.resources.createMesh(
+                .init(
+                    topology: .triangles,
+                    storage: .immutable,
+                    vertexCount: casterVertices.count,
+                    indexCount: 0,
+                    bounds: .init(
+                        minimum: .init(x: 1, y: 0.2, z: -1),
+                        maximum: .init(x: 1, y: 1.8, z: 1)
+                    )
+                ),
+                vertices: $0,
+                indices: nil
+            )
+        }
+        var casterMaterialDescriptor = MaterialDescriptor.default
+        casterMaterialDescriptor.cullMode = .none
+        let casterMaterial = try RenderServices.resources.createMaterial(
+            casterMaterialDescriptor
+        )
+        let overrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: material)
+        }
+        defer {
+            RenderServices.resources.destroyLight(light)
+            RenderServices.resources.destroyMaterial(casterMaterial)
+            RenderServices.resources.destroyMesh(caster)
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 3, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1,
+                radianceCascades: .init(
+                    tier: .high,
+                    debugView: .finalIndirect,
+                    indirectIntensity: 1,
+                    invalidate: true
+                )
+            )
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        let center = ((readback.size.height / 2) * readback.size.width
+            + readback.size.width / 2) * 4
+        let red = Int(readback.rgba8[center])
+        let green = Int(readback.rgba8[center + 1])
+        let blue = Int(readback.rgba8[center + 2])
+        XCTAssertGreaterThan(red, 20)
+        XCTAssertGreaterThan(red, green * 2)
+        XCTAssertGreaterThan(red, blue * 2)
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 3, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1,
+                radianceCascades: .init(
+                    tier: .high,
+                    debugView: .finalIndirect,
+                    indirectIntensity: 1,
+                    invalidate: true
+                )
+            )
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        RenderServices.scene.submit(.mesh(.init(
+            mesh: caster,
+            material: casterMaterial,
+            transform: .identity
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+        let cubeBlockedReadback = try RenderServices.canvas
+            .readbackPresentedFrame()
+        let cubeBlockedCenter =
+            ((cubeBlockedReadback.size.height / 2) *
+                cubeBlockedReadback.size.width +
+                cubeBlockedReadback.size.width / 2) * 4
+        let cubeBlockedRed = Int(
+            cubeBlockedReadback.rgba8[cubeBlockedCenter]
+        )
+        XCTAssertLessThan(cubeBlockedRed, red - 12)
+
+        var barrierSamples: [Float] = []
+        barrierSamples.reserveCapacity(8 * 8 * 2)
+        for _ in 0..<8 {
+            for x in 0..<8 {
+                barrierSamples.append(
+                    x == 5 ? -0.5 : Float(abs(x - 5))
+                )
+                barrierSamples.append(10)
+            }
+        }
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.scene.beginFrame(.init(
+            camera: .init(
+                position: .init(x: 0, y: 3, z: -3),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1,
+                radianceCascades: .init(
+                    tier: .high,
+                    debugView: .finalIndirect,
+                    indirectIntensity: 1,
+                    occlusionCascades: [.init(
+                        originWorldXZ: .init(x: -4, y: -4),
+                        cellSize: 1,
+                        width: 8,
+                        height: 8,
+                        revision: 1,
+                        samples: barrierSamples
+                    )],
+                    invalidate: true
+                )
+            )
+        ))
+        RenderServices.scene.submit(.modelInstances(.init(
+            model: model,
+            instances: [.init(
+                transform: .identity,
+                color: .white,
+                custom: .init(x: 0, y: 0, z: 0, w: 0)
+            )],
+            overrides: overrides,
+            persistentBuffer: nil
+        )))
+        try RenderServices.scene.endFrame()
+        RenderServices.canvas.endFrame()
+
+        let blockedReadback = try RenderServices.canvas
+            .readbackPresentedFrame()
+        let blockedCenter =
+            ((blockedReadback.size.height / 2) *
+                blockedReadback.size.width +
+                blockedReadback.size.width / 2) * 4
+        let blockedRed = Int(blockedReadback.rgba8[blockedCenter])
+        XCTAssertLessThan(blockedRed, red / 2)
+    }
+
+    func testHolographicRadianceMaterialResponseAndUnlitIsolation() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH HRC material response test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot.appendingPathComponent(
+                "Tests/Fixtures/upward-lit-slab.obj"
+            ).path,
+            flags: [.meshData, .highQuality]
+        )
+        let metadata = try RenderServices.resources.modelMetadata(model)
+        var materialDescriptor = MaterialDescriptor.default
+        let material = try RenderServices.resources.createMaterial(
+            materialDescriptor
+        )
+        let overrides = (0..<metadata.materialCount).map {
+            MaterialOverride(slot: $0, material: material)
+        }
+        defer {
+            RenderServices.resources.destroyMaterial(material)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        let source = RadianceEmitter(
+            stableID: 0x574f_524c_4400_0001,
+            position: .init(x: 2, y: 1, z: 0),
+            color: .white,
+            energy: 30,
+            radius: 0.75,
+            lightClass: .world
+        )
+        let openOcclusion = RadianceCascadesOcclusionCascade(
+            originWorldXZ: .init(x: -16, y: -16),
+            cellSize: 0.5,
+            width: 64,
+            height: 64,
+            revision: 1,
+            samples: Array(repeating: [Float(4), Float(0)], count: 64 * 64)
+                .flatMap { $0 }
+        )
+        func centerRGB(
+            descriptor: MaterialDescriptor,
+            sourceEnabled: Bool
+        ) throws -> [UInt8] {
+            try RenderServices.resources.updateMaterial(
+                material,
+                descriptor: descriptor
+            )
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(.init(
+                camera: .init(
+                    position: .init(x: 0, y: 3, z: -3),
+                    target: .zero,
+                    up: .up,
+                    verticalFOVDegrees: 60,
+                    projection: .perspective
+                ),
+                environment: .init(
+                    backgroundColor: .black,
+                    backgroundEnergy: 0,
+                    ambientColor: .black,
+                    ambientEnergy: 0,
+                    ambientMap: .invalid,
+                    skyCubemap: .invalid,
+                    ssaoEnabled: true,
+                    tonemap: .reinhard,
+                    tonemapWhite: 1,
+                    radianceCascades: .init(
+                        tier: .high,
+                        backend: .holographic,
+                        debugView: .finalIndirect,
+                        indirectIntensity: 1,
+                        emitters: sourceEnabled ? [source] : [],
+                        occlusionCascades: [openOcclusion],
+                        invalidate: true
+                    )
+                )
+            ))
+            RenderServices.scene.submit(.modelInstances(.init(
+                model: model,
+                instances: [.init(
+                    transform: .identity,
+                    color: .white,
+                    custom: .init(x: 0, y: 0, z: 0, w: 0)
+                )],
+                overrides: overrides,
+                persistentBuffer: nil
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.endFrame()
+            let readback = try RenderServices.canvas.readbackPresentedFrame()
+            let center = ((readback.size.height / 2) * readback.size.width
+                + readback.size.width / 2) * 4
+            return Array(readback.rgba8[center..<(center + 3)])
+        }
+
+        let neutral = try centerRGB(
+            descriptor: materialDescriptor,
+            sourceEnabled: true
+        )
+        materialDescriptor.albedoColor = .init(
+            r: 255,
+            g: 24,
+            b: 24,
+            a: 255
+        )
+        let red = try centerRGB(
+            descriptor: materialDescriptor,
+            sourceEnabled: true
+        )
+        materialDescriptor.occlusion = 0
+        let occluded = try centerRGB(
+            descriptor: materialDescriptor,
+            sourceEnabled: true
+        )
+
+        XCTAssertGreaterThan(Int(neutral[0]) + Int(neutral[1]) + Int(neutral[2]), 20)
+        XCTAssertGreaterThan(red[0], red[1] + 8)
+        XCTAssertLessThan(
+            Int(occluded[0]) + Int(occluded[1]) + Int(occluded[2]),
+            Int(red[0]) + Int(red[1]) + Int(red[2]),
+            "material AO must attenuate HRC: open=\(red) occluded=\(occluded)"
+        )
+
+        materialDescriptor = .default
+        materialDescriptor.albedoColor = .init(
+            r: 24,
+            g: 64,
+            b: 255,
+            a: 255
+        )
+        materialDescriptor.unlit = true
+        let unlitWithSource = try centerRGB(
+            descriptor: materialDescriptor,
+            sourceEnabled: true
+        )
+        let unlitWithoutSource = try centerRGB(
+            descriptor: materialDescriptor,
+            sourceEnabled: false
+        )
+        for channel in 0..<3 {
+            XCTAssertEqual(
+                unlitWithSource[channel],
+                unlitWithoutSource[channel],
+                accuracy: 2
+            )
+        }
+        XCTAssertGreaterThan(unlitWithSource[2], unlitWithSource[0] + 40)
+    }
+
     func testTransparentMeshDoesNotWriteDepthBeforeOpaqueGeometry() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
@@ -3610,7 +4055,9 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(zeroNormalReadback.rgba8[center + 2], 30)
     }
 
-    func testDirectionalShadowDarkensReceiverBehindOpaqueCaster() throws {
+    func testDirectionalAndOmniShadowsDarkenReceiverBehindOpaqueCaster()
+        throws
+    {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }
         let bundle = GPURenderServices.make(
@@ -3810,6 +4257,81 @@ final class GPURenderServicesTests: XCTestCase {
         }
         XCTAssertGreaterThan(materiallyDarkerPixels, 100)
         XCTAssertGreaterThan(litPixels, 1_000)
+
+        try RenderServices.resources.updateLight(
+            light,
+            descriptor: .init(
+                kind: .directional,
+                active: false,
+                position: .zero,
+                direction: .down,
+                color: .white,
+                energy: 0,
+                range: 10,
+                castsShadow: false,
+                shadowSoftness: 0
+            )
+        )
+        let unshadowedOmniDescriptor = LightDescriptor(
+            kind: .omni,
+            active: true,
+            position: .init(x: -1.2, y: 0, z: -2),
+            direction: .down,
+            color: .white,
+            energy: 8,
+            range: 6,
+            castsShadow: false,
+            shadowSoftness: 1
+        )
+        let omni = try RenderServices.resources.createLight(
+            unshadowedOmniDescriptor
+        )
+        defer { RenderServices.resources.destroyLight(omni) }
+        try renderFrame()
+        let unshadowedOmni = try RenderServices.canvas
+            .readbackPresentedFrame()
+        let shadowedOmniDescriptor = LightDescriptor(
+            kind: unshadowedOmniDescriptor.kind,
+            active: unshadowedOmniDescriptor.active,
+            position: unshadowedOmniDescriptor.position,
+            direction: unshadowedOmniDescriptor.direction,
+            color: unshadowedOmniDescriptor.color,
+            energy: unshadowedOmniDescriptor.energy,
+            range: unshadowedOmniDescriptor.range,
+            castsShadow: true,
+            shadowSoftness: unshadowedOmniDescriptor.shadowSoftness
+        )
+        try RenderServices.resources.updateLight(
+            omni,
+            descriptor: shadowedOmniDescriptor
+        )
+        try renderFrame()
+        let shadowedOmni = try RenderServices.canvas
+            .readbackPresentedFrame()
+        var omniDarkerPixels = 0
+        var omniLitPixels = 0
+        for offset in stride(
+            from: 0,
+            to: shadowedOmni.rgba8.count,
+            by: 4
+        ) {
+            let before =
+                Int(unshadowedOmni.rgba8[offset]) +
+                Int(unshadowedOmni.rgba8[offset + 1]) +
+                Int(unshadowedOmni.rgba8[offset + 2])
+            let after =
+                Int(shadowedOmni.rgba8[offset]) +
+                Int(shadowedOmni.rgba8[offset + 1]) +
+                Int(shadowedOmni.rgba8[offset + 2])
+            if before - after >= 24 {
+                omniDarkerPixels += 1
+            }
+            if after >= 96 {
+                omniLitPixels += 1
+            }
+        }
+        XCTAssertGreaterThan(omniDarkerPixels, 100)
+        XCTAssertGreaterThan(omniLitPixels, 1_000)
     }
 
     func testDirectPBRUsesNormalRoughnessAndMetalnessMaps() throws {
@@ -4549,9 +5071,10 @@ final class GPURenderServicesTests: XCTestCase {
 
         let unlitReadback = try RenderServices.canvas
             .readbackPresentedFrame()
-        XCTAssertLessThan(unlitReadback.rgba8[center], 10)
-        XCTAssertLessThan(unlitReadback.rgba8[center + 1], 10)
-        XCTAssertLessThan(unlitReadback.rgba8[center + 2], 10)
+        XCTAssertGreaterThan(unlitReadback.rgba8[center], 220)
+        XCTAssertGreaterThan(unlitReadback.rgba8[center + 1], 15)
+        XCTAssertLessThan(unlitReadback.rgba8[center + 1], 80)
+        XCTAssertLessThan(unlitReadback.rgba8[center + 2], 50)
     }
 
     func testModelMaterialPatchPreservesImportedBaseColor() throws {

@@ -483,7 +483,7 @@ public struct AnimationTreeDescriptor: Sendable {
 }
 
 public enum LightKind: UInt8, Sendable {
-    case directional, spot
+    case directional, spot, omni
 }
 
 public struct LightDescriptor: Sendable {
@@ -493,6 +493,9 @@ public struct LightDescriptor: Sendable {
     public let direction: RenderVec3
     public let color: RenderColor
     public let energy: Float
+    /// Energy contributed to Radiance Cascades indirect lighting.
+    /// This is independent from direct-light `energy`.
+    public let indirectEnergy: Float
     public let range: Float
     public let castsShadow: Bool
     public let shadowSoftness: Float
@@ -512,7 +515,8 @@ public struct LightDescriptor: Sendable {
         range: Float,
         castsShadow: Bool,
         shadowSoftness: Float,
-        shadowUpdatePeriodFrames: UInt32 = 1
+        shadowUpdatePeriodFrames: UInt32 = 1,
+        indirectEnergy: Float = 0
     ) {
         self.kind = kind
         self.active = active
@@ -520,6 +524,7 @@ public struct LightDescriptor: Sendable {
         self.direction = direction
         self.color = color
         self.energy = energy
+        self.indirectEnergy = indirectEnergy
         self.range = range
         self.castsShadow = castsShadow
         self.shadowSoftness = shadowSoftness
@@ -527,8 +532,358 @@ public struct LightDescriptor: Sendable {
     }
 }
 
-public enum TonemapMode: UInt8, Sendable {
+public enum TonemapMode: UInt8, Sendable, Equatable {
     case reinhard
+    case pbrNeutral
+}
+
+public enum RadianceCascadesTier: UInt8, Sendable, Equatable {
+    case off
+    case low
+    case high
+    case auto
+}
+
+public enum RadianceCascadesBackend: UInt8, Sendable, Equatable {
+    case classic
+    case holographic
+}
+
+public enum RadianceCascadesDebugView: UInt8, Sendable, Equatable {
+    case none
+    case cascade0
+    case cascade1
+    case cascade2
+    case cascade3
+    case hitDistance
+    case confidence
+    case finalIndirect
+    case fallbackReason
+    case directionalSource
+    case directLight
+}
+
+public enum RadianceCascadesFallbackReason: UInt8, Sendable, Equatable {
+    case none
+    case disabled
+    case capabilityUnavailable
+    case shaderUnavailable
+    case pipelineCreationFailed
+    case resourceAllocationFailed
+    case dispatchFailed
+    case invalidConfiguration
+}
+
+public struct RadianceCascadesPassTelemetry: Sendable, Equatable {
+    public let cpuPrepareMilliseconds: Double
+    public let cpuPipelinePrepareMilliseconds: Double
+    public let cpuResourcePrepareMilliseconds: Double
+    public let cpuTraceEncodeMilliseconds: Double
+    public let cpuMergeUpEncodeMilliseconds: Double
+    public let cpuMergeDownEncodeMilliseconds: Double
+    public let cpuReprojectEncodeMilliseconds: Double
+    public let cpuFinishEncodeMilliseconds: Double
+    public let cpuBlurEncodeMilliseconds: Double
+    public let cpuResolveEncodeMilliseconds: Double
+    public let cpuReconstructEncodeMilliseconds: Double
+    public let cpuComposeEncodeMilliseconds: Double
+    public let traceDispatchCount: Int
+    public let mergeUpDispatchCount: Int
+    public let mergeDownDispatchCount: Int
+    public let reprojectDispatchCount: Int
+    public let finishDispatchCount: Int
+    public let blurDispatchCount: Int
+    public let resolveDispatchCount: Int
+    public let reconstructDispatchCount: Int
+    public let composeDrawCount: Int
+    public let temporalHistoryValid: Bool
+    public let temporalPhase: Int
+    public let freshQuadrantCount: Int
+
+    public init(
+        cpuPrepareMilliseconds: Double = 0,
+        cpuPipelinePrepareMilliseconds: Double = 0,
+        cpuResourcePrepareMilliseconds: Double = 0,
+        cpuTraceEncodeMilliseconds: Double = 0,
+        cpuMergeUpEncodeMilliseconds: Double = 0,
+        cpuMergeDownEncodeMilliseconds: Double = 0,
+        cpuReprojectEncodeMilliseconds: Double = 0,
+        cpuFinishEncodeMilliseconds: Double = 0,
+        cpuBlurEncodeMilliseconds: Double = 0,
+        cpuResolveEncodeMilliseconds: Double = 0,
+        cpuReconstructEncodeMilliseconds: Double = 0,
+        cpuComposeEncodeMilliseconds: Double = 0,
+        traceDispatchCount: Int = 0,
+        mergeUpDispatchCount: Int = 0,
+        mergeDownDispatchCount: Int = 0,
+        reprojectDispatchCount: Int = 0,
+        finishDispatchCount: Int = 0,
+        blurDispatchCount: Int = 0,
+        resolveDispatchCount: Int = 0,
+        reconstructDispatchCount: Int = 0,
+        composeDrawCount: Int = 0,
+        temporalHistoryValid: Bool = false,
+        temporalPhase: Int = 0,
+        freshQuadrantCount: Int = 0
+    ) {
+        self.cpuPrepareMilliseconds = cpuPrepareMilliseconds
+        self.cpuPipelinePrepareMilliseconds =
+            cpuPipelinePrepareMilliseconds
+        self.cpuResourcePrepareMilliseconds =
+            cpuResourcePrepareMilliseconds
+        self.cpuTraceEncodeMilliseconds = cpuTraceEncodeMilliseconds
+        self.cpuMergeUpEncodeMilliseconds = cpuMergeUpEncodeMilliseconds
+        self.cpuMergeDownEncodeMilliseconds = cpuMergeDownEncodeMilliseconds
+        self.cpuReprojectEncodeMilliseconds =
+            cpuReprojectEncodeMilliseconds
+        self.cpuFinishEncodeMilliseconds = cpuFinishEncodeMilliseconds
+        self.cpuBlurEncodeMilliseconds = cpuBlurEncodeMilliseconds
+        self.cpuResolveEncodeMilliseconds = cpuResolveEncodeMilliseconds
+        self.cpuReconstructEncodeMilliseconds =
+            cpuReconstructEncodeMilliseconds
+        self.cpuComposeEncodeMilliseconds = cpuComposeEncodeMilliseconds
+        self.traceDispatchCount = traceDispatchCount
+        self.mergeUpDispatchCount = mergeUpDispatchCount
+        self.mergeDownDispatchCount = mergeDownDispatchCount
+        self.reprojectDispatchCount = reprojectDispatchCount
+        self.finishDispatchCount = finishDispatchCount
+        self.blurDispatchCount = blurDispatchCount
+        self.resolveDispatchCount = resolveDispatchCount
+        self.reconstructDispatchCount = reconstructDispatchCount
+        self.composeDrawCount = composeDrawCount
+        self.temporalHistoryValid = temporalHistoryValid
+        self.temporalPhase = temporalPhase
+        self.freshQuadrantCount = freshQuadrantCount
+    }
+
+    public static let zero = Self()
+}
+
+public struct RadianceCascadesStatus: Sendable, Equatable {
+    public let requestedTier: RadianceCascadesTier
+    public let activeTier: RadianceCascadesTier
+    public let pendingTier: RadianceCascadesTier
+    public let requestedBackend: RadianceCascadesBackend
+    public let activeBackend: RadianceCascadesBackend
+    public let fallbackReason: RadianceCascadesFallbackReason
+    public let internalSize: PixelSize2D
+    public let generation: UInt32
+    public let sampleCount: Int
+    public let cpuEncodeMilliseconds: Double
+    public let passTelemetry: RadianceCascadesPassTelemetry
+
+    public init(
+        requestedTier: RadianceCascadesTier,
+        activeTier: RadianceCascadesTier,
+        pendingTier: RadianceCascadesTier,
+        requestedBackend: RadianceCascadesBackend = .classic,
+        activeBackend: RadianceCascadesBackend = .classic,
+        fallbackReason: RadianceCascadesFallbackReason,
+        internalSize: PixelSize2D,
+        generation: UInt32,
+        sampleCount: Int,
+        cpuEncodeMilliseconds: Double,
+        passTelemetry: RadianceCascadesPassTelemetry = .zero
+    ) {
+        self.requestedTier = requestedTier
+        self.activeTier = activeTier
+        self.pendingTier = pendingTier
+        self.requestedBackend = requestedBackend
+        self.activeBackend = activeBackend
+        self.fallbackReason = fallbackReason
+        self.internalSize = internalSize
+        self.generation = generation
+        self.sampleCount = sampleCount
+        self.cpuEncodeMilliseconds = cpuEncodeMilliseconds
+        self.passTelemetry = passTelemetry
+    }
+}
+
+public enum RadianceEmitterShape: Int, Sendable, Equatable {
+    case disk
+    case rectangle
+    case segment
+}
+
+/// Semantic ownership used by renderer-level energy-density policies.
+public enum RadianceEmitterClass: Int, Sendable, Equatable, CaseIterable {
+    case hero
+    case world
+    case pickup
+    case transient
+}
+
+public struct RadianceEmitter: Sendable, Equatable {
+    public let stableID: UInt64
+    public let position: RenderVec3
+    public let color: RenderColor
+    public let energy: Float
+    /// Analytic energy used by the RC-native occluded direct-light field.
+    /// Zero keeps a source indirect-only.
+    public let directEnergy: Float
+    /// Physical source radius. Illumination range is derived by RC transport.
+    public let radius: Float
+    /// Vertical source extent in the 2.5D world field. For a directional
+    /// emitter with spot cutoffs, this is the cone length.
+    public let height: Float
+    public let shape: RadianceEmitterShape
+    public let lightClass: RadianceEmitterClass
+    /// Direction in which the source emits. The default cutoffs below make
+    /// this direction irrelevant and preserve the original omni behavior.
+    public let direction: RenderVec3
+    public let innerCutoff: Float
+    public let outerCutoff: Float
+
+    public init(
+        stableID: UInt64 = 0,
+        position: RenderVec3,
+        color: RenderColor,
+        energy: Float,
+        directEnergy: Float = 0,
+        radius: Float,
+        height: Float = 0,
+        shape: RadianceEmitterShape = .disk,
+        lightClass: RadianceEmitterClass = .world,
+        direction: RenderVec3 = .forward,
+        innerCutoff: Float = -1,
+        outerCutoff: Float = -2
+    ) {
+        self.stableID = stableID
+        self.position = position
+        self.color = color
+        self.energy = energy
+        self.directEnergy = directEnergy
+        self.radius = radius
+        self.height = height
+        self.shape = shape
+        self.lightClass = lightClass
+        self.direction = direction
+        self.innerCutoff = innerCutoff
+        self.outerCutoff = outerCutoff
+    }
+
+    @available(*, deprecated, message: "Use radius; RC transport has no analytic light range")
+    public init(
+        position: RenderVec3,
+        color: RenderColor,
+        energy: Float,
+        range: Float,
+        direction: RenderVec3 = .forward,
+        innerCutoff: Float = -1,
+        outerCutoff: Float = -2
+    ) {
+        self.init(
+            position: position,
+            color: color,
+            energy: energy,
+            directEnergy: 0,
+            radius: range,
+            lightClass: .world,
+            direction: direction,
+            innerCutoff: innerCutoff,
+            outerCutoff: outerCutoff
+        )
+    }
+
+    @available(*, deprecated, renamed: "radius")
+    public var range: Float { radius }
+}
+
+@available(*, deprecated, renamed: "RadianceEmitter")
+public typealias RadianceCascadesLightSource = RadianceEmitter
+
+/// A top-down 2.5D visibility field consumed by Radiance Cascades.
+///
+/// Each cell stores two interleaved floats: signed horizontal distance to the
+/// nearest occluder and the occluder's top height in world space.
+public struct RadianceCascadesOcclusionCascade: Sendable, Equatable {
+    public let originWorldXZ: RenderVec2
+    public let cellSize: Float
+    public let width: Int
+    public let height: Int
+    public let revision: UInt64
+    public let samples: [Float]
+
+    public init(
+        originWorldXZ: RenderVec2,
+        cellSize: Float,
+        width: Int,
+        height: Int,
+        revision: UInt64,
+        samples: [Float]
+    ) {
+        self.originWorldXZ = originWorldXZ
+        self.cellSize = cellSize
+        self.width = width
+        self.height = height
+        self.revision = revision
+        self.samples = samples
+    }
+}
+
+public struct RadianceCascadesDescriptor: Sendable, Equatable {
+    public static let maximumOcclusionCascades = 3
+
+    public let tier: RadianceCascadesTier
+    public let backend: RadianceCascadesBackend
+    public let debugView: RadianceCascadesDebugView
+    public let autoFrameBudgetMilliseconds: Float
+    public let indirectIntensity: Float
+    public let emitters: [RadianceEmitter]
+    public let occlusionCascades: [RadianceCascadesOcclusionCascade]
+    public let allowAutoTransition: Bool
+    public let invalidate: Bool
+
+    public init(
+        tier: RadianceCascadesTier,
+        backend: RadianceCascadesBackend = .classic,
+        debugView: RadianceCascadesDebugView = .none,
+        autoFrameBudgetMilliseconds: Float = 1_000 / 60,
+        indirectIntensity: Float = 0.90,
+        emitters: [RadianceEmitter] = [],
+        occlusionCascades: [RadianceCascadesOcclusionCascade] = [],
+        allowAutoTransition: Bool = false,
+        invalidate: Bool = false
+    ) {
+        self.tier = tier
+        self.backend = backend
+        self.debugView = debugView
+        self.autoFrameBudgetMilliseconds = autoFrameBudgetMilliseconds
+        self.indirectIntensity = indirectIntensity
+        self.emitters = emitters
+        self.occlusionCascades = occlusionCascades
+        self.allowAutoTransition = allowAutoTransition
+        self.invalidate = invalidate
+    }
+
+    @available(*, deprecated, message: "Use emitters")
+    public init(
+        tier: RadianceCascadesTier,
+        debugView: RadianceCascadesDebugView = .none,
+        autoFrameBudgetMilliseconds: Float = 1_000 / 60,
+        indirectIntensity: Float = 0.90,
+        lightSources: [RadianceCascadesLightSource],
+        occlusionCascades: [RadianceCascadesOcclusionCascade] = [],
+        allowAutoTransition: Bool = false,
+        invalidate: Bool = false
+    ) {
+        self.init(
+            tier: tier,
+            backend: .classic,
+            debugView: debugView,
+            autoFrameBudgetMilliseconds: autoFrameBudgetMilliseconds,
+            indirectIntensity: indirectIntensity,
+            emitters: lightSources,
+            occlusionCascades: occlusionCascades,
+            allowAutoTransition: allowAutoTransition,
+            invalidate: invalidate
+        )
+    }
+
+    @available(*, deprecated, renamed: "emitters")
+    public var lightSources: [RadianceCascadesLightSource] { emitters }
+
+    public static let off = Self(tier: .off)
 }
 
 public struct EnvironmentDescriptor: Sendable {
@@ -541,6 +896,7 @@ public struct EnvironmentDescriptor: Sendable {
     public let ssaoEnabled: Bool
     public let tonemap: TonemapMode
     public let tonemapWhite: Float
+    public let radianceCascades: RadianceCascadesDescriptor
 
     public init(
         backgroundColor: RenderColor,
@@ -551,7 +907,8 @@ public struct EnvironmentDescriptor: Sendable {
         skyCubemap: CubemapHandle,
         ssaoEnabled: Bool,
         tonemap: TonemapMode,
-        tonemapWhite: Float
+        tonemapWhite: Float,
+        radianceCascades: RadianceCascadesDescriptor = .off
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -562,6 +919,7 @@ public struct EnvironmentDescriptor: Sendable {
         self.ssaoEnabled = ssaoEnabled
         self.tonemap = tonemap
         self.tonemapWhite = tonemapWhite
+        self.radianceCascades = radianceCascades
     }
 
     public static let `default` = Self(
@@ -573,7 +931,8 @@ public struct EnvironmentDescriptor: Sendable {
         skyCubemap: .invalid,
         ssaoEnabled: false,
         tonemap: .reinhard,
-        tonemapWhite: 1
+        tonemapWhite: 1,
+        radianceCascades: .off
     )
 }
 

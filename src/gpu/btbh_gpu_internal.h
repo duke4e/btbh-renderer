@@ -74,6 +74,7 @@ struct BTBHGPUWindow {
     uint32_t pending_drawable_width;
     uint32_t pending_drawable_height;
     bool frame_telemetry_enabled;
+    bool radiance_cascades_telemetry_enabled;
     uint64_t next_frame_telemetry_serial;
     BTBHGPUFrameTelemetryPending frame_telemetry_pending[
         BTBH_GPU_FRAME_TELEMETRY_CAPACITY
@@ -135,6 +136,9 @@ bool btbh_gpu_scene_uses_transparent_pass(
 bool btbh_gpu_scene_uses_fast_unlit_pipeline(
     const BTBHGPUSceneGeometryBatch *batch
 );
+bool btbh_gpu_scene_lighting_valid(
+    const BTBHGPUSceneLighting *lighting
+);
 void btbh_gpu_scene_resolve_blend_state(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled,
@@ -182,6 +186,10 @@ bool btbh_gpu_window_blit_pending_scene(
 void btbh_gpu_window_scene_submission_finished(
     BTBHGPUWindow *window,
     bool submitted
+);
+void btbh_gpu_window_scene_record_frame_completion(
+    BTBHGPUWindow *window,
+    double completion_milliseconds
 );
 void btbh_gpu_window_release_frame_telemetry(
     BTBHGPUWindow *window

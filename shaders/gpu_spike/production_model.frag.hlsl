@@ -2,6 +2,14 @@
 #define BTBH_DIRECTIONAL_SHADOWS 1
 #endif
 
+#ifndef BTBH_OMNI_SHADOWS
+#define BTBH_OMNI_SHADOWS 1
+#endif
+
+#ifndef BTBH_RC_MATERIAL_OUTPUT
+#define BTBH_RC_MATERIAL_OUTPUT 0
+#endif
+
 #include "production_surface.hlsli"
 
 Texture2D<float4> albedo_texture : register(t0, space2);
@@ -23,6 +31,10 @@ SamplerState secondary_directional_shadow_sampler
     : register(s6, space2);
 Texture2D<float> spot_shadow_texture : register(t7, space2);
 SamplerState spot_shadow_sampler : register(s7, space2);
+#if BTBH_OMNI_SHADOWS
+TextureCube<float> omni_shadow_texture : register(t8, space2);
+SamplerState omni_shadow_sampler : register(s8, space2);
+#endif
 #endif
 
 cbuffer MaterialPBR : register(b0, space3)
@@ -60,6 +72,7 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 directional_shadow_controls;
     float4 secondary_directional_shadow_controls;
     float4 spot_shadow_controls;
+    float4 omni_shadow_position_range;
 #endif
 };
 
@@ -83,6 +96,7 @@ struct FragmentOutput
     float4 ambient : SV_Target1;
     float4 normal : SV_Target2;
     float4 ambient_specular : SV_Target3;
+    float4 emission : SV_Target4;
 };
 
 static const float inverse_pi = 0.3183098861837907f;
@@ -572,6 +586,81 @@ float secondary_directional_visibility(
     return visibility / 9.0f;
 }
 
+float omni_projected_depth(
+    float major_distance,
+    float near_plane,
+    float far_plane
+)
+{
+    const float safe_near = max(near_plane, 0.0001f);
+    const float safe_far = max(far_plane, safe_near + 0.0001f);
+    const float depth_scale = safe_far / (safe_far - safe_near);
+    return depth_scale -
+        safe_near * depth_scale / max(major_distance, safe_near);
+}
+
+#if BTBH_OMNI_SHADOWS
+float omni_visibility(
+    float3 world_position,
+    float3 normal
+)
+{
+    const float3 from_light =
+        world_position - omni_shadow_position_range.xyz;
+    const float major_distance = max(
+        max(abs(from_light.x), abs(from_light.y)),
+        abs(from_light.z)
+    );
+    const float near_plane = spot_shadow_controls.w;
+    const float far_plane = omni_shadow_position_range.w;
+    if (major_distance <= near_plane || major_distance >= far_plane)
+    {
+        return 1.0f;
+    }
+    const float3 sample_direction = stable_normalize(
+        from_light,
+        float3(0.0f, 0.0f, 1.0f)
+    );
+    const float3 light_direction = -sample_direction;
+    const float normal_dot_light =
+        saturate(dot(normal, light_direction));
+    const float world_bias =
+        0.025f + 0.1f * (1.0f - normal_dot_light);
+    const float reference_depth = omni_projected_depth(
+        max(major_distance - world_bias, near_plane),
+        near_plane,
+        far_plane
+    );
+    const float3 basis_seed = abs(sample_direction.y) < 0.99f
+        ? float3(0.0f, 1.0f, 0.0f)
+        : float3(1.0f, 0.0f, 0.0f);
+    const float3 tangent = normalize(cross(basis_seed, sample_direction));
+    const float3 bitangent = cross(sample_direction, tangent);
+    const float texel_radius =
+        max(spot_shadow_controls.y, 0.0f) * 2.0f / 512.0f;
+    float visibility = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; ++x)
+        {
+            const float3 direction = normalize(
+                sample_direction +
+                tangent * ((float)x * texel_radius) +
+                bitangent * ((float)y * texel_radius)
+            );
+            const float stored_depth = omni_shadow_texture.Sample(
+                omni_shadow_sampler,
+                direction
+            );
+            visibility += reference_depth <= stored_depth ? 1.0f : 0.0f;
+        }
+    }
+    return visibility / 9.0f;
+}
+#endif
+
 float spot_visibility(
     float3 world_position,
     float3 normal
@@ -581,6 +670,12 @@ float spot_visibility(
     {
         return 1.0f;
     }
+#if BTBH_OMNI_SHADOWS
+    if (spot_shadow_controls.z > 0.5f)
+    {
+        return omni_visibility(world_position, normal);
+    }
+#endif
     const float4 clip = mul(
         spot_shadow_view_projection,
         float4(world_position, 1.0f)
@@ -797,6 +892,7 @@ void evaluate_ambient_multiscattering(
 
 FragmentOutput fragment_output(
     float4 color,
+    float3 emission,
     float3 ambient_diffuse,
     float3 ambient_specular,
     float3 normal,
@@ -806,6 +902,7 @@ FragmentOutput fragment_output(
 {
     FragmentOutput output;
     output.color = color;
+    output.emission = float4(emission, 1.0f);
     output.ambient = float4(ambient_diffuse, 1.0f);
     output.normal = float4(
         normal * 0.5f + 0.5f,
@@ -817,6 +914,41 @@ FragmentOutput fragment_output(
     );
     return output;
 }
+
+#if BTBH_RC_MATERIAL_OUTPUT
+FragmentOutput rc_material_output(
+    float4 albedo,
+    float3 emission,
+    float3 normal,
+    float occlusion,
+    float roughness,
+    float metalness,
+    bool unlit
+)
+{
+    FragmentOutput output;
+    const float3 source_emission = unlit
+        ? albedo.rgb + emission
+        : emission;
+    output.color = float4(albedo.rgb + emission, albedo.a);
+    output.ambient = unlit
+        ? float4(0.0f, 0.0f, 0.0f, 0.0f)
+        : float4(albedo.rgb, metalness);
+    output.normal = float4(
+        normal * 0.5f + 0.5f,
+        unlit ? 1.0f : occlusion
+    );
+    output.ambient_specular = float4(
+        lerp(float3(0.04f, 0.04f, 0.04f), albedo.rgb, metalness),
+        roughness
+    );
+    output.emission = float4(
+        source_emission,
+        unlit ? 1.0f : 0.0f
+    );
+    return output;
+}
+#endif
 
 FragmentOutput main(FragmentInput input)
 {
@@ -873,10 +1005,26 @@ FragmentOutput main(FragmentInput input)
     {
         normal = -normal;
     }
+    const float occlusion =
+        saturate(orm.r * material_factors.y);
+    const float roughness = saturate(orm.g * material_factors.z);
+    const float metalness = saturate(orm.b * material_factors.w);
+#if BTBH_RC_MATERIAL_OUTPUT
+    return rc_material_output(
+        albedo_sample,
+        emission,
+        normal,
+        occlusion,
+        roughness,
+        metalness,
+        unlit_enabled != 0u
+    );
+#endif
     if (unlit_enabled != 0u)
     {
         return fragment_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
+            emission,
             0.0f,
             0.0f,
             normal,
@@ -884,10 +1032,6 @@ FragmentOutput main(FragmentInput input)
             1.0f
         );
     }
-    const float occlusion =
-        saturate(orm.r * material_factors.y);
-    const float roughness = saturate(orm.g * material_factors.z);
-    const float metalness = saturate(orm.b * material_factors.w);
     const float3 view = stable_normalize(
         camera_position.xyz - input.world_position,
         -normal
@@ -907,6 +1051,7 @@ FragmentOutput main(FragmentInput input)
     {
         return fragment_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
+            emission,
             0.0f,
             0.0f,
             normal,
@@ -1018,6 +1163,7 @@ FragmentOutput main(FragmentInput input)
     );
     return fragment_output(
         float4(lighting + emission, albedo_sample.a),
+        emission,
         ambient_diffuse_lighting,
         ambient_specular_lighting,
         normal,

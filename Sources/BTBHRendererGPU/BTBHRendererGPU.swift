@@ -822,6 +822,10 @@ struct GPUSceneLightingProbe {
         cos(22.5 * .pi / 180)
     static let legacySpotOuterCutoff: Float =
         cos(45 * .pi / 180)
+    static let radianceSpotInnerCutoff: Float =
+        cos(12 * .pi / 180)
+    static let radianceSpotOuterCutoff: Float =
+        cos(30 * .pi / 180)
 
     let ambientColor: RenderColor
     let ambientEnergy: Float
@@ -843,6 +847,7 @@ struct GPUSceneLightingProbe {
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
+    let heroOmniShadow: GPUSceneOmniShadowProbe
 
     init(
         ambientColor: RenderColor,
@@ -864,7 +869,8 @@ struct GPUSceneLightingProbe {
         spotOuterCutoff: Float = Self.legacySpotOuterCutoff,
         directionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
-        spotShadow: GPUSceneDirectionalShadowProbe = .disabled
+        spotShadow: GPUSceneDirectionalShadowProbe = .disabled,
+        heroOmniShadow: GPUSceneOmniShadowProbe = .disabled
     ) {
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
@@ -887,12 +893,14 @@ struct GPUSceneLightingProbe {
         self.directionalShadow = directionalShadow
         self.secondaryDirectionalShadow = secondaryDirectionalShadow
         self.spotShadow = spotShadow
+        self.heroOmniShadow = heroOmniShadow
     }
 }
 
 struct GPUScenePostProbe {
     static let `default` = Self(
         lutTexture: nil,
+        tonemapMode: .reinhard,
         tonemapWhite: 1,
         casSharpness: 0,
         focusPoint: .init(x: 0.5, y: 0.55),
@@ -907,10 +915,13 @@ struct GPUScenePostProbe {
         tiltShiftEnabled: false,
         ssaoEnabled: false,
         antiAliasing: .off,
-        upscaleMode: .linear
+        upscaleMode: .linear,
+        radianceCascades: .off,
+        heroOmniLightSourceIndex: -1
     )
 
     let lutTexture: OpaquePointer?
+    let tonemapMode: TonemapMode
     let tonemapWhite: Float
     let casSharpness: Float
     let focusPoint: RenderVec2
@@ -926,6 +937,34 @@ struct GPUScenePostProbe {
     let ssaoEnabled: Bool
     let antiAliasing: AntiAliasing
     let upscaleMode: UpscaleMode
+    let radianceCascades: RadianceCascadesDescriptor
+    let heroOmniLightSourceIndex: Int32
+
+    func withRadianceCascades(
+        _ radianceCascades: RadianceCascadesDescriptor
+    ) -> Self {
+        .init(
+            lutTexture: lutTexture,
+            tonemapMode: tonemapMode,
+            tonemapWhite: tonemapWhite,
+            casSharpness: casSharpness,
+            focusPoint: focusPoint,
+            focusDirection: focusDirection,
+            focusHalfWidth: focusHalfWidth,
+            maximumRadiusPixels: maximumRadiusPixels,
+            blurCurve: blurCurve,
+            highlightThreshold: highlightThreshold,
+            highlightGain: highlightGain,
+            lutEnabled: lutEnabled,
+            casEnabled: casEnabled,
+            tiltShiftEnabled: tiltShiftEnabled,
+            ssaoEnabled: ssaoEnabled,
+            antiAliasing: antiAliasing,
+            upscaleMode: upscaleMode,
+            radianceCascades: radianceCascades,
+            heroOmniLightSourceIndex: heroOmniLightSourceIndex
+        )
+    }
 }
 
 struct GPUSceneDirectionalShadowProbe: Equatable {
@@ -964,6 +1003,28 @@ struct GPUSceneDirectionalShadowProbe: Equatable {
     }
 }
 
+struct GPUSceneOmniShadowProbe: Equatable {
+    static let faceCount = 6
+    static let mapSize: Float = 512
+    static let nearPlane: Float = 0.05
+    static let disabled = Self(
+        enabled: false,
+        range: 0,
+        softness: 0,
+        updatePeriodFrames: 1,
+        viewProjections: Array(
+            repeating: GPUSceneDirectionalShadowProbe.disabled.viewProjection,
+            count: faceCount
+        ).flatMap { $0 }
+    )
+
+    let enabled: Bool
+    let range: Float
+    let softness: Float
+    let updatePeriodFrames: UInt32
+    let viewProjections: [Float]
+}
+
 struct GPUScenePresentationProbeReport {
     let drawableSize: PixelSize2D
     let renderSize: PixelSize2D
@@ -996,6 +1057,7 @@ struct GPUScenePresentationProbeReport {
     let cpuTargetEnsureMilliseconds: Double
     let cpuGeometryEncodeMilliseconds: Double
     let cpuPostEncodeMilliseconds: Double
+    let radianceCascadesStatus: RadianceCascadesStatus
 }
 
 struct GPUFrameTelemetrySample: Equatable {
@@ -1052,6 +1114,20 @@ enum GPUAnimationLibraryProbe {
 
 @MainActor
 public final class GPUWindowProbe {
+    private struct RadianceCascadesOcclusionStorageKey: Equatable {
+        let originWorldXZ: RenderVec2
+        let cellSize: Float
+        let width: Int
+        let height: Int
+        let revision: UInt64
+    }
+
+    private struct RadianceCascadesOcclusionStorage {
+        let key: RadianceCascadesOcclusionStorageKey
+        let samples: UnsafeMutablePointer<Float>
+        let count: Int
+    }
+
     static var monotonicElapsedSeconds: Double {
         btbh_gpu_monotonic_elapsed_seconds()
     }
@@ -1067,6 +1143,13 @@ public final class GPUWindowProbe {
     private var nativeSceneBatches: [BTBHGPUSceneGeometryBatch] = []
     private var nativeSceneVisibility: [UInt8] = []
     private var nativeDirectionalShadowVisibility: [UInt8] = []
+    private var radianceCascadesOcclusionStorage:
+        [RadianceCascadesOcclusionStorage?] =
+            Array(
+                repeating: nil,
+                count: RadianceCascadesDescriptor
+                    .maximumOcclusionCascades
+            )
     private var sceneCameraRightValues: [Float] = [0, 0, 0]
     private var sceneCameraUpValues: [Float] = [0, 0, 0]
     private var sceneCameraPositionValues: [Float] = [0, 0, 0]
@@ -1913,6 +1996,9 @@ public final class GPUWindowProbe {
                 message: "Invalid GPU model instance scene data"
             )
         }
+        try prepareRadianceCascadesOcclusionStorage(
+            post.radianceCascades.occlusionCascades
+        )
         sceneCameraRightValues[0] = cameraRight.x
         sceneCameraRightValues[1] = cameraRight.y
         sceneCameraRightValues[2] = cameraRight.z
@@ -1986,9 +2072,16 @@ public final class GPUWindowProbe {
         nativeLighting.secondary_directional_shadow_softness =
             lighting.secondaryDirectionalShadow.softness
         nativeLighting.spot_shadow_enabled =
-            lighting.spotShadow.enabled ? 1 : 0
+            lighting.spotShadow.enabled || lighting.heroOmniShadow.enabled
+                ? 1
+                : 0
         nativeLighting.spot_shadow_softness =
-            lighting.spotShadow.softness
+            lighting.heroOmniShadow.enabled
+                ? lighting.heroOmniShadow.softness
+                : lighting.spotShadow.softness
+        nativeLighting.spot_shadow_is_omni =
+            lighting.heroOmniShadow.enabled ? 1 : 0
+        nativeLighting.spot_shadow_near = GPUSceneOmniShadowProbe.nearPlane
         withUnsafeMutablePointer(
             to: &nativeLighting.directional_shadow_view_projection
         ) {
@@ -2022,6 +2115,19 @@ public final class GPUWindowProbe {
                 }
             }
         }
+        withUnsafeMutablePointer(
+            to: &nativeLighting.omni_shadow_view_projection
+        ) {
+            $0.withMemoryRebound(
+                to: Float.self,
+                capacity: GPUSceneOmniShadowProbe.faceCount * 16
+            ) { values in
+                for index in 0..<(GPUSceneOmniShadowProbe.faceCount * 16) {
+                    values[index] =
+                        lighting.heroOmniShadow.viewProjections[index]
+                }
+            }
+        }
         if let environment = lighting.environment {
             nativeLighting.ibl_enabled = 1
             withUnsafeMutablePointer(
@@ -2049,7 +2155,9 @@ public final class GPUWindowProbe {
             window,
             lighting.directionalShadow.updatePeriodFrames,
             lighting.secondaryDirectionalShadow.updatePeriodFrames,
-            lighting.spotShadow.updatePeriodFrames
+            lighting.heroOmniShadow.enabled
+                ? lighting.heroOmniShadow.updatePeriodFrames
+                : lighting.spotShadow.updatePeriodFrames
         ) != 0 else {
             throw GPUSceneProbeError.operationFailed(
                 message: "Invalid GPU shadow update period"
@@ -2057,6 +2165,7 @@ public final class GPUWindowProbe {
         }
         var nativePost = BTBHGPUScenePost()
         nativePost.lut_texture = post.lutTexture
+        nativePost.tonemap_mode = post.tonemapMode.rawValue
         nativePost.tonemap_white = post.tonemapWhite
         nativePost.cas_sharpness = post.casSharpness
         nativePost.focus_point_x = post.focusPoint.x
@@ -2077,6 +2186,125 @@ public final class GPUWindowProbe {
             GPUAntiAliasingProjection.native(post.antiAliasing)
         nativePost.upscale_mode =
             GPUUpscaleModeProjection.native(post.upscaleMode)
+        nativePost.radiance_cascades.tier =
+            Self.radianceCascadesTier(post.radianceCascades.tier)
+        nativePost.radiance_cascades.backend =
+            Self.radianceCascadesBackend(post.radianceCascades.backend)
+        nativePost.radiance_cascades.debug_view =
+            Self.radianceCascadesDebugView(
+                post.radianceCascades.debugView
+            )
+        nativePost.radiance_cascades.auto_frame_budget_milliseconds =
+            post.radianceCascades.autoFrameBudgetMilliseconds
+        nativePost.radiance_cascades.indirect_intensity =
+            post.radianceCascades.indirectIntensity
+        nativePost.radiance_cascades.hero_omni_emitter_index =
+            post.heroOmniLightSourceIndex
+        let radianceEmitters = post.radianceCascades.emitters
+        guard radianceEmitters.count <= Int(UInt32.max) else {
+            throw GPUSceneProbeError.operationFailed(
+                message: "Radiance emitter count exceeds UInt32"
+            )
+        }
+        let nativeRadianceEmitters: UnsafeMutablePointer<
+            BTBHGPUSceneRadianceEmitter
+        >? = radianceEmitters.isEmpty
+            ? nil
+            : .allocate(capacity: radianceEmitters.count)
+        defer { nativeRadianceEmitters?.deallocate() }
+        for (index, emitter) in radianceEmitters.enumerated() {
+            var nativeEmitter = BTBHGPUSceneRadianceEmitter()
+            nativeEmitter.stable_id = emitter.stableID
+            nativeEmitter.position_x = emitter.position.x
+            nativeEmitter.position_y = emitter.position.y
+            nativeEmitter.position_z = emitter.position.z
+            nativeEmitter.radius = emitter.radius
+            nativeEmitter.height = emitter.height
+            nativeEmitter.red = GPUColorSpace.linearComponent(
+                emitter.color.r
+            )
+            nativeEmitter.green = GPUColorSpace.linearComponent(
+                emitter.color.g
+            )
+            nativeEmitter.blue = GPUColorSpace.linearComponent(
+                emitter.color.b
+            )
+            nativeEmitter.energy = emitter.energy
+            nativeEmitter.direct_energy = emitter.directEnergy
+            nativeEmitter.direction_x = emitter.direction.x
+            nativeEmitter.direction_y = emitter.direction.y
+            nativeEmitter.direction_z = emitter.direction.z
+            nativeEmitter.inner_cutoff = emitter.innerCutoff
+            nativeEmitter.outer_cutoff = emitter.outerCutoff
+            switch emitter.shape {
+            case .disk:
+                nativeEmitter.shape =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_DISK
+            case .rectangle:
+                nativeEmitter.shape =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_RECTANGLE
+            case .segment:
+                nativeEmitter.shape =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_SEGMENT
+            }
+            switch emitter.lightClass {
+            case .hero:
+                nativeEmitter.light_class =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_HERO
+            case .world:
+                nativeEmitter.light_class =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_WORLD
+            case .pickup:
+                nativeEmitter.light_class =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_PICKUP
+            case .transient:
+                nativeEmitter.light_class =
+                    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_TRANSIENT
+            }
+            nativeRadianceEmitters?[index] = nativeEmitter
+        }
+        nativePost.radiance_cascades.emitter_count =
+            UInt32(radianceEmitters.count)
+        nativePost.radiance_cascades.emitters = UnsafePointer(
+            nativeRadianceEmitters
+        )
+        let radianceCascadesOcclusionCascades = post.radianceCascades
+            .occlusionCascades
+            .prefix(RadianceCascadesDescriptor.maximumOcclusionCascades)
+        nativePost.radiance_cascades.occlusion_cascade_count =
+            UInt32(radianceCascadesOcclusionCascades.count)
+        withUnsafeMutablePointer(
+            to: &nativePost.radiance_cascades.occlusion_cascades
+        ) { tuple in
+            tuple.withMemoryRebound(
+                to: BTBHGPUSceneRadianceCascadesOcclusionCascade.self,
+                capacity:
+                    RadianceCascadesDescriptor.maximumOcclusionCascades
+            ) { nativeCascades in
+                for (index, cascade) in
+                    radianceCascadesOcclusionCascades.enumerated()
+                {
+                    var nativeCascade =
+                        BTBHGPUSceneRadianceCascadesOcclusionCascade()
+                    nativeCascade.origin_world_x =
+                        cascade.originWorldXZ.x
+                    nativeCascade.origin_world_z =
+                        cascade.originWorldXZ.y
+                    nativeCascade.cell_size = cascade.cellSize
+                    nativeCascade.width = UInt32(cascade.width)
+                    nativeCascade.height = UInt32(cascade.height)
+                    nativeCascade.revision = cascade.revision
+                    nativeCascade.samples = UnsafePointer(
+                        radianceCascadesOcclusionStorage[index]!.samples
+                    )
+                    nativeCascades[index] = nativeCascade
+                }
+            }
+        }
+        nativePost.radiance_cascades.allow_auto_transition =
+            post.radianceCascades.allowAutoTransition ? 1 : 0
+        nativePost.radiance_cascades.invalidate =
+            post.radianceCascades.invalidate ? 1 : 0
         nativeSceneBatches.removeAll(keepingCapacity: true)
         nativeSceneVisibility.removeAll(keepingCapacity: true)
         nativeDirectionalShadowVisibility.removeAll(keepingCapacity: true)
@@ -2423,7 +2651,85 @@ public final class GPUWindowProbe {
             cpuGeometryEncodeMilliseconds:
                 report.cpu_geometry_encode_milliseconds,
             cpuPostEncodeMilliseconds:
-                report.cpu_post_encode_milliseconds
+                report.cpu_post_encode_milliseconds,
+            radianceCascadesStatus: .init(
+                requestedTier: Self.radianceCascadesTier(
+                    report.radiance_cascades.requested_tier
+                ),
+                activeTier: Self.radianceCascadesTier(
+                    report.radiance_cascades.active_tier
+                ),
+                pendingTier: Self.radianceCascadesTier(
+                    report.radiance_cascades.pending_tier
+                ),
+                requestedBackend: Self.radianceCascadesBackend(
+                    report.radiance_cascades.requested_backend
+                ),
+                activeBackend: Self.radianceCascadesBackend(
+                    report.radiance_cascades.active_backend
+                ),
+                fallbackReason: Self.radianceCascadesFallbackReason(
+                    report.radiance_cascades.fallback_reason
+                ),
+                internalSize: .init(
+                    width: Int(report.radiance_cascades.internal_width),
+                    height: Int(report.radiance_cascades.internal_height)
+                ),
+                generation: report.radiance_cascades.generation,
+                sampleCount: Int(report.radiance_cascades.sample_count),
+                cpuEncodeMilliseconds:
+                    report.radiance_cascades.cpu_encode_milliseconds,
+                passTelemetry: .init(
+                    cpuPrepareMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_prepare_milliseconds,
+                    cpuPipelinePrepareMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_pipeline_prepare_milliseconds,
+                    cpuResourcePrepareMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_resource_prepare_milliseconds,
+                    cpuTraceEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_trace_encode_milliseconds,
+                    cpuMergeUpEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_merge_up_encode_milliseconds,
+                    cpuMergeDownEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_merge_down_encode_milliseconds,
+                    cpuReprojectEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_reproject_encode_milliseconds,
+                    cpuFinishEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_finish_encode_milliseconds,
+                    cpuBlurEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_blur_encode_milliseconds,
+                    cpuResolveEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_resolve_encode_milliseconds,
+                    cpuReconstructEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_reconstruct_encode_milliseconds,
+                    cpuComposeEncodeMilliseconds: report.radiance_cascades
+                        .pass_telemetry.cpu_compose_encode_milliseconds,
+                    traceDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.trace_dispatch_count),
+                    mergeUpDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.merge_up_dispatch_count),
+                    mergeDownDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.merge_down_dispatch_count),
+                    reprojectDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.reproject_dispatch_count),
+                    finishDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.finish_dispatch_count),
+                    blurDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.blur_dispatch_count),
+                    resolveDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.resolve_dispatch_count),
+                    reconstructDispatchCount: Int(report.radiance_cascades
+                        .pass_telemetry.reconstruct_dispatch_count),
+                    composeDrawCount: Int(report.radiance_cascades
+                        .pass_telemetry.compose_draw_count),
+                    temporalHistoryValid: report.radiance_cascades
+                        .pass_telemetry.temporal_history_valid != 0,
+                    temporalPhase: Int(report.radiance_cascades
+                        .pass_telemetry.temporal_phase),
+                    freshQuadrantCount: Int(report.radiance_cascades
+                        .pass_telemetry.fresh_quadrant_count)
+                )
+            )
         )
     }
 
@@ -2530,6 +2836,18 @@ public final class GPUWindowProbe {
         }) else {
             return false
         }
+        let heroOmniShadow = lighting.heroOmniShadow
+        guard heroOmniShadow.range.isFinite,
+              heroOmniShadow.range >= 0,
+              heroOmniShadow.softness.isFinite,
+              heroOmniShadow.softness >= 0,
+              heroOmniShadow.updatePeriodFrames >= 1,
+              heroOmniShadow.updatePeriodFrames <= 60,
+              heroOmniShadow.viewProjections.count ==
+                GPUSceneOmniShadowProbe.faceCount * 16,
+              heroOmniShadow.viewProjections.allSatisfy(\.isFinite) else {
+            return false
+        }
         guard let environment = lighting.environment else {
             return true
         }
@@ -2557,7 +2875,7 @@ public final class GPUWindowProbe {
     private static func scenePostIsValid(
         _ post: GPUScenePostProbe
     ) -> Bool {
-        [
+        let scalarFieldsValid = [
             post.tonemapWhite,
             post.casSharpness,
             post.focusPoint.x,
@@ -2578,6 +2896,121 @@ public final class GPUWindowProbe {
         post.maximumRadiusPixels >= 0 &&
         post.blurCurve > 0 &&
         (!post.lutEnabled || post.lutTexture != nil)
+        guard scalarFieldsValid else { return false }
+        let emittersValid = post.radianceCascades.emitters
+            .allSatisfy { emitter in
+                emitter.position.x.isFinite &&
+                emitter.position.y.isFinite &&
+                emitter.position.z.isFinite &&
+                emitter.energy.isFinite && emitter.energy > 0 &&
+                emitter.radius.isFinite && emitter.radius > 0 &&
+                emitter.height.isFinite && emitter.height >= 0 &&
+                emitter.direction.x.isFinite &&
+                emitter.direction.y.isFinite &&
+                emitter.direction.z.isFinite &&
+                emitter.direction.lengthSquared > 0 &&
+                emitter.innerCutoff.isFinite &&
+                emitter.outerCutoff.isFinite &&
+                emitter.innerCutoff > emitter.outerCutoff
+            }
+        guard emittersValid else { return false }
+        guard post.heroOmniLightSourceIndex >= -1,
+              post.heroOmniLightSourceIndex <
+                (Int32(exactly: post.radianceCascades.emitters.count) ?? -1) ||
+                post.heroOmniLightSourceIndex == -1 else {
+            return false
+        }
+        return post.radianceCascades.occlusionCascades
+            .prefix(RadianceCascadesDescriptor.maximumOcclusionCascades)
+            .allSatisfy { cascade in
+                cascade.originWorldXZ.x.isFinite &&
+                cascade.originWorldXZ.y.isFinite &&
+                cascade.cellSize.isFinite && cascade.cellSize > 0 &&
+                cascade.width > 0 && cascade.width <= 2_048 &&
+                cascade.height > 0 && cascade.height <= 2_048 &&
+                cascade.samples.count == cascade.width * cascade.height * 2
+            }
+    }
+
+    private static func radianceCascadesTier(
+        _ tier: RadianceCascadesTier
+    ) -> BTBHGPUSceneRadianceCascadesTier {
+        switch tier {
+        case .off: BTBH_GPU_SCENE_RC_OFF
+        case .low: BTBH_GPU_SCENE_RC_LOW
+        case .high: BTBH_GPU_SCENE_RC_HIGH
+        case .auto: BTBH_GPU_SCENE_RC_AUTO
+        }
+    }
+
+    private static func radianceCascadesTier(
+        _ tier: BTBHGPUSceneRadianceCascadesTier
+    ) -> RadianceCascadesTier {
+        switch tier {
+        case BTBH_GPU_SCENE_RC_LOW: .low
+        case BTBH_GPU_SCENE_RC_HIGH: .high
+        case BTBH_GPU_SCENE_RC_AUTO: .auto
+        default: .off
+        }
+    }
+
+    private static func radianceCascadesBackend(
+        _ backend: RadianceCascadesBackend
+    ) -> BTBHGPUSceneRadianceCascadesBackend {
+        switch backend {
+        case .classic: BTBH_GPU_SCENE_RC_BACKEND_CLASSIC
+        case .holographic: BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC
+        }
+    }
+
+    private static func radianceCascadesBackend(
+        _ backend: BTBHGPUSceneRadianceCascadesBackend
+    ) -> RadianceCascadesBackend {
+        switch backend {
+        case BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC: .holographic
+        default: .classic
+        }
+    }
+
+    private static func radianceCascadesFallbackReason(
+        _ reason: BTBHGPUSceneRadianceCascadesFallbackReason
+    ) -> RadianceCascadesFallbackReason {
+        switch reason {
+        case BTBH_GPU_SCENE_RC_FALLBACK_DISABLED:
+            .disabled
+        case BTBH_GPU_SCENE_RC_FALLBACK_CAPABILITY_UNAVAILABLE:
+            .capabilityUnavailable
+        case BTBH_GPU_SCENE_RC_FALLBACK_SHADER_UNAVAILABLE:
+            .shaderUnavailable
+        case BTBH_GPU_SCENE_RC_FALLBACK_PIPELINE_CREATION_FAILED:
+            .pipelineCreationFailed
+        case BTBH_GPU_SCENE_RC_FALLBACK_RESOURCE_ALLOCATION_FAILED:
+            .resourceAllocationFailed
+        case BTBH_GPU_SCENE_RC_FALLBACK_DISPATCH_FAILED:
+            .dispatchFailed
+        case BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION:
+            .invalidConfiguration
+        default:
+            .none
+        }
+    }
+
+    private static func radianceCascadesDebugView(
+        _ view: RadianceCascadesDebugView
+    ) -> BTBHGPUSceneRadianceCascadesDebugView {
+        switch view {
+        case .none: BTBH_GPU_SCENE_RC_DEBUG_NONE
+        case .cascade0: BTBH_GPU_SCENE_RC_DEBUG_CASCADE_0
+        case .cascade1: BTBH_GPU_SCENE_RC_DEBUG_CASCADE_1
+        case .cascade2: BTBH_GPU_SCENE_RC_DEBUG_CASCADE_2
+        case .cascade3: BTBH_GPU_SCENE_RC_DEBUG_CASCADE_3
+        case .hitDistance: BTBH_GPU_SCENE_RC_DEBUG_HIT_DISTANCE
+        case .confidence: BTBH_GPU_SCENE_RC_DEBUG_CONFIDENCE
+        case .finalIndirect: BTBH_GPU_SCENE_RC_DEBUG_FINAL_INDIRECT
+        case .fallbackReason: BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON
+        case .directionalSource: BTBH_GPU_SCENE_RC_DEBUG_DIRECTIONAL_SOURCE
+        case .directLight: BTBH_GPU_SCENE_RC_DEBUG_DIRECT_LIGHT
+        }
     }
 
     private static func sceneBlendMode(
@@ -2896,14 +3329,72 @@ public final class GPUWindowProbe {
         nativeSceneBatches = []
         nativeSceneVisibility = []
         nativeDirectionalShadowVisibility = []
+        releaseRadianceCascadesOcclusionStorage()
         nativeFrameTelemetrySamples = []
         deviceProbe.shutdown()
         isShutdown = true
     }
 
     deinit {
+        for storage in radianceCascadesOcclusionStorage.compactMap({ $0 }) {
+            storage.samples.deinitialize(count: storage.count)
+            storage.samples.deallocate()
+        }
         if let window {
             btbh_gpu_window_destroy(window)
+        }
+    }
+
+    private func prepareRadianceCascadesOcclusionStorage(
+        _ cascades: [RadianceCascadesOcclusionCascade]
+    ) throws {
+        for (index, cascade) in cascades
+            .prefix(RadianceCascadesDescriptor.maximumOcclusionCascades)
+            .enumerated()
+        {
+            let key = RadianceCascadesOcclusionStorageKey(
+                originWorldXZ: cascade.originWorldXZ,
+                cellSize: cascade.cellSize,
+                width: cascade.width,
+                height: cascade.height,
+                revision: cascade.revision
+            )
+            if radianceCascadesOcclusionStorage[index]?.key == key {
+                continue
+            }
+            guard cascade.samples.allSatisfy(\.isFinite) else {
+                throw GPUSceneProbeError.operationFailed(
+                    message: "Radiance Cascades occlusion contains non-finite samples"
+                )
+            }
+            let samples = UnsafeMutablePointer<Float>.allocate(
+                capacity: cascade.samples.count
+            )
+            cascade.samples.withUnsafeBufferPointer { source in
+                samples.initialize(
+                    from: source.baseAddress!,
+                    count: source.count
+                )
+            }
+            if let previous = radianceCascadesOcclusionStorage[index] {
+                previous.samples.deinitialize(count: previous.count)
+                previous.samples.deallocate()
+            }
+            radianceCascadesOcclusionStorage[index] = .init(
+                key: key,
+                samples: samples,
+                count: cascade.samples.count
+            )
+        }
+    }
+
+    private func releaseRadianceCascadesOcclusionStorage() {
+        for index in radianceCascadesOcclusionStorage.indices {
+            guard let storage = radianceCascadesOcclusionStorage[index]
+            else { continue }
+            storage.samples.deinitialize(count: storage.count)
+            storage.samples.deallocate()
+            radianceCascadesOcclusionStorage[index] = nil
         }
     }
 

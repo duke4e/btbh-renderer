@@ -425,6 +425,156 @@ typedef enum BTBHGPUSceneUpscaleMode {
     BTBH_GPU_SCENE_UPSCALE_LANCZOS = 1
 } BTBHGPUSceneUpscaleMode;
 
+typedef enum BTBHGPUSceneTonemapMode {
+    BTBH_GPU_SCENE_TONEMAP_REINHARD = 0,
+    BTBH_GPU_SCENE_TONEMAP_PBR_NEUTRAL = 1,
+    BTBH_GPU_SCENE_TONEMAP_COUNT = 2
+} BTBHGPUSceneTonemapMode;
+
+typedef enum BTBHGPUSceneRadianceCascadesTier {
+    BTBH_GPU_SCENE_RC_OFF = 0,
+    BTBH_GPU_SCENE_RC_LOW = 1,
+    BTBH_GPU_SCENE_RC_HIGH = 2,
+    BTBH_GPU_SCENE_RC_AUTO = 3
+} BTBHGPUSceneRadianceCascadesTier;
+
+typedef enum BTBHGPUSceneRadianceCascadesBackend {
+    BTBH_GPU_SCENE_RC_BACKEND_CLASSIC = 0,
+    BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC = 1
+} BTBHGPUSceneRadianceCascadesBackend;
+
+typedef enum BTBHGPUSceneRadianceCascadesDebugView {
+    BTBH_GPU_SCENE_RC_DEBUG_NONE = 0,
+    BTBH_GPU_SCENE_RC_DEBUG_CASCADE_0 = 1,
+    BTBH_GPU_SCENE_RC_DEBUG_CASCADE_1 = 2,
+    BTBH_GPU_SCENE_RC_DEBUG_CASCADE_2 = 3,
+    BTBH_GPU_SCENE_RC_DEBUG_CASCADE_3 = 4,
+    BTBH_GPU_SCENE_RC_DEBUG_HIT_DISTANCE = 5,
+    BTBH_GPU_SCENE_RC_DEBUG_CONFIDENCE = 6,
+    BTBH_GPU_SCENE_RC_DEBUG_FINAL_INDIRECT = 7,
+    BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON = 8,
+    BTBH_GPU_SCENE_RC_DEBUG_DIRECTIONAL_SOURCE = 9,
+    BTBH_GPU_SCENE_RC_DEBUG_DIRECT_LIGHT = 10
+} BTBHGPUSceneRadianceCascadesDebugView;
+
+typedef enum BTBHGPUSceneRadianceCascadesFallbackReason {
+    BTBH_GPU_SCENE_RC_FALLBACK_NONE = 0,
+    BTBH_GPU_SCENE_RC_FALLBACK_DISABLED = 1,
+    BTBH_GPU_SCENE_RC_FALLBACK_CAPABILITY_UNAVAILABLE = 2,
+    BTBH_GPU_SCENE_RC_FALLBACK_SHADER_UNAVAILABLE = 3,
+    BTBH_GPU_SCENE_RC_FALLBACK_PIPELINE_CREATION_FAILED = 4,
+    BTBH_GPU_SCENE_RC_FALLBACK_RESOURCE_ALLOCATION_FAILED = 5,
+    BTBH_GPU_SCENE_RC_FALLBACK_DISPATCH_FAILED = 6,
+    BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION = 7
+} BTBHGPUSceneRadianceCascadesFallbackReason;
+
+#define BTBH_GPU_RC_MAX_OCCLUSION_CASCADES 3u
+
+typedef enum BTBHGPUSceneRadianceEmitterShape {
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_DISK = 0,
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_RECTANGLE = 1,
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_SEGMENT = 2
+} BTBHGPUSceneRadianceEmitterShape;
+
+typedef enum BTBHGPUSceneRadianceEmitterClass {
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_HERO = 0,
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_WORLD = 1,
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_PICKUP = 2,
+    BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_TRANSIENT = 3
+} BTBHGPUSceneRadianceEmitterClass;
+
+typedef struct BTBHGPUSceneRadianceEmitter {
+    uint64_t stable_id;
+    float position_x;
+    float position_y;
+    float position_z;
+    float radius;
+    float height;
+    float red;
+    float green;
+    float blue;
+    float energy;
+    float direct_energy;
+    float direction_x;
+    float direction_y;
+    float direction_z;
+    float inner_cutoff;
+    float outer_cutoff;
+    BTBHGPUSceneRadianceEmitterShape shape;
+    BTBHGPUSceneRadianceEmitterClass light_class;
+    uint32_t reserved;
+} BTBHGPUSceneRadianceEmitter;
+
+typedef struct BTBHGPUSceneRadianceCascadesOcclusionCascade {
+    float origin_world_x;
+    float origin_world_z;
+    float cell_size;
+    uint32_t width;
+    uint32_t height;
+    uint64_t revision;
+    const float *samples;
+} BTBHGPUSceneRadianceCascadesOcclusionCascade;
+
+typedef struct BTBHGPUSceneRadianceCascades {
+    BTBHGPUSceneRadianceCascadesTier tier;
+    BTBHGPUSceneRadianceCascadesBackend backend;
+    BTBHGPUSceneRadianceCascadesDebugView debug_view;
+    float auto_frame_budget_milliseconds;
+    float indirect_intensity;
+    uint32_t emitter_count;
+    int32_t hero_omni_emitter_index;
+    uint32_t occlusion_cascade_count;
+    uint8_t allow_auto_transition;
+    uint8_t invalidate;
+    uint8_t reserved[2];
+    const BTBHGPUSceneRadianceEmitter *emitters;
+    BTBHGPUSceneRadianceCascadesOcclusionCascade
+        occlusion_cascades[BTBH_GPU_RC_MAX_OCCLUSION_CASCADES];
+} BTBHGPUSceneRadianceCascades;
+
+typedef struct BTBHGPUSceneRadianceCascadesPassTelemetry {
+    double cpu_prepare_milliseconds;
+    double cpu_pipeline_prepare_milliseconds;
+    double cpu_resource_prepare_milliseconds;
+    double cpu_trace_encode_milliseconds;
+    double cpu_merge_up_encode_milliseconds;
+    double cpu_merge_down_encode_milliseconds;
+    double cpu_reproject_encode_milliseconds;
+    double cpu_finish_encode_milliseconds;
+    double cpu_blur_encode_milliseconds;
+    double cpu_resolve_encode_milliseconds;
+    double cpu_reconstruct_encode_milliseconds;
+    double cpu_compose_encode_milliseconds;
+    uint32_t trace_dispatch_count;
+    uint32_t merge_up_dispatch_count;
+    uint32_t merge_down_dispatch_count;
+    uint32_t reproject_dispatch_count;
+    uint32_t finish_dispatch_count;
+    uint32_t blur_dispatch_count;
+    uint32_t resolve_dispatch_count;
+    uint32_t reconstruct_dispatch_count;
+    uint32_t compose_draw_count;
+    uint32_t temporal_history_valid;
+    uint32_t temporal_phase;
+    uint32_t fresh_quadrant_count;
+    uint32_t reserved;
+} BTBHGPUSceneRadianceCascadesPassTelemetry;
+
+typedef struct BTBHGPUSceneRadianceCascadesStatus {
+    BTBHGPUSceneRadianceCascadesTier requested_tier;
+    BTBHGPUSceneRadianceCascadesTier active_tier;
+    BTBHGPUSceneRadianceCascadesTier pending_tier;
+    BTBHGPUSceneRadianceCascadesBackend requested_backend;
+    BTBHGPUSceneRadianceCascadesBackend active_backend;
+    BTBHGPUSceneRadianceCascadesFallbackReason fallback_reason;
+    uint32_t internal_width;
+    uint32_t internal_height;
+    uint32_t generation;
+    uint32_t sample_count;
+    double cpu_encode_milliseconds;
+    BTBHGPUSceneRadianceCascadesPassTelemetry pass_telemetry;
+} BTBHGPUSceneRadianceCascadesStatus;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -541,13 +691,15 @@ typedef struct BTBHGPUSceneLighting {
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
+    float omni_shadow_view_projection[6][16];
     uint32_t directional_shadow_enabled;
     float directional_shadow_softness;
     uint32_t secondary_directional_shadow_enabled;
     float secondary_directional_shadow_softness;
     uint32_t spot_shadow_enabled;
     float spot_shadow_softness;
-    float shadow_reserved[2];
+    uint32_t spot_shadow_is_omni;
+    float spot_shadow_near;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
@@ -567,8 +719,10 @@ typedef struct BTBHGPUScenePost {
     uint8_t cas_enabled;
     uint8_t tilt_shift_enabled;
     uint8_t ssao_enabled;
+    uint8_t tonemap_mode;
     uint8_t anti_aliasing;
     uint8_t upscale_mode;
+    BTBHGPUSceneRadianceCascades radiance_cascades;
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {
@@ -588,6 +742,7 @@ typedef struct BTBHGPUSceneReport {
     double cpu_target_ensure_milliseconds;
     double cpu_geometry_encode_milliseconds;
     double cpu_post_encode_milliseconds;
+    BTBHGPUSceneRadianceCascadesStatus radiance_cascades;
     char message[256];
 } BTBHGPUSceneReport;
 

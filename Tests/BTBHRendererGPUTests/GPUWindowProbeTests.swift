@@ -796,7 +796,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let nativeScene = try String(
             contentsOf: packageRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_scene.c"
@@ -895,6 +895,9 @@ final class GPUWindowProbeTests: XCTestCase {
             "float4 ambient_specular : SV_Target3;"
         ))
         XCTAssertTrue(modelShader.contains(
+            "float4 emission : SV_Target4;"
+        ))
+        XCTAssertTrue(modelShader.contains(
             "ambient_diffuse_lighting"
         ))
         XCTAssertTrue(modelShader.contains(
@@ -915,14 +918,51 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(resolveShader.contains(
             "ambient_specular * specular_ratio"
         ))
-        XCTAssertTrue(nativeScene.contains(
-            "SDL_GPUColorTargetDescription color_targets[4];"
+        XCTAssertTrue(resolveShader.contains(
+            "Texture2D<float4> emission_texture"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "if (ssao_enabled == 2u)"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "scene - emission"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "const float contact_visibility = lerp("
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "rc_contact_ao_strength"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "SDL_GPUTextureSamplerBinding resolve_samplers[6];"
+            "SDL_GPUColorTargetDescription color_targets[5];"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "SDL_GPUTextureSamplerBinding resolve_samplers[7];"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "resolve_samplers[6].texture = runtime->emission_texture;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "radiance_cascades_active\n" +
+                "            ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "const bool ssao_resolve_active ="
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "!radiance_cascades_debug_output;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "if (ssao_resolve_active) {"
+        ))
+        XCTAssertFalse(nativeScene.contains(
+            "post->ssao_enabled != 0u && !radiance_cascades_active"
         ))
         XCTAssertTrue(nativeScene.contains(
             "runtime->ambient_specular_texture"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->emission_texture"
         ))
         XCTAssertTrue(nativeScene.contains(
             "color_targets[3].blend_state.color_write_mask =\n" +
@@ -956,11 +996,11 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertTrue(nativeScene.contains(
             "info.target_info.num_color_targets =\n" +
-                "        ssao_enabled ? 4u : 1u;"
+                "        ssao_enabled ? 5u : 1u;"
         ))
         XCTAssertTrue(nativeScene.contains(
             "const uint32_t color_target_count =\n" +
-                "        post->ssao_enabled != 0u ? 4u : 1u;"
+                "        auxiliary_geometry_outputs ? 5u : 1u;"
         ))
         XCTAssertTrue(nativeScene.contains(
             "command,\n" +
@@ -1162,6 +1202,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
 
         XCTAssertEqual(GPUSceneDirectionalShadowProbe.mapSize, 512)
+        XCTAssertEqual(GPUSceneOmniShadowProbe.mapSize, 512)
         XCTAssertTrue(nativeScene.contains(
             "#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u"
         ))
@@ -1169,11 +1210,21 @@ final class GPUWindowProbeTests: XCTestCase {
             "#define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 1024u"
         ))
         XCTAssertTrue(nativeScene.contains(
+            "#define BTBH_GPU_OMNI_SHADOW_MAP_SIZE 512u"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "shadow_info.type = SDL_GPU_TEXTURETYPE_CUBE;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "shadow_info.layer_count_or_depth = " +
+                "BTBH_GPU_OMNI_SHADOW_FACE_COUNT;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
             "BTBH_GPU_SPOT_SHADOW_MAP_SIZE"
         ))
         XCTAssertEqual(
             shader.components(separatedBy: "512.0f").count - 1,
-            2
+            3
         )
         XCTAssertEqual(
             shader.components(separatedBy: "1024.0f").count - 1,
@@ -2240,7 +2291,8 @@ final class GPUWindowProbeTests: XCTestCase {
             range: 50,
             castsShadow: true,
             shadowSoftness: 4,
-            shadowUpdatePeriodFrames: 3
+            shadowUpdatePeriodFrames: 3,
+            indirectEnergy: 2
         ))
         let projection = try resources.sceneLighting(
             environment: .default,
@@ -2284,6 +2336,138 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(
             projection.spotShadow.viewProjection.allSatisfy(\.isFinite)
         )
+        XCTAssertFalse(projection.heroOmniShadow.enabled)
+        let post = try resources.scenePost(
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1,
+                radianceCascades: .init(
+                    tier: .high,
+                    backend: .holographic
+                )
+            ),
+            chain: .empty,
+            antiAliasing: .off,
+            upscaleMode: .linear
+        )
+        let indirectSource = try XCTUnwrap(
+            post.radianceCascades.emitters.first
+        )
+        XCTAssertEqual(post.radianceCascades.backend, .holographic)
+        XCTAssertEqual(indirectSource.direction, projection.spotDirection)
+        XCTAssertEqual(indirectSource.radius, 0.5, accuracy: 0.000_001)
+        XCTAssertEqual(
+            indirectSource.height,
+            projection.spotRange * 0.65,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            indirectSource.innerCutoff,
+            GPUSceneLightingProbe.radianceSpotInnerCutoff,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(
+            indirectSource.outerCutoff,
+            GPUSceneLightingProbe.radianceSpotOuterCutoff,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(post.heroOmniLightSourceIndex, -1)
+    }
+
+    func testOmniLightingProjectsSixFaceHeroShadowForDirectAndIndirect()
+        throws
+    {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH hero omni shadow projection",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        _ = try resources.createLight(.init(
+            kind: .omni,
+            active: true,
+            position: .init(x: 2, y: 3, z: -4),
+            direction: .down,
+            color: .init(r: 255, g: 160, b: 96, a: 255),
+            energy: 4,
+            range: 24,
+            castsShadow: true,
+            shadowSoftness: 3,
+            shadowUpdatePeriodFrames: 2,
+            indirectEnergy: 6
+        ))
+        let projection = try resources.sceneLighting(
+            environment: .default,
+            camera: .init(
+                position: .init(x: 0, y: 4, z: -8),
+                target: .zero,
+                up: .up,
+                verticalFOVDegrees: 60,
+                projection: .perspective
+            ),
+            aspect: 320 / 180
+        )
+
+        XCTAssertEqual(projection.spotPosition, .init(x: 2, y: 3, z: -4))
+        XCTAssertEqual(projection.spotInnerCutoff, -1)
+        XCTAssertEqual(projection.spotOuterCutoff, -2)
+        XCTAssertFalse(projection.spotShadow.enabled)
+        XCTAssertTrue(projection.heroOmniShadow.enabled)
+        XCTAssertEqual(projection.heroOmniShadow.range, 24)
+        XCTAssertEqual(projection.heroOmniShadow.softness, 3)
+        XCTAssertEqual(projection.heroOmniShadow.updatePeriodFrames, 2)
+        XCTAssertEqual(
+            projection.heroOmniShadow.viewProjections.count,
+            GPUSceneOmniShadowProbe.faceCount * 16
+        )
+        XCTAssertTrue(
+            projection.heroOmniShadow.viewProjections.allSatisfy(\.isFinite)
+        )
+        XCTAssertNotEqual(
+            Array(projection.heroOmniShadow.viewProjections[0..<16]),
+            Array(projection.heroOmniShadow.viewProjections[16..<32])
+        )
+        XCTAssertEqual(GPUSceneOmniShadowProbe.mapSize, 512)
+        XCTAssertEqual(GPUSceneOmniShadowProbe.nearPlane, 0.05)
+
+        let post = try resources.scenePost(
+            environment: .init(
+                backgroundColor: .black,
+                backgroundEnergy: 0,
+                ambientColor: .black,
+                ambientEnergy: 0,
+                ambientMap: .invalid,
+                skyCubemap: .invalid,
+                ssaoEnabled: false,
+                tonemap: .reinhard,
+                tonemapWhite: 1,
+                radianceCascades: .init(tier: .high)
+            ),
+            chain: .empty,
+            antiAliasing: .off,
+            upscaleMode: .linear
+        )
+        XCTAssertEqual(post.heroOmniLightSourceIndex, 0)
+        let source = try XCTUnwrap(post.radianceCascades.emitters.first)
+        XCTAssertEqual(source.position, projection.spotPosition)
+        XCTAssertEqual(source.energy, 6)
+        XCTAssertEqual(source.innerCutoff, -1)
+        XCTAssertEqual(source.outerCutoff, -2)
     }
 
     func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
@@ -3107,5 +3291,368 @@ final class GPUWindowProbeTests: XCTestCase {
                 ),
             ]
         )
+    }
+
+    func testRadianceCascadesOffLowResizeAndMissingShaderFallback() throws {
+        let probe = try GPUWindowProbe(
+            request: .platformDefault,
+            title: "BTBH Radiance Cascades runtime",
+            width: 320,
+            height: 180,
+            hidden: false,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shaderDirectory =
+            ProcessInfo.processInfo.environment[
+                "BTBH_GPU_TEST_SHADER_DIR"
+            ].map { URL(fileURLWithPath: $0) } ??
+            packageRoot.appendingPathComponent(
+                platformShaderFallbackDirectory
+            )
+        let model = try probe.loadModel(
+            path: packageRoot.appendingPathComponent(
+                "Tests/Fixtures/instanced-transformed-default-material.gltf"
+            ).path
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+        let instances = [GPUInstanceRecordPacking.record(
+            matrix: .identity,
+            color: .white,
+            custom: .init(x: 0, y: 0, z: 0, w: 0)
+        )]
+        let batches = [GPUSceneGeometryProbeBatch(
+            geometry: .model(model.pointer),
+            animation: nil,
+            material: model.materials.first,
+            materialSlot: nil,
+            firstInstance: 0,
+            instanceCount: 1
+        )]
+        let present = {
+            (directory: URL, size: PixelSize2D,
+             radianceCascades: RadianceCascadesDescriptor) in
+            try probe.presentModelInstances(
+                vertexShaderPath: directory.appendingPathComponent(
+                    "production_model.vert.\(self.platformShaderExtension)"
+                ).path,
+                animatedVertexShaderPath: directory.appendingPathComponent(
+                    "production_animated_model.vert.\(self.platformShaderExtension)"
+                ).path,
+                fastShadowVertexShaderPath: directory.appendingPathComponent(
+                    "production_shadow_fast.vert.\(self.platformShaderExtension)"
+                ).path,
+                fastShadowFragmentShaderPath: directory.appendingPathComponent(
+                    "production_shadow_fast.frag.\(self.platformShaderExtension)"
+                ).path,
+                shadowVertexShaderPath: directory.appendingPathComponent(
+                    "production_shadow.vert.\(self.platformShaderExtension)"
+                ).path,
+                animatedShadowVertexShaderPath: directory.appendingPathComponent(
+                    "production_animated_shadow.vert.\(self.platformShaderExtension)"
+                ).path,
+                shadowFragmentShaderPath: directory.appendingPathComponent(
+                    "production_shadow.frag.\(self.platformShaderExtension)"
+                ).path,
+                fragmentShaderPath: directory.appendingPathComponent(
+                    "production_model.frag.\(self.platformShaderExtension)"
+                ).path,
+                unshadowedFragmentShaderPath: directory.appendingPathComponent(
+                    "production_model_unshadowed.frag.\(self.platformShaderExtension)"
+                ).path,
+                postVertexShaderPath: directory.appendingPathComponent(
+                    "production_post.vert.\(self.platformShaderExtension)"
+                ).path,
+                postFragmentShaderPath: directory.appendingPathComponent(
+                    "production_post.frag.\(self.platformShaderExtension)"
+                ).path,
+                shaderFormat: self.platformShaderFormat,
+                renderSize: size,
+                viewProjection: [
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    0, 0, 0, 1,
+                ],
+                cameraRight: .right,
+                cameraUp: .up,
+                cameraPosition: .init(x: 0, y: 0, z: -3),
+                lighting: .init(
+                    ambientColor: .white,
+                    ambientEnergy: 0.25,
+                    directionalDirection: .down,
+                    directionalColor: .white,
+                    directionalEnergy: 1,
+                    secondaryDirectionalDirection: .down,
+                    secondaryDirectionalColor: .white,
+                    secondaryDirectionalEnergy: 0
+                ),
+                post: GPUScenePostProbe.default.withRadianceCascades(
+                    radianceCascades
+                ),
+                instances: instances,
+                batches: batches,
+                clearColor: .black
+            )
+        }
+        let finishFrame = {
+            try probe.presentCanvas(
+                vertexShaderPath: shaderDirectory.appendingPathComponent(
+                    "production_canvas.vert.\(self.platformShaderExtension)"
+                ).path,
+                fragmentShaderPath: shaderDirectory.appendingPathComponent(
+                    "production_canvas.frag.\(self.platformShaderExtension)"
+                ).path,
+                texturedFragmentShaderPath: shaderDirectory.appendingPathComponent(
+                    "production_canvas_textured.frag.\(self.platformShaderExtension)"
+                ).path,
+                shaderFormat: self.platformShaderFormat,
+                vertices: [],
+                batches: [],
+                passes: [.init(
+                    firstBatch: 0,
+                    batchCount: 0,
+                    target: nil,
+                    clearColor: nil,
+                    screenClearToken: nil
+                )]
+            )
+        }
+
+        let offReport = try present(
+            shaderDirectory,
+            .init(width: 320, height: 180),
+            .off
+        )
+        XCTAssertEqual(offReport.radianceCascadesStatus.activeTier, .off)
+        XCTAssertEqual(
+            offReport.radianceCascadesStatus.fallbackReason,
+            .disabled
+        )
+        XCTAssertEqual(
+            offReport.radianceCascadesStatus.internalSize,
+            .init(width: 0, height: 0)
+        )
+        XCTAssertEqual(
+            offReport.radianceCascadesStatus.cpuEncodeMilliseconds,
+            0
+        )
+        try finishFrame()
+
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.copyItem(
+            at: shaderDirectory,
+            to: temporaryDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        try FileManager.default.removeItem(
+            at: temporaryDirectory.appendingPathComponent(
+                "production_rc_merge.comp.\(platformShaderExtension)"
+            )
+        )
+        let fallbackReport = try present(
+            temporaryDirectory,
+            .init(width: 256, height: 144),
+            .init(
+                tier: .low,
+                debugView: .fallbackReason,
+                invalidate: true
+            )
+        )
+        XCTAssertEqual(fallbackReport.radianceCascadesStatus.activeTier, .off)
+        XCTAssertEqual(
+            fallbackReport.radianceCascadesStatus.fallbackReason,
+            .shaderUnavailable
+        )
+        XCTAssertGreaterThan(
+            fallbackReport.radianceCascadesStatus.cpuEncodeMilliseconds,
+            0
+        )
+        try finishFrame()
+
+        let lowReport = try present(
+            shaderDirectory,
+            .init(width: 320, height: 180),
+            .init(tier: .low, invalidate: true)
+        )
+        XCTAssertEqual(lowReport.radianceCascadesStatus.activeTier, .low)
+        XCTAssertEqual(lowReport.radianceCascadesStatus.fallbackReason, .none)
+        XCTAssertEqual(
+            lowReport.radianceCascadesStatus.internalSize,
+            .init(width: 80, height: 48)
+        )
+        XCTAssertGreaterThan(
+            lowReport.radianceCascadesStatus.cpuEncodeMilliseconds,
+            0
+        )
+        try finishFrame()
+
+        let hrcField = RadianceCascadesOcclusionCascade(
+            originWorldXZ: .init(x: -128, y: -128),
+            cellSize: 1,
+            width: 256,
+            height: 256,
+            revision: 1,
+            samples: Array(repeating: [1_000 as Float, 0], count: 256 * 256)
+                .flatMap { $0 }
+        )
+        let holographicReport = try present(
+            shaderDirectory,
+            .init(width: 320, height: 180),
+            .init(
+                tier: .low,
+                backend: .holographic,
+                occlusionCascades: [hrcField],
+                invalidate: true
+            )
+        )
+        XCTAssertEqual(
+            holographicReport.radianceCascadesStatus.requestedBackend,
+            .holographic
+        )
+        XCTAssertEqual(
+            holographicReport.radianceCascadesStatus.activeBackend,
+            .holographic
+        )
+        XCTAssertEqual(
+            holographicReport.radianceCascadesStatus.fallbackReason,
+            .none
+        )
+        XCTAssertGreaterThan(
+            holographicReport.radianceCascadesStatus.cpuEncodeMilliseconds,
+            0
+        )
+        let hrcPasses =
+            holographicReport.radianceCascadesStatus.passTelemetry
+        XCTAssertGreaterThanOrEqual(hrcPasses.cpuPrepareMilliseconds, 0)
+        XCTAssertGreaterThanOrEqual(
+            hrcPasses.cpuPipelinePrepareMilliseconds,
+            0
+        )
+        XCTAssertGreaterThanOrEqual(
+            hrcPasses.cpuResourcePrepareMilliseconds,
+            0
+        )
+        XCTAssertGreaterThan(hrcPasses.traceDispatchCount, 0)
+        XCTAssertGreaterThan(hrcPasses.mergeUpDispatchCount, 0)
+        XCTAssertGreaterThan(hrcPasses.mergeDownDispatchCount, 0)
+        XCTAssertEqual(hrcPasses.finishDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.blurDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.resolveDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.composeDrawCount, 1)
+        try finishFrame()
+
+        let resizedReport = try present(
+            shaderDirectory,
+            .init(width: 256, height: 144),
+            .init(tier: .low)
+        )
+        XCTAssertEqual(
+            resizedReport.radianceCascadesStatus.internalSize,
+            .init(width: 64, height: 40)
+        )
+        XCTAssertGreaterThan(
+            resizedReport.radianceCascadesStatus.generation,
+            lowReport.radianceCascadesStatus.generation
+        )
+        try finishFrame()
+
+        let invalidConfigurationReport = try present(
+            shaderDirectory,
+            .init(width: 256, height: 144),
+            .init(tier: .low, indirectIntensity: 2.1)
+        )
+        XCTAssertEqual(
+            invalidConfigurationReport.radianceCascadesStatus.activeTier,
+            .off
+        )
+        XCTAssertEqual(
+            invalidConfigurationReport.radianceCascadesStatus.fallbackReason,
+            .invalidConfiguration
+        )
+        try finishFrame()
+
+        let recoveredConfigurationReport = try present(
+            shaderDirectory,
+            .init(width: 256, height: 144),
+            .init(tier: .low)
+        )
+        XCTAssertEqual(
+            recoveredConfigurationReport.radianceCascadesStatus.activeTier,
+            .low
+        )
+        XCTAssertEqual(
+            recoveredConfigurationReport.radianceCascadesStatus.fallbackReason,
+            .none
+        )
+        XCTAssertGreaterThan(
+            recoveredConfigurationReport.radianceCascadesStatus.generation,
+            invalidConfigurationReport.radianceCascadesStatus.generation
+        )
+        try finishFrame()
+
+        let validEmitter = RadianceEmitter(
+            position: .zero,
+            color: .white,
+            energy: 1,
+            radius: 1
+        )
+        let manyEmitters = Array(repeating: validEmitter, count: 10_000)
+        let manyEmitterReport = try present(
+            shaderDirectory,
+            .init(width: 256, height: 144),
+            .init(tier: .low, emitters: manyEmitters)
+        )
+        XCTAssertEqual(
+            manyEmitterReport.radianceCascadesStatus.activeTier,
+            .low
+        )
+        XCTAssertEqual(
+            manyEmitterReport.radianceCascadesStatus.fallbackReason,
+            .none
+        )
+        try finishFrame()
+
+        var automaticReport = resizedReport
+        for _ in 0..<24 {
+            automaticReport = try present(
+                shaderDirectory,
+                .init(width: 256, height: 144),
+                .init(
+                    tier: .auto,
+                    autoFrameBudgetMilliseconds: 1_000
+                )
+            )
+            try finishFrame()
+        }
+        XCTAssertEqual(automaticReport.radianceCascadesStatus.activeTier, .low)
+        XCTAssertEqual(automaticReport.radianceCascadesStatus.pendingTier, .high)
+        XCTAssertGreaterThanOrEqual(
+            automaticReport.radianceCascadesStatus.sampleCount,
+            16
+        )
+        let transitionedReport = try present(
+            shaderDirectory,
+            .init(width: 256, height: 144),
+            .init(
+                tier: .auto,
+                autoFrameBudgetMilliseconds: 1_000,
+                allowAutoTransition: true
+            )
+        )
+        XCTAssertEqual(
+            transitionedReport.radianceCascadesStatus.activeTier,
+            .high
+        )
+        XCTAssertEqual(
+            transitionedReport.radianceCascadesStatus.internalSize,
+            .init(width: 256, height: 144)
+        )
+        try finishFrame()
     }
 }

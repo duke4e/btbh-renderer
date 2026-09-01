@@ -3,6 +3,8 @@ SamplerState scene_sampler : register(s0, space2);
 Texture2D<float4> lut_texture : register(t1, space2);
 SamplerState lut_sampler : register(s1, space2);
 
+#include "production_tonemap.hlsli"
+
 cbuffer PostUniforms : register(b0, space3)
 {
     float2 inverse_resolution;
@@ -19,7 +21,8 @@ cbuffer PostUniforms : register(b0, space3)
     uint cas_enabled;
     uint tilt_shift_enabled;
     uint ssao_enabled;
-    float3 ssao_padding;
+    uint tonemap_mode;
+    float2 post_padding;
     float4x4 inverse_view_projection;
     float projection_scale_y;
 };
@@ -40,7 +43,12 @@ float3 grade_lut(float3 color)
     const float lut_size = 64.0f;
     const float tiles_per_row = 8.0f;
     const float texture_size = 512.0f;
-    const float3 raw = saturate(pow(max(color, 0.0f), 1.0f / 2.2f));
+    const float3 prepared = btbh_prepare_lut_input(
+        color,
+        tonemap_mode,
+        tonemap_white
+    );
+    const float3 raw = saturate(pow(max(prepared, 0.0f), 1.0f / 2.2f));
     const float blue_index = raw.b * (lut_size - 1.0f);
     const float lower_index = floor(blue_index);
     const float upper_index = min(lut_size - 1.0f, lower_index + 1.0f);

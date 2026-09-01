@@ -604,12 +604,37 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_animated_shadow.vert|vertex"
         "production_shadow.frag|fragment"
         "production_model.frag|fragment"
+        "production_model_2d_shadows.frag|fragment"
         "production_model_unshadowed.frag|fragment"
         "production_model_unlit.frag|fragment"
+        "production_model_rc.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
+        "production_rc_source.vert|vertex"
+        "production_rc_source.frag|fragment"
+        "production_rc_directional_source.vert|vertex"
+        "production_rc_directional_source.frag|fragment"
+        "production_rc_direct_light.vert|vertex"
+        "production_rc_direct_light.frag|fragment"
+        "production_rc_material_source.vert|vertex"
+        "production_rc_animated_material_source.vert|vertex"
+        "production_rc_material_source.frag|fragment"
+        "production_rc_trace.comp|compute"
+        "production_rc_merge.comp|compute"
+        "production_rc_prefilter.comp|compute"
+        "production_rc_diffuse_cache.comp|compute"
+        "production_rc_resolve.comp|compute"
+        "production_hrc_trace.comp|compute"
+        "production_hrc_merge_up.comp|compute"
+        "production_hrc_merge_down.comp|compute"
+        "production_hrc_reproject.comp|compute"
+        "production_hrc_finish.comp|compute"
+        "production_hrc_blur.comp|compute"
+        "production_hrc_resolve.comp|compute"
+        "production_hrc_reconstruct.comp|compute"
+        "production_rc_compose.frag|fragment"
         "production_lut.frag|fragment"
         "production_cas.frag|fragment"
         "production_tilt_shift.frag|fragment"
@@ -652,7 +677,11 @@ if(BTBH_BUILD_GPU_SPIKE)
             "${_shader_source}"
             "${R3D_ROOT_PATH}/shaders/gpu_spike/production_surface.hlsli"
         )
-        if(_shader_name STREQUAL "production_model_unshadowed.frag")
+        if(
+            _shader_name STREQUAL "production_model_unshadowed.frag" OR
+            _shader_name STREQUAL "production_model_2d_shadows.frag" OR
+            _shader_name STREQUAL "production_model_rc.frag"
+        )
             list(
                 APPEND
                 _shader_dependencies
@@ -665,6 +694,17 @@ if(BTBH_BUILD_GPU_SPIKE)
                 _shader_dependencies
                 "${R3D_ROOT_PATH}/shaders/gpu_spike/production_smaa_common.hlsli"
                 "${R3D_ROOT_PATH}/shaders/external/SMAA.hlsl"
+            )
+        endif()
+        if(
+            _shader_name STREQUAL "production_lut.frag" OR
+            _shader_name STREQUAL "production_post.frag" OR
+            _shader_name STREQUAL "production_tilt_shift.frag"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${R3D_ROOT_PATH}/shaders/gpu_spike/production_tonemap.hlsli"
             )
         endif()
         add_custom_command(
@@ -798,6 +838,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_instance_buffer.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_model.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_phase2_runtime.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_holographic_radiance_cascades.c"
+        "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_radiance_cascades.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_resources.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_scene.c"
         "${R3D_ROOT_PATH}/src/gpu/btbh_gpu_spike_scene.c"
@@ -845,6 +887,22 @@ if(BTBH_BUILD_GPU_SPIKE)
     )
     target_link_libraries(btbh_gpu_contract_test PRIVATE btbh_gpu)
     add_test(NAME btbh_gpu_contract COMMAND btbh_gpu_contract_test)
+
+    add_executable(btbh_gpu_radiance_cascades_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_radiance_cascades_test.c"
+    )
+    target_include_directories(
+        btbh_gpu_radiance_cascades_test
+        PRIVATE "${R3D_ROOT_PATH}/src/gpu"
+    )
+    target_link_libraries(
+        btbh_gpu_radiance_cascades_test
+        PRIVATE btbh_gpu
+    )
+    add_test(
+        NAME btbh_gpu_radiance_cascades
+        COMMAND btbh_gpu_radiance_cascades_test
+    )
 
     add_executable(btbh_gpu_scene_blend_test
         "${R3D_ROOT_PATH}/tests/btbh_gpu_scene_blend_test.c"
@@ -1003,11 +1061,36 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow_fast.vert.json"
             BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_shadow.vert.json"
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
+            BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_2d_shadows.frag.json"
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
+            BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
             BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
             BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"
+            BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.vert.json"
+            BTBH_PRODUCTION_RC_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.frag.json"
+            BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.vert.json"
+            BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.frag.json"
+            BTBH_PRODUCTION_RC_DIRECT_LIGHT_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.vert.json"
+            BTBH_PRODUCTION_RC_DIRECT_LIGHT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.frag.json"
+            BTBH_PRODUCTION_RC_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.vert.json"
+            BTBH_PRODUCTION_RC_ANIMATED_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_animated_material_source.vert.json"
+            BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.frag.json"
+            BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_trace.comp.json"
+            BTBH_PRODUCTION_RC_MERGE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_merge.comp.json"
+            BTBH_PRODUCTION_RC_PREFILTER_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_prefilter.comp.json"
+            BTBH_PRODUCTION_RC_DIFFUSE_CACHE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_diffuse_cache.comp.json"
+            BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_resolve.comp.json"
+            BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_trace.comp.json"
+            BTBH_PRODUCTION_HRC_MERGE_UP_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_up.comp.json"
+            BTBH_PRODUCTION_HRC_MERGE_DOWN_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_down.comp.json"
+            BTBH_PRODUCTION_HRC_REPROJECT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reproject.comp.json"
+            BTBH_PRODUCTION_HRC_FINISH_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_finish.comp.json"
+            BTBH_PRODUCTION_HRC_BLUR_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_blur.comp.json"
+            BTBH_PRODUCTION_HRC_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_resolve.comp.json"
+            BTBH_PRODUCTION_HRC_RECONSTRUCT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reconstruct.comp.json"
+            BTBH_PRODUCTION_RC_COMPOSE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_compose.frag.json"
             BTBH_PRODUCTION_LUT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_lut.frag.json"
             BTBH_PRODUCTION_CAS_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_cas.frag.json"
             BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_tilt_shift.frag.json"

@@ -1,6 +1,8 @@
 Texture2D<float4> scene_texture : register(t0, space2);
 SamplerState scene_sampler : register(s0, space2);
 
+#include "production_tonemap.hlsli"
+
 cbuffer PostUniforms : register(b0, space3)
 {
     float2 inverse_resolution;
@@ -17,7 +19,8 @@ cbuffer PostUniforms : register(b0, space3)
     uint cas_enabled;
     uint tilt_shift_enabled;
     uint ssao_enabled;
-    float3 ssao_padding;
+    uint tonemap_mode;
+    float2 post_padding;
     float4x4 inverse_view_projection;
     float projection_scale_y;
 };
@@ -27,15 +30,6 @@ struct FragmentInput
     float4 position : SV_Position;
     float2 texture_coordinate : TEXCOORD0;
 };
-
-float3 tone_map(float3 color)
-{
-    const float white_squared = tonemap_white * tonemap_white;
-    const float3 white_squared_color = white_squared * color;
-    return
-        (white_squared_color + color * color) /
-        (white_squared_color + white_squared);
-}
 
 float3 linear_to_srgb(float3 color)
 {
@@ -47,7 +41,12 @@ float3 linear_to_srgb(float3 color)
 
 float3 output_color(float3 color, float2 fragment_coordinate)
 {
-    color = linear_to_srgb(tone_map(color));
+    color = linear_to_srgb(btbh_tone_map_for_output(
+        color,
+        tonemap_mode,
+        tonemap_white,
+        lut_enabled
+    ));
     const float noise = frac(
         52.9829189f *
         frac(dot(fragment_coordinate, float2(0.06711056f, 0.00583715f)))

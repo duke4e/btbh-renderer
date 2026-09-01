@@ -10,6 +10,8 @@ Texture2D<float4> ambient_specular_texture : register(t4, space2);
 SamplerState ambient_specular_sampler : register(s4, space2);
 Texture2D<float> ssao_texture : register(t5, space2);
 SamplerState ssao_sampler : register(s5, space2);
+Texture2D<float4> emission_texture : register(t6, space2);
+SamplerState emission_sampler : register(s6, space2);
 
 cbuffer PostUniforms : register(b0, space3)
 {
@@ -27,7 +29,8 @@ cbuffer PostUniforms : register(b0, space3)
     uint cas_enabled;
     uint tilt_shift_enabled;
     uint ssao_enabled;
-    float3 ssao_padding;
+    uint tonemap_mode;
+    float2 post_padding;
     float4x4 inverse_view_projection;
     float projection_scale_y;
 };
@@ -238,17 +241,6 @@ float4 main(FragmentInput input) : SV_Target0
 {
     const float2 uv = input.texture_coordinate;
     const float3 scene = scene_texture.Sample(scene_sampler, uv).rgb;
-    const float4 ambient_diffuse_sample =
-        ambient_texture.Sample(ambient_sampler, uv);
-    const float4 ambient_specular_sample =
-        ambient_specular_texture.Sample(
-            ambient_specular_sampler,
-            uv
-        );
-    const float3 ambient_diffuse =
-        ambient_diffuse_sample.rgb;
-    const float3 ambient_specular =
-        ambient_specular_sample.rgb;
     const int2 full_resolution = int2(
         1.0f / inverse_resolution
     );
@@ -272,10 +264,43 @@ float4 main(FragmentInput input) : SV_Target0
         max(dot(normal, view), 0.0f);
     const float material_occlusion =
         saturate(encoded_normal.w);
-    const float roughness =
-        saturate(ambient_specular_sample.w);
     const float ambient_occlusion =
         depth_aware_upsample(uv);
+    if (ssao_enabled == 2u)
+    {
+        static const float rc_contact_ao_strength = 0.75f;
+        const float3 emission = emission_texture.Sample(
+            emission_sampler,
+            uv
+        ).rgb;
+        const float3 preserved_emission = min(emission, scene);
+        const float3 occludable_lighting = max(
+            scene - emission,
+            0.0f
+        );
+        const float contact_visibility = lerp(
+            1.0f,
+            ambient_occlusion,
+            rc_contact_ao_strength
+        );
+        return float4(
+            preserved_emission + occludable_lighting * contact_visibility,
+            1.0f
+        );
+    }
+    const float4 ambient_diffuse_sample =
+        ambient_texture.Sample(ambient_sampler, uv);
+    const float4 ambient_specular_sample =
+        ambient_specular_texture.Sample(
+            ambient_specular_sampler,
+            uv
+        );
+    const float3 ambient_diffuse =
+        ambient_diffuse_sample.rgb;
+    const float3 ambient_specular =
+        ambient_specular_sample.rgb;
+    const float roughness =
+        saturate(ambient_specular_sample.w);
     const float original_specular_occlusion =
         specular_occlusion(
             normal_dot_view,

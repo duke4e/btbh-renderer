@@ -1284,7 +1284,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             .map(\.value)
             .first {
                 $0.active &&
-                $0.kind == .spot &&
+                ($0.kind == .spot || $0.kind == .omni) &&
                 $0.energy > 0
             }
         return .init(
@@ -1306,9 +1306,13 @@ final class GPUResourceBackend: RenderResourceBackend {
             spotRange: spot?.range ?? 50,
             spotFalloff: 1,
             spotInnerCutoff:
-                GPUSceneLightingProbe.legacySpotInnerCutoff,
+                spot?.kind == .omni
+                    ? -1
+                    : GPUSceneLightingProbe.legacySpotInnerCutoff,
             spotOuterCutoff:
-                GPUSceneLightingProbe.legacySpotOuterCutoff,
+                spot?.kind == .omni
+                    ? -2
+                    : GPUSceneLightingProbe.legacySpotOuterCutoff,
             directionalShadow: Self.directionalShadow(
                 primary,
                 camera: camera,
@@ -1319,7 +1323,12 @@ final class GPUResourceBackend: RenderResourceBackend {
                 camera: camera,
                 aspect: aspect
             ),
-            spotShadow: Self.spotShadow(spot)
+            spotShadow: spot?.kind == .spot
+                ? Self.spotShadow(spot)
+                : .disabled,
+            heroOmniShadow: spot?.kind == .omni
+                ? Self.omniShadow(spot)
+                : .disabled
         )
     }
 
@@ -1398,8 +1407,85 @@ final class GPUResourceBackend: RenderResourceBackend {
                 )
             }
         }
+        let radianceCascades = environment.radianceCascades
+        let sortedLights = lights
+            .sorted { $0.key.rawValue < $1.key.rawValue }
+        let localSlot = sortedLights.first {
+            $0.value.active &&
+            ($0.value.kind == .spot || $0.value.kind == .omni) &&
+            $0.value.energy > 0
+        }
+        let heroOmniHandle: LightHandle? = {
+            guard let localSlot,
+                  localSlot.value.kind == .omni,
+                  localSlot.value.castsShadow,
+                  localSlot.value.range > GPUSceneOmniShadowProbe.nearPlane else {
+                return nil
+            }
+            return localSlot.key
+        }()
+        var heroOmniLightSourceIndex: Int32 = -1
+        var indirectEmitters: [RadianceEmitter] = []
+        indirectEmitters.reserveCapacity(sortedLights.count)
+        for (handle, light) in sortedLights {
+            guard light.active,
+                  light.kind != .directional,
+                  light.indirectEnergy > 0,
+                  light.range > 0 else {
+                continue
+            }
+            if handle == heroOmniHandle {
+                heroOmniLightSourceIndex =
+                    Int32(exactly: indirectEmitters.count) ?? -1
+            }
+            let emitterRadius = light.kind == .spot
+                ? max(light.range * 0.01, 0.25)
+                : max(
+                    light.shadowSoftness,
+                    light.range * 0.02,
+                    0.05
+                )
+            indirectEmitters.append(RadianceEmitter(
+                stableID: handle.rawValue,
+                position: light.position,
+                color: light.color,
+                energy: light.indirectEnergy,
+                // The RC-native direct field stores radiance, while the
+                // public light energy is an engine-space illuminance scale.
+                // Convert once here instead of hiding a gain in the shader.
+                directEnergy: light.kind == .spot ? light.energy * 1.50 : 0,
+                radius: emitterRadius,
+                height: light.kind == .spot
+                    ? light.range
+                    : emitterRadius * 2,
+                lightClass: handle == localSlot?.key ? .hero : .world,
+                direction: light.direction.normalized(),
+                innerCutoff: light.kind == .spot
+                    ? GPUSceneLightingProbe.radianceSpotInnerCutoff
+                    : -1,
+                outerCutoff: light.kind == .spot
+                    ? GPUSceneLightingProbe.radianceSpotOuterCutoff
+                    : -2
+            ))
+        }
+        let mergedEmitters = RadianceEmitterBudgetPolicy.production.applying(
+            to: indirectEmitters + radianceCascades.emitters
+        )
+        let mergedRadianceCascades = RadianceCascadesDescriptor(
+            tier: radianceCascades.tier,
+            backend: radianceCascades.backend,
+            debugView: radianceCascades.debugView,
+            autoFrameBudgetMilliseconds:
+                radianceCascades.autoFrameBudgetMilliseconds,
+            indirectIntensity: radianceCascades.indirectIntensity,
+            emitters: mergedEmitters,
+            occlusionCascades: radianceCascades.occlusionCascades,
+            allowAutoTransition: radianceCascades.allowAutoTransition,
+            invalidate: radianceCascades.invalidate
+        )
         return .init(
             lutTexture: lutTexture,
+            tonemapMode: environment.tonemap,
             tonemapWhite: environment.tonemapWhite,
             casSharpness: chain.casSharpness,
             focusPoint: focusPoint,
@@ -1414,7 +1500,9 @@ final class GPUResourceBackend: RenderResourceBackend {
             tiltShiftEnabled: tiltShiftEnabled,
             ssaoEnabled: environment.ssaoEnabled,
             antiAliasing: antiAliasing,
-            upscaleMode: upscaleMode
+            upscaleMode: upscaleMode,
+            radianceCascades: mergedRadianceCascades,
+            heroOmniLightSourceIndex: heroOmniLightSourceIndex
         )
     }
 
@@ -1583,6 +1671,86 @@ final class GPUResourceBackend: RenderResourceBackend {
             softness: descriptor.shadowSoftness,
             updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
             viewProjection: viewProjection
+        )
+    }
+
+    private static func omniShadow(
+        _ descriptor: LightDescriptor?
+    ) -> GPUSceneOmniShadowProbe {
+        guard let descriptor else { return .disabled }
+        let disabled = GPUSceneOmniShadowProbe(
+            enabled: false,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
+            viewProjections: GPUSceneOmniShadowProbe.disabled.viewProjections
+        )
+        guard descriptor.castsShadow,
+              descriptor.energy > 0,
+              descriptor.range > GPUSceneOmniShadowProbe.nearPlane else {
+            return disabled
+        }
+
+        let directions: [RenderVec3] = [
+            .init(x: 1, y: 0, z: 0),
+            .init(x: -1, y: 0, z: 0),
+            .init(x: 0, y: 1, z: 0),
+            .init(x: 0, y: -1, z: 0),
+            .init(x: 0, y: 0, z: 1),
+            .init(x: 0, y: 0, z: -1),
+        ]
+        let authoredUps: [RenderVec3] = [
+            .init(x: 0, y: -1, z: 0),
+            .init(x: 0, y: -1, z: 0),
+            .init(x: 0, y: 0, z: 1),
+            .init(x: 0, y: 0, z: -1),
+            .init(x: 0, y: -1, z: 0),
+            .init(x: 0, y: -1, z: 0),
+        ]
+        let near = GPUSceneOmniShadowProbe.nearPlane
+        let depthScale = descriptor.range / (descriptor.range - near)
+        let depthBias = -near * depthScale
+        let projection: [Float] = [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, depthScale, 1,
+            0, 0, depthBias, 0,
+        ]
+        var viewProjections: [Float] = []
+        viewProjections.reserveCapacity(
+            GPUSceneOmniShadowProbe.faceCount * 16
+        )
+        for (direction, authoredUp) in zip(directions, authoredUps) {
+            let right = direction.cross(authoredUp).normalized()
+            let up = right.cross(direction).normalized()
+            guard right.lengthSquared > 0, up.lengthSquared > 0 else {
+                return disabled
+            }
+            let position = descriptor.position
+            let view: [Float] = [
+                right.x, up.x, direction.x, 0,
+                right.y, up.y, direction.y, 0,
+                right.z, up.z, direction.z, 0,
+                -position.dot(right),
+                -position.dot(up),
+                -position.dot(direction),
+                1,
+            ]
+            viewProjections.append(
+                contentsOf: multiplyShadowMatrix(projection, view)
+            )
+        }
+        guard viewProjections.count ==
+                GPUSceneOmniShadowProbe.faceCount * 16,
+              viewProjections.allSatisfy(\.isFinite) else {
+            return disabled
+        }
+        return .init(
+            enabled: true,
+            range: descriptor.range,
+            softness: descriptor.shadowSoftness,
+            updatePeriodFrames: descriptor.shadowUpdatePeriodFrames,
+            viewProjections: viewProjections
         )
     }
 
@@ -3157,6 +3325,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             descriptor.direction.z.isFinite,
             descriptor.energy.isFinite,
             descriptor.energy >= 0,
+            descriptor.indirectEnergy.isFinite,
+            descriptor.indirectEnergy >= 0,
             descriptor.range.isFinite,
             descriptor.range >= 0,
             descriptor.shadowSoftness.isFinite,

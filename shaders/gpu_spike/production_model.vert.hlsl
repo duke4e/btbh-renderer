@@ -1,5 +1,9 @@
 #include "production_surface.hlsli"
 
+#ifndef BTBH_RC_SOURCE_PROJECTION
+#define BTBH_RC_SOURCE_PROJECTION 0
+#endif
+
 struct InstanceData
 {
     float4x4 model;
@@ -176,7 +180,19 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     );
 
     VertexOutput output;
+#if BTBH_RC_SOURCE_PROJECTION
+    const float2 source_uv =
+        (world_position.xz - ambient_color_energy.xy) *
+        ambient_color_energy.zw;
+    output.position = float4(
+        source_uv.x * 2.0f - 1.0f,
+        1.0f - source_uv.y * 2.0f,
+        0.0f,
+        1.0f
+    );
+#else
     output.position = mul(view_projection, world_position);
+#endif
     output.color =
         input.color *
         instance.color *

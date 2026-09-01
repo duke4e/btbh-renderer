@@ -352,6 +352,40 @@ static bool btbh_gpu_canvas_validate_passes(
     return expected_first_batch == batch_count;
 }
 
+static void btbh_gpu_window_poll_radiance_cascades_telemetry(
+    BTBHGPUWindow *window
+) {
+    if (window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->frame_telemetry_enabled ||
+        !window->radiance_cascades_telemetry_enabled) {
+        return;
+    }
+    const uint64_t observed_ticks = SDL_GetTicksNS();
+    uint32_t retained_count = 0u;
+    for (uint32_t index = 0u;
+         index < window->frame_telemetry_pending_count;
+         ++index) {
+        BTBHGPUFrameTelemetryPending pending =
+            window->frame_telemetry_pending[index];
+        if (SDL_QueryGPUFence(window->device->gpu, pending.fence)) {
+            const double completion_milliseconds =
+                (double)(observed_ticks - pending.submit_started_ticks) /
+                1000000.0;
+            btbh_gpu_window_scene_record_frame_completion(
+                window,
+                completion_milliseconds
+            );
+            SDL_ReleaseGPUFence(window->device->gpu, pending.fence);
+        } else {
+            window->frame_telemetry_pending[retained_count] = pending;
+            retained_count += 1u;
+        }
+    }
+    window->frame_telemetry_pending_count = retained_count;
+}
+
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
@@ -369,8 +403,16 @@ bool btbh_gpu_window_finish_pending_frame(
     window->pending_drawable_width = 0u;
     window->pending_drawable_height = 0u;
     window->presented_frame_readback_requested = false;
+    if (window->radiance_cascades_telemetry_enabled) {
+        btbh_gpu_window_poll_radiance_cascades_telemetry(window);
+    } else if (!window->frame_telemetry_enabled &&
+               window->frame_telemetry_pending_count > 0u) {
+        btbh_gpu_window_release_frame_telemetry(window);
+    }
     bool result;
-    if (submit && window->frame_telemetry_enabled) {
+    if (submit &&
+        (window->frame_telemetry_enabled ||
+         window->radiance_cascades_telemetry_enabled)) {
         const uint64_t submit_started_ticks = SDL_GetTicksNS();
         SDL_GPUFence *fence =
             SDL_SubmitGPUCommandBufferAndAcquireFence(command);
@@ -498,6 +540,10 @@ uint32_t btbh_gpu_window_poll_frame_telemetry(
                     observed_ticks -
                     pending.submit_started_ticks
                 ) / 1000000.0;
+            btbh_gpu_window_scene_record_frame_completion(
+                window,
+                sample->fence_completion_milliseconds
+            );
             output_count += 1u;
             SDL_ReleaseGPUFence(
                 window->device->gpu,

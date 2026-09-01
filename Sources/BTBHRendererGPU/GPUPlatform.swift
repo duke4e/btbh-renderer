@@ -833,7 +833,7 @@ public final class GPUPlatform: GamePlatform {
             index, report in
             String(
                 format:
-                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu prepared_geometry=%llu animated_geometry=%llu animation_samples=%llu bone_matrices=%llu shadow_pipeline_binds=%llu shadow_pipeline_bind_skips=%llu geometry_pipeline_binds=%llu geometry_pipeline_bind_skips=%llu cpu_encode_ms=%.6f cpu_prepare_ms=%.6f cpu_prepare_setup_ms=%.6f cpu_prepare_bones_ms=%.6f cpu_prepare_bone_count_ms=%.6f cpu_prepare_bone_allocate_ms=%.6f cpu_prepare_bone_sample_ms=%.6f cpu_prepare_pipelines_ms=%.6f cpu_prepare_buffers_ms=%.6f cpu_upload_ms=%.6f cpu_shadow_encode_ms=%.6f cpu_swapchain_acquire_ms=%.6f cpu_target_ensure_ms=%.6f cpu_geometry_encode_ms=%.6f cpu_post_encode_ms=%.6f\n",
+                    "BTBH_GPU_SCENE_ENCODE_TELEMETRY sample=%llu prepared_geometry=%llu animated_geometry=%llu animation_samples=%llu bone_matrices=%llu shadow_pipeline_binds=%llu shadow_pipeline_bind_skips=%llu geometry_pipeline_binds=%llu geometry_pipeline_bind_skips=%llu cpu_encode_ms=%.6f cpu_prepare_ms=%.6f cpu_prepare_setup_ms=%.6f cpu_prepare_bones_ms=%.6f cpu_prepare_bone_count_ms=%.6f cpu_prepare_bone_allocate_ms=%.6f cpu_prepare_bone_sample_ms=%.6f cpu_prepare_pipelines_ms=%.6f cpu_prepare_buffers_ms=%.6f cpu_upload_ms=%.6f cpu_shadow_encode_ms=%.6f cpu_swapchain_acquire_ms=%.6f cpu_target_ensure_ms=%.6f cpu_geometry_encode_ms=%.6f cpu_post_encode_ms=%.6f rc_requested=%llu rc_active=%llu rc_requested_backend=%llu rc_active_backend=%llu rc_pending=%llu rc_fallback=%llu rc_width=%llu rc_height=%llu rc_generation=%llu rc_samples=%llu rc_cpu_encode_ms=%.6f rc_cpu_prepare_ms=%.6f rc_cpu_pipeline_prepare_ms=%.6f rc_cpu_resource_prepare_ms=%.6f hrc_cpu_trace_encode_ms=%.6f hrc_cpu_merge_up_encode_ms=%.6f hrc_cpu_merge_down_encode_ms=%.6f hrc_cpu_reproject_encode_ms=%.6f hrc_cpu_finish_encode_ms=%.6f hrc_cpu_blur_encode_ms=%.6f hrc_cpu_resolve_encode_ms=%.6f hrc_cpu_reconstruct_encode_ms=%.6f hrc_cpu_compose_encode_ms=%.6f hrc_trace_dispatches=%llu hrc_merge_up_dispatches=%llu hrc_merge_down_dispatches=%llu hrc_reproject_dispatches=%llu hrc_finish_dispatches=%llu hrc_blur_dispatches=%llu hrc_resolve_dispatches=%llu hrc_reconstruct_dispatches=%llu hrc_compose_draws=%llu hrc_history_valid=%llu hrc_temporal_phase=%llu hrc_fresh_quadrants=%llu\n",
                 locale: locale,
                 UInt64(index + 1),
                 UInt64(report.preparedGeometryCount),
@@ -858,7 +858,66 @@ public final class GPUPlatform: GamePlatform {
                 report.cpuSwapchainAcquireMilliseconds,
                 report.cpuTargetEnsureMilliseconds,
                 report.cpuGeometryEncodeMilliseconds,
-                report.cpuPostEncodeMilliseconds
+                report.cpuPostEncodeMilliseconds,
+                UInt64(report.radianceCascadesStatus.requestedTier.rawValue),
+                UInt64(report.radianceCascadesStatus.activeTier.rawValue),
+                UInt64(report.radianceCascadesStatus.requestedBackend.rawValue),
+                UInt64(report.radianceCascadesStatus.activeBackend.rawValue),
+                UInt64(report.radianceCascadesStatus.pendingTier.rawValue),
+                UInt64(report.radianceCascadesStatus.fallbackReason.rawValue),
+                UInt64(report.radianceCascadesStatus.internalSize.width),
+                UInt64(report.radianceCascadesStatus.internalSize.height),
+                UInt64(report.radianceCascadesStatus.generation),
+                UInt64(report.radianceCascadesStatus.sampleCount),
+                report.radianceCascadesStatus.cpuEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuPrepareMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuPipelinePrepareMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuResourcePrepareMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuTraceEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuMergeUpEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuMergeDownEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuReprojectEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuFinishEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuBlurEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuResolveEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuReconstructEncodeMilliseconds,
+                report.radianceCascadesStatus.passTelemetry
+                    .cpuComposeEncodeMilliseconds,
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .traceDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .mergeUpDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .mergeDownDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .reprojectDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .finishDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .blurDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .resolveDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .reconstructDispatchCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .composeDrawCount),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .temporalHistoryValid ? 1 : 0),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .temporalPhase),
+                UInt64(report.radianceCascadesStatus.passTelemetry
+                    .freshQuadrantCount)
             )
         }.joined()
         lines += canvasPresentTelemetryMilliseconds.enumerated().map {

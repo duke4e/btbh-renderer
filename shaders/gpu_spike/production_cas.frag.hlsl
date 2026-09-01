@@ -17,7 +17,8 @@ cbuffer PostUniforms : register(b0, space3)
     uint cas_enabled;
     uint tilt_shift_enabled;
     uint ssao_enabled;
-    float3 ssao_padding;
+    uint tonemap_mode;
+    float2 post_padding;
     float4x4 inverse_view_projection;
     float projection_scale_y;
 };
