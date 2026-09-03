@@ -22,9 +22,11 @@ cbuffer PostUniforms : register(b0, space3)
     uint tilt_shift_enabled;
     uint ssao_enabled;
     uint tonemap_mode;
-    float2 post_padding;
+    float exposure;
+    float contrast;
     float4x4 inverse_view_projection;
     float projection_scale_y;
+    float saturation;
 };
 
 struct FragmentInput

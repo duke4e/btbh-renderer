@@ -586,12 +586,18 @@ final class RenderServicesTests: XCTestCase {
             path: "blueprint.png",
             generateMipmaps: true,
             filter: .trilinear,
-            wrap: .repeatMode
+            wrap: .repeatMode,
+            colorSpace: .sRGB
         )
         XCTAssertEqual(textureLoad.path, "blueprint.png")
         XCTAssertTrue(textureLoad.generateMipmaps)
         XCTAssertEqual(textureLoad.filter, .trilinear)
         XCTAssertEqual(textureLoad.wrap, .repeatMode)
+        XCTAssertEqual(textureLoad.colorSpace, .sRGB)
+        XCTAssertEqual(
+            TextureLoadDescriptor(path: "linear.png").colorSpace,
+            .linear
+        )
 
         let font = FontDescriptor(path: "font", baseSize: 16, glyphs: [65])
         XCTAssertEqual(font.path, "font")
@@ -820,7 +826,8 @@ final class RenderServicesTests: XCTestCase {
             backgroundColor: .black, backgroundEnergy: 1,
             ambientColor: .white, ambientEnergy: 2,
             ambientMap: ambientMap, skyCubemap: skyCubemap,
-            ssaoEnabled: true, tonemap: .reinhard, tonemapWhite: 3
+            ssaoEnabled: true, tonemap: .aces, tonemapWhite: 3,
+            exposure: 0.96, contrast: 1.03, saturation: 1.05
         )
         XCTAssertEqual(environment.backgroundColor, .black)
         XCTAssertEqual(environment.backgroundEnergy, 1)
@@ -829,8 +836,11 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(environment.ambientMap, ambientMap)
         XCTAssertEqual(environment.skyCubemap, skyCubemap)
         XCTAssertTrue(environment.ssaoEnabled)
-        XCTAssertEqual(environment.tonemap, .reinhard)
+        XCTAssertEqual(environment.tonemap, .aces)
         XCTAssertEqual(environment.tonemapWhite, 3)
+        XCTAssertEqual(environment.exposure, 0.96)
+        XCTAssertEqual(environment.contrast, 1.03)
+        XCTAssertEqual(environment.saturation, 1.05)
 
         let surface = SurfaceShaderDescriptor(
             vertexPath: "vertex", fragmentPath: "surface", parameters: ["value": .float(1)]
@@ -909,6 +919,9 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertFalse(EnvironmentDescriptor.default.ssaoEnabled)
         XCTAssertEqual(EnvironmentDescriptor.default.tonemap, .reinhard)
         XCTAssertEqual(EnvironmentDescriptor.default.tonemapWhite, 1)
+        XCTAssertEqual(EnvironmentDescriptor.default.exposure, 1)
+        XCTAssertEqual(EnvironmentDescriptor.default.contrast, 1)
+        XCTAssertEqual(EnvironmentDescriptor.default.saturation, 1)
         XCTAssertEqual(PostChainDescriptor.empty.screenShaders, [])
         XCTAssertEqual(PostChainDescriptor.empty.casSharpness, 0)
         XCTAssertFalse(PostChainDescriptor.empty.tiltShiftEnabled)

@@ -101,5 +101,10 @@ float4 main(FragmentInput input) : SV_Target0
     {
         return float4(scene_texture.Sample(scene_sampler, uv).rgb, 1.0f);
     }
-    return float4(indirect.rgb, 1.0f);
+    if (indirect.a < -0.5f)
+    {
+        return float4(scene_texture.Sample(scene_sampler, uv).rgb, 1.0f);
+    }
+    const float3 scene = scene_texture.Sample(scene_sampler, uv).rgb;
+    return float4(max(scene, indirect.rgb), 1.0f);
 }

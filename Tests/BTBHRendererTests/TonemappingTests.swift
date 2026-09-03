@@ -3,9 +3,10 @@ import XCTest
 @testable import BTBHRenderer
 
 final class TonemappingTests: XCTestCase {
-    func testToneMapModesKeepLegacyValueAndExposePBRNeutral() {
+    func testToneMapModesKeepLegacyValuesAndExposeACES() {
         XCTAssertEqual(TonemapMode.reinhard.rawValue, 0)
         XCTAssertEqual(TonemapMode.pbrNeutral.rawValue, 1)
+        XCTAssertEqual(TonemapMode.aces.rawValue, 2)
     }
 
     func testPBRNeutralMapsRepresentativeHDRColorsIntoDisplayRange() {
@@ -67,6 +68,8 @@ final class TonemappingTests: XCTestCase {
         let nativeScene = try source("src/gpu/btbh_gpu_scene.c")
 
         XCTAssertTrue(shared.contains("btbh_pbr_neutral_tone_map"))
+        XCTAssertTrue(shared.contains("btbh_aces_tone_map"))
+        XCTAssertTrue(shared.contains("btbh_apply_color_adjustment"))
         XCTAssertTrue(shared.contains("const float start_compression = 0.8f - 0.04f;"))
         XCTAssertTrue(shared.contains("return lerp(color, new_peak.xxx, desaturation_amount);"))
         XCTAssertTrue(shared.contains("lut_enabled != 0u"))
@@ -77,8 +80,15 @@ final class TonemappingTests: XCTestCase {
         XCTAssertTrue(tilt.contains("#include \"production_tonemap.hlsli\""))
         XCTAssertTrue(tilt.contains("btbh_tone_map_for_output("))
         XCTAssertTrue(nativeHeader.contains("BTBH_GPU_SCENE_TONEMAP_PBR_NEUTRAL = 1"))
+        XCTAssertTrue(nativeHeader.contains("BTBH_GPU_SCENE_TONEMAP_ACES = 2"))
+        XCTAssertTrue(nativeHeader.contains("float exposure;"))
+        XCTAssertTrue(nativeHeader.contains("float contrast;"))
+        XCTAssertTrue(nativeHeader.contains("float saturation;"))
         XCTAssertTrue(nativeHeader.contains("uint8_t tonemap_mode;"))
         XCTAssertTrue(nativeScene.contains("post_uniforms.tonemap_mode = post->tonemap_mode;"))
+        XCTAssertTrue(nativeScene.contains("post_uniforms.exposure = post->exposure;"))
+        XCTAssertTrue(nativeScene.contains("post_uniforms.contrast = post->contrast;"))
+        XCTAssertTrue(nativeScene.contains("post_uniforms.saturation = post->saturation;"))
     }
 
     private func pbrNeutral(_ input: SIMD3<Double>) -> SIMD3<Double> {

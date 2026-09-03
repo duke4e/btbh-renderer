@@ -216,7 +216,11 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     {
         const float duration = max(0.01f, surface_parameters0.x);
         const float time = saturate(instance_custom.y / duration);
-        const float cell_size = max(0.01f, surface_parameters0.y);
+        const float local_scale = max(1.0f, instance_custom.w);
+        const float cell_size = max(
+            0.01f,
+            surface_parameters0.y * local_scale
+        );
         const float2 cell = floor(position.xz / cell_size);
         const float2 cell_hash = btbh_surface_hash22(
             cell +
@@ -231,14 +235,16 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
         const float2 drift =
             float2(cos(direction_angle), sin(direction_angle)) *
             speed *
-            surface_parameters0.w;
+            surface_parameters0.w *
+            local_scale;
         const float spread_time =
             1.0f - (1.0f - time) * (1.0f - time);
         const float drop =
             -0.5f *
             surface_parameters0.z *
             instance_custom.y *
-            instance_custom.y;
+            instance_custom.y *
+            local_scale;
         const float3 offset = float3(
             drift.x * spread_time * instance_custom.y,
             drop,

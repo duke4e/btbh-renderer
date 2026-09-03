@@ -47,6 +47,7 @@ typedef struct BTBHGPUSceneUniforms {
     float camera_up[4];
     float camera_position[4];
     float material_color[4];
+    float uv_transform[4];
     float ambient_color_energy[4];
     float directional_direction_energy[4];
     float directional_color[4];
@@ -125,9 +126,11 @@ typedef struct BTBHGPUPostUniforms {
     uint32_t tilt_shift_enabled;
     uint32_t ssao_enabled;
     uint32_t tonemap_mode;
-    uint32_t post_padding[2];
+    float exposure;
+    float contrast;
     float inverse_view_projection[16];
     float projection_scale_y;
+    float saturation;
 } BTBHGPUPostUniforms;
 
 typedef struct BTBHGPUSceneSMAAUniforms {
@@ -1930,10 +1933,15 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
                 ? "metallib"
                 : "spv";
         char filename[128];
+        const char *rc_fragment_name = !shadows_active
+            ? "production_model_rc_unshadowed.frag.%s"
+            : (omni_shadows_active
+                ? "production_model_rc.frag.%s"
+                : "production_model_rc_2d_shadows.frag.%s");
         (void)snprintf(
             filename,
             sizeof(filename),
-            "production_model_rc.frag.%s",
+            rc_fragment_name,
             extension
         );
         if (!btbh_gpu_scene_sibling_path(
@@ -1983,13 +1991,11 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         selected_fragment_shader_path,
         project_format,
         animated,
-        radiance_cascades_active
-            ? 4u
-            : (fast_unlit
-                ? 2u
-                : (shadows_active
-                    ? (omni_shadows_active ? 9u : 8u)
-                    : 5u)),
+        fast_unlit
+            ? 2u
+            : (shadows_active
+                ? (omni_shadows_active ? 9u : 8u)
+                : 5u),
         auxiliary_geometry_outputs,
         batch,
         stencil_variant,
@@ -3160,6 +3166,10 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->occlusion) &&
             isfinite(batch->roughness) &&
             isfinite(batch->metalness) &&
+            isfinite(batch->uv_scale_x) &&
+            isfinite(batch->uv_scale_y) &&
+            isfinite(batch->uv_offset_x) &&
+            isfinite(batch->uv_offset_y) &&
             isfinite(batch->surface_time) &&
             isfinite(batch->surface_parameters0[0]) &&
             isfinite(batch->surface_parameters0[1]) &&
@@ -3665,6 +3675,12 @@ static bool btbh_gpu_scene_post_valid(
     return post != NULL &&
         isfinite(post->tonemap_white) &&
         post->tonemap_white > 0.0f &&
+        isfinite(post->exposure) &&
+        post->exposure >= 0.0f &&
+        isfinite(post->contrast) &&
+        post->contrast >= 0.0f &&
+        isfinite(post->saturation) &&
+        post->saturation >= 0.0f &&
         isfinite(post->cas_sharpness) &&
         post->cas_sharpness >= 0.0f &&
         post->cas_sharpness <= 1.0f &&
@@ -4136,6 +4152,10 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 (float)batch->albedo_blue / 255.0f;
             uniforms.material_color[3] =
                 (float)batch->albedo_alpha / 255.0f;
+            uniforms.uv_transform[0] = batch->uv_scale_x;
+            uniforms.uv_transform[1] = batch->uv_scale_y;
+            uniforms.uv_transform[2] = batch->uv_offset_x;
+            uniforms.uv_transform[3] = batch->uv_offset_y;
             uniforms.ambient_color_energy[0] = origin_x;
             uniforms.ambient_color_energy[1] = origin_z;
             uniforms.ambient_color_energy[2] = inverse_world_width;
@@ -4476,11 +4496,6 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         lighting->secondary_directional_shadow_enabled,
         lighting->spot_shadow_enabled
     };
-    if (radiance_cascades_active) {
-        shadow_enabled[0] = 0u;
-        shadow_enabled[1] = 0u;
-        shadow_enabled[2] = 0u;
-    }
     const bool requested_shadows_active =
         shadow_enabled[0] != 0u ||
         shadow_enabled[1] != 0u ||
@@ -5213,6 +5228,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 (float)batch->albedo_blue / 255.0f;
             uniforms.material_color[3] =
                 (float)batch->albedo_alpha / 255.0f;
+            uniforms.uv_transform[0] = batch->uv_scale_x;
+            uniforms.uv_transform[1] = batch->uv_scale_y;
+            uniforms.uv_transform[2] = batch->uv_offset_x;
+            uniforms.uv_transform[3] = batch->uv_offset_y;
             uniforms.ambient_color_energy[0] =
                 lighting->ambient_red;
             uniforms.ambient_color_energy[1] =
@@ -5633,13 +5652,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 pass,
                 0u,
                 samplers,
-                radiance_cascades_active
-                    ? 4u
-                    : (btbh_gpu_scene_uses_fast_unlit_pipeline(batch)
-                        ? 2u
-                        : (shadows_active
-                            ? (omni_shadows_active ? 9u : 8u)
-                            : 5u))
+                (!radiance_cascades_active &&
+                 btbh_gpu_scene_uses_fast_unlit_pipeline(batch))
+                    ? 2u
+                    : (shadows_active
+                        ? (omni_shadows_active ? 9u : 8u)
+                        : 5u)
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -5836,12 +5854,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             : 1u)
         : 0u;
     post_uniforms.tonemap_mode = post->tonemap_mode;
+    post_uniforms.exposure = post->exposure;
+    post_uniforms.contrast = post->contrast;
     (void)memcpy(
         post_uniforms.inverse_view_projection,
         inverse_view_projection,
         sizeof(post_uniforms.inverse_view_projection)
     );
     post_uniforms.projection_scale_y = projection_scale_y;
+    post_uniforms.saturation = post->saturation;
     SDL_GPUTexture *post_input = radiance_cascades_post_input;
     bool fullscreen_ok = true;
     if (ssao_resolve_active) {

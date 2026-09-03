@@ -70,6 +70,11 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         output_uv,
         0.0f
     );
+    if (center_value.a < -0.5f)
+    {
+        reconstructed_output[dispatch_id.xy] = center_value;
+        return;
+    }
     const float center_confidence = saturate(center_value.a);
     const float3 center_normal = decoded_normal(output_uv);
     const float3 center_position = world_position(output_uv, center_depth);
@@ -107,6 +112,10 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
                 source_uv,
                 0.0f
             );
+            if (source_value.a < -0.5f)
+            {
+                continue;
+            }
             const float3 source_normal = decoded_normal(source_uv);
             const float3 source_position = world_position(
                 source_uv,

@@ -4400,6 +4400,18 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
+    resolve_uniforms.environment_controls[1] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_red * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[2] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_green * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[3] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_blue * lighting->ambient_energy
+            : 0.0f;
     SDL_GPUTextureSamplerBinding resolve_samplers[7];
     SDL_zeroa(resolve_samplers);
     resolve_samplers[0].texture = filtered_quadrant_texture;
@@ -5051,6 +5063,18 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
+    resolve_uniforms.environment_controls[1] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_red * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[2] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_green * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[3] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_blue * lighting->ambient_energy
+            : 0.0f;
     SDL_GPUTextureSamplerBinding resolve_samplers[8];
     SDL_zeroa(resolve_samplers);
     resolve_samplers[0].texture = resolve_cascade_texture;

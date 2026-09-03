@@ -608,6 +608,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_model_unshadowed.frag|fragment"
         "production_model_unlit.frag|fragment"
         "production_model_rc.frag|fragment"
+        "production_model_rc_2d_shadows.frag|fragment"
+        "production_model_rc_unshadowed.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
@@ -680,7 +682,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         if(
             _shader_name STREQUAL "production_model_unshadowed.frag" OR
             _shader_name STREQUAL "production_model_2d_shadows.frag" OR
-            _shader_name STREQUAL "production_model_rc.frag"
+            _shader_name STREQUAL "production_model_rc.frag" OR
+            _shader_name STREQUAL "production_model_rc_2d_shadows.frag" OR
+            _shader_name STREQUAL "production_model_rc_unshadowed.frag"
         )
             list(
                 APPEND
@@ -1065,6 +1069,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
+            BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
+            BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
             BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
             BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"

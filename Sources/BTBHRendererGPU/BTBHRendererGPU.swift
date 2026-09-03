@@ -791,6 +791,8 @@ final class GPUSceneSubmissionScratch {
 struct GPUSceneMaterialProbe: Equatable {
     let albedoTexture: OpaquePointer?
     let albedoColor: RenderColor
+    let uvScale: RenderVec2
+    let uvOffset: RenderVec2
     let normalTexture: OpaquePointer?
     let ormTexture: OpaquePointer?
     let normalScale: Float
@@ -902,6 +904,9 @@ struct GPUScenePostProbe {
         lutTexture: nil,
         tonemapMode: .reinhard,
         tonemapWhite: 1,
+        exposure: 1,
+        contrast: 1,
+        saturation: 1,
         casSharpness: 0,
         focusPoint: .init(x: 0.5, y: 0.55),
         focusDirection: .init(x: 1, y: 0),
@@ -923,6 +928,9 @@ struct GPUScenePostProbe {
     let lutTexture: OpaquePointer?
     let tonemapMode: TonemapMode
     let tonemapWhite: Float
+    let exposure: Float
+    let contrast: Float
+    let saturation: Float
     let casSharpness: Float
     let focusPoint: RenderVec2
     let focusDirection: RenderVec2
@@ -947,6 +955,9 @@ struct GPUScenePostProbe {
             lutTexture: lutTexture,
             tonemapMode: tonemapMode,
             tonemapWhite: tonemapWhite,
+            exposure: exposure,
+            contrast: contrast,
+            saturation: saturation,
             casSharpness: casSharpness,
             focusPoint: focusPoint,
             focusDirection: focusDirection,
@@ -1493,12 +1504,15 @@ public final class GPUWindowProbe {
 
         var report = BTBHGPUTextureReport()
         let texture = descriptor.path.withCString { path in
-            btbh_gpu_window_texture_load(
+            btbh_gpu_window_texture_load_ex(
                 window,
                 path,
                 descriptor.generateMipmaps ? 1 : 0,
                 filter,
                 wrap,
+                descriptor.colorSpace == .sRGB
+                    ? BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB
+                    : BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR,
                 &report
             )
         }
@@ -1631,7 +1645,10 @@ public final class GPUWindowProbe {
         btbh_gpu_font_destroy(font)
     }
 
-    func loadModel(path: String) throws -> GPUModelProbeResource {
+    func loadModel(
+        path: String,
+        flags: ModelImportFlags = []
+    ) throws -> GPUModelProbeResource {
         guard let window, !isShutdown else {
             throw GPUWindowProbeError.operationFailed(
                 operation: "loadModel",
@@ -1641,9 +1658,10 @@ public final class GPUWindowProbe {
         }
         var report = BTBHGPUModelReport()
         let model = path.withCString { pathPointer in
-            btbh_gpu_window_model_load(
+            btbh_gpu_window_model_load_ex(
                 window,
                 pathPointer,
+                flags.rawValue,
                 &report
             )
         }
@@ -1765,6 +1783,8 @@ public final class GPUWindowProbe {
                     b: info.albedo_blue,
                     a: info.albedo_alpha
                 ),
+                uvScale: .init(x: 1, y: 1),
+                uvOffset: .zero,
                 normalTexture: info.normal_texture,
                 ormTexture: info.orm_texture,
                 normalScale: info.normal_scale,
@@ -2167,6 +2187,9 @@ public final class GPUWindowProbe {
         nativePost.lut_texture = post.lutTexture
         nativePost.tonemap_mode = post.tonemapMode.rawValue
         nativePost.tonemap_white = post.tonemapWhite
+        nativePost.exposure = post.exposure
+        nativePost.contrast = post.contrast
+        nativePost.saturation = post.saturation
         nativePost.cas_sharpness = post.casSharpness
         nativePost.focus_point_x = post.focusPoint.x
         nativePost.focus_point_y = post.focusPoint.y
@@ -2436,6 +2459,10 @@ public final class GPUWindowProbe {
             nativeBatch.albedo_green = linearAlbedo.g
             nativeBatch.albedo_blue = linearAlbedo.b
             nativeBatch.albedo_alpha = linearAlbedo.a
+            nativeBatch.uv_scale_x = material?.uvScale.x ?? 1
+            nativeBatch.uv_scale_y = material?.uvScale.y ?? 1
+            nativeBatch.uv_offset_x = material?.uvOffset.x ?? 0
+            nativeBatch.uv_offset_y = material?.uvOffset.y ?? 0
             nativeBatch.normal_texture = material?.normalTexture
             nativeBatch.orm_texture = material?.ormTexture
             nativeBatch.normal_scale = material?.normalScale ?? 1
@@ -2877,6 +2904,9 @@ public final class GPUWindowProbe {
     ) -> Bool {
         let scalarFieldsValid = [
             post.tonemapWhite,
+            post.exposure,
+            post.contrast,
+            post.saturation,
             post.casSharpness,
             post.focusPoint.x,
             post.focusPoint.y,
@@ -2889,6 +2919,9 @@ public final class GPUWindowProbe {
             post.highlightGain,
         ].allSatisfy(\.isFinite) &&
         post.tonemapWhite > 0 &&
+        post.exposure >= 0 &&
+        post.contrast >= 0 &&
+        post.saturation >= 0 &&
         post.casSharpness >= 0 &&
         post.casSharpness <= 1 &&
         post.focusHalfWidth >= 0 &&

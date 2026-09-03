@@ -205,10 +205,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
     if (any(field_cell < 0.0f) ||
         any(field_cell >= float2(field_dimensions)))
     {
-        indirect_output[dispatch_id.xy] = float4(
-            emission,
-            unlit_material ? 1.0f : 0.0f
-        );
+        indirect_output[dispatch_id.xy] = float4(emission, -1.0f);
         return;
     }
     const float4 encoded_normal = normal_texture.SampleLevel(
@@ -296,10 +293,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         normal_dot_view,
         f0
     );
-    const float3 environment_diffuse =
+    const float3 environment_irradiance =
         evaluate_irradiance_sh(normal) *
-        environment_controls.x *
-        sky_visibility *
+            environment_controls.x *
+            sky_visibility +
+        environment_controls.yzw;
+    const float3 environment_diffuse =
+        environment_irradiance *
         (1.0f - environment_fresnel) *
         (1.0f - metalness) *
         albedo;

@@ -994,13 +994,12 @@ final class GPUResourceBackend: RenderResourceBackend {
         flags: ModelImportFlags
     ) throws -> ModelHandle {
         trace("loadModel path=\(path)")
-        _ = flags
         guard let modelHandles else {
             throw GPUModelProbeError.operationFailed(
                 message: "Could not allocate the GPU model handle pool"
             )
         }
-        let resource = try platform.loadModel(path: path)
+        let resource = try platform.loadModel(path: path, flags: flags)
         let handle: ModelHandle
         do {
             handle = try modelHandles.acquire(ModelHandle.self)
@@ -1080,6 +1079,8 @@ final class GPUResourceBackend: RenderResourceBackend {
         var material = GPUSceneMaterialProbe(
             albedoTexture: texture,
             albedoColor: descriptor.albedoColor,
+            uvScale: descriptor.uvScale,
+            uvOffset: descriptor.uvOffset,
             normalTexture: normalTexture,
             ormTexture: ormTexture,
             normalScale: descriptor.normalScale,
@@ -1203,6 +1204,8 @@ final class GPUResourceBackend: RenderResourceBackend {
                     albedoTexture: texture ?? base.albedoTexture,
                     albedoColor:
                         patch.albedoColor ?? base.albedoColor,
+                    uvScale: base.uvScale,
+                    uvOffset: base.uvOffset,
                     normalTexture:
                         normalTexture ?? base.normalTexture,
                     ormTexture: ormTexture ?? base.ormTexture,
@@ -1487,6 +1490,9 @@ final class GPUResourceBackend: RenderResourceBackend {
             lutTexture: lutTexture,
             tonemapMode: environment.tonemap,
             tonemapWhite: environment.tonemapWhite,
+            exposure: environment.exposure,
+            contrast: environment.contrast,
+            saturation: environment.saturation,
             casSharpness: chain.casSharpness,
             focusPoint: focusPoint,
             focusDirection: focusDirection,

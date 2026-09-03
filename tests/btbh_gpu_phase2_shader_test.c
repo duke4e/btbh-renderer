@@ -50,6 +50,12 @@
 #ifndef BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_SSAO_REFLECTION_PATH
 #error "BTBH_PRODUCTION_SSAO_REFLECTION_PATH must be defined"
 #endif
@@ -283,7 +289,15 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 4"
+            "\"samplers\": 9"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 8"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 5"
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH,

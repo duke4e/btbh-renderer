@@ -1,5 +1,6 @@
 static const uint BTBH_TONEMAP_REINHARD = 0u;
 static const uint BTBH_TONEMAP_PBR_NEUTRAL = 1u;
+static const uint BTBH_TONEMAP_ACES = 2u;
 
 float3 btbh_reinhard_tone_map(float3 color, float white_point)
 {
@@ -41,25 +42,77 @@ float3 btbh_pbr_neutral_tone_map(float3 input_color)
     return lerp(color, new_peak.xxx, desaturation_amount);
 }
 
+// Narkowicz's fitted ACES curve, matching the compact ACES presentation
+// mode used by the legacy R3D backend.
+float3 btbh_aces_tone_map(float3 color)
+{
+    const float a = 2.51f;
+    const float b = 0.03f;
+    const float c = 2.43f;
+    const float d = 0.59f;
+    const float e = 0.14f;
+    return saturate((color * (a * color + b)) /
+        (color * (c * color + d) + e));
+}
+
+float3 btbh_apply_color_adjustment(
+    float3 color,
+    float contrast,
+    float saturation
+)
+{
+    color = (color - 0.5f) * contrast + 0.5f;
+    const float luminance = dot(
+        color,
+        float3(0.2126f, 0.7152f, 0.0722f)
+    );
+    return saturate(lerp(luminance.xxx, color, saturation));
+}
+
 float3 btbh_tone_map(
     float3 color,
     uint tonemap_mode,
-    float white_point
+    float white_point,
+    float exposure,
+    float contrast,
+    float saturation
 )
 {
-    return tonemap_mode == BTBH_TONEMAP_PBR_NEUTRAL
-        ? btbh_pbr_neutral_tone_map(color)
-        : btbh_reinhard_tone_map(color, white_point);
+    color = max(color * exposure, 0.0f);
+    float3 mapped;
+    if (tonemap_mode == BTBH_TONEMAP_PBR_NEUTRAL)
+    {
+        mapped = btbh_pbr_neutral_tone_map(color);
+    }
+    else if (tonemap_mode == BTBH_TONEMAP_ACES)
+    {
+        mapped = btbh_aces_tone_map(color);
+    }
+    else
+    {
+        mapped = btbh_reinhard_tone_map(color, white_point);
+    }
+    return btbh_apply_color_adjustment(mapped, contrast, saturation);
 }
 
 float3 btbh_prepare_lut_input(
     float3 color,
     uint tonemap_mode,
-    float white_point
+    float white_point,
+    float exposure,
+    float contrast,
+    float saturation
 )
 {
-    return tonemap_mode == BTBH_TONEMAP_PBR_NEUTRAL
-        ? btbh_tone_map(color, tonemap_mode, white_point)
+    return tonemap_mode != BTBH_TONEMAP_REINHARD
+        ? btbh_tone_map(
+            color,
+            tonemap_mode,
+            white_point,
+            exposure,
+            contrast,
+            saturation
+        )
         : color;
 }
 
@@ -67,12 +120,22 @@ float3 btbh_tone_map_for_output(
     float3 color,
     uint tonemap_mode,
     float white_point,
-    uint lut_enabled
+    uint lut_enabled,
+    float exposure,
+    float contrast,
+    float saturation
 )
 {
-    if (tonemap_mode == BTBH_TONEMAP_PBR_NEUTRAL && lut_enabled != 0u)
+    if (tonemap_mode != BTBH_TONEMAP_REINHARD && lut_enabled != 0u)
     {
         return saturate(color);
     }
-    return btbh_tone_map(color, tonemap_mode, white_point);
+    return btbh_tone_map(
+        color,
+        tonemap_mode,
+        white_point,
+        exposure,
+        contrast,
+        saturation
+    );
 }

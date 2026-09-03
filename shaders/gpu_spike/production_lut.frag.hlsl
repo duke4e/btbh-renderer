@@ -22,9 +22,11 @@ cbuffer PostUniforms : register(b0, space3)
     uint tilt_shift_enabled;
     uint ssao_enabled;
     uint tonemap_mode;
-    float2 post_padding;
+    float exposure;
+    float contrast;
     float4x4 inverse_view_projection;
     float projection_scale_y;
+    float saturation;
 };
 
 struct FragmentInput
@@ -46,7 +48,10 @@ float3 grade_lut(float3 color)
     const float3 prepared = btbh_prepare_lut_input(
         color,
         tonemap_mode,
-        tonemap_white
+        tonemap_white,
+        exposure,
+        contrast,
+        saturation
     );
     const float3 raw = saturate(pow(max(prepared, 0.0f), 1.0f / 2.2f));
     const float blue_index = raw.b * (lut_size - 1.0f);
