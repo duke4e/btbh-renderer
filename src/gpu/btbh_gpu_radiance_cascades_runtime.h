@@ -42,6 +42,7 @@ typedef struct BTBHGPUSceneRadianceCascadesRuntime {
     SDL_GPUTexture *source_field_texture;
     SDL_GPUTexture *directional_source_texture;
     SDL_GPUTexture *direct_light_texture;
+    SDL_GPUTexture *fallback_cube_texture;
     uint32_t source_field_width;
     uint32_t source_field_height;
     BTBHGPUSceneRadianceCascadesProfile profile;

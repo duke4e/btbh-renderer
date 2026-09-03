@@ -122,6 +122,36 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertEqual(telemetry.freshQuadrantCount, 0)
     }
 
+    func testFallbackDebugBindsCompleteComposeSamplerSet() throws {
+        let repositoryRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_radiance_cascades.c"
+            ),
+            encoding: .utf8
+        )
+        let functionStart = try XCTUnwrap(source.range(
+            of: "bool btbh_gpu_radiance_cascades_runtime_encode_fallback_debug("
+        ))
+        let functionEnd = try XCTUnwrap(source.range(
+            of: "\nbool btbh_gpu_radiance_cascades_runtime_encode(",
+            range: functionStart.upperBound..<source.endIndex
+        ))
+        let function = source[
+            functionStart.lowerBound..<functionEnd.lowerBound
+        ]
+
+        XCTAssertTrue(function.contains(
+            "SDL_GPUTextureSamplerBinding samplers[8];"
+        ))
+        XCTAssertTrue(function.contains(
+            "SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 8u);"
+        ))
+    }
+
     func testHolographicTemporalHistoryIsBoundedAndRejectedByOpacity() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -348,7 +378,11 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertFalse(trace.contains("direct_and_emissive"))
         XCTAssertTrue(unlit.contains("output.emission = float4(emission"))
         XCTAssertFalse(sourceVertex.contains("cone_end_half_width"))
-        XCTAssertTrue(sourceFragment.contains("clip(-1.0f)"))
+        XCTAssertTrue(sourceFragment.contains("if (is_spot)"))
+        XCTAssertTrue(sourceFragment.contains(
+            "return float4(0.0f, 0.0f, 0.0f, 0.0f);"
+        ))
+        XCTAssertFalse(sourceFragment.contains("clip(-1.0f)"))
         XCTAssertTrue(directionalSourceVertex.contains("emitter_index"))
         XCTAssertTrue(directionalSourceVertex.contains("direction_index"))
         XCTAssertTrue(directionalSourceVertex.contains("inner_cutoff"))

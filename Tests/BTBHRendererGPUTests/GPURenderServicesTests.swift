@@ -1853,6 +1853,55 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertFalse(RenderServices.platform.shouldClose)
     }
 
+    func testSystemScaleCanvasReachesRetinaDrawableBottomRight() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU Retina canvas integration",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .system
+        ))
+
+        let logical = RenderServices.platform.logicalSize
+        let drawable = RenderServices.platform.drawableSize
+        guard drawable.width > logical.width,
+              drawable.height > logical.height else {
+            throw XCTSkip("The active display does not expose a high-density drawable")
+        }
+
+        RenderServices.canvas.requestPresentedFrameReadback()
+        RenderServices.canvas.beginFrame()
+        RenderServices.canvas.submit(.clear(.black))
+        RenderServices.canvas.submit(.fillRect(.init(
+            rect: .init(
+                x: Float(logical.width - 40),
+                y: Float(logical.height - 40),
+                width: 40,
+                height: 40
+            ),
+            color: .white
+        )))
+        RenderServices.canvas.endFrame()
+
+        let readback = try RenderServices.canvas.readbackPresentedFrame()
+        XCTAssertEqual(readback.size, drawable)
+        let sampleX = drawable.width - 10
+        let sampleY = drawable.height - 10
+        let offset = (sampleY * drawable.width + sampleX) * 4
+        XCTAssertEqual(
+            Array(readback.rgba8[offset..<(offset + 4)]),
+            [255, 255, 255, 255]
+        )
+    }
+
     func testCanvasRoundedRectClosesTopFanSegment() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }

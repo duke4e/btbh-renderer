@@ -25,7 +25,7 @@
 #define BTBH_GPU_SCENE_TRANSPARENCY_COUNT 2u
 #define BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT 2u
 #define BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT 3u
-#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 3u
+#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u
 #define BTBH_GPU_SCENE_SMAA_QUALITY_COUNT 2u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_MAX 3u
@@ -1817,9 +1817,9 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     const uint32_t fast_unlit =
         !radiance_cascades_active &&
         btbh_gpu_scene_uses_fast_unlit_pipeline(batch) ? 1u : 0u;
-    const uint32_t color_target_variant = radiance_cascades_active
-        ? 2u
-        : (auxiliary_geometry_outputs ? 1u : 0u);
+    const uint32_t color_target_variant =
+        (radiance_cascades_active ? 2u : 0u) +
+        (auxiliary_geometry_outputs ? 1u : 0u);
     if (shadows_active) {
         if (!omni_shadows_active) {
             return animated
@@ -4050,6 +4050,11 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
         origin_x = config->occlusion_cascades[0].origin_world_x;
         origin_z = config->occlusion_cascades[0].origin_world_z;
         cell_size = config->occlusion_cascades[0].cell_size;
+    } else {
+        origin_x = -0.5f *
+            (float)runtime->radiance_cascades.source_field_width;
+        origin_z = -0.5f *
+            (float)runtime->radiance_cascades.source_field_height;
     }
     const float inverse_world_width = 1.0f /
         ((float)runtime->radiance_cascades.source_field_width * cell_size);
@@ -4479,7 +4484,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     if (radiance_cascades_active) {
         shadow_enabled[0] = 0u;
         shadow_enabled[1] = 0u;
-        shadow_enabled[2] = 0u;
+        if (lighting->spot_shadow_is_omni == 0u ||
+            post->radiance_cascades.hero_omni_emitter_index < 0) {
+            shadow_enabled[2] = 0u;
+        }
     }
     const bool requested_shadows_active =
         shadow_enabled[0] != 0u ||

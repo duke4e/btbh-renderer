@@ -697,6 +697,16 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         if(
+            _shader_name STREQUAL "production_rc_resolve.comp" OR
+            _shader_name STREQUAL "production_hrc_resolve.comp"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${R3D_ROOT_PATH}/shaders/gpu_spike/production_rc_omni_shadow.hlsli"
+            )
+        endif()
+        if(
             _shader_name STREQUAL "production_lut.frag" OR
             _shader_name STREQUAL "production_post.frag" OR
             _shader_name STREQUAL "production_tilt_shift.frag"

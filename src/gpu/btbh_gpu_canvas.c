@@ -352,6 +352,67 @@ static bool btbh_gpu_canvas_validate_passes(
     return expected_first_batch == batch_count;
 }
 
+static int btbh_gpu_canvas_scale_screen_edge(
+    int64_t coordinate,
+    uint32_t logical_extent,
+    uint32_t drawable_extent,
+    bool round_up
+) {
+    if (coordinate <= 0 || logical_extent == 0u) {
+        return 0;
+    }
+    if ((uint64_t)coordinate >= logical_extent) {
+        return (int)drawable_extent;
+    }
+    const uint64_t numerator =
+        (uint64_t)coordinate * drawable_extent;
+    const uint64_t scaled = round_up
+        ? (numerator + logical_extent - 1u) / logical_extent
+        : numerator / logical_extent;
+    return (int)scaled;
+}
+
+static SDL_Rect btbh_gpu_canvas_scale_screen_scissor(
+    const BTBHGPUCanvasBatch *batch,
+    uint32_t logical_width,
+    uint32_t logical_height,
+    uint32_t drawable_width,
+    uint32_t drawable_height
+) {
+    const int64_t right =
+        (int64_t)batch->scissor_x + batch->scissor_width;
+    const int64_t bottom =
+        (int64_t)batch->scissor_y + batch->scissor_height;
+    SDL_Rect result;
+    result.x = btbh_gpu_canvas_scale_screen_edge(
+        batch->scissor_x,
+        logical_width,
+        drawable_width,
+        false
+    );
+    result.y = btbh_gpu_canvas_scale_screen_edge(
+        batch->scissor_y,
+        logical_height,
+        drawable_height,
+        false
+    );
+    const int scaled_right = btbh_gpu_canvas_scale_screen_edge(
+        right,
+        logical_width,
+        drawable_width,
+        true
+    );
+    const int scaled_bottom = btbh_gpu_canvas_scale_screen_edge(
+        bottom,
+        logical_height,
+        drawable_height,
+        true
+    );
+    result.w = scaled_right - result.x;
+    result.h = scaled_bottom - result.y;
+    return result;
+}
+
 static void btbh_gpu_window_poll_radiance_cascades_telemetry(
     BTBHGPUWindow *window
 ) {
@@ -1106,6 +1167,20 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         return report->result;
     }
 
+    int logical_width_value = 0;
+    int logical_height_value = 0;
+    const bool logical_size_available = SDL_GetWindowSize(
+        window->window,
+        &logical_width_value,
+        &logical_height_value
+    ) && logical_width_value > 0 && logical_height_value > 0;
+    const uint32_t logical_width = logical_size_available
+        ? (uint32_t)logical_width_value
+        : window->pending_drawable_width;
+    const uint32_t logical_height = logical_size_available
+        ? (uint32_t)logical_height_value
+        : window->pending_drawable_height;
+
     const uint32_t byte_count =
         vertex_count * (uint32_t)sizeof(*vertices);
     if (!btbh_gpu_canvas_ensure_upload_buffers(window, byte_count)) {
@@ -1179,6 +1254,10 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         const uint32_t target_height = is_screen
             ? window->pending_drawable_height
             : canvas_pass->target->height;
+        const uint32_t projection_width =
+            is_screen ? logical_width : target_width;
+        const uint32_t projection_height =
+            is_screen ? logical_height : target_height;
         SDL_GPUColorTargetInfo color_target;
         SDL_zero(color_target);
         color_target.texture = target_texture;
@@ -1218,8 +1297,8 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             return report->result;
         }
         const float uniforms[4] = {
-            (float)target_width,
-            (float)target_height,
+            (float)projection_width,
+            (float)projection_height,
             0.0f,
             0.0f
         };
@@ -1269,15 +1348,28 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             }
             SDL_Rect scissor;
             if (batch->scissor_enabled != 0u) {
-                scissor.x = batch->scissor_x;
-                scissor.y = batch->scissor_y;
-                scissor.w = batch->scissor_width;
-                scissor.h = batch->scissor_height;
+                if (is_screen) {
+                    scissor = btbh_gpu_canvas_scale_screen_scissor(
+                        batch,
+                        logical_width,
+                        logical_height,
+                        target_width,
+                        target_height
+                    );
+                } else {
+                    scissor.x = batch->scissor_x;
+                    scissor.y = batch->scissor_y;
+                    scissor.w = batch->scissor_width;
+                    scissor.h = batch->scissor_height;
+                }
             } else {
                 scissor.x = 0;
                 scissor.y = 0;
                 scissor.w = (int)target_width;
                 scissor.h = (int)target_height;
+            }
+            if (scissor.w <= 0 || scissor.h <= 0) {
+                continue;
             }
             if (!has_bound_scissor ||
                 scissor.x != bound_scissor.x ||

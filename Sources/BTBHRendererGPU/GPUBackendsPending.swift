@@ -1269,9 +1269,10 @@ final class GPUResourceBackend: RenderResourceBackend {
             }
             projectedEnvironment = ambient.environment
         }
-        let directionals = lights
+        let sortedLights: [LightDescriptor] = lights
             .sorted { $0.key.rawValue < $1.key.rawValue }
             .map(\.value)
+        let directionals: [LightDescriptor] = sortedLights
             .filter {
                 $0.active &&
                 $0.kind == .directional &&
@@ -1279,15 +1280,30 @@ final class GPUResourceBackend: RenderResourceBackend {
             }
         let primary = directionals.first
         let secondary = directionals.dropFirst().first
-        let spot = lights
-            .sorted { $0.key.rawValue < $1.key.rawValue }
-            .map(\.value)
+        let spot: LightDescriptor? = sortedLights
             .first {
                 $0.active &&
                 ($0.kind == .spot || $0.kind == .omni) &&
                 $0.energy > 0
             }
-        return .init(
+        let spotIsOmni = spot?.kind == .omni
+        let directionalShadow = Self.directionalShadow(
+            primary,
+            camera: camera,
+            aspect: aspect
+        )
+        let secondaryDirectionalShadow = Self.directionalShadow(
+            secondary,
+            camera: camera,
+            aspect: aspect
+        )
+        let spotShadow = spot?.kind == .spot
+            ? Self.spotShadow(spot)
+            : .disabled
+        let heroOmniShadow = spotIsOmni
+            ? Self.omniShadow(spot)
+            : .disabled
+        return GPUSceneLightingProbe(
             ambientColor: environment.ambientColor,
             ambientEnergy: environment.ambientEnergy,
             environment: projectedEnvironment,
@@ -1305,30 +1321,16 @@ final class GPUResourceBackend: RenderResourceBackend {
             spotEnergy: spot?.energy ?? 0,
             spotRange: spot?.range ?? 50,
             spotFalloff: 1,
-            spotInnerCutoff:
-                spot?.kind == .omni
-                    ? -1
-                    : GPUSceneLightingProbe.legacySpotInnerCutoff,
-            spotOuterCutoff:
-                spot?.kind == .omni
-                    ? -2
-                    : GPUSceneLightingProbe.legacySpotOuterCutoff,
-            directionalShadow: Self.directionalShadow(
-                primary,
-                camera: camera,
-                aspect: aspect
-            ),
-            secondaryDirectionalShadow: Self.directionalShadow(
-                secondary,
-                camera: camera,
-                aspect: aspect
-            ),
-            spotShadow: spot?.kind == .spot
-                ? Self.spotShadow(spot)
-                : .disabled,
-            heroOmniShadow: spot?.kind == .omni
-                ? Self.omniShadow(spot)
-                : .disabled
+            spotInnerCutoff: spotIsOmni
+                ? -1
+                : GPUSceneLightingProbe.legacySpotInnerCutoff,
+            spotOuterCutoff: spotIsOmni
+                ? -2
+                : GPUSceneLightingProbe.legacySpotOuterCutoff,
+            directionalShadow: directionalShadow,
+            secondaryDirectionalShadow: secondaryDirectionalShadow,
+            spotShadow: spotShadow,
+            heroOmniShadow: heroOmniShadow
         )
     }
 
@@ -1456,7 +1458,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                 directEnergy: light.kind == .spot ? light.energy * 1.50 : 0,
                 radius: emitterRadius,
                 height: light.kind == .spot
-                    ? light.range
+                    ? light.range * 0.65
                     : emitterRadius * 2,
                 lightClass: handle == localSlot?.key ? .hero : .world,
                 direction: light.direction.normalized(),

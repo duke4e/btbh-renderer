@@ -14,6 +14,8 @@ Texture2D<float4> emission_texture : register(t6, space0);
 SamplerState emission_sampler : register(s6, space0);
 Texture2D<float4> direct_light_texture : register(t7, space0);
 SamplerState direct_light_sampler : register(s7, space0);
+TextureCube<float> hero_omni_shadow_texture : register(t8, space0);
+SamplerState hero_omni_shadow_sampler : register(s8, space0);
 RWTexture2D<float4> indirect_output : register(u0, space1);
 
 cbuffer RadianceResolveUniforms : register(b0, space2)
@@ -37,7 +39,11 @@ cbuffer RadianceResolveUniforms : register(b0, space2)
     uint padding1;
     float4 irradiance_sh[9];
     float4 environment_controls;
+    float4 hero_omni_shadow_position_range;
+    float4 hero_omni_shadow_controls;
 };
+
+#include "production_rc_omni_shadow.hlsli"
 
 static const float pi = 3.14159265359f;
 
@@ -453,10 +459,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
             roughness
         ) *
         specular_occlusion(normal_dot_view, occlusion, roughness);
+    const float hero_omni_visibility =
+        rc_hero_omni_visibility(position, normal);
     indirect_output[dispatch_id.xy] = float4(
         emission +
             direct_diffuse * occlusion +
-            reflected_radiance * occlusion * indirect_strength +
+            reflected_radiance * occlusion * indirect_strength *
+                hero_omni_visibility +
             environment_diffuse * occlusion +
             environment_specular,
         confidence / max(response_sum, 0.00001f)

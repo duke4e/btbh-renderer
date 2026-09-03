@@ -32,7 +32,10 @@ var rendererTargets: [Target] = [
             .unsafeFlags(
                 ["-fno-implicit-module-maps"],
                 .when(platforms: [.macOS])
-            )
+            ),
+            // Keep assertions and debug symbols, but do not run cgltf/stb_image
+            // at -O0 while the game imports its startup model set.
+            .unsafeFlags(["-O"], .when(configuration: .debug))
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),

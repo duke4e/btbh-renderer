@@ -19,8 +19,10 @@ float4 main(FragmentInput input) : SV_Target0
     if (is_spot)
     {
         // Spots are emitted only into the angular source atlas. Keeping them
-        // out of the isotropic field prevents a symmetric halo at the source.
-        clip(-1.0f);
+        // out of this additive isotropic field prevents a symmetric halo at
+        // the source. A zero contribution also keeps generated MSL control
+        // flow fully initialized after SPIR-V optimization.
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
     else if (input.shape == 0u)
     {

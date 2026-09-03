@@ -179,18 +179,6 @@ float4 trace_display_segment(float2 start, float2 end)
         const float2 field_cell = display_position / float(linear_scale);
         const float2 uv =
             (field_cell + 0.5f) / float2(field_dimensions);
-        const float4 source = source_field_texture.SampleLevel(
-            source_field_sampler,
-            uv,
-            0.0f
-        );
-        const float4 directed_source = directional_source(uv, angle);
-        if (source.a > 0.001f || directed_source.a > 0.001f)
-        {
-            radiance = source.rgb + directed_source.rgb;
-            transmittance = 0.0f;
-            break;
-        }
         const float2 field = occlusion_texture.SampleLevel(
             occlusion_sampler,
             uv,
@@ -203,6 +191,18 @@ float4 trace_display_segment(float2 start, float2 end)
         if (field.x <= origin_cell.z * 0.55f &&
             field.y > ray_height + origin_cell.z * 0.25f)
         {
+            transmittance = 0.0f;
+            break;
+        }
+        const float4 source = source_field_texture.SampleLevel(
+            source_field_sampler,
+            uv,
+            0.0f
+        );
+        const float4 directed_source = directional_source(uv, angle);
+        if (source.a > 0.001f || directed_source.a > 0.001f)
+        {
+            radiance = source.rgb + directed_source.rgb;
             transmittance = 0.0f;
             break;
         }

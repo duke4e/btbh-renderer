@@ -383,7 +383,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH,
-            "\"samplers\": 8"
+            "\"samplers\": 9"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH,
@@ -419,7 +419,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_RESOLVE_REFLECTION_PATH,
-            "\"samplers\": 7"
+            "\"samplers\": 8"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_RESOLVE_REFLECTION_PATH,

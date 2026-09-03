@@ -28,6 +28,52 @@ final class GPUWindowProbeTests: XCTestCase {
         }
     }
 
+    func testRadianceCascadesPipelineCacheSeparatesAttachmentLayouts()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(source.contains(
+            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u"
+        ))
+        XCTAssertTrue(source.contains(
+            "(radiance_cascades_active ? 2u : 0u) +\n" +
+                "        (auxiliary_geometry_outputs ? 1u : 0u)"
+        ))
+    }
+
+    func testNativeCanvasProjectsScreenCommandsInLogicalWindowSpace()
+        throws
+    {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_canvas.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(source.contains("SDL_GetWindowSize("))
+        XCTAssertTrue(source.contains(
+            "is_screen ? logical_width : target_width"
+        ))
+        XCTAssertTrue(source.contains(
+            "btbh_gpu_canvas_scale_screen_scissor("
+        ))
+    }
+
     func testCanvasBatchCoalescingRequiresExactAdjacentPassState() {
         let texture = OpaquePointer(bitPattern: 0x100)!
         let otherTexture = OpaquePointer(bitPattern: 0x200)!
@@ -992,20 +1038,18 @@ final class GPUWindowProbeTests: XCTestCase {
         ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(nativeScene.contains(
-            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 2u"
+            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u"
         ))
         XCTAssertTrue(nativeScene.contains(
             "info.target_info.num_color_targets =\n" +
-                "        ssao_enabled ? 5u : 1u;"
+                "        auxiliary_geometry_outputs ? 5u : 1u;"
         ))
         XCTAssertTrue(nativeScene.contains(
             "const uint32_t color_target_count =\n" +
                 "        auxiliary_geometry_outputs ? 5u : 1u;"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "command,\n" +
-                "        color_targets,\n" +
-                "        color_target_count,"
+            "transparent_phase ? 1u : color_target_count,"
         ))
     }
 
@@ -1179,7 +1223,7 @@ final class GPUWindowProbeTests: XCTestCase {
             "(width + 1u) / 2u"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "SDL_GPUTextureSamplerBinding resolve_samplers[6];"
+            "SDL_GPUTextureSamplerBinding resolve_samplers[7];"
         ))
     }
 
@@ -3542,8 +3586,10 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertGreaterThan(hrcPasses.mergeUpDispatchCount, 0)
         XCTAssertGreaterThan(hrcPasses.mergeDownDispatchCount, 0)
         XCTAssertEqual(hrcPasses.finishDispatchCount, 1)
-        XCTAssertEqual(hrcPasses.blurDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.reprojectDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.blurDispatchCount, 0)
         XCTAssertEqual(hrcPasses.resolveDispatchCount, 1)
+        XCTAssertEqual(hrcPasses.reconstructDispatchCount, 1)
         XCTAssertEqual(hrcPasses.composeDrawCount, 1)
         try finishFrame()
 

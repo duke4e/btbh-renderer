@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#define BTBH_GPU_RC_COMPATIBILITY_FIELD_SIZE 64u
+
 #define BTBH_GPU_RC_MODEL_VERTEX_STRIDE 96u
 #define BTBH_GPU_RC_MODEL_COLOR_OFFSET 48u
 #define BTBH_GPU_RC_MODEL_JOINTS_OFFSET 64u
@@ -847,6 +849,8 @@ typedef struct BTBHGPUSceneRadianceResolveUniforms {
     uint32_t padding1;
     float irradiance_sh[9][4];
     float environment_controls[4];
+    float hero_omni_shadow_position_range[4];
+    float hero_omni_shadow_controls[4];
 } BTBHGPUSceneRadianceResolveUniforms;
 
 typedef struct BTBHGPUHRCTraceUniforms {
@@ -944,6 +948,8 @@ typedef struct BTBHGPUHRCResolveUniforms {
     uint32_t padding1[2];
     float irradiance_sh[9][4];
     float environment_controls[4];
+    float hero_omni_shadow_position_range[4];
+    float hero_omni_shadow_controls[4];
 } BTBHGPUHRCResolveUniforms;
 
 typedef struct BTBHGPUHRCReconstructUniforms {
@@ -1009,7 +1015,7 @@ _Static_assert(
     "RC resolve inverse view-projection offset must match shader layout"
 );
 _Static_assert(
-    sizeof(BTBHGPUSceneRadianceResolveUniforms) == 336u,
+    sizeof(BTBHGPUSceneRadianceResolveUniforms) == 368u,
     "RC resolve uniform block must match shader layout"
 );
 _Static_assert(sizeof(BTBHGPUHRCTraceUniforms) == 176u,
@@ -1024,7 +1030,7 @@ _Static_assert(sizeof(BTBHGPUHRCFinishUniforms) == 176u,
     "HRC finish uniform block must match shader layout");
 _Static_assert(sizeof(BTBHGPUHRCBlurUniforms) == 16u,
     "HRC blur uniform block must match shader layout");
-_Static_assert(sizeof(BTBHGPUHRCResolveUniforms) == 304u,
+_Static_assert(sizeof(BTBHGPUHRCResolveUniforms) == 336u,
     "HRC resolve uniform block must match shader layout");
 _Static_assert(sizeof(BTBHGPUHRCReconstructUniforms) == 96u,
     "HRC reconstruct uniform block must match shader layout");
@@ -1523,6 +1529,22 @@ static SDL_GPUTexture *btbh_gpu_radiance_cascades_create_texture(
     return SDL_CreateGPUTexture(device, &info);
 }
 
+static SDL_GPUTexture *btbh_gpu_radiance_cascades_create_fallback_cube(
+    SDL_GPUDevice *device
+) {
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_CUBE;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = 1u;
+    info.height = 1u;
+    info.layer_count_or_depth = 6u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    return SDL_CreateGPUTexture(device, &info);
+}
+
 static bool btbh_gpu_radiance_cascades_prepare_occlusion_upload(
     SDL_GPUDevice *device,
     BTBHGPUSceneRadianceCascadesRuntime *runtime,
@@ -1848,6 +1870,10 @@ static void btbh_gpu_radiance_cascades_release_resources(
     if (runtime->direct_light_texture != NULL) {
         SDL_ReleaseGPUTexture(device, runtime->direct_light_texture);
         runtime->direct_light_texture = NULL;
+    }
+    if (runtime->fallback_cube_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->fallback_cube_texture);
+        runtime->fallback_cube_texture = NULL;
     }
     if (runtime->prefiltered_cascade_texture != NULL) {
         SDL_ReleaseGPUTexture(
@@ -2484,7 +2510,7 @@ static bool btbh_gpu_radiance_cascades_ensure_pipelines(
             device,
             path,
             shader_format,
-            8u,
+            9u,
             &shader_loaded,
             message,
             message_capacity
@@ -2532,7 +2558,7 @@ static bool btbh_gpu_radiance_cascades_ensure_hrc_pipelines(
         "production_hrc_reconstruct.comp"
     };
     static const uint32_t sampler_counts[] = {
-        3u, 1u, 3u, 3u, 4u, 1u, 7u, 3u
+        3u, 1u, 3u, 3u, 4u, 1u, 8u, 3u
     };
     const char *extension =
         shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB
@@ -2688,6 +2714,7 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
         runtime->source_field_texture != NULL &&
         runtime->directional_source_texture != NULL &&
         runtime->direct_light_texture != NULL &&
+        runtime->fallback_cube_texture != NULL &&
         (!angular_prefilter_enabled ||
          runtime->prefiltered_cascade_texture != NULL) &&
         (!diffuse_cache_enabled ||
@@ -2779,6 +2806,8 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
             direct_light_width,
             direct_light_height
         );
+    runtime->fallback_cube_texture =
+        btbh_gpu_radiance_cascades_create_fallback_cube(device);
     if (!holographic) {
         for (uint32_t index = 0u;
              index < cascade_count;
@@ -2884,6 +2913,7 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
     if (runtime->source_field_texture == NULL ||
         runtime->directional_source_texture == NULL ||
         runtime->direct_light_texture == NULL ||
+        runtime->fallback_cube_texture == NULL ||
         runtime->indirect_texture == NULL ||
         (holographic &&
          runtime->hrc_reconstructed_texture == NULL) ||
@@ -3115,11 +3145,11 @@ bool btbh_gpu_radiance_cascades_runtime_prepare(
     const uint32_t source_field_width =
         config->occlusion_cascade_count > 0u
             ? config->occlusion_cascades[0].width
-            : 1u;
+            : BTBH_GPU_RC_COMPATIBILITY_FIELD_SIZE;
     const uint32_t source_field_height =
         config->occlusion_cascade_count > 0u
             ? config->occlusion_cascades[0].height
-            : 1u;
+            : BTBH_GPU_RC_COMPATIBILITY_FIELD_SIZE;
     BTBHGPUSceneRadianceCascadesBackend active_backend = config->backend;
     BTBHGPUHolographicRadianceCascadesLayout hrc_layout;
     (void)memset(&hrc_layout, 0, sizeof(hrc_layout));
@@ -3535,6 +3565,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
             uniforms.origin_cell[2] = field->cell_size;
             uniforms.origin_cell[3] = 1.0f / field->cell_size;
         } else {
+            uniforms.origin_cell[0] =
+                -0.5f * (float)runtime->source_field_width;
+            uniforms.origin_cell[1] =
+                -0.5f * (float)runtime->source_field_height;
             uniforms.origin_cell[2] = 1.0f;
             uniforms.origin_cell[3] = 1.0f;
         }
@@ -3599,6 +3633,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
             uniforms.origin_cell[2] = field->cell_size;
             uniforms.origin_cell[3] = 1.0f / field->cell_size;
         } else {
+            uniforms.origin_cell[0] =
+                -0.5f * (float)runtime->source_field_width;
+            uniforms.origin_cell[1] =
+                -0.5f * (float)runtime->source_field_height;
             uniforms.origin_cell[2] = 1.0f;
             uniforms.origin_cell[3] = 1.0f;
         }
@@ -3662,6 +3700,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
             uniforms.origin_cell[2] = field->cell_size;
             uniforms.origin_cell[3] = 1.0f / field->cell_size;
         } else {
+            uniforms.origin_cell[0] =
+                -0.5f * (float)runtime->source_field_width;
+            uniforms.origin_cell[1] =
+                -0.5f * (float)runtime->source_field_height;
             uniforms.origin_cell[2] = 1.0f;
             uniforms.origin_cell[3] = 1.0f;
         }
@@ -3971,6 +4013,10 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     SDL_GPUTexture *emission_texture,
     SDL_GPUTexture *normal_texture,
     SDL_GPUTexture *depth_texture,
+    SDL_GPUTexture *hero_omni_shadow_texture,
+    const float hero_omni_shadow_position_range[4],
+    float hero_omni_shadow_near,
+    float hero_omni_shadow_softness,
     float field_origin_x,
     float field_origin_z,
     float field_cell_size,
@@ -4400,7 +4446,19 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
-    SDL_GPUTextureSamplerBinding resolve_samplers[7];
+    (void)memcpy(
+        resolve_uniforms.hero_omni_shadow_position_range,
+        hero_omni_shadow_position_range,
+        sizeof(resolve_uniforms.hero_omni_shadow_position_range)
+    );
+    resolve_uniforms.hero_omni_shadow_controls[0] =
+        hero_omni_shadow_near;
+    resolve_uniforms.hero_omni_shadow_controls[1] =
+        hero_omni_shadow_softness;
+    resolve_uniforms.hero_omni_shadow_controls[2] =
+        hero_omni_shadow_texture != NULL &&
+        config->hero_omni_emitter_index >= 0 ? 1.0f : 0.0f;
+    SDL_GPUTextureSamplerBinding resolve_samplers[8];
     SDL_zeroa(resolve_samplers);
     resolve_samplers[0].texture = filtered_quadrant_texture;
     resolve_samplers[1].texture = depth_texture;
@@ -4409,7 +4467,10 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     resolve_samplers[4].texture = ambient_specular_texture;
     resolve_samplers[5].texture = emission_texture;
     resolve_samplers[6].texture = runtime->direct_light_texture;
-    for (uint32_t index = 0u; index < 7u; ++index) {
+    resolve_samplers[7].texture = hero_omni_shadow_texture != NULL
+        ? hero_omni_shadow_texture
+        : runtime->fallback_cube_texture;
+    for (uint32_t index = 0u; index < 8u; ++index) {
         resolve_samplers[index].sampler = runtime->sampler;
     }
     SDL_InsertGPUDebugLabel(command, "BTBH HRC Four-quadrant Resolve");
@@ -4419,7 +4480,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
             runtime->hrc_resolve_pipeline,
             runtime->indirect_texture,
             resolve_samplers,
-            7u,
+            8u,
             &resolve_uniforms,
             (uint32_t)sizeof(resolve_uniforms),
             runtime->internal_width,
@@ -4569,13 +4630,13 @@ bool btbh_gpu_radiance_cascades_runtime_encode_fallback_debug(
         return false;
     }
     SDL_BindGPUGraphicsPipeline(pass, runtime->compose_pipeline);
-    SDL_GPUTextureSamplerBinding samplers[7];
+    SDL_GPUTextureSamplerBinding samplers[8];
     SDL_zeroa(samplers);
-    for (uint32_t index = 0u; index < 7u; ++index) {
+    for (uint32_t index = 0u; index < 8u; ++index) {
         samplers[index].texture = scene_texture;
         samplers[index].sampler = runtime->sampler;
     }
-    SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 7u);
+    SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 8u);
     BTBHGPUSceneRadianceCascadesComposeUniforms uniforms;
     uniforms.debug_view = BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON;
     uniforms.fallback_reason =
@@ -4612,13 +4673,11 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     float hero_omni_shadow_softness,
     SDL_GPUTexture **composed_texture
 ) {
-    (void)hero_omni_shadow_texture;
-    (void)hero_omni_shadow_position_range;
-    (void)hero_omni_shadow_near;
-    (void)hero_omni_shadow_softness;
     if (command == NULL || runtime == NULL || config == NULL ||
         lighting == NULL ||
-        inverse_view_projection == NULL || composed_texture == NULL ||
+        inverse_view_projection == NULL ||
+        hero_omni_shadow_position_range == NULL ||
+        composed_texture == NULL ||
         scene_texture == NULL || ambient_texture == NULL ||
         ambient_specular_texture == NULL || emission_texture == NULL ||
         normal_texture == NULL || depth_texture == NULL ||
@@ -4637,10 +4696,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
             : NULL;
     const float field_origin_x = field != NULL
         ? field->origin_world_x
-        : 0.0f;
+        : -0.5f * (float)runtime->source_field_width;
     const float field_origin_z = field != NULL
         ? field->origin_world_z
-        : 0.0f;
+        : -0.5f * (float)runtime->source_field_height;
     const float field_cell_size = field != NULL ? field->cell_size : 1.0f;
 
     if (runtime->state.active_backend ==
@@ -4657,6 +4716,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
             emission_texture,
             normal_texture,
             depth_texture,
+            hero_omni_shadow_texture,
+            hero_omni_shadow_position_range,
+            hero_omni_shadow_near,
+            hero_omni_shadow_softness,
             field_origin_x,
             field_origin_z,
             field_cell_size,
@@ -5051,7 +5114,19 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
-    SDL_GPUTextureSamplerBinding resolve_samplers[8];
+    (void)memcpy(
+        resolve_uniforms.hero_omni_shadow_position_range,
+        hero_omni_shadow_position_range,
+        sizeof(resolve_uniforms.hero_omni_shadow_position_range)
+    );
+    resolve_uniforms.hero_omni_shadow_controls[0] =
+        hero_omni_shadow_near;
+    resolve_uniforms.hero_omni_shadow_controls[1] =
+        hero_omni_shadow_softness;
+    resolve_uniforms.hero_omni_shadow_controls[2] =
+        hero_omni_shadow_texture != NULL &&
+        config->hero_omni_emitter_index >= 0 ? 1.0f : 0.0f;
+    SDL_GPUTextureSamplerBinding resolve_samplers[9];
     SDL_zeroa(resolve_samplers);
     resolve_samplers[0].texture = resolve_cascade_texture;
     resolve_samplers[1].texture = runtime->diffuse_cache_texture != NULL
@@ -5063,7 +5138,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     resolve_samplers[5].texture = ambient_specular_texture;
     resolve_samplers[6].texture = emission_texture;
     resolve_samplers[7].texture = runtime->direct_light_texture;
-    for (uint32_t index = 0u; index < 8u; ++index) {
+    resolve_samplers[8].texture = hero_omni_shadow_texture != NULL
+        ? hero_omni_shadow_texture
+        : runtime->fallback_cube_texture;
+    for (uint32_t index = 0u; index < 9u; ++index) {
         resolve_samplers[index].sampler = runtime->sampler;
     }
     SDL_InsertGPUDebugLabel(command, "BTBH RC Directional Resolve");
@@ -5072,7 +5150,7 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
             runtime->resolve_pipeline,
             runtime->indirect_texture,
             resolve_samplers,
-            8u,
+            9u,
             &resolve_uniforms,
             (uint32_t)sizeof(resolve_uniforms),
             runtime->internal_width,
