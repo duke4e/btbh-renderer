@@ -212,6 +212,11 @@ typedef enum BTBHGPUTextureWrap {
     BTBH_GPU_TEXTURE_WRAP_MIRROR = 2
 } BTBHGPUTextureWrap;
 
+typedef enum BTBHGPUTextureColorSpace {
+    BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR = 0,
+    BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB = 1
+} BTBHGPUTextureColorSpace;
+
 typedef struct BTBHGPUTextureReport {
     BTBHGPUResult result;
     uint32_t width;
@@ -309,6 +314,10 @@ typedef struct BTBHGPUModelReport {
     uint32_t material_count;
     char message[256];
 } BTBHGPUModelReport;
+
+enum {
+    BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES = 1u << 2
+};
 
 typedef struct BTBHGPUModelMaterialInfo {
     BTBHGPUTexture *albedo_texture;
@@ -428,7 +437,8 @@ typedef enum BTBHGPUSceneUpscaleMode {
 typedef enum BTBHGPUSceneTonemapMode {
     BTBH_GPU_SCENE_TONEMAP_REINHARD = 0,
     BTBH_GPU_SCENE_TONEMAP_PBR_NEUTRAL = 1,
-    BTBH_GPU_SCENE_TONEMAP_COUNT = 2
+    BTBH_GPU_SCENE_TONEMAP_ACES = 2,
+    BTBH_GPU_SCENE_TONEMAP_COUNT = 3
 } BTBHGPUSceneTonemapMode;
 
 typedef enum BTBHGPUSceneRadianceCascadesTier {
@@ -592,6 +602,10 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t albedo_green;
     uint8_t albedo_blue;
     uint8_t albedo_alpha;
+    float uv_scale_x;
+    float uv_scale_y;
+    float uv_offset_x;
+    float uv_offset_y;
     BTBHGPUTexture *normal_texture;
     BTBHGPUTexture *orm_texture;
     float normal_scale;
@@ -705,6 +719,9 @@ typedef struct BTBHGPUSceneLighting {
 typedef struct BTBHGPUScenePost {
     BTBHGPUTexture *lut_texture;
     float tonemap_white;
+    float exposure;
+    float contrast;
+    float saturation;
     float cas_sharpness;
     float focus_point_x;
     float focus_point_y;
@@ -869,6 +886,15 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report
 );
+BTBHGPUTexture *btbh_gpu_window_texture_load_ex(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+);
 BTBHGPUTexture *btbh_gpu_window_render_target_create(
     BTBHGPUWindow *window,
     uint32_t width,
@@ -928,6 +954,12 @@ BTBHGPUResult btbh_gpu_write_png_rgba8(
 BTBHGPUModel *btbh_gpu_window_model_load(
     BTBHGPUWindow *window,
     const char *path,
+    BTBHGPUModelReport *report
+);
+BTBHGPUModel *btbh_gpu_window_model_load_ex(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint32_t import_flags,
     BTBHGPUModelReport *report
 );
 int32_t btbh_gpu_model_material_slot(

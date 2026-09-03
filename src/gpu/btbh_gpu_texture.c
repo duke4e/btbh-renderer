@@ -790,13 +790,35 @@ BTBHGPUTexture *btbh_gpu_window_texture_load(
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report
 ) {
+    return btbh_gpu_window_texture_load_ex(
+        window,
+        path,
+        generate_mipmaps,
+        filter,
+        wrap,
+        BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR,
+        report
+    );
+}
+
+BTBHGPUTexture *btbh_gpu_window_texture_load_ex(
+    BTBHGPUWindow *window,
+    const char *path,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+) {
     return btbh_gpu_window_texture_load_format(
         window,
         path,
         generate_mipmaps,
         filter,
         wrap,
-        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        color_space == BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB
+            ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB
+            : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
         report
     );
 }

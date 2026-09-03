@@ -917,6 +917,7 @@ FragmentOutput fragment_output(
 
 #if BTBH_RC_MATERIAL_OUTPUT
 FragmentOutput rc_material_output(
+    float4 lit_color,
     float4 albedo,
     float3 emission,
     float3 normal,
@@ -930,7 +931,7 @@ FragmentOutput rc_material_output(
     const float3 source_emission = unlit
         ? albedo.rgb + emission
         : emission;
-    output.color = float4(albedo.rgb + emission, albedo.a);
+    output.color = lit_color;
     output.ambient = unlit
         ? float4(0.0f, 0.0f, 0.0f, 0.0f)
         : float4(albedo.rgb, metalness);
@@ -1009,19 +1010,20 @@ FragmentOutput main(FragmentInput input)
         saturate(orm.r * material_factors.y);
     const float roughness = saturate(orm.g * material_factors.z);
     const float metalness = saturate(orm.b * material_factors.w);
-#if BTBH_RC_MATERIAL_OUTPUT
-    return rc_material_output(
-        albedo_sample,
-        emission,
-        normal,
-        occlusion,
-        roughness,
-        metalness,
-        unlit_enabled != 0u
-    );
-#endif
     if (unlit_enabled != 0u)
     {
+#if BTBH_RC_MATERIAL_OUTPUT
+        return rc_material_output(
+            float4(albedo_sample.rgb + emission, albedo_sample.a),
+            albedo_sample,
+            emission,
+            normal,
+            1.0f,
+            1.0f,
+            metalness,
+            true
+        );
+#else
         return fragment_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
             emission,
@@ -1031,6 +1033,7 @@ FragmentOutput main(FragmentInput input)
             1.0f,
             1.0f
         );
+#endif
     }
     const float3 view = stable_normalize(
         camera_position.xyz - input.world_position,
@@ -1049,6 +1052,18 @@ FragmentOutput main(FragmentInput input)
         spot_direction_energy.w;
     if (total_energy <= 0.0f)
     {
+#if BTBH_RC_MATERIAL_OUTPUT
+        return rc_material_output(
+            float4(albedo_sample.rgb + emission, albedo_sample.a),
+            albedo_sample,
+            emission,
+            normal,
+            occlusion,
+            roughness,
+            metalness,
+            false
+        );
+#else
         return fragment_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
             emission,
@@ -1058,6 +1073,7 @@ FragmentOutput main(FragmentInput input)
             occlusion,
             roughness
         );
+#endif
     }
 
     const float normal_dot_view =
@@ -1161,6 +1177,18 @@ FragmentOutput main(FragmentInput input)
         1.0f
 #endif
     );
+#if BTBH_RC_MATERIAL_OUTPUT
+    return rc_material_output(
+        float4(lighting + emission, albedo_sample.a),
+        albedo_sample,
+        emission,
+        normal,
+        occlusion,
+        roughness,
+        metalness,
+        false
+    );
+#else
     return fragment_output(
         float4(lighting + emission, albedo_sample.a),
         emission,
@@ -1170,4 +1198,5 @@ FragmentOutput main(FragmentInput input)
         occlusion,
         roughness
     );
+#endif
 }

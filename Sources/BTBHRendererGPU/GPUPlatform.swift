@@ -495,11 +495,14 @@ public final class GPUPlatform: GamePlatform {
         try GPUWindowProbe.fontGlyph(font, codepoint: codepoint)
     }
 
-    func loadModel(path: String) throws -> GPUModelProbeResource {
+    func loadModel(
+        path: String,
+        flags: ModelImportFlags
+    ) throws -> GPUModelProbeResource {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
         }
-        return try window.loadModel(path: path)
+        return try window.loadModel(path: path, flags: flags)
     }
 
     func destroyModel(_ model: OpaquePointer) {

@@ -13,7 +13,7 @@ final class RadianceCascadesTests: XCTestCase {
                 "src/gpu/btbh_gpu_radiance_cascades.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let runtime = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_radiance_cascades_runtime.h"
@@ -58,7 +58,7 @@ final class RadianceCascadesTests: XCTestCase {
                 "src/gpu/btbh_gpu_radiance_cascades.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
         let runtime = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_radiance_cascades_runtime.h"
@@ -428,6 +428,24 @@ final class RadianceCascadesTests: XCTestCase {
             ),
             encoding: .utf8
         )
+        let holographicResolve = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_hrc_resolve.comp.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let holographicReconstruct = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_hrc_reconstruct.comp.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeRadiance = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_radiance_cascades.c"
+            ),
+            encoding: .utf8
+        )
         let merge = try String(
             contentsOf: shaderDirectory.appendingPathComponent(
                 "production_rc_merge.comp.hlsl"
@@ -449,6 +467,30 @@ final class RadianceCascadesTests: XCTestCase {
         let material = try String(
             contentsOf: shaderDirectory.appendingPathComponent(
                 "production_model_rc.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let unshadowedMaterial = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_model_rc_unshadowed.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let twoDimensionalShadowMaterial = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_model_rc_2d_shadows.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let sharedMaterial = try String(
+            contentsOf: shaderDirectory.appendingPathComponent(
+                "production_model.frag.hlsl"
+            ),
+            encoding: .utf8
+        )
+        let nativeScene = try String(
+            contentsOf: repositoryRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
             ),
             encoding: .utf8
         )
@@ -479,6 +521,26 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(compose.contains("directional_source_texture"))
         XCTAssertTrue(resolve.contains("if (debug_view == 10u)"))
         XCTAssertFalse(compose.contains("indirect.rgb * indirect.a"))
+        XCTAssertTrue(resolve.contains("float4(emission, -1.0f)"))
+        XCTAssertTrue(holographicResolve.contains("float4(emission, -1.0f)"))
+        XCTAssertTrue(holographicReconstruct.contains(
+            "if (center_value.a < -0.5f)"
+        ))
+        XCTAssertTrue(holographicReconstruct.contains(
+            "if (source_value.a < -0.5f)"
+        ))
+        XCTAssertTrue(compose.contains("if (indirect.a < -0.5f)"))
+        XCTAssertTrue(compose.contains(
+            "return float4(scene_texture.Sample(scene_sampler, uv).rgb, 1.0f);"
+        ))
+        XCTAssertTrue(resolve.contains("environment_controls.yzw"))
+        XCTAssertTrue(holographicResolve.contains("environment_controls.yzw"))
+        XCTAssertEqual(
+            nativeRadiance.components(
+                separatedBy: "resolve_uniforms.environment_controls[1] ="
+            ).count - 1,
+            2
+        )
         XCTAssertTrue(merge.contains("lower.rgb + lower.a * upper.rgb"))
         XCTAssertTrue(merge.contains("lower.a * upper.a"))
         XCTAssertTrue(merge.contains("filtered_upper_interval"))
@@ -534,13 +596,36 @@ final class RadianceCascadesTests: XCTestCase {
             "reflected_radiance * occlusion"
         ))
         XCTAssertTrue(material.contains("BTBH_RC_MATERIAL_OUTPUT 1"))
+        XCTAssertTrue(material.contains("BTBH_DIRECTIONAL_SHADOWS 1"))
+        XCTAssertTrue(material.contains("BTBH_OMNI_SHADOWS 1"))
+        XCTAssertTrue(unshadowedMaterial.contains("BTBH_DIRECTIONAL_SHADOWS 0"))
+        XCTAssertTrue(unshadowedMaterial.contains("BTBH_OMNI_SHADOWS 0"))
+        XCTAssertTrue(twoDimensionalShadowMaterial.contains(
+            "BTBH_DIRECTIONAL_SHADOWS 1"
+        ))
+        XCTAssertTrue(twoDimensionalShadowMaterial.contains(
+            "BTBH_OMNI_SHADOWS 0"
+        ))
+        XCTAssertTrue(sharedMaterial.contains("float4 lit_color"))
+        XCTAssertTrue(sharedMaterial.contains("output.color = lit_color"))
+        XCTAssertFalse(nativeScene.contains(
+            "if (radiance_cascades_active) {\n" +
+                "        shadow_enabled[0] = 0u;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "production_model_rc_unshadowed.frag.%s"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "production_model_rc_2d_shadows.frag.%s"
+        ))
         XCTAssertTrue(materialSource.contains("emission_texture.Sample"))
         XCTAssertTrue(materialSource.contains("unlit_enabled"))
         XCTAssertFalse(materialSource.contains("depth_texture"))
         XCTAssertFalse(materialSource.contains("scene_texture"))
         XCTAssertTrue(materialSourceVertex.contains("BTBH_RC_SOURCE_PROJECTION 1"))
-        XCTAssertTrue(compose.contains("return float4(indirect.rgb, 1.0f)"))
-        XCTAssertFalse(compose.contains("scene + indirect"))
+        XCTAssertTrue(compose.contains(
+            "return float4(max(scene, indirect.rgb), 1.0f)"
+        ))
         XCTAssertEqual(
             compose.components(separatedBy: "indirect_strength").count - 1,
             1
@@ -663,7 +748,7 @@ final class RadianceCascadesTests: XCTestCase {
                 "src/gpu/btbh_gpu_scene.c"
             ),
             encoding: .utf8
-        )
+        ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(scene.contains("BTBH Opaque Draws"))
         XCTAssertTrue(scene.contains("BTBH Forward Transparent Draws"))

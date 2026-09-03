@@ -759,6 +759,7 @@ static bool btbh_gpu_model_load_gltf_materials(
     BTBHGPUModel *model,
     const cgltf_data *data,
     const char *model_path,
+    bool load_material_textures,
     BTBHGPUModelReport *report
 ) {
     model->materials = calloc(
@@ -807,7 +808,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                 btbh_gpu_model_color_channel(factor[2]);
             destination->albedo_alpha =
                 btbh_gpu_model_color_channel(factor[3]);
-            if (!btbh_gpu_model_load_texture(
+            if (load_material_textures && !btbh_gpu_model_load_texture(
                     model->owner,
                     &source->pbr_metallic_roughness.base_color_texture,
                     model_path,
@@ -818,7 +819,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                 return false;
             }
         }
-        if (!btbh_gpu_model_load_orm_texture(
+        if (load_material_textures && !btbh_gpu_model_load_orm_texture(
                 model->owner,
                 &source->occlusion_texture,
                 &source->pbr_metallic_roughness
@@ -829,7 +830,7 @@ static bool btbh_gpu_model_load_gltf_materials(
             )) {
             return false;
         }
-        if (!btbh_gpu_model_load_texture(
+        if (load_material_textures && !btbh_gpu_model_load_texture(
                     model->owner,
                     &source->normal_texture,
                     model_path,
@@ -839,7 +840,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                 )) {
             return false;
         }
-        if (destination->normal_texture != NULL) {
+        if (source->normal_texture.texture != NULL) {
             destination->normal_scale = source->normal_texture.scale;
         }
         destination->emission_red =
@@ -852,7 +853,7 @@ static bool btbh_gpu_model_load_gltf_materials(
             source->has_emissive_strength
                 ? source->emissive_strength.emissive_strength
                 : 1.0f;
-        if (!btbh_gpu_model_load_texture(
+        if (load_material_textures && !btbh_gpu_model_load_texture(
                 model->owner,
                 &source->emissive_texture,
                 model_path,
@@ -2092,9 +2093,10 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
 }
 #endif
 
-BTBHGPUModel *btbh_gpu_window_model_load(
+BTBHGPUModel *btbh_gpu_window_model_load_ex(
     BTBHGPUWindow *window,
     const char *path,
+    uint32_t import_flags,
     BTBHGPUModelReport *report
 ) {
     if (
@@ -2179,6 +2181,8 @@ BTBHGPUModel *btbh_gpu_window_model_load(
             model,
             data,
             path,
+            (import_flags
+                & BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES) == 0u,
             report
         )) {
         cgltf_free(data);
@@ -2273,6 +2277,14 @@ BTBHGPUModel *btbh_gpu_window_model_load(
     report->mesh_count = model->primitive_count;
     report->material_count = model->material_count;
     return model;
+}
+
+BTBHGPUModel *btbh_gpu_window_model_load(
+    BTBHGPUWindow *window,
+    const char *path,
+    BTBHGPUModelReport *report
+) {
+    return btbh_gpu_window_model_load_ex(window, path, 0u, report);
 }
 
 int32_t btbh_gpu_model_material_slot(

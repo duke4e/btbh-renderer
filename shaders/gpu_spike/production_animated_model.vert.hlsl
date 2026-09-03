@@ -21,6 +21,7 @@ cbuffer SceneUniforms : register(b0, space1)
     float4 camera_up;
     float4 camera_position;
     float4 material_color;
+    float4 uv_transform;
     float4 ambient_color_energy;
     float4 directional_direction_energy;
     float4 directional_color;
@@ -170,12 +171,14 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         input.color *
         instance.color *
         material_color;
-    output.texture_coordinate = float2(
+    const float2 material_uv = float2(
         f16tof32(f32tof16(input.texture_coordinate.x)),
         1.0f - f16tof32(
             f32tof16(1.0f - input.texture_coordinate.y)
         )
     );
+    output.texture_coordinate =
+        material_uv * uv_transform.xy + uv_transform.zw;
     output.world_position = world_position.xyz;
     output.world_normal = world_normal;
     output.world_tangent = world_tangent;

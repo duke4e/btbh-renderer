@@ -4446,6 +4446,18 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
+    resolve_uniforms.environment_controls[1] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_red * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[2] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_green * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[3] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_blue * lighting->ambient_energy
+            : 0.0f;
     (void)memcpy(
         resolve_uniforms.hero_omni_shadow_position_range,
         hero_omni_shadow_position_range,
@@ -5114,6 +5126,18 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     }
     resolve_uniforms.environment_controls[0] =
         lighting->ibl_enabled != 0u ? lighting->ambient_energy : 0.0f;
+    resolve_uniforms.environment_controls[1] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_red * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[2] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_green * lighting->ambient_energy
+            : 0.0f;
+    resolve_uniforms.environment_controls[3] =
+        lighting->ibl_enabled == 0u
+            ? lighting->ambient_blue * lighting->ambient_energy
+            : 0.0f;
     (void)memcpy(
         resolve_uniforms.hero_omni_shadow_position_range,
         hero_omni_shadow_position_range,

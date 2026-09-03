@@ -20,9 +20,11 @@ cbuffer PostUniforms : register(b0, space3)
     uint tilt_shift_enabled;
     uint ssao_enabled;
     uint tonemap_mode;
-    float2 post_padding;
+    float exposure;
+    float contrast;
     float4x4 inverse_view_projection;
     float projection_scale_y;
+    float saturation;
 };
 
 struct FragmentInput
@@ -45,7 +47,10 @@ float3 output_color(float3 color, float2 fragment_coordinate)
         color,
         tonemap_mode,
         tonemap_white,
-        lut_enabled
+        lut_enabled,
+        exposure,
+        contrast,
+        saturation
     ));
     const float noise = frac(
         52.9829189f *

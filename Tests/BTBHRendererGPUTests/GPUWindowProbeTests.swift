@@ -1773,6 +1773,8 @@ final class GPUWindowProbeTests: XCTestCase {
             var result = GPUSceneMaterialProbe(
                 albedoTexture: nil,
                 albedoColor: .white,
+                uvScale: descriptor.uvScale,
+                uvOffset: descriptor.uvOffset,
                 normalTexture: nil,
                 ormTexture: nil,
                 normalScale: 1,
@@ -2548,6 +2550,8 @@ final class GPUWindowProbeTests: XCTestCase {
         descriptor.occlusion = 0.83
         descriptor.roughness = 0.27
         descriptor.metalness = 0.91
+        descriptor.uvScale = .init(x: 0.25, y: 0.5)
+        descriptor.uvOffset = .init(x: 0.375, y: 0.125)
         descriptor.alphaCutoff = 0.37
         descriptor.stencilCompare = .notEqual
         descriptor.stencilReference = 7
@@ -2565,6 +2569,8 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(standalone.occlusion, 0.83, accuracy: 0.0001)
         XCTAssertEqual(standalone.roughness, 0.27, accuracy: 0.0001)
         XCTAssertEqual(standalone.metalness, 0.91, accuracy: 0.0001)
+        XCTAssertEqual(standalone.uvScale, descriptor.uvScale)
+        XCTAssertEqual(standalone.uvOffset, descriptor.uvOffset)
         XCTAssertEqual(standalone.alphaCutoff, 0.37, accuracy: 0.0001)
         XCTAssertEqual(standalone.stencilCompare, .notEqual)
         XCTAssertEqual(standalone.stencilReference, 7)
@@ -2711,6 +2717,44 @@ final class GPUWindowProbeTests: XCTestCase {
             1,
             accuracy: 0.0001
         )
+    }
+
+    func testGLTFImportCanIgnoreMaterialTexturesWithoutLosingFactors() throws {
+        let probe = try GPUWindowProbe(
+            request: .platformDefault,
+            title: "BTBH texture-free imported material",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try probe.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/material-factor-triangle.gltf"
+                )
+                .path,
+            flags: [.ignoreMaterialTextures]
+        )
+        defer { GPUWindowProbe.destroyModel(model.pointer) }
+
+        let material = try XCTUnwrap(model.materials.indices.contains(1)
+            ? model.materials[1]
+            : nil)
+        XCTAssertNil(material.albedoTexture)
+        XCTAssertNil(material.normalTexture)
+        XCTAssertNil(material.ormTexture)
+        XCTAssertNil(material.emissionTexture)
+        XCTAssertEqual(material.normalScale, 0.45, accuracy: 0.0001)
+        XCTAssertEqual(material.occlusion, 0.66, accuracy: 0.0001)
+        XCTAssertEqual(material.roughness, 0.31, accuracy: 0.0001)
+        XCTAssertEqual(material.metalness, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(material.alphaCutoff, 0.42, accuracy: 0.0001)
     }
 
     func testAssimpOBJImportPreservesLegacyMaterialFactors() throws {

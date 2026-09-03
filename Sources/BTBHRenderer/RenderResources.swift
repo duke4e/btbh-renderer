@@ -2,6 +2,11 @@ public enum PixelFormat: UInt8, Sendable {
     case r8, rg8, rgba8, rgba8SRGB, rgba16Float, depth32Float
 }
 
+public enum TextureColorSpace: UInt8, Sendable, Equatable {
+    case linear
+    case sRGB
+}
+
 public struct TextureUsage: OptionSet, Sendable {
     public let rawValue: UInt8
 
@@ -37,17 +42,20 @@ public struct TextureLoadDescriptor: Sendable {
     public let generateMipmaps: Bool
     public let filter: TextureFilter?
     public let wrap: TextureWrap?
+    public let colorSpace: TextureColorSpace
 
     public init(
         path: String,
         generateMipmaps: Bool = false,
         filter: TextureFilter? = nil,
-        wrap: TextureWrap? = nil
+        wrap: TextureWrap? = nil,
+        colorSpace: TextureColorSpace = .linear
     ) {
         self.path = path
         self.generateMipmaps = generateMipmaps
         self.filter = filter
         self.wrap = wrap
+        self.colorSpace = colorSpace
     }
 }
 
@@ -121,6 +129,10 @@ public struct ModelImportFlags: OptionSet, Sendable {
 
     public static let meshData = Self(rawValue: 1 << 0)
     public static let highQuality = Self(rawValue: 1 << 1)
+    /// Preserve model geometry, material slots, and scalar material values,
+    /// but do not resolve or upload texture references embedded in the model.
+    /// Use this when the caller supplies complete material overrides.
+    public static let ignoreMaterialTextures = Self(rawValue: 1 << 2)
 }
 
 public enum ModelFootprintKind: UInt8, Hashable, Sendable {
@@ -535,6 +547,7 @@ public struct LightDescriptor: Sendable {
 public enum TonemapMode: UInt8, Sendable, Equatable {
     case reinhard
     case pbrNeutral
+    case aces
 }
 
 public enum RadianceCascadesTier: UInt8, Sendable, Equatable {
@@ -896,6 +909,9 @@ public struct EnvironmentDescriptor: Sendable {
     public let ssaoEnabled: Bool
     public let tonemap: TonemapMode
     public let tonemapWhite: Float
+    public let exposure: Float
+    public let contrast: Float
+    public let saturation: Float
     public let radianceCascades: RadianceCascadesDescriptor
 
     public init(
@@ -908,6 +924,9 @@ public struct EnvironmentDescriptor: Sendable {
         ssaoEnabled: Bool,
         tonemap: TonemapMode,
         tonemapWhite: Float,
+        exposure: Float = 1,
+        contrast: Float = 1,
+        saturation: Float = 1,
         radianceCascades: RadianceCascadesDescriptor = .off
     ) {
         self.backgroundColor = backgroundColor
@@ -919,6 +938,9 @@ public struct EnvironmentDescriptor: Sendable {
         self.ssaoEnabled = ssaoEnabled
         self.tonemap = tonemap
         self.tonemapWhite = tonemapWhite
+        self.exposure = exposure
+        self.contrast = contrast
+        self.saturation = saturation
         self.radianceCascades = radianceCascades
     }
 
@@ -932,6 +954,9 @@ public struct EnvironmentDescriptor: Sendable {
         ssaoEnabled: false,
         tonemap: .reinhard,
         tonemapWhite: 1,
+        exposure: 1,
+        contrast: 1,
+        saturation: 1,
         radianceCascades: .off
     )
 }
