@@ -32,7 +32,8 @@ var rendererTargets: [Target] = [
             .unsafeFlags(
                 ["-fno-implicit-module-maps"],
                 .when(platforms: [.macOS])
-            )
+            ),
+            .unsafeFlags(["-O"], .when(configuration: .debug))
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),
