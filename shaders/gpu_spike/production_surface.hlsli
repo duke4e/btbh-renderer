@@ -287,7 +287,17 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     return result;
 }
 
-bool btbh_surface_shadow_visible(float4 surface_data)
+// Ordered coverage keeps fading debris in the opaque RC/depth path.
+bool btbh_surface_coverage_visible(float coverage, float2 pixel_position)
+{
+    const uint2 pixel = uint2(pixel_position) & 3u;
+    const uint low = ((pixel.x & 1u) ^ (pixel.y & 1u)) * 2u + (pixel.y & 1u);
+    const uint high = ((pixel.x >> 1u) ^ (pixel.y >> 1u)) * 2u + (pixel.y >> 1u);
+    const float threshold = (float(low * 4u + high) + 0.5f) / 16.0f;
+    return coverage >= threshold;
+}
+
+bool btbh_surface_shadow_visible(float4 surface_data, float2 pixel_position)
 {
     const uint variant = (uint)(surface_data.w + 0.5f);
     if (variant == 3u)
@@ -298,7 +308,7 @@ bool btbh_surface_shadow_visible(float4 surface_data)
     }
     if (variant == 4u)
     {
-        return surface_data.y >= 0.01f;
+        return btbh_surface_coverage_visible(surface_data.y, pixel_position);
     }
     return true;
 }

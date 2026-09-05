@@ -1437,6 +1437,13 @@ public final class GPUWindowProbe {
         )
     }
 
+    func gamepadSnapshot() -> BTBHGPUGamepadSnapshot {
+        var snapshot = BTBHGPUGamepadSnapshot()
+        guard let window, !isShutdown else { return snapshot }
+        _ = btbh_gpu_window_gamepad_snapshot(window, &snapshot)
+        return snapshot
+    }
+
     func isKeyDown(_ key: InputKey) -> Bool {
         guard let window, !isShutdown else { return false }
         return btbh_gpu_window_key_down(window, key.rawValue) != 0

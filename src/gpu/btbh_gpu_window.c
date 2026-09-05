@@ -20,6 +20,64 @@ static void btbh_gpu_set_window_error(
     );
 }
 
+static const SDL_GamepadButton btbh_gpu_gamepad_buttons[] = {
+    SDL_GAMEPAD_BUTTON_SOUTH, SDL_GAMEPAD_BUTTON_EAST,
+    SDL_GAMEPAD_BUTTON_WEST, SDL_GAMEPAD_BUTTON_NORTH,
+    SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER,
+    SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
+    SDL_GAMEPAD_BUTTON_START, SDL_GAMEPAD_BUTTON_BACK, SDL_GAMEPAD_BUTTON_GUIDE,
+    SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+    SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT
+};
+
+_Static_assert(sizeof(BTBHGPUGamepadSnapshot) == 36, "Gamepad snapshot ABI");
+
+static void btbh_gpu_close_gamepad(BTBHGPUWindow *window) {
+    if (window->gamepad != NULL) {
+        SDL_CloseGamepad(window->gamepad);
+        window->gamepad = NULL;
+    }
+    memset(&window->gamepad_snapshot, 0, sizeof(window->gamepad_snapshot));
+}
+
+static void btbh_gpu_discover_gamepad(BTBHGPUWindow *window) {
+    if (window->gamepad != NULL) { return; }
+    int count = 0;
+    SDL_JoystickID *identifiers = SDL_GetGamepads(&count);
+    for (int index = 0; index < count; index += 1) {
+        window->gamepad = SDL_OpenGamepad(identifiers[index]);
+        if (window->gamepad != NULL) {
+            window->gamepad_snapshot.instance_id = identifiers[index];
+            break;
+        }
+    }
+    SDL_free(identifiers);
+}
+
+static float btbh_gpu_gamepad_axis(SDL_Gamepad *gamepad, SDL_GamepadAxis axis) {
+    const Sint16 value = SDL_GetGamepadAxis(gamepad, axis);
+    return value >= 0 ? (float) value / 32767.0f : (float) value / 32768.0f;
+}
+
+static void btbh_gpu_sample_gamepad(BTBHGPUWindow *window) {
+    if (window->gamepad == NULL) { return; }
+    BTBHGPUGamepadSnapshot *state = &window->gamepad_snapshot;
+    uint32_t down = 0;
+    for (uint32_t index = 0; index < 15; index += 1) {
+        if (SDL_GetGamepadButton(window->gamepad, btbh_gpu_gamepad_buttons[index])) {
+            down |= 1u << index;
+        }
+    }
+    state->buttons_pressed |= down & ~state->buttons_down;
+    state->buttons_down = down;
+    state->left_x = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+    state->left_y = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+    state->right_x = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+    state->right_y = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+    state->left_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+    state->right_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+}
+
 static bool btbh_gpu_valid_window_size(uint32_t width, uint32_t height) {
     return
         width > 0 &&
@@ -267,6 +325,16 @@ BTBHGPUWindow *btbh_gpu_window_create(
         free(window);
         return NULL;
     }
+
+    // SDL subsystems are reference counted. Hold our own gamepad reference so
+    // shutdown cannot disable another window's or library's controller input.
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+        btbh_gpu_set_window_error(report, BTBH_GPU_ERROR_STAGE_PLATFORM_INITIALIZATION, SDL_GetError());
+        btbh_gpu_window_destroy(window);
+        return NULL;
+    }
+    window->owns_gamepad_subsystem = true;
+    btbh_gpu_discover_gamepad(window);
 
     SDL_WindowFlags flags = 0;
     if (descriptor->hidden != 0) {
@@ -729,6 +797,7 @@ BTBHGPUResult btbh_gpu_window_poll_events(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
+    window->gamepad_snapshot.buttons_pressed = 0;
     window->mouse_delta_x = 0.0f;
     window->mouse_delta_y = 0.0f;
     window->mouse_wheel_x = 0.0f;
@@ -739,7 +808,21 @@ BTBHGPUResult btbh_gpu_window_poll_events(
     const SDL_WindowID window_id = SDL_GetWindowID(window->window);
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_EVENT_QUIT) {
+        if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
+            btbh_gpu_discover_gamepad(window);
+        } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED &&
+                   event.gdevice.which == window->gamepad_snapshot.instance_id) {
+            btbh_gpu_close_gamepad(window);
+            btbh_gpu_discover_gamepad(window);
+        } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+                   event.gbutton.which == window->gamepad_snapshot.instance_id) {
+            for (uint32_t index = 0; index < 15; index += 1) {
+                if (event.gbutton.button == btbh_gpu_gamepad_buttons[index]) {
+                    window->gamepad_snapshot.buttons_pressed |= 1u << index;
+                    break;
+                }
+            }
+        } else if (event.type == SDL_EVENT_QUIT) {
             window->should_close = true;
         } else if (
             event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
@@ -784,7 +867,17 @@ BTBHGPUResult btbh_gpu_window_poll_events(
         }
     }
 
+    btbh_gpu_sample_gamepad(window);
     btbh_gpu_platform_snapshot(window, snapshot, 0.0f);
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
+    const BTBHGPUWindow *window,
+    BTBHGPUGamepadSnapshot *snapshot
+) {
+    if (window == NULL || snapshot == NULL) { return BTBH_GPU_INVALID_ARGUMENT; }
+    *snapshot = window->gamepad_snapshot;
     return BTBH_GPU_OK;
 }
 
@@ -1256,6 +1349,11 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     if (window->window != NULL) {
         SDL_DestroyWindow(window->window);
         window->window = NULL;
+    }
+    btbh_gpu_close_gamepad(window);
+    if (window->owns_gamepad_subsystem) {
+        SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+        window->owns_gamepad_subsystem = false;
     }
     if (window->owns_video_subsystem) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);

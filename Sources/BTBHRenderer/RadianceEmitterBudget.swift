@@ -86,18 +86,51 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
             )
         }
 
-        var windowEnergy: [BudgetCell: Float] = [:]
-        windowEnergy.reserveCapacity(cellEnergy.count * 4)
-        for occupiedCell in cellEnergy.keys.sorted(by: BudgetCell.precedes) {
-            let energy = cellEnergy[occupiedCell, default: 0]
+        // A 3x3 window cannot exceed its budget unless at least one cell's
+        // energy, added nine times, exceeds it. Use repeated Float additions
+        // to keep this bound conservative at rounding and saturated-coordinate
+        // boundaries. Authored city windows are mostly below this bound.
+        var candidateWindows: Set<BudgetCell> = []
+        for (occupiedCell, energy) in cellEnergy {
+            var upperBound: Float = 0
+            for _ in 0..<9 { upperBound += energy }
+            guard upperBound > budget(for: occupiedCell.lightClass)
+                .maximumNeighborhoodEnergy else { continue }
             for centerZOffset in Int64(-1)...Int64(1) {
                 for centerXOffset in Int64(-1)...Int64(1) {
-                    let center = BudgetCell(
+                    candidateWindows.insert(BudgetCell(
                         lightClass: occupiedCell.lightClass,
                         x: Self.offset(occupiedCell.x, by: centerXOffset),
                         z: Self.offset(occupiedCell.z, by: centerZOffset)
-                    )
-                    windowEnergy[center, default: 0] += energy
+                    ))
+                }
+            }
+            // Dense inputs are cheaper with the original scatter pass.
+            if candidateWindows.count > cellEnergy.count { break }
+        }
+
+        var windowEnergy: [BudgetCell: Float] = [:]
+        if candidateWindows.count <= cellEnergy.count {
+            windowEnergy.reserveCapacity(candidateWindows.count)
+            for center in candidateWindows {
+                let total = Self.windowEnergy(at: center, from: cellEnergy)
+                if total > budget(for: center.lightClass).maximumNeighborhoodEnergy {
+                    windowEnergy[center] = total
+                }
+            }
+        } else {
+            windowEnergy.reserveCapacity(cellEnergy.count * 4)
+            for occupiedCell in cellEnergy.keys.sorted(by: BudgetCell.precedes) {
+                let energy = cellEnergy[occupiedCell, default: 0]
+                for centerZOffset in Int64(-1)...Int64(1) {
+                    for centerXOffset in Int64(-1)...Int64(1) {
+                        let center = BudgetCell(
+                            lightClass: occupiedCell.lightClass,
+                            x: Self.offset(occupiedCell.x, by: centerXOffset),
+                            z: Self.offset(occupiedCell.z, by: centerZOffset)
+                        )
+                        windowEnergy[center, default: 0] += energy
+                    }
                 }
             }
         }
@@ -114,19 +147,21 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
             // Every 3x3 window containing this source contributes a bound.
             // Taking the strictest one makes every occupied neighborhood obey
             // the ceiling, including sources sitting on cell boundaries.
-            for centerZOffset in Int64(-1)...Int64(1) {
-                for centerXOffset in Int64(-1)...Int64(1) {
-                    let center = BudgetCell(
-                        lightClass: entry.cell.lightClass,
-                        x: Self.offset(entry.cell.x, by: centerXOffset),
-                        z: Self.offset(entry.cell.z, by: centerZOffset)
-                    )
-                    let total = windowEnergy[center, default: 0]
-                    if total > budget.maximumNeighborhoodEnergy {
-                        neighborhoodScale = min(
-                            neighborhoodScale,
-                            budget.maximumNeighborhoodEnergy / total
+            if !windowEnergy.isEmpty {
+                for centerZOffset in Int64(-1)...Int64(1) {
+                    for centerXOffset in Int64(-1)...Int64(1) {
+                        let center = BudgetCell(
+                            lightClass: entry.cell.lightClass,
+                            x: Self.offset(entry.cell.x, by: centerXOffset),
+                            z: Self.offset(entry.cell.z, by: centerZOffset)
                         )
+                        let total = windowEnergy[center, default: 0]
+                        if total > budget.maximumNeighborhoodEnergy {
+                            neighborhoodScale = min(
+                                neighborhoodScale,
+                                budget.maximumNeighborhoodEnergy / total
+                            )
+                        }
                     }
                 }
             }
@@ -147,6 +182,25 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
         case .pickup: pickup
         case .transient: transient
         }
+    }
+
+    private static func windowEnergy(
+        at center: BudgetCell,
+        from cellEnergy: [BudgetCell: Float]
+    ) -> Float {
+        var total: Float = 0
+        // Match the scatter pass's sorted source-cell accumulation exactly.
+        for x in offset(center.x, by: -1)...offset(center.x, by: 1) {
+            for z in offset(center.z, by: -1)...offset(center.z, by: 1) {
+                let cell = BudgetCell(lightClass: center.lightClass, x: x, z: z)
+                guard let energy = cellEnergy[cell] else { continue }
+                // At Int64 limits, two source offsets collapse onto one center.
+                let xCopies = x == center.x && (x == .min || x == .max) ? 2 : 1
+                let zCopies = z == center.z && (z == .min || z == .max) ? 2 : 1
+                for _ in 0..<(xCopies * zCopies) { total += energy }
+            }
+        }
+        return total
     }
 
     private func cell(

@@ -121,6 +121,7 @@ public final class GPUPlatform: GamePlatform {
     private let sceneShaderPaths: GPUSceneShaderPaths
     var isFrameTelemetryEnabled: Bool { frameTelemetryEnabled }
     private var window: GPUWindowProbe?
+    private var gamepadState = GPUGamepadState()
     private var state = GPUPlatformState.empty
     private var forcedClose = false
     private var targetFramesPerSecond = 0
@@ -230,6 +231,7 @@ public final class GPUPlatform: GamePlatform {
         emitFrameTelemetry()
         window?.shutdown()
         window = nil
+        gamepadState = GPUGamepadState()
         state = .empty
         targetFramesPerSecond = 0
         previousFrameStart = nil
@@ -239,6 +241,7 @@ public final class GPUPlatform: GamePlatform {
         guard let window else { return }
         do {
             state = try window.pollPlatform()
+            gamepadState.advance(window.gamepadSnapshot())
         } catch {
             closeWindow()
         }
@@ -340,40 +343,24 @@ public final class GPUPlatform: GamePlatform {
         window?.wasMouseButtonReleased(button) ?? false
     }
 
-    public var gamepad: GamepadSnapshot {
-        .init(
-            isConnected: false,
-            leftStick: .zero,
-            rightStick: .zero,
-            dpad: .zero,
-            leftTrigger: 0,
-            rightTrigger: 0,
-            hasActiveInput: false
-        )
-    }
+    public var gamepad: GamepadSnapshot { gamepadState.snapshot }
 
     public func isGamepadButtonDown(_ button: GamepadButton) -> Bool {
-        _ = button
-        return false
+        gamepadState.isDown(button)
     }
 
     public func wasGamepadButtonPressed(_ button: GamepadButton) -> Bool {
-        _ = button
-        return false
+        gamepadState.wasPressed(button)
     }
 
-    public func wasGamepadTriggerPressed(
-        left: Bool,
-        threshold: Float
-    ) -> Bool {
-        _ = left
-        _ = threshold
-        return false
+    public func wasGamepadTriggerPressed(left: Bool, threshold: Float) -> Bool {
+        gamepadState.triggerPressed(left: left, threshold: threshold)
     }
 
     public func wasNavigationPressed(
         _ direction: NavigationDirection
     ) -> Bool {
+        if gamepadState.navigationPressed(direction) { return true }
         switch direction {
         case .up:
             return wasKeyPressed(.up) || wasKeyPressed(.w)

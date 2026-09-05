@@ -51,6 +51,9 @@ struct BTBHGPUWindow {
     float mouse_delta_y;
     float mouse_wheel_x;
     float mouse_wheel_y;
+    bool owns_gamepad_subsystem;
+    SDL_Gamepad *gamepad;
+    BTBHGPUGamepadSnapshot gamepad_snapshot;
     bool key_pressed[SDL_SCANCODE_COUNT];
     bool mouse_pressed[4];
     bool mouse_released[4];

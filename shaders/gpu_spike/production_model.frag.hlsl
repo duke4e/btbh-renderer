@@ -78,6 +78,7 @@ cbuffer MaterialPBR : register(b0, space3)
 
 struct FragmentInput
 {
+    float4 pixel_position : SV_Position;
     float4 color : TEXCOORD0;
     float2 texture_coordinate : TEXCOORD1;
     float3 world_position : TEXCOORD2;
@@ -227,8 +228,11 @@ void apply_surface(
     }
     else if (surface_variant == 4u && input.instance_custom.y > 0.0f)
     {
+        if (!btbh_surface_coverage_visible(input.surface_data.y, input.pixel_position.xy))
+        {
+            discard;
+        }
         const float t = input.surface_data.z;
-        albedo.a *= input.surface_data.y;
         emission +=
             float3(1.0f, 0.4f, 0.1f) *
             smoothstep(0.15f, 0.0f, t) *

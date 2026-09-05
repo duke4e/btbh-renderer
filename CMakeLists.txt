@@ -934,6 +934,12 @@ if(BTBH_BUILD_GPU_SPIKE)
         COMMAND btbh_gpu_scene_blend_test
     )
 
+    add_executable(btbh_gpu_gamepad_test
+        "${R3D_ROOT_PATH}/tests/btbh_gpu_gamepad_test.c"
+    )
+    target_link_libraries(btbh_gpu_gamepad_test PRIVATE btbh_gpu SDL3::SDL3-static)
+    add_test(NAME btbh_gpu_gamepad COMMAND btbh_gpu_gamepad_test)
+
     add_executable(btbh_gpu_window_config_test
         "${R3D_ROOT_PATH}/tests/btbh_gpu_window_config_test.c"
     )

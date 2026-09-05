@@ -11,7 +11,12 @@ var rendererTargets: [Target] = [
     .target(
         name: "BTBHRenderer",
         dependencies: ["BTBHRendererCore"],
-        path: "Sources/BTBHRenderer"
+        path: "Sources/BTBHRenderer",
+        swiftSettings: [
+            // The game keeps Debug builds playable; per-frame adapter work must
+            // not remain at -Onone while the rest of the frame is optimized.
+            .unsafeFlags(["-O"], .when(configuration: .debug))
+        ]
     ),
     .target(
         name: "BTBHRendererGPUCore",
@@ -82,7 +87,10 @@ var rendererTargets: [Target] = [
     .target(
         name: "BTBHRendererGPU",
         dependencies: ["BTBHRenderer", "BTBHRendererGPUCore"],
-        path: "Sources/BTBHRendererGPU"
+        path: "Sources/BTBHRendererGPU",
+        swiftSettings: [
+            .unsafeFlags(["-O"], .when(configuration: .debug))
+        ]
     ),
     .testTarget(
         name: "BTBHRendererTests",

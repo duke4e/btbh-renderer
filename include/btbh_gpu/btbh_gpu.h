@@ -164,6 +164,22 @@ typedef struct BTBHGPUPlatformSnapshot {
     uint8_t reserved[5];
 } BTBHGPUPlatformSnapshot;
 
+/* Button bits follow the public GamepadButton order: south, east, west,
+ * north, left/right shoulder, left/right stick, start, back, guide,
+ * dpad up/down/left/right. Axis values are normalized to [-1, 1]; triggers
+ * use [0, 1]. instance_id == 0 means disconnected. */
+typedef struct BTBHGPUGamepadSnapshot {
+    uint32_t instance_id;
+    uint32_t buttons_down;
+    uint32_t buttons_pressed;
+    float left_x;
+    float left_y;
+    float right_x;
+    float right_y;
+    float left_trigger;
+    float right_trigger;
+} BTBHGPUGamepadSnapshot;
+
 typedef enum BTBHGPUFileDialogKind {
     BTBH_GPU_FILE_DIALOG_OPEN = 1,
     BTBH_GPU_FILE_DIALOG_SAVE = 2
@@ -818,6 +834,10 @@ BTBHGPUResult btbh_gpu_window_present_clear(
 BTBHGPUResult btbh_gpu_window_poll_events(
     BTBHGPUWindow *window,
     BTBHGPUPlatformSnapshot *snapshot
+);
+BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
+    const BTBHGPUWindow *window,
+    BTBHGPUGamepadSnapshot *snapshot
 );
 BTBHGPUResult btbh_gpu_window_begin_frame(
     BTBHGPUWindow *window,
