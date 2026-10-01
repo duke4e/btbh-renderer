@@ -246,7 +246,7 @@ final class RadianceCascadesTests: XCTestCase {
             .deletingLastPathComponent()
         let backend = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "Sources/BTBHRendererGPU/GPUBackendsPending.swift"
+                "Sources/BTBHRendererGPU/GPUResourceBackend.swift"
             ),
             encoding: .utf8
         )

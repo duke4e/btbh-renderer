@@ -6,7 +6,7 @@
 #include <string.h>
 
 static const uint64_t required_features =
-    BTBH_GPU_PHASE2_REQUIRED_FEATURES;
+    BTBH_GPU_REQUIRED_FEATURES;
 
 static BTBHGPUCapabilitySnapshot full_snapshot(const char *driver) {
     BTBHGPUCapabilitySnapshot snapshot = {0};

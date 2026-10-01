@@ -7,7 +7,7 @@
 #include <stdlib.h>
 
 static const BTBHGPUFeatureFlags required_features =
-    BTBH_GPU_PHASE2_REQUIRED_FEATURES;
+    BTBH_GPU_REQUIRED_FEATURES;
 
 int main(void) {
 #if defined(_WIN32)

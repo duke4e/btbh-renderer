@@ -365,7 +365,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let source = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "Sources/BTBHRendererGPU/GPUBackendsPending.swift"
+                "Sources/BTBHRendererGPU/GPUSceneBackend.swift"
             ),
             encoding: .utf8
         )
