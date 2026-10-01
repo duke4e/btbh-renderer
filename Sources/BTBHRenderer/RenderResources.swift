@@ -557,9 +557,10 @@ public enum RadianceCascadesTier: UInt8, Sendable, Equatable {
     case auto
 }
 
+/// Holographic Radiance Cascades are the only implementation. The raw value
+/// stays 1 so frame telemetry reads the same as before classic RC was removed.
 public enum RadianceCascadesBackend: UInt8, Sendable, Equatable {
-    case classic
-    case holographic
+    case holographic = 1
 }
 
 public enum RadianceCascadesDebugView: UInt8, Sendable, Equatable {
@@ -689,8 +690,8 @@ public struct RadianceCascadesStatus: Sendable, Equatable {
         requestedTier: RadianceCascadesTier,
         activeTier: RadianceCascadesTier,
         pendingTier: RadianceCascadesTier,
-        requestedBackend: RadianceCascadesBackend = .classic,
-        activeBackend: RadianceCascadesBackend = .classic,
+        requestedBackend: RadianceCascadesBackend = .holographic,
+        activeBackend: RadianceCascadesBackend = .holographic,
         fallbackReason: RadianceCascadesFallbackReason,
         internalSize: PixelSize2D,
         generation: UInt32,
@@ -849,7 +850,7 @@ public struct RadianceCascadesDescriptor: Sendable, Equatable {
 
     public init(
         tier: RadianceCascadesTier,
-        backend: RadianceCascadesBackend = .classic,
+        backend: RadianceCascadesBackend = .holographic,
         debugView: RadianceCascadesDebugView = .none,
         autoFrameBudgetMilliseconds: Float = 1_000 / 60,
         indirectIntensity: Float = 0.90,
@@ -882,7 +883,7 @@ public struct RadianceCascadesDescriptor: Sendable, Equatable {
     ) {
         self.init(
             tier: tier,
-            backend: .classic,
+            backend: .holographic,
             debugView: debugView,
             autoFrameBudgetMilliseconds: autoFrameBudgetMilliseconds,
             indirectIntensity: indirectIntensity,

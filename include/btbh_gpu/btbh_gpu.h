@@ -465,8 +465,7 @@ typedef enum BTBHGPUSceneRadianceCascadesTier {
 } BTBHGPUSceneRadianceCascadesTier;
 
 typedef enum BTBHGPUSceneRadianceCascadesBackend {
-    BTBH_GPU_SCENE_RC_BACKEND_CLASSIC = 0,
-    BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC = 1
+    BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC = 0
 } BTBHGPUSceneRadianceCascadesBackend;
 
 typedef enum BTBHGPUSceneRadianceCascadesDebugView {

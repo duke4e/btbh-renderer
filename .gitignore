@@ -379,7 +379,15 @@ build/
 
 # Local renderer investigation outputs (captures, compiled probes, shader dumps).
 .diagnostics/*
-!.diagnostics/run-final-default-ab.ps1
 !.diagnostics/run-game-swift.ps1
 !.diagnostics/run-renderer-swift-test.ps1
 /tools/*.exe
+
+# Generated capture evidence, API audits and tool session state.
+/final-authority/
+/final-authority-candidate/
+/final-candidate/
+/independent-*/
+/api-audit-*.txt
+/.superpowers/
+.DS_Store

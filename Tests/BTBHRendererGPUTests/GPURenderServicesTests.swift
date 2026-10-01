@@ -516,7 +516,7 @@ final class GPURenderServicesTests: XCTestCase {
         ))
         let shader = try RenderServices.resources.createScreenShader(.init(
             fragmentPath: packageRoot
-                .appendingPathComponent("shaders/post/output.frag")
+                .appendingPathComponent("shaders/gpu/production_post.frag.hlsl")
                 .path,
             parameters: [
                 "u_texture": .texture(texture),
@@ -535,7 +535,7 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertThrowsError(
             try RenderServices.resources.createScreenShader(.init(
                 fragmentPath: packageRoot
-                    .appendingPathComponent("shaders/post/output.frag")
+                    .appendingPathComponent("shaders/gpu/production_post.frag.hlsl")
                     .path,
                 parameters: ["u_texture": .texture(texture)]
             ))
@@ -569,10 +569,10 @@ final class GPURenderServicesTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let vertexPath = packageRoot
-            .appendingPathComponent("shaders/scene/scene.vert")
+            .appendingPathComponent("shaders/gpu/production_model.vert.hlsl")
             .path
         let fragmentPath = packageRoot
-            .appendingPathComponent("shaders/scene/forward.frag")
+            .appendingPathComponent("shaders/gpu/production_model.frag.hlsl")
             .path
         let texturePath = packageRoot
             .appendingPathComponent("external/SDL/test/icon.png")
@@ -2585,7 +2585,7 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertThrowsError(
             try RenderServices.resources.createScreenShader(.init(
                 fragmentPath: packageRoot
-                    .appendingPathComponent("shaders/post/output.frag")
+                    .appendingPathComponent("shaders/gpu/production_post.frag.hlsl")
                     .path,
                 parameters: ["u_texture": .texture(texture)]
             ))
@@ -3449,75 +3449,6 @@ final class GPURenderServicesTests: XCTestCase {
             cubeBlockedReadback.rgba8[cubeBlockedCenter]
         )
         XCTAssertLessThan(cubeBlockedRed, red - 12)
-
-        var barrierSamples: [Float] = []
-        barrierSamples.reserveCapacity(8 * 8 * 2)
-        for _ in 0..<8 {
-            for x in 0..<8 {
-                barrierSamples.append(
-                    x == 5 ? -0.5 : Float(abs(x - 5))
-                )
-                barrierSamples.append(10)
-            }
-        }
-        RenderServices.canvas.requestPresentedFrameReadback()
-        RenderServices.canvas.beginFrame()
-        RenderServices.canvas.submit(.clear(.black))
-        RenderServices.scene.beginFrame(.init(
-            camera: .init(
-                position: .init(x: 0, y: 3, z: -3),
-                target: .zero,
-                up: .up,
-                verticalFOVDegrees: 60,
-                projection: .perspective
-            ),
-            environment: .init(
-                backgroundColor: .black,
-                backgroundEnergy: 0,
-                ambientColor: .black,
-                ambientEnergy: 0,
-                ambientMap: .invalid,
-                skyCubemap: .invalid,
-                ssaoEnabled: false,
-                tonemap: .reinhard,
-                tonemapWhite: 1,
-                radianceCascades: .init(
-                    tier: .high,
-                    debugView: .finalIndirect,
-                    indirectIntensity: 1,
-                    occlusionCascades: [.init(
-                        originWorldXZ: .init(x: -4, y: -4),
-                        cellSize: 1,
-                        width: 8,
-                        height: 8,
-                        revision: 1,
-                        samples: barrierSamples
-                    )],
-                    invalidate: true
-                )
-            )
-        ))
-        RenderServices.scene.submit(.modelInstances(.init(
-            model: model,
-            instances: [.init(
-                transform: .identity,
-                color: .white,
-                custom: .init(x: 0, y: 0, z: 0, w: 0)
-            )],
-            overrides: overrides,
-            persistentBuffer: nil
-        )))
-        try RenderServices.scene.endFrame()
-        RenderServices.canvas.endFrame()
-
-        let blockedReadback = try RenderServices.canvas
-            .readbackPresentedFrame()
-        let blockedCenter =
-            ((blockedReadback.size.height / 2) *
-                blockedReadback.size.width +
-                blockedReadback.size.width / 2) * 4
-        let blockedRed = Int(blockedReadback.rgba8[blockedCenter])
-        XCTAssertLessThan(blockedRed, red / 2)
     }
 
     func testHolographicRadianceMaterialResponseAndUnlitIsolation() throws {

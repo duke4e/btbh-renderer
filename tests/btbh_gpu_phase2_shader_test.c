@@ -2,24 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef BTBH_SHADOW_VERTEX_REFLECTION_PATH
-#error "BTBH_SHADOW_VERTEX_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_GBUFFER_VERTEX_REFLECTION_PATH
-#error "BTBH_GBUFFER_VERTEX_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_GBUFFER_FRAGMENT_REFLECTION_PATH
-#error "BTBH_GBUFFER_FRAGMENT_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_INTERVAL_REFLECTION_PATH
-#error "BTBH_INTERVAL_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH
-#error "BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH
-#error "BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH must be defined"
-#endif
 #ifndef BTBH_PRODUCTION_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_VERTEX_REFLECTION_PATH must be defined"
 #endif
@@ -91,21 +73,6 @@
 #endif
 #ifndef BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH
-#error "BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_PRODUCTION_RC_MERGE_REFLECTION_PATH
-#error "BTBH_PRODUCTION_RC_MERGE_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_PRODUCTION_RC_PREFILTER_REFLECTION_PATH
-#error "BTBH_PRODUCTION_RC_PREFILTER_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_PRODUCTION_RC_DIFFUSE_CACHE_REFLECTION_PATH
-#error "BTBH_PRODUCTION_RC_DIFFUSE_CACHE_REFLECTION_PATH must be defined"
-#endif
-#ifndef BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH
-#error "BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH must be defined"
 #endif
 #ifndef BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH
 #error "BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH must be defined"
@@ -184,38 +151,6 @@ static int require_text(const char *path, const char *needle)
 int main(void)
 {
     if (!require_text(
-            BTBH_SHADOW_VERTEX_REFLECTION_PATH,
-            "\"uniform_buffers\": 1"
-        ) ||
-        !require_text(
-            BTBH_GBUFFER_VERTEX_REFLECTION_PATH,
-            "\"storage_buffers\": 2"
-        ) ||
-        !require_text(
-            BTBH_GBUFFER_FRAGMENT_REFLECTION_PATH,
-            "\"location\": 2"
-        ) ||
-        !require_text(
-            BTBH_INTERVAL_REFLECTION_PATH,
-            "\"readonly_storage_buffers\": 1"
-        ) ||
-        !require_text(
-            BTBH_INTERVAL_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
-        ) ||
-        !require_text(
-            BTBH_INTERVAL_REFLECTION_PATH,
-            "\"threadcount_x\": 8"
-        ) ||
-        !require_text(
-            BTBH_LIGHTING_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 6"
-        ) ||
-        !require_text(
-            BTBH_TRANSPARENT_FRAGMENT_REFLECTION_PATH,
-            "\"location\": 0"
-        ) ||
-        !require_text(
             BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 4"
         ) ||
@@ -358,50 +293,6 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 2, \"storage_textures\": 0"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH,
-            "\"samplers\": 3"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_TRACE_REFLECTION_PATH,
-            "\"threadcount_y\": 8"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_MERGE_REFLECTION_PATH,
-            "\"samplers\": 5"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_MERGE_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_PREFILTER_REFLECTION_PATH,
-            "\"samplers\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_PREFILTER_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_DIFFUSE_CACHE_REFLECTION_PATH,
-            "\"samplers\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_DIFFUSE_CACHE_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH,
-            "\"samplers\": 9"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_RESOLVE_REFLECTION_PATH,
-            "\"readwrite_storage_textures\": 1"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH,

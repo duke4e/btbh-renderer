@@ -162,20 +162,16 @@ static void test_fixed_tiers_apply_immediately(void) {
     assert(state.fallback_reason == BTBH_GPU_SCENE_RC_FALLBACK_DISABLED);
 }
 
-static void test_backend_selection_updates_generation_and_status(void) {
+static void test_status_reports_the_holographic_backend(void) {
     BTBHGPUSceneRadianceCascadesState state;
     btbh_gpu_radiance_cascades_state_initialize(&state);
-    BTBHGPUSceneRadianceCascades value =
-        config(BTBH_GPU_SCENE_RC_HIGH);
-    assert(btbh_gpu_radiance_cascades_state_configure(&state, &value));
-    const uint64_t classic_generation = state.generation;
-    value.backend = BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC;
-    assert(btbh_gpu_radiance_cascades_state_configure(&state, &value));
     assert(state.requested_backend ==
         BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC);
     assert(state.active_backend ==
         BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC);
-    assert(state.generation == classic_generation + 1u);
+    BTBHGPUSceneRadianceCascades value =
+        config(BTBH_GPU_SCENE_RC_HIGH);
+    assert(btbh_gpu_radiance_cascades_state_configure(&state, &value));
 
     BTBHGPUSceneRadianceCascadesStatus status;
     btbh_gpu_radiance_cascades_status(&state, 512u, 512u, 0.25, &status);
@@ -300,226 +296,13 @@ static void test_tier_dimensions_round_to_threadgroups(void) {
     assert(height % 8u == 0u);
 }
 
-static void assert_close(float actual, float expected) {
-    assert(fabsf(actual - expected) < 0.0001f);
-}
-
-static void test_directional_cascade_profiles_and_layout(void) {
-    BTBHGPUSceneRadianceCascadesProfile low = {0};
-    assert(btbh_gpu_radiance_cascades_profile_for_tier(
-        BTBH_GPU_SCENE_RC_LOW,
-        &low
-    ));
-    assert(btbh_gpu_radiance_cascades_profile_valid(&low));
-    assert(low.cascade_count == 4u);
-    assert(low.angular_branching == 2u);
-    assert(btbh_gpu_radiance_cascades_direct_resolution_scale(&low) == 1u);
-
-    BTBHGPUSceneRadianceCascadeLayout layout = {0};
-    assert(btbh_gpu_radiance_cascade_layout(
-        &low,
-        64u,
-        32u,
-        0u,
-        4096u,
-        &layout
-    ));
-    assert(layout.probe_spacing_cells == 2u);
-    assert(layout.probe_count_x == 32u);
-    assert(layout.probe_count_y == 16u);
-    assert(layout.direction_tile_width == 2u);
-    assert(layout.direction_tile_height == 2u);
-    assert(layout.direction_count == 4u);
-    assert(layout.atlas_width == 64u);
-    assert(layout.atlas_height == 32u);
-    assert_close(layout.interval_start_cells, 0.0f);
-    assert_close(layout.interval_end_cells, 2.0f);
-
-    assert(btbh_gpu_radiance_cascade_layout(
-        &low,
-        64u,
-        32u,
-        2u,
-        4096u,
-        &layout
-    ));
-    assert(layout.probe_spacing_cells == 8u);
-    assert(layout.direction_tile_width == 4u);
-    assert(layout.direction_tile_height == 4u);
-    assert(layout.direction_count == 16u);
-    assert(layout.atlas_width == 32u);
-    assert(layout.atlas_height == 16u);
-    assert_close(layout.interval_start_cells, 6.0f);
-    assert_close(layout.interval_end_cells, 14.0f);
-
-    BTBHGPUSceneRadianceCascadesProfile high = {0};
-    assert(btbh_gpu_radiance_cascades_profile_for_tier(
-        BTBH_GPU_SCENE_RC_HIGH,
-        &high
-    ));
-    assert(high.cascade_count == 5u);
-    assert(high.angular_branching == 2u);
-    assert(high.interval_branching == 4u);
-    assert(high.base_probe_spacing_cells == 1u);
-    assert(high.base_direction_tile_width == 8u);
-    assert(high.base_direction_tile_height == 8u);
-    assert(btbh_gpu_radiance_cascades_direct_resolution_scale(&high) == 3u);
-    assert(btbh_gpu_radiance_cascade_layout(
-        &high,
-        64u,
-        32u,
-        4u,
-        4096u,
-        &layout
-    ));
-    assert(layout.probe_spacing_cells == 16u);
-    assert(layout.probe_count_x == 4u);
-    assert(layout.probe_count_y == 2u);
-    assert(layout.direction_tile_width == 32u);
-    assert(layout.direction_tile_height == 32u);
-    assert(layout.direction_count == 1024u);
-    assert(layout.atlas_width == 128u);
-    assert(layout.atlas_height == 64u);
-    assert_close(layout.interval_start_cells, 170.0f);
-    assert_close(layout.interval_end_cells, 682.0f);
-
-    assert(!btbh_gpu_radiance_cascade_layout(
-        &high,
-        64u,
-        32u,
-        4u,
-        64u,
-        &layout
-    ));
-    assert(!btbh_gpu_radiance_cascades_profile_for_tier(
-        BTBH_GPU_SCENE_RC_OFF,
-        &high
-    ));
-    low.angular_branching = 3u;
-    assert(!btbh_gpu_radiance_cascades_profile_valid(&low));
-}
-
-static void test_directional_atlas_address_and_children(void) {
-    BTBHGPUSceneRadianceCascadesProfile profile = {0};
-    BTBHGPUSceneRadianceCascadeLayout layout = {0};
-    assert(btbh_gpu_radiance_cascades_profile_for_tier(
-        BTBH_GPU_SCENE_RC_HIGH,
-        &profile
-    ));
-    assert(btbh_gpu_radiance_cascade_layout(
-        &profile,
-        64u,
-        32u,
-        1u,
-        4096u,
-        &layout
-    ));
-    assert(layout.direction_tile_width == 16u);
-    assert(layout.direction_tile_height == 8u);
-
-    uint32_t atlas_x = 0u;
-    uint32_t atlas_y = 0u;
-    assert(btbh_gpu_radiance_cascade_atlas_address(
-        &layout,
-        5u,
-        3u,
-        19u,
-        &atlas_x,
-        &atlas_y
-    ));
-    assert(atlas_x == 83u);
-    assert(atlas_y == 25u);
-    assert(!btbh_gpu_radiance_cascade_atlas_address(
-        &layout,
-        layout.probe_count_x,
-        0u,
-        0u,
-        &atlas_x,
-        &atlas_y
-    ));
-
-    assert(btbh_gpu_radiance_cascade_layout(
-        &profile,
-        64u,
-        32u,
-        0u,
-        4096u,
-        &layout
-    ));
-    uint32_t first_child = 0u;
-    uint32_t child_count = 0u;
-    assert(btbh_gpu_radiance_cascade_direction_children(
-        &profile,
-        &layout,
-        3u,
-        &first_child,
-        &child_count
-    ));
-    assert(first_child == 6u);
-    assert(child_count == 2u);
-}
-
-static void test_radiance_interval_composition(void) {
-    const BTBHGPUSceneRadianceInterval near_interval = {
-        1.0f, 0.5f, 0.25f, 0.25f
-    };
-    const BTBHGPUSceneRadianceInterval far_interval = {
-        4.0f, 2.0f, 1.0f, 0.5f
-    };
-    const BTBHGPUSceneRadianceInterval merged =
-        btbh_gpu_radiance_interval_merge(near_interval, far_interval);
-    assert_close(merged.red, 2.0f);
-    assert_close(merged.green, 1.0f);
-    assert_close(merged.blue, 0.5f);
-    assert_close(merged.transmittance, 0.125f);
-
-    const BTBHGPUSceneRadianceInterval bottom_left = {
-        0.0f, 1.0f, 2.0f, 0.0f
-    };
-    const BTBHGPUSceneRadianceInterval bottom_right = {
-        2.0f, 3.0f, 4.0f, 0.2f
-    };
-    const BTBHGPUSceneRadianceInterval top_left = {
-        4.0f, 5.0f, 6.0f, 0.4f
-    };
-    const BTBHGPUSceneRadianceInterval top_right = {
-        6.0f, 7.0f, 8.0f, 0.6f
-    };
-    const BTBHGPUSceneRadianceInterval interpolated =
-        btbh_gpu_radiance_interval_bilinear(
-            bottom_left,
-            bottom_right,
-            top_left,
-            top_right,
-            0.25f,
-            0.5f
-        );
-    assert_close(interpolated.red, 2.5f);
-    assert_close(interpolated.green, 3.5f);
-    assert_close(interpolated.blue, 4.5f);
-    assert_close(interpolated.transmittance, 0.25f);
-}
-
-static void test_reprojected_merge_only_traces_top_cascade(void) {
-    for (uint32_t cascade = 0u; cascade < 4u; ++cascade) {
-        assert(!btbh_gpu_radiance_cascades_raw_trace_required(
-            cascade,
-            5u,
-            true
-        ));
-    }
-    assert(btbh_gpu_radiance_cascades_raw_trace_required(4u, 5u, true));
-
-    for (uint32_t cascade = 0u; cascade < 5u; ++cascade) {
-        assert(btbh_gpu_radiance_cascades_raw_trace_required(
-            cascade,
-            5u,
-            false
-        ));
-    }
-
-    assert(!btbh_gpu_radiance_cascades_raw_trace_required(0u, 0u, true));
-    assert(!btbh_gpu_radiance_cascades_raw_trace_required(5u, 5u, true));
+static void test_direct_light_resolution_follows_tier(void) {
+    assert(btbh_gpu_radiance_cascades_direct_resolution_scale(
+        BTBH_GPU_SCENE_RC_HIGH
+    ) == 3u);
+    assert(btbh_gpu_radiance_cascades_direct_resolution_scale(
+        BTBH_GPU_SCENE_RC_LOW
+    ) == 1u);
 }
 
 static void test_holographic_layout_scales_256_domain_to_512(void) {
@@ -644,16 +427,13 @@ int main(void) {
     test_configuration_validation();
     test_directional_emitter_count_only_includes_spots();
     test_fixed_tiers_apply_immediately();
-    test_backend_selection_updates_generation_and_status();
+    test_status_reports_the_holographic_backend();
     test_auto_is_gated_and_adjacent();
     test_auto_hysteresis_holds_middle_band();
     test_failure_is_sticky_until_invalidation();
     test_valid_configuration_recovers_invalid_configuration();
     test_tier_dimensions_round_to_threadgroups();
-    test_directional_cascade_profiles_and_layout();
-    test_directional_atlas_address_and_children();
-    test_radiance_interval_composition();
-    test_reprojected_merge_only_traces_top_cascade();
+    test_direct_light_resolution_follows_tier();
     test_holographic_layout_scales_256_domain_to_512();
     test_holographic_tiers_have_distinct_scales_and_working_sets();
     test_holographic_layout_rejects_invalid_or_oversized_domains();

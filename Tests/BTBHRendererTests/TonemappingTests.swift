@@ -60,10 +60,10 @@ final class TonemappingTests: XCTestCase {
             )
         }
 
-        let shared = try source("shaders/gpu_spike/production_tonemap.hlsli")
-        let lut = try source("shaders/gpu_spike/production_lut.frag.hlsl")
-        let post = try source("shaders/gpu_spike/production_post.frag.hlsl")
-        let tilt = try source("shaders/gpu_spike/production_tilt_shift.frag.hlsl")
+        let shared = try source("shaders/gpu/production_tonemap.hlsli")
+        let lut = try source("shaders/gpu/production_lut.frag.hlsl")
+        let post = try source("shaders/gpu/production_post.frag.hlsl")
+        let tilt = try source("shaders/gpu/production_tilt_shift.frag.hlsl")
         let nativeHeader = try source("include/btbh_gpu/btbh_gpu.h")
         let nativeScene = try source("src/gpu/btbh_gpu_scene.c")
 

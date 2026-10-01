@@ -93,7 +93,7 @@ final class RadianceCascadesTests: XCTestCase {
         ))
     }
 
-    func testPassTelemetryZeroIsAnIdleClassicCompatibleValue() {
+    func testPassTelemetryZeroIsAnIdleValue() {
         let telemetry = RadianceCascadesPassTelemetry.zero
 
         XCTAssertEqual(telemetry.cpuPrepareMilliseconds, 0)
@@ -171,13 +171,13 @@ final class RadianceCascadesTests: XCTestCase {
         )
         let reproject = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_hrc_reproject.comp.hlsl"
+                "shaders/gpu/production_hrc_reproject.comp.hlsl"
             ),
             encoding: .utf8
         )
         let finish = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_hrc_finish.comp.hlsl"
+                "shaders/gpu/production_hrc_finish.comp.hlsl"
             ),
             encoding: .utf8
         )
@@ -213,7 +213,7 @@ final class RadianceCascadesTests: XCTestCase {
         )
         XCTAssertEqual(
             EnvironmentDescriptor.default.radianceCascades.backend,
-            .classic
+            .holographic
         )
     }
 
@@ -306,49 +306,49 @@ final class RadianceCascadesTests: XCTestCase {
             .deletingLastPathComponent()
         let trace = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_trace.comp.hlsl"
+                "shaders/gpu/production_hrc_trace.comp.hlsl"
             ),
             encoding: .utf8
         )
         let unlit = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model_unlit.frag.hlsl"
+                "shaders/gpu/production_model_unlit.frag.hlsl"
             ),
             encoding: .utf8
         )
         let sourceVertex = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_source.vert.hlsl"
+                "shaders/gpu/production_rc_source.vert.hlsl"
             ),
             encoding: .utf8
         )
         let sourceFragment = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_source.frag.hlsl"
+                "shaders/gpu/production_rc_source.frag.hlsl"
             ),
             encoding: .utf8
         )
         let directionalSourceVertex = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_directional_source.vert.hlsl"
+                "shaders/gpu/production_rc_directional_source.vert.hlsl"
             ),
             encoding: .utf8
         )
         let directionalSourceFragment = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_directional_source.frag.hlsl"
+                "shaders/gpu/production_rc_directional_source.frag.hlsl"
             ),
             encoding: .utf8
         )
         let directLightVertex = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_direct_light.vert.hlsl"
+                "shaders/gpu/production_rc_direct_light.vert.hlsl"
             ),
             encoding: .utf8
         )
         let directLightFragment = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_rc_direct_light.frag.hlsl"
+                "shaders/gpu/production_rc_direct_light.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -357,18 +357,11 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(trace.contains("directional_source_texture"))
         XCTAssertTrue(trace.contains("directional_source_count = 64u"))
         XCTAssertTrue(trace.contains("occlusion_texture"))
-        XCTAssertTrue(trace.contains("direction_tile"))
         XCTAssertTrue(trace.contains("direction_index"))
-        XCTAssertTrue(trace.contains("interval_start"))
-        XCTAssertTrue(trace.contains("interval_end"))
         XCTAssertTrue(trace.contains("environment_radiance"))
         XCTAssertTrue(trace.contains("directional_boundary_radiance"))
         XCTAssertTrue(trace.contains("sky_top_energy"))
         XCTAssertTrue(trace.contains("sky_horizon_curve"))
-        XCTAssertTrue(trace.contains("receiver_surface_height"))
-        XCTAssertTrue(trace.contains(
-            "radiance += transmittance * evaluate_boundary_radiance"
-        ))
         XCTAssertFalse(trace.contains("light_source_count"))
         XCTAssertFalse(trace.contains("BTBH_RC_MAX_LIGHT_SOURCES"))
         XCTAssertFalse(trace.contains("for (uint source_index"))
@@ -415,16 +408,10 @@ final class RadianceCascadesTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shaderDirectory = repositoryRoot
-            .appendingPathComponent("shaders/gpu_spike", isDirectory: true)
+            .appendingPathComponent("shaders/gpu", isDirectory: true)
         let compose = try String(
             contentsOf: shaderDirectory.appendingPathComponent(
                 "production_rc_compose.frag.hlsl"
-            ),
-            encoding: .utf8
-        )
-        let resolve = try String(
-            contentsOf: shaderDirectory.appendingPathComponent(
-                "production_rc_resolve.comp.hlsl"
             ),
             encoding: .utf8
         )
@@ -443,24 +430,6 @@ final class RadianceCascadesTests: XCTestCase {
         let nativeRadiance = try String(
             contentsOf: repositoryRoot.appendingPathComponent(
                 "src/gpu/btbh_gpu_radiance_cascades.c"
-            ),
-            encoding: .utf8
-        )
-        let merge = try String(
-            contentsOf: shaderDirectory.appendingPathComponent(
-                "production_rc_merge.comp.hlsl"
-            ),
-            encoding: .utf8
-        )
-        let prefilter = try String(
-            contentsOf: shaderDirectory.appendingPathComponent(
-                "production_rc_prefilter.comp.hlsl"
-            ),
-            encoding: .utf8
-        )
-        let diffuseCache = try String(
-            contentsOf: shaderDirectory.appendingPathComponent(
-                "production_rc_diffuse_cache.comp.hlsl"
             ),
             encoding: .utf8
         )
@@ -519,9 +488,8 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(compose.contains("if (debug_view == 9u)"))
         XCTAssertTrue(compose.contains("if (debug_view == 10u)"))
         XCTAssertTrue(compose.contains("directional_source_texture"))
-        XCTAssertTrue(resolve.contains("if (debug_view == 10u)"))
+        XCTAssertTrue(holographicResolve.contains("if (debug_view == 10u)"))
         XCTAssertFalse(compose.contains("indirect.rgb * indirect.a"))
-        XCTAssertTrue(resolve.contains("float4(emission, -1.0f)"))
         XCTAssertTrue(holographicResolve.contains("float4(emission, -1.0f)"))
         XCTAssertTrue(holographicReconstruct.contains(
             "if (center_value.a < -0.5f)"
@@ -533,66 +501,33 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(compose.contains(
             "return float4(scene_texture.Sample(scene_sampler, uv).rgb, 1.0f);"
         ))
-        XCTAssertTrue(resolve.contains("environment_controls.yzw"))
         XCTAssertTrue(holographicResolve.contains("environment_controls.yzw"))
         XCTAssertEqual(
             nativeRadiance.components(
                 separatedBy: "resolve_uniforms.environment_controls[1] ="
             ).count - 1,
-            2
+            1
         )
-        XCTAssertTrue(merge.contains("lower.rgb + lower.a * upper.rgb"))
-        XCTAssertTrue(merge.contains("lower.a * upper.a"))
-        XCTAssertTrue(merge.contains("filtered_upper_interval"))
-        XCTAssertTrue(merge.contains("trace_reprojected_interval"))
-        XCTAssertTrue(merge.contains("receiver_surface_height"))
-        XCTAssertTrue(merge.contains("ray_height"))
-        XCTAssertTrue(merge.contains("if (bilinear_fix != 0u)"))
-        XCTAssertTrue(merge.contains("reprojected_merge"))
-        XCTAssertTrue(merge.contains("directional_source_texture"))
-        XCTAssertTrue(merge.contains("directional_source_count = 64u"))
-        XCTAssertTrue(prefilter.contains("directions_per_output"))
-        XCTAssertTrue(prefilter.contains("interval_sum"))
-        XCTAssertTrue(prefilter.contains(
-            "interval_sum / float(max(directions_per_output, 1u))"
-        ))
-        XCTAssertTrue(diffuseCache.contains("input_direction_count"))
-        XCTAssertTrue(diffuseCache.contains("output_normal_count"))
-        XCTAssertTrue(diffuseCache.contains("tilted_normal_count = 8u"))
-        XCTAssertTrue(diffuseCache.contains(
-            "direction_index < input_direction_count"
-        ))
-        XCTAssertTrue(diffuseCache.contains(
-            "transmitted_response / max(response_sum, 0.00001f)"
-        ))
-        XCTAssertTrue(resolve.contains("use_diffuse_cache"))
-        XCTAssertTrue(resolve.contains("roughness >= 0.62f"))
-        XCTAssertTrue(resolve.contains("metalness <= 0.05f"))
-        XCTAssertTrue(resolve.contains("cached_diffuse_irradiance"))
-        XCTAssertTrue(resolve.contains("lerp(luminance.xxx, irradiance, 1.18f)"))
-        XCTAssertTrue(resolve.contains("for (uint direction_index"))
-        XCTAssertTrue(resolve.contains("spatial_interval"))
-        XCTAssertTrue(resolve.contains("evaluate_brdf"))
-        XCTAssertTrue(resolve.contains("evaluate_irradiance_sh"))
-        XCTAssertTrue(resolve.contains("open_sky_response"))
-        XCTAssertTrue(resolve.contains("sky_visibility"))
-        XCTAssertTrue(resolve.contains("traced_sky_visibility"))
-        XCTAssertTrue(resolve.contains("environment_diffuse"))
-        XCTAssertTrue(resolve.contains("environment_specular"))
-        XCTAssertTrue(resolve.contains("direct_light_texture"))
-        XCTAssertTrue(resolve.contains("direct_peak * 0.25f"))
-        XCTAssertTrue(resolve.contains("direct_diffuse * occlusion"))
-        XCTAssertFalse(resolve.contains(
+        XCTAssertTrue(holographicResolve.contains("lerp(luminance.xxx, irradiance, 1.18f)"))
+        XCTAssertTrue(holographicResolve.contains("evaluate_brdf"))
+        XCTAssertTrue(holographicResolve.contains("evaluate_irradiance_sh"))
+        XCTAssertTrue(holographicResolve.contains("sky_visibility"))
+        XCTAssertTrue(holographicResolve.contains("environment_diffuse"))
+        XCTAssertTrue(holographicResolve.contains("environment_specular"))
+        XCTAssertTrue(holographicResolve.contains("direct_light_texture"))
+        XCTAssertTrue(holographicResolve.contains("direct_peak * 0.25f"))
+        XCTAssertTrue(holographicResolve.contains("direct_diffuse * occlusion"))
+        XCTAssertFalse(holographicResolve.contains(
             "direct_diffuse * occlusion * indirect_strength"
         ))
-        XCTAssertTrue(resolve.contains(
+        XCTAssertTrue(holographicResolve.contains(
             "reflected_radiance * occlusion * indirect_strength"
         ))
-        XCTAssertFalse(resolve.contains(
+        XCTAssertFalse(holographicResolve.contains(
             "environment_specular) * indirect_strength"
         ))
-        XCTAssertTrue(resolve.contains("fresnel_schlick_roughness"))
-        XCTAssertTrue(resolve.contains(
+        XCTAssertTrue(holographicResolve.contains("fresnel_schlick_roughness"))
+        XCTAssertTrue(holographicResolve.contains(
             "reflected_radiance * occlusion"
         ))
         XCTAssertTrue(material.contains("BTBH_RC_MATERIAL_OUTPUT 1"))
@@ -631,7 +566,7 @@ final class RadianceCascadesTests: XCTestCase {
             1
         )
         XCTAssertEqual(
-            resolve.components(separatedBy: "indirect_strength").count - 1,
+            holographicResolve.components(separatedBy: "indirect_strength").count - 1,
             2
         )
     }
@@ -642,18 +577,12 @@ final class RadianceCascadesTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shaderDirectory = repositoryRoot.appendingPathComponent(
-            "shaders/gpu_spike",
+            "shaders/gpu",
             isDirectory: true
         )
         let hrcResolve = try String(
             contentsOf: shaderDirectory.appendingPathComponent(
                 "production_hrc_resolve.comp.hlsl"
-            ),
-            encoding: .utf8
-        )
-        let classicResolve = try String(
-            contentsOf: shaderDirectory.appendingPathComponent(
-                "production_rc_resolve.comp.hlsl"
             ),
             encoding: .utf8
         )
@@ -676,19 +605,18 @@ final class RadianceCascadesTests: XCTestCase {
             encoding: .utf8
         )
 
-        for resolve in [hrcResolve, classicResolve] {
-            XCTAssertTrue(resolve.contains("evaluate_brdf("))
-            XCTAssertTrue(resolve.contains("(1.0f - metalness) * albedo / pi"))
-            XCTAssertTrue(resolve.contains("fresnel_schlick_roughness("))
-            XCTAssertTrue(resolve.contains("reflected_radiance * occlusion * indirect_strength"))
-            XCTAssertTrue(resolve.contains("environment_diffuse * occlusion"))
-            XCTAssertTrue(resolve.contains("const float4 emission_material ="))
-            XCTAssertTrue(resolve.contains("const bool unlit_material ="))
-            XCTAssertTrue(resolve.contains("if (unlit_material)"))
-            XCTAssertTrue(resolve.contains("float4(emission, 1.0f)"))
-            XCTAssertFalse(resolve.contains("emission * occlusion"))
-            XCTAssertFalse(resolve.contains("emission * indirect_strength"))
-        }
+        let resolve = hrcResolve
+        XCTAssertTrue(resolve.contains("evaluate_brdf("))
+        XCTAssertTrue(resolve.contains("(1.0f - metalness) * albedo / pi"))
+        XCTAssertTrue(resolve.contains("fresnel_schlick_roughness("))
+        XCTAssertTrue(resolve.contains("reflected_radiance * occlusion * indirect_strength"))
+        XCTAssertTrue(resolve.contains("environment_diffuse * occlusion"))
+        XCTAssertTrue(resolve.contains("const float4 emission_material ="))
+        XCTAssertTrue(resolve.contains("const bool unlit_material ="))
+        XCTAssertTrue(resolve.contains("if (unlit_material)"))
+        XCTAssertTrue(resolve.contains("float4(emission, 1.0f)"))
+        XCTAssertFalse(resolve.contains("emission * occlusion"))
+        XCTAssertFalse(resolve.contains("emission * indirect_strength"))
         XCTAssertTrue(material.contains(
             "unlit ? 1.0f : 0.0f"
         ))
@@ -699,43 +627,6 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(build.contains(
             "_shader_name STREQUAL \"production_model_rc.frag\""
         ))
-    }
-
-    func testAngularPrefilterPreservesUniformIntervalEnergy() {
-        let inputDirectionCount = 64
-        let outputDirectionCount = 16
-        let directionsPerOutput = inputDirectionCount / outputDirectionCount
-        let uniformInterval = SIMD4<Float>(1.25, 0.75, 0.5, 0.625)
-        let input = Array(
-            repeating: uniformInterval,
-            count: inputDirectionCount
-        )
-        let output = stride(
-            from: 0,
-            to: inputDirectionCount,
-            by: directionsPerOutput
-        ).map { firstDirection in
-            input[firstDirection..<(firstDirection + directionsPerOutput)]
-                .reduce(SIMD4<Float>(repeating: 0), +) /
-                Float(directionsPerOutput)
-        }
-
-        XCTAssertEqual(output.count, outputDirectionCount)
-        XCTAssertTrue(output.allSatisfy { $0 == uniformInterval })
-
-        let inputAngularMeasure = Float.pi * 2 / Float(inputDirectionCount)
-        let outputAngularMeasure = Float.pi * 2 / Float(outputDirectionCount)
-        let integratedInput = input.reduce(SIMD4<Float>(repeating: 0), +) *
-            inputAngularMeasure
-        let integratedOutput = output.reduce(SIMD4<Float>(repeating: 0), +) *
-            outputAngularMeasure
-        for component in 0..<4 {
-            XCTAssertEqual(
-                integratedOutput[component],
-                integratedInput[component],
-                accuracy: 0.001
-            )
-        }
     }
 
     func testRCComposesOpaqueLightingBeforeForwardTransparency() throws {
@@ -794,7 +685,7 @@ final class RadianceCascadesTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shaderDirectory = repositoryRoot
-            .appendingPathComponent("shaders/gpu_spike", isDirectory: true)
+            .appendingPathComponent("shaders/gpu", isDirectory: true)
         func shader(_ name: String) throws -> String {
             try String(
                 contentsOf: shaderDirectory.appendingPathComponent(name),

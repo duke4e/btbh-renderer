@@ -27,7 +27,6 @@
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "R3D_RAYLIB_VENDORED": "ON",
         "R3D_ASSIMP_VENDORED": "ON"
       }
     },
@@ -37,19 +36,17 @@
       "inherits": "x64-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "R3D_RAYLIB_VENDORED": "ON",
         "R3D_ASSIMP_VENDORED": "ON"
       }
     },
     {
       "name": "x64-gpu-debug",
-      "displayName": "x64 SDL_GPU Phase 2 Debug",
+      "displayName": "x64 SDL_GPU Debug",
       "inherits": "x64-debug",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
-        "BTBH_BUILD_GPU_SPIKE": "ON",
-        "R3D_BUILD_EXAMPLES": "OFF"
+        "BTBH_BUILD_GPU_SPIKE": "ON"
       }
     },
     {
@@ -62,7 +59,6 @@
       },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "R3D_RAYLIB_VENDORED": "ON",
         "R3D_ASSIMP_VENDORED": "ON"
       }
     },
@@ -72,7 +68,6 @@
       "inherits": "x86-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "R3D_RAYLIB_VENDORED": "ON",
         "R3D_ASSIMP_VENDORED": "ON"
       }
     },
@@ -84,7 +79,6 @@
       "installDir": "${sourceDir}/out/install/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "R3D_RAYLIB_VENDORED": "ON",
         "R3D_ASSIMP_VENDORED": "ON"
       },
       "condition": {
@@ -107,9 +101,7 @@
       "cacheVariables": {
         "CMAKE_OSX_DEPLOYMENT_TARGET": "12.0",
         "BUILD_SHARED_LIBS": "OFF",
-        "R3D_RAYLIB_VENDORED": "ON",
-        "R3D_ASSIMP_VENDORED": "ON",
-        "R3D_BUILD_EXAMPLES": "OFF"
+        "R3D_ASSIMP_VENDORED": "ON"
       },
       "condition": {
         "type": "equals",

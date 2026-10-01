@@ -10,15 +10,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BTBH_GPU_RC_CASCADE_COUNT BTBH_GPU_RC_MAX_PRODUCTION_CASCADES
-
 typedef struct BTBHGPUSceneRadianceCascadesRuntime {
     BTBHGPUSceneRadianceCascadesState state;
-    SDL_GPUComputePipeline *trace_pipeline;
-    SDL_GPUComputePipeline *merge_pipeline;
-    SDL_GPUComputePipeline *prefilter_pipeline;
-    SDL_GPUComputePipeline *diffuse_cache_pipeline;
-    SDL_GPUComputePipeline *resolve_pipeline;
     SDL_GPUComputePipeline *hrc_trace_pipeline;
     SDL_GPUComputePipeline *hrc_merge_up_pipeline;
     SDL_GPUComputePipeline *hrc_merge_down_pipeline;
@@ -45,26 +38,10 @@ typedef struct BTBHGPUSceneRadianceCascadesRuntime {
     SDL_GPUTexture *fallback_cube_texture;
     uint32_t source_field_width;
     uint32_t source_field_height;
-    BTBHGPUSceneRadianceCascadesProfile profile;
-    BTBHGPUSceneRadianceCascadeLayout
-        cascade_layouts[BTBH_GPU_RC_CASCADE_COUNT];
-    uint32_t cascade_count;
-    SDL_GPUTexture *raw_cascade_textures[BTBH_GPU_RC_CASCADE_COUNT];
-    SDL_GPUTexture *cascade_textures[BTBH_GPU_RC_CASCADE_COUNT];
-    SDL_GPUTexture *prefiltered_cascade_texture;
-    SDL_GPUTexture *diffuse_cache_texture;
     BTBHGPUHolographicRadianceCascadesLayout hrc_layout;
     SDL_GPUTexture *hrc_acceleration_textures[BTBH_GPU_HRC_MAX_LEVELS];
     SDL_GPUTexture *hrc_radiance_textures[2];
     SDL_GPUTexture *hrc_quadrant_textures[3];
-    BTBHGPUSceneRadianceCascadesBackend resource_backend;
-    uint32_t resolve_atlas_width;
-    uint32_t resolve_atlas_height;
-    uint32_t resolve_direction_tile_width;
-    uint32_t resolve_direction_tile_height;
-    uint32_t resolve_direction_count;
-    uint32_t diffuse_cache_atlas_width;
-    uint32_t diffuse_cache_atlas_height;
     SDL_GPUTexture *occlusion_textures[
         BTBH_GPU_RC_MAX_OCCLUSION_CASCADES
     ];

@@ -16,7 +16,7 @@
   }],
   "textures": [{"source": 0}],
   "images": [{
-    "uri": "../../examples/resources/images/placeholder.png"
+    "uri": "placeholder.png"
   }],
   "buffers": [{
     "byteLength": 42,

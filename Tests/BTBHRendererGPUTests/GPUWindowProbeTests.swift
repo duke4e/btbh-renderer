@@ -500,7 +500,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -577,7 +577,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -700,7 +700,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_fxaa.frag.hlsl"
+                "shaders/gpu/production_fxaa.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -778,25 +778,25 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let lutShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_lut.frag.hlsl"
+                "shaders/gpu/production_lut.frag.hlsl"
             ),
             encoding: .utf8
         )
         let casShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_cas.frag.hlsl"
+                "shaders/gpu/production_cas.frag.hlsl"
             ),
             encoding: .utf8
         )
         let tiltShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+                "shaders/gpu/production_tilt_shift.frag.hlsl"
             ),
             encoding: .utf8
         )
         let outputShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_post.frag.hlsl"
+                "shaders/gpu/production_post.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -839,7 +839,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+                "shaders/gpu/production_tilt_shift.frag.hlsl"
             ),
             encoding: .utf8
         ).replacingOccurrences(of: "\r\n", with: "\n")
@@ -873,7 +873,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_tilt_shift.frag.hlsl"
+                "shaders/gpu/production_tilt_shift.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -908,19 +908,19 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let modelShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
         let postShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_post.frag.hlsl"
+                "shaders/gpu/production_post.frag.hlsl"
             ),
             encoding: .utf8
         )
         let resolveShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_ssao_resolve.frag.hlsl"
+                "shaders/gpu/production_ssao_resolve.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1102,7 +1102,7 @@ final class GPUWindowProbeTests: XCTestCase {
         ).replacingOccurrences(of: "\r\n", with: "\n")
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_upscale_lanczos.frag.hlsl"
+                "shaders/gpu/production_upscale_lanczos.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1142,19 +1142,19 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let resolveShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_ssao_resolve.frag.hlsl"
+                "shaders/gpu/production_ssao_resolve.frag.hlsl"
             ),
             encoding: .utf8
         )
         let denoiseShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_ssao_denoise.frag.hlsl"
+                "shaders/gpu/production_ssao_denoise.frag.hlsl"
             ),
             encoding: .utf8
         )
         let ssaoShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_ssao.frag.hlsl"
+                "shaders/gpu/production_ssao.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1240,7 +1240,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1322,7 +1322,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1342,19 +1342,19 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let fragmentShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
         let staticVertexShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.vert.hlsl"
+                "shaders/gpu/production_model.vert.hlsl"
             ),
             encoding: .utf8
         )
         let animatedVertexShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+                "shaders/gpu/production_animated_model.vert.hlsl"
             ),
             encoding: .utf8
         )
@@ -1408,7 +1408,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+                "shaders/gpu/production_animated_model.vert.hlsl"
             ),
             encoding: .utf8
         ).replacingOccurrences(of: "\r\n", with: "\n")
@@ -1429,19 +1429,19 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let fragmentShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
         let staticVertexShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.vert.hlsl"
+                "shaders/gpu/production_model.vert.hlsl"
             ),
             encoding: .utf8
         )
         let animatedVertexShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_animated_model.vert.hlsl"
+                "shaders/gpu/production_animated_model.vert.hlsl"
             ),
             encoding: .utf8
         )
@@ -1485,7 +1485,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shaderPaths = [
-            "shaders/gpu_spike/production_animated_model.vert.hlsl",
+            "shaders/gpu/production_animated_model.vert.hlsl",
         ]
 
         for shaderPath in shaderPaths {
@@ -1512,7 +1512,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1532,7 +1532,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_model.frag.hlsl"
+                "shaders/gpu/production_model.frag.hlsl"
             ),
             encoding: .utf8
         )
@@ -1559,7 +1559,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let shaderDirectory = packageRoot.appendingPathComponent(
-            "shaders/gpu_spike"
+            "shaders/gpu"
         )
         let vertexShaders = [
             "production_model.vert.hlsl",
@@ -1609,7 +1609,7 @@ final class GPUWindowProbeTests: XCTestCase {
             encoding: .utf8
         )
         let shaderDirectory = packageRoot.appendingPathComponent(
-            "shaders/gpu_spike"
+            "shaders/gpu"
         )
         let vertexShader = try String(
             contentsOf: shaderDirectory.appendingPathComponent(
@@ -2142,7 +2142,7 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         let fastShader = try String(
             contentsOf: packageRoot.appendingPathComponent(
-                "shaders/gpu_spike/production_shadow_fast.vert.hlsl"
+                "shaders/gpu/production_shadow_fast.vert.hlsl"
             ),
             encoding: .utf8
         )
@@ -2538,7 +2538,7 @@ final class GPUWindowProbeTests: XCTestCase {
         let texture = try resources.loadTexture(.init(
             path: packageRoot
                 .appendingPathComponent(
-                    "examples/resources/images/placeholder.png"
+                    "Tests/Fixtures/placeholder.png"
                 )
                 .path
         ))
@@ -3540,7 +3540,7 @@ final class GPUWindowProbeTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
         try FileManager.default.removeItem(
             at: temporaryDirectory.appendingPathComponent(
-                "production_rc_merge.comp.\(platformShaderExtension)"
+                "production_hrc_merge_up.comp.\(platformShaderExtension)"
             )
         )
         let fallbackReport = try present(

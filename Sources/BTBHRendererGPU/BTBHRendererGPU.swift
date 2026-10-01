@@ -2998,7 +2998,6 @@ public final class GPUWindowProbe {
         _ backend: RadianceCascadesBackend
     ) -> BTBHGPUSceneRadianceCascadesBackend {
         switch backend {
-        case .classic: BTBH_GPU_SCENE_RC_BACKEND_CLASSIC
         case .holographic: BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC
         }
     }
@@ -3006,10 +3005,7 @@ public final class GPUWindowProbe {
     private static func radianceCascadesBackend(
         _ backend: BTBHGPUSceneRadianceCascadesBackend
     ) -> RadianceCascadesBackend {
-        switch backend {
-        case BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC: .holographic
-        default: .classic
-        }
+        .holographic
     }
 
     private static func radianceCascadesFallbackReason(
