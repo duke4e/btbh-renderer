@@ -1,8 +1,9 @@
 [CmdletBinding()]
 param(
     [string] $RendererRoot = (Split-Path -Parent $PSScriptRoot),
-    [string] $RendererBuildDirectory = (
-        Join-Path $env:LOCALAPPDATA "btbh-renderer-gpu"
+    [string] $RendererBuildDirectory = $(
+        if ($env:BTBH_RENDERER_BUILD_ROOT) { $env:BTBH_RENDERER_BUILD_ROOT }
+        else { Join-Path $env:LOCALAPPDATA "btbh-renderer-gpu" }
     ),
     [string] $Filter
 )

@@ -87,7 +87,11 @@ foreach ($line in $environmentResult.StandardOutput -split "`r?`n") {
     $visualStudioEnvironment[$name] = $value
 }
 
-$rendererBuildRoot = Join-Path $env:LOCALAPPDATA "btbh-renderer-gpu"
+$rendererBuildRoot = if ($env:BTBH_RENDERER_BUILD_ROOT) {
+    $env:BTBH_RENDERER_BUILD_ROOT
+} else {
+    Join-Path $env:LOCALAPPDATA "btbh-renderer-gpu"
+}
 $visualStudioEnvironment["BTBH_ENABLE_GPU_BACKEND"] = "1"
 $visualStudioEnvironment["LIB"] = [string]::Join(";", @(
     (Join-Path $rendererBuildRoot "lib"),
