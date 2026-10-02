@@ -2870,7 +2870,7 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
     BTBHGPUWindow *window,
     uint32_t width,
     uint32_t height,
-    bool anti_aliasing_enabled,
+    bool post_color_enabled,
     bool smaa_enabled,
     BTBHGPUSceneReport *report
 ) {
@@ -2881,7 +2881,7 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
         runtime->post_pong_texture != NULL &&
         runtime->smaa_width == width &&
         runtime->smaa_height == height &&
-        (!anti_aliasing_enabled ||
+        (!post_color_enabled ||
          runtime->post_color_texture != NULL) &&
         (!smaa_enabled ||
          (runtime->smaa_edges_texture != NULL &&
@@ -2942,7 +2942,7 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
             SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT
         );
     }
-    if (anti_aliasing_enabled &&
+    if (post_color_enabled &&
         runtime->post_color_texture == NULL) {
         runtime->post_color_texture = btbh_gpu_scene_create_smaa_target(
             device,
@@ -2970,7 +2970,7 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
     if (runtime->final_color_texture == NULL ||
         runtime->post_ping_texture == NULL ||
         runtime->post_pong_texture == NULL ||
-        (anti_aliasing_enabled &&
+        (post_color_enabled &&
          runtime->post_color_texture == NULL) ||
         (smaa_enabled &&
          (runtime->smaa_edges_texture == NULL ||
@@ -3704,6 +3704,7 @@ static bool btbh_gpu_scene_post_valid(
         post->tonemap_mode < BTBH_GPU_SCENE_TONEMAP_COUNT &&
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
+        post->mirror_horizontal <= 1u &&
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL);
 }
@@ -5013,7 +5014,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             window,
             render_width,
             render_height,
-            post->anti_aliasing != 0u,
+            post->anti_aliasing != 0u ||
+                post->mirror_horizontal != 0u,
             post->anti_aliasing >= 1u &&
                 post->anti_aliasing <=
                     BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
@@ -6131,6 +6133,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         runtime->final_color_texture;
     runtime->composite_width = render_width;
     runtime->composite_height = render_height;
+    if (fullscreen_ok && post->mirror_horizontal != 0u) {
+        /* A same-size nearest blit mirrors pixel x to width - 1 - x
+         * exactly. Anti-aliasing has already consumed
+         * post_color_texture, so it holds the mirrored image, and the
+         * capture, upscale and composite all read the mirrored frame. */
+        SDL_GPUBlitInfo mirror_blit;
+        SDL_zero(mirror_blit);
+        mirror_blit.source.texture = runtime->final_color_texture;
+        mirror_blit.source.w = render_width;
+        mirror_blit.source.h = render_height;
+        mirror_blit.destination.texture = runtime->post_color_texture;
+        mirror_blit.destination.w = render_width;
+        mirror_blit.destination.h = render_height;
+        mirror_blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        mirror_blit.flip_mode = SDL_FLIP_HORIZONTAL;
+        mirror_blit.filter = SDL_GPU_FILTER_NEAREST;
+        SDL_InsertGPUDebugLabel(command, "BTBH Scene Mirror");
+        SDL_BlitGPUTexture(command, &mirror_blit);
+        runtime->composite_color_texture =
+            runtime->post_color_texture;
+    }
     if (fullscreen_ok &&
         post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS &&
         (render_width != drawable_width ||
@@ -6144,7 +6167,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         upscale_uniforms.metrics[3] = (float)render_height;
         SDL_GPUTextureSamplerBinding upscale_sampler;
         SDL_zero(upscale_sampler);
-        upscale_sampler.texture = runtime->final_color_texture;
+        upscale_sampler.texture = runtime->composite_color_texture;
         upscale_sampler.sampler = runtime->scene_color_sampler;
         fullscreen_ok = btbh_gpu_scene_render_fullscreen(
             command,

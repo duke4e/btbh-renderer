@@ -909,6 +909,14 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(postChain.screenShaders, [screenShader])
         XCTAssertEqual(postChain.casSharpness, 0.8)
         XCTAssertTrue(postChain.tiltShiftEnabled)
+        XCTAssertFalse(postChain.mirrorHorizontally, "the final image is not mirrored by default")
+        let mirroredChain = PostChainDescriptor(
+            screenShaders: [screenShader], casSharpness: 0.8, tiltShiftEnabled: true, mirrorHorizontally: true
+        )
+        XCTAssertEqual(mirroredChain.screenShaders, [screenShader])
+        XCTAssertEqual(mirroredChain.casSharpness, 0.8)
+        XCTAssertTrue(mirroredChain.tiltShiftEnabled)
+        XCTAssertTrue(mirroredChain.mirrorHorizontally)
 
         XCTAssertEqual(EnvironmentDescriptor.default.backgroundColor, .black)
         XCTAssertEqual(EnvironmentDescriptor.default.backgroundEnergy, 0)
@@ -925,6 +933,7 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(PostChainDescriptor.empty.screenShaders, [])
         XCTAssertEqual(PostChainDescriptor.empty.casSharpness, 0)
         XCTAssertFalse(PostChainDescriptor.empty.tiltShiftEnabled)
+        XCTAssertFalse(PostChainDescriptor.empty.mirrorHorizontally)
     }
 
     func testScenePublicInitializersAndFrameDefaultsAreAvailable() {
@@ -1134,6 +1143,7 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(frame.postChain.screenShaders, [])
         XCTAssertEqual(frame.postChain.casSharpness, 0)
         XCTAssertFalse(frame.postChain.tiltShiftEnabled)
+        XCTAssertFalse(frame.postChain.mirrorHorizontally)
 
         let readback = FrameReadback(size: size, rgba8: [0, 1, 2, 3])
         XCTAssertEqual(readback.size, size)

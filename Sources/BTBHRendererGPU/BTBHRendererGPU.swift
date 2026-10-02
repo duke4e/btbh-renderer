@@ -922,7 +922,8 @@ struct GPUScenePostProbe {
         antiAliasing: .off,
         upscaleMode: .linear,
         radianceCascades: .off,
-        heroOmniLightSourceIndex: -1
+        heroOmniLightSourceIndex: -1,
+        mirrorHorizontally: false
     )
 
     let lutTexture: OpaquePointer?
@@ -947,6 +948,7 @@ struct GPUScenePostProbe {
     let upscaleMode: UpscaleMode
     let radianceCascades: RadianceCascadesDescriptor
     let heroOmniLightSourceIndex: Int32
+    let mirrorHorizontally: Bool
 
     func withRadianceCascades(
         _ radianceCascades: RadianceCascadesDescriptor
@@ -973,7 +975,8 @@ struct GPUScenePostProbe {
             antiAliasing: antiAliasing,
             upscaleMode: upscaleMode,
             radianceCascades: radianceCascades,
-            heroOmniLightSourceIndex: heroOmniLightSourceIndex
+            heroOmniLightSourceIndex: heroOmniLightSourceIndex,
+            mirrorHorizontally: mirrorHorizontally
         )
     }
 }
@@ -2216,6 +2219,7 @@ public final class GPUWindowProbe {
             GPUAntiAliasingProjection.native(post.antiAliasing)
         nativePost.upscale_mode =
             GPUUpscaleModeProjection.native(post.upscaleMode)
+        nativePost.mirror_horizontal = post.mirrorHorizontally ? 1 : 0
         nativePost.radiance_cascades.tier =
             Self.radianceCascadesTier(post.radianceCascades.tier)
         nativePost.radiance_cascades.backend =

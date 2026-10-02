@@ -1510,7 +1510,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             antiAliasing: antiAliasing,
             upscaleMode: upscaleMode,
             radianceCascades: mergedRadianceCascades,
-            heroOmniLightSourceIndex: heroOmniLightSourceIndex
+            heroOmniLightSourceIndex: heroOmniLightSourceIndex,
+            mirrorHorizontally: chain.mirrorHorizontally
         )
     }
 

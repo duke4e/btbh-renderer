@@ -1073,11 +1073,20 @@ public struct PostChainDescriptor: Sendable {
     public let screenShaders: [ScreenShaderHandle]
     public let casSharpness: Float
     public let tiltShiftEnabled: Bool
+    /// Flips the final world image left-right after anti-aliasing. The canvas pass draws on top of
+    /// the flipped image unchanged, and the world geometry, culling and handedness are untouched.
+    public let mirrorHorizontally: Bool
 
-    public init(screenShaders: [ScreenShaderHandle], casSharpness: Float, tiltShiftEnabled: Bool) {
+    public init(
+        screenShaders: [ScreenShaderHandle],
+        casSharpness: Float,
+        tiltShiftEnabled: Bool,
+        mirrorHorizontally: Bool = false
+    ) {
         self.screenShaders = screenShaders
         self.casSharpness = casSharpness
         self.tiltShiftEnabled = tiltShiftEnabled
+        self.mirrorHorizontally = mirrorHorizontally
     }
 
     public static let empty = Self(screenShaders: [], casSharpness: 0, tiltShiftEnabled: false)

@@ -1135,6 +1135,97 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
+    func testProductionMirrorFlipsTheFinishedImageBeforeUpscaleAndComposite() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "src/gpu/btbh_gpu_scene.c"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+        let header = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "include/btbh_gpu/btbh_gpu.h"
+            ),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+
+        XCTAssertTrue(header.contains(
+            "    uint8_t upscale_mode;\n" +
+                "    /* 1 flips the final scene image left-right before it is composited. */\n" +
+                "    uint8_t mirror_horizontal;\n"
+        ))
+        XCTAssertTrue(nativeScene.contains("post->mirror_horizontal <= 1u &&"))
+        XCTAssertTrue(nativeScene.contains(
+            "post->anti_aliasing != 0u ||\n" +
+                "                post->mirror_horizontal != 0u,"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "mirror_blit.flip_mode = SDL_FLIP_HORIZONTAL;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "mirror_blit.filter = SDL_GPU_FILTER_NEAREST;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "upscale_sampler.texture = runtime->composite_color_texture;"
+        ))
+        let blend = try XCTUnwrap(nativeScene.range(of: "\"BTBH SMAA Blend\""))
+        let mirror = try XCTUnwrap(nativeScene.range(of: "\"BTBH Scene Mirror\""))
+        let upscale = try XCTUnwrap(nativeScene.range(of: "\"BTBH Lanczos Upscale\""))
+        XCTAssertLessThan(blend.lowerBound, mirror.lowerBound, "the mirror follows anti-aliasing")
+        XCTAssertLessThan(mirror.lowerBound, upscale.lowerBound, "the upscale reads the mirrored image")
+        XCTAssertEqual(nativeScene.components(separatedBy: "flip_mode").count - 1, 1)
+    }
+
+    func testScenePostCarriesTheMirrorFlagOnlyWhenRequested() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH scene post mirror projection",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        XCTAssertFalse(GPUScenePostProbe.default.mirrorHorizontally)
+        let plain = try resources.scenePost(
+            environment: .default,
+            chain: .empty,
+            antiAliasing: .fxaa,
+            upscaleMode: .linear
+        )
+        XCTAssertFalse(plain.mirrorHorizontally)
+        let mirrored = try resources.scenePost(
+            environment: .default,
+            chain: .init(
+                screenShaders: [],
+                casSharpness: 0,
+                tiltShiftEnabled: false,
+                mirrorHorizontally: true
+            ),
+            antiAliasing: .fxaa,
+            upscaleMode: .linear
+        )
+        XCTAssertTrue(mirrored.mirrorHorizontally)
+        XCTAssertTrue(
+            mirrored.withRadianceCascades(.off).mirrorHorizontally,
+            "rebuilding the probe keeps the flag"
+        )
+        XCTAssertEqual(
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.mirror_horizontal),
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.upscale_mode).map { $0 + 1 }
+        )
+        XCTAssertEqual(MemoryLayout<BTBHGPUScenePost>.offset(of: \.radiance_cascades), 72)
+    }
+
     func testProductionSSAOUsesLegacyWorldSpaceObscurance() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

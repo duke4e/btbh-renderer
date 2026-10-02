@@ -754,6 +754,8 @@ typedef struct BTBHGPUScenePost {
     uint8_t tonemap_mode;
     uint8_t anti_aliasing;
     uint8_t upscale_mode;
+    /* 1 flips the final scene image left-right before it is composited. */
+    uint8_t mirror_horizontal;
     BTBHGPUSceneRadianceCascades radiance_cascades;
 } BTBHGPUScenePost;
 

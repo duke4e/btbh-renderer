@@ -1788,6 +1788,167 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertEqual(readback.rgba8[center + 3], 255)
     }
 
+    func testPostChainMirrorFlipsTheWorldImageButNotTheCanvas() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        let bundle = GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        )
+        try RenderServices.install(bundle)
+        let drawableSize = PixelSize2D(width: 320, height: 180)
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU post-chain mirror",
+            width: drawableSize.width,
+            height: drawableSize.height,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(drawableSize: drawableSize)
+
+        let environment = EnvironmentDescriptor(
+            backgroundColor: .init(r: 30, g: 40, b: 120, a: 255),
+            backgroundEnergy: 1,
+            ambientColor: .black,
+            ambientEnergy: 0,
+            ambientMap: .invalid,
+            skyCubemap: .invalid,
+            ssaoEnabled: false,
+            tonemap: .reinhard,
+            tonemapWhite: 1
+        )
+        // The canvas rectangle stands in for the HUD: it must stay where it was drawn.
+        let hud = RenderRect(x: 12, y: 10, width: 40, height: 24)
+        let hudColor = RenderColor(r: 0, g: 255, b: 0, a: 255)
+
+        func present(
+            mirror: Bool,
+            antiAliasing: AntiAliasing,
+            renderScale: Float,
+            upscaleMode: UpscaleMode
+        ) throws -> FrameReadback {
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(.init(
+                camera: .init(
+                    position: .init(x: 0, y: 3, z: -4),
+                    target: .zero,
+                    up: .up,
+                    verticalFOVDegrees: 60,
+                    projection: .perspective
+                ),
+                environment: environment,
+                renderScale: renderScale,
+                antiAliasing: antiAliasing,
+                upscaleMode: upscaleMode,
+                postChain: .init(
+                    screenShaders: [],
+                    casSharpness: 0,
+                    tiltShiftEnabled: false,
+                    mirrorHorizontally: mirror
+                )
+            ))
+            // Asymmetric content: a solid quad and a wire sphere on one side only.
+            RenderServices.scene.submit(.debug(.plane(
+                center: .init(x: 1.4, y: 0, z: 0.4),
+                size: .init(x: 1.2, y: 0.8),
+                color: .white
+            )))
+            RenderServices.scene.submit(.debug(.sphere(
+                center: .init(x: 1.6, y: 0.6, z: -0.5),
+                radius: 0.5,
+                color: .init(r: 255, g: 200, b: 0, a: 255)
+            )))
+            RenderServices.scene.submit(.debug(.line(
+                start: .init(x: -2.2, y: 0, z: -1),
+                end: .init(x: -0.4, y: 1.2, z: 1),
+                color: .init(r: 255, g: 0, b: 160, a: 255)
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.submit(.fillRect(.init(rect: hud, color: hudColor)))
+            RenderServices.canvas.endFrame()
+            return try RenderServices.canvas.readbackPresentedFrame()
+        }
+
+        func pixel(_ frame: FrameReadback, _ x: Int, _ y: Int) -> [UInt8] {
+            let offset = (y * frame.size.width + x) * 4
+            return Array(frame.rgba8[offset..<(offset + 4)])
+        }
+
+        func insideHUD(_ x: Int, _ y: Int) -> Bool {
+            Float(x) >= hud.x && Float(x) < hud.x + hud.width &&
+                Float(y) >= hud.y && Float(y) < hud.y + hud.height
+        }
+
+        let cases: [(AntiAliasing, Float, UpscaleMode, Int)] = [
+            (.off, 1, .linear, 0),
+            (.fxaa, 1, .linear, 0),
+            (.smaaMedium, 1, .linear, 0),
+            // The mirror runs before the Lanczos pass, whose symmetric kernel can differ by
+            // rounding when it samples a mirrored image.
+            (.off, 0.5, .lanczos, 2),
+        ]
+        for (antiAliasing, renderScale, upscaleMode, tolerance) in cases {
+            let label = "\(antiAliasing) scale \(renderScale) \(upscaleMode)"
+            let plain = try present(
+                mirror: false,
+                antiAliasing: antiAliasing,
+                renderScale: renderScale,
+                upscaleMode: upscaleMode
+            )
+            let plainAgain = try present(
+                mirror: false,
+                antiAliasing: antiAliasing,
+                renderScale: renderScale,
+                upscaleMode: upscaleMode
+            )
+            let mirrored = try present(
+                mirror: true,
+                antiAliasing: antiAliasing,
+                renderScale: renderScale,
+                upscaleMode: upscaleMode
+            )
+            XCTAssertEqual(plain.size, drawableSize, label)
+            XCTAssertEqual(mirrored.size, drawableSize, label)
+            XCTAssertEqual(plain.rgba8, plainAgain.rgba8, "\(label): the unmirrored frame is stable")
+
+            let width = drawableSize.width
+            var asymmetricPixels = 0
+            var worstDifference = 0
+            for y in 0..<drawableSize.height {
+                for x in 0..<width {
+                    let flippedX = width - 1 - x
+                    if insideHUD(x, y) || insideHUD(flippedX, y) { continue }
+                    let source = pixel(plain, flippedX, y)
+                    let image = pixel(mirrored, x, y)
+                    for channel in 0..<4 {
+                        worstDifference = max(
+                            worstDifference,
+                            abs(Int(source[channel]) - Int(image[channel]))
+                        )
+                    }
+                    if pixel(plain, x, y) != source { asymmetricPixels += 1 }
+                }
+            }
+            XCTAssertGreaterThan(asymmetricPixels, 200, "\(label): the test scene must not be symmetric")
+            XCTAssertLessThanOrEqual(
+                worstDifference,
+                tolerance,
+                "\(label): the mirrored world is the unmirrored world flipped left-right"
+            )
+            let hudCenter = (Int(hud.x + hud.width / 2), Int(hud.y + hud.height / 2))
+            XCTAssertEqual(pixel(plain, hudCenter.0, hudCenter.1), [0, 255, 0, 255], label)
+            XCTAssertEqual(pixel(mirrored, hudCenter.0, hudCenter.1), [0, 255, 0, 255], "\(label): the canvas is not mirrored")
+            XCTAssertNotEqual(
+                pixel(mirrored, width - 1 - hudCenter.0, hudCenter.1),
+                [0, 255, 0, 255],
+                "\(label): the canvas does not appear at its mirrored position"
+            )
+        }
+    }
+
     func testCanvasFillRectPresentsWithoutFailClosing() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }

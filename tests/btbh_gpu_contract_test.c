@@ -1,8 +1,10 @@
 #include "btbh_gpu/btbh_gpu.h"
 
 #include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const uint64_t required_features =
@@ -112,6 +114,27 @@ static void test_matching_snapshot_passes(void) {
     assert(report.missing_features == 0);
 }
 
+/* The mirror flag takes the padding byte after upscale_mode, so the
+ * radiance-cascade block keeps its offset and the struct its size. */
+_Static_assert(
+    offsetof(BTBHGPUScenePost, mirror_horizontal) ==
+        offsetof(BTBHGPUScenePost, upscale_mode) + 1u,
+    "mirror_horizontal must follow upscale_mode"
+);
+_Static_assert(
+    sizeof(void *) != 8u ||
+        offsetof(BTBHGPUScenePost, radiance_cascades) == 72u,
+    "the scene post radiance block must keep its 64-bit offset"
+);
+
+static void test_scene_post_mirror_flag_defaults_off(void) {
+    BTBHGPUScenePost post = {0};
+    if (post.mirror_horizontal != 0u) {
+        fprintf(stderr, "zeroed scene post must not mirror\n");
+        abort();
+    }
+}
+
 static int file_dialog_callback_count = 0;
 
 static void file_dialog_callback(
@@ -169,6 +192,7 @@ int main(void) {
     test_software_vulkan_is_rejected();
     test_missing_features_are_reported_exactly();
     test_matching_snapshot_passes();
+    test_scene_post_mirror_flag_defaults_off();
     test_file_dialog_rejects_invalid_ownership_transfer();
     return 0;
 }
