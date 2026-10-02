@@ -56,6 +56,24 @@ final class GPUPlatformTests: XCTestCase {
                 .appendingPathComponent("production_post.frag.spv")
                 .path
         )
+        XCTAssertEqual(
+            paths.canvasVertexShaderPath,
+            URL(fileURLWithPath: "/tmp/btbh-shaders")
+                .appendingPathComponent("production_canvas.vert.spv")
+                .path
+        )
+        XCTAssertEqual(
+            paths.canvasFragmentShaderPath,
+            URL(fileURLWithPath: "/tmp/btbh-shaders")
+                .appendingPathComponent("production_canvas.frag.spv")
+                .path
+        )
+        XCTAssertEqual(
+            paths.canvasTexturedFragmentShaderPath,
+            URL(fileURLWithPath: "/tmp/btbh-shaders")
+                .appendingPathComponent("production_canvas_textured.frag.spv")
+                .path
+        )
         XCTAssertEqual(paths.shaderFormat, BTBH_GPU_SHADER_FORMAT_SPIRV)
     }
 
@@ -75,6 +93,18 @@ final class GPUPlatformTests: XCTestCase {
             expectedDirectory
                 .appendingPathComponent(
                     "production_animated_model.vert.metallib"
+                )
+                .path
+        )
+        // The canvas used to resolve this directory on every present; it must match.
+        XCTAssertEqual(
+            paths.canvasTexturedFragmentShaderPath,
+            URL(fileURLWithPath: executablePath)
+                .standardizedFileURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("GPUShaders")
+                .appendingPathComponent(
+                    "production_canvas_textured.frag.metallib"
                 )
                 .path
         )

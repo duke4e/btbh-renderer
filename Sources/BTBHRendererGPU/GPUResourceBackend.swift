@@ -746,8 +746,15 @@ final class GPUResourceBackend: RenderResourceBackend {
     private var pendingAnimationLibraryDestruction:
         Set<AnimationLibraryHandle> = []
 
+    /// Read once: per-frame updates (lights, surface shaders) trace through this flag, and
+    /// reading the process environment builds a whole dictionary on every call.
+    private let resourceTraceEnabled: Bool
+
     init(platform: GPUPlatform) {
         self.platform = platform
+        resourceTraceEnabled = ProcessInfo.processInfo.environment[
+            "BTBH_GPU_RESOURCE_TRACE"
+        ] == "1"
     }
 
     func loadTexture(
@@ -3413,12 +3420,11 @@ final class GPUResourceBackend: RenderResourceBackend {
         return .operation(operation)
     }
 
-    private func trace(_ operation: String) {
-        guard ProcessInfo.processInfo.environment[
-            "BTBH_GPU_RESOURCE_TRACE"
-        ] == "1" else {
+    private func trace(_ operation: @autoclosure () -> String) {
+        guard resourceTraceEnabled else {
             return
         }
+        let operation = operation()
         FileHandle.standardError.write(
             Data("BTBH_GPU_RESOURCE_TRACE operation=\(operation)\n".utf8)
         )

@@ -63,6 +63,9 @@ struct GPUSceneShaderPaths {
     let unshadowedFragmentShaderPath: String
     let postVertexShaderPath: String
     let postFragmentShaderPath: String
+    let canvasVertexShaderPath: String
+    let canvasFragmentShaderPath: String
+    let canvasTexturedFragmentShaderPath: String
     let shaderFormat: BTBHGPUShaderFormat
 
     init(
@@ -110,6 +113,10 @@ struct GPUSceneShaderPaths {
             path("production_model_unshadowed.frag")
         postVertexShaderPath = path("production_post.vert")
         postFragmentShaderPath = path("production_post.frag")
+        canvasVertexShaderPath = path("production_canvas.vert")
+        canvasFragmentShaderPath = path("production_canvas.frag")
+        canvasTexturedFragmentShaderPath =
+            path("production_canvas_textured.frag")
     }
 }
 
@@ -663,47 +670,15 @@ public final class GPUPlatform: GamePlatform {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
         }
-        let shaderDirectory: URL
-        if let override = ProcessInfo.processInfo.environment[
-            "BTBH_GPU_SHADER_DIR"
-        ], !override.isEmpty {
-            shaderDirectory = URL(fileURLWithPath: override)
-        } else {
-            let executable = URL(
-                fileURLWithPath: CommandLine.arguments[0]
-            ).standardizedFileURL
-            shaderDirectory = executable
-                .deletingLastPathComponent()
-                .appendingPathComponent("GPUShaders")
-        }
-        let extensionName: String
-        let shaderFormat: BTBHGPUShaderFormat
-        switch request {
-        case .vulkan:
-            extensionName = "spv"
-            shaderFormat = BTBH_GPU_SHADER_FORMAT_SPIRV
-        case .metal:
-            extensionName = "metallib"
-            shaderFormat = BTBH_GPU_SHADER_FORMAT_METALLIB
-        }
+        // Canvas shader paths resolve once in `init`, like the scene paths, instead of
+        // rebuilding URLs and reading the process environment every frame.
         let presentStarted = GPUWindowProbe.monotonicElapsedSeconds
         try window.presentCanvas(
-            vertexShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_canvas.vert.\(extensionName)"
-                )
-                .path,
-            fragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_canvas.frag.\(extensionName)"
-                )
-                .path,
-            texturedFragmentShaderPath: shaderDirectory
-                .appendingPathComponent(
-                    "production_canvas_textured.frag.\(extensionName)"
-                )
-                .path,
-            shaderFormat: shaderFormat,
+            vertexShaderPath: sceneShaderPaths.canvasVertexShaderPath,
+            fragmentShaderPath: sceneShaderPaths.canvasFragmentShaderPath,
+            texturedFragmentShaderPath:
+                sceneShaderPaths.canvasTexturedFragmentShaderPath,
+            shaderFormat: sceneShaderPaths.shaderFormat,
             vertices: vertices,
             batches: batches,
             passes: passes
