@@ -547,6 +547,15 @@ enum GPUModelInstanceDrawCoalescing {
 }
 
 enum GPUSceneBatchShadowCulling {
+    /// A batch whose material does not cast shadows stays out of both shadow passes.
+    static func castsDirectionalShadow(_ batch: GPUSceneGeometryProbeBatch) -> Bool {
+        batch.directionalShadowVisible && batch.material?.castsShadow != false
+    }
+
+    static func castsSpotShadow(_ batch: GPUSceneGeometryProbeBatch) -> Bool {
+        batch.spotShadowVisible && batch.material?.castsShadow != false
+    }
+
     static func applyingSpotFrustum(
         to batches: [GPUSceneGeometryProbeBatch],
         shadow: GPUSceneDirectionalShadowProbe
@@ -817,6 +826,7 @@ struct GPUSceneMaterialProbe: Equatable {
     let unlit: Bool
     let surface: GPUSceneSurfaceProjection
     var legacySortKey: GPULegacyMaterialSortKey? = nil
+    var castsShadow = true
 }
 
 struct GPUSceneLightingProbe {
@@ -2468,7 +2478,7 @@ public final class GPUWindowProbe {
                  kind == BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH)
                     ? 1 : 0
             let spotShadowVisible: UInt8 =
-                batch.spotShadowVisible ? 1 : 0
+                GPUSceneBatchShadowCulling.castsSpotShadow(batch) ? 1 : 0
             let surfaceVariant: BTBHGPUSceneSurfaceVariant =
                 Self.sceneSurfaceVariant(surface.variant)
             let surfaceParameters0: (Float, Float, Float, Float) = (
@@ -2485,7 +2495,7 @@ public final class GPUWindowProbe {
             )
             nativeSceneVisibility.append(batch.sceneVisible ? 1 : 0)
             nativeDirectionalShadowVisibility.append(
-                batch.directionalShadowVisible ? 1 : 0
+                GPUSceneBatchShadowCulling.castsDirectionalShadow(batch) ? 1 : 0
             )
             var nativeBatch = BTBHGPUSceneGeometryBatch()
             nativeBatch.kind = kind

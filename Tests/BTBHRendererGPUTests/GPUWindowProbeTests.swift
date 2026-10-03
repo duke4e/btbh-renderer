@@ -2753,6 +2753,113 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(source.outerCutoff, -2)
     }
 
+    func testMaterialsThatDoNotCastShadowsStayOutOfShadowPasses() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH material shadow casting",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        var descriptor = MaterialDescriptor.default
+        descriptor.castsShadow = false
+        let quiet = try resources.sceneMaterial(resources.createMaterial(descriptor))
+        let ordinary = try resources.sceneMaterial(resources.createMaterial(.default))
+        XCTAssertFalse(quiet.castsShadow)
+        XCTAssertTrue(ordinary.castsShadow)
+
+        let model = try resources.loadModel(
+            path: packageRoot.appendingPathComponent("Tests/Fixtures/material-factor-triangle.gltf").path,
+            flags: [.meshData]
+        )
+        let quietPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(castsShadow: false)
+        )
+        let keptPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(stencilReference: 3)
+        )
+        let quietEntry = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: quietPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        let keptEntry = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: keptPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        XCTAssertFalse(quietEntry.castsShadow)
+        XCTAssertTrue(keptEntry.castsShadow, "an unset patch keeps the imported shadow casting")
+
+        func batch(_ material: GPUSceneMaterialProbe?) -> GPUSceneGeometryProbeBatch {
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(OpaquePointer(bitPattern: 1)!),
+                animation: nil,
+                material: material,
+                materialSlot: 0,
+                legacyInstanced: true,
+                instanceBuffer: nil,
+                firstInstance: 0,
+                instanceCount: 1
+            )
+        }
+        XCTAssertFalse(GPUSceneBatchShadowCulling.castsDirectionalShadow(batch(quiet)))
+        XCTAssertFalse(GPUSceneBatchShadowCulling.castsSpotShadow(batch(quiet)))
+        XCTAssertTrue(GPUSceneBatchShadowCulling.castsDirectionalShadow(batch(ordinary)))
+        XCTAssertTrue(GPUSceneBatchShadowCulling.castsSpotShadow(batch(ordinary)))
+        XCTAssertTrue(GPUSceneBatchShadowCulling.castsDirectionalShadow(batch(nil)))
+    }
+
+    func testModelPatchCanFadeAnImportedMaterial() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH model patch transparency",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try resources.loadModel(
+            path: packageRoot.appendingPathComponent("Tests/Fixtures/material-factor-triangle.gltf").path,
+            flags: [.meshData]
+        )
+        let fadedPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(castsShadow: false, transparency: .alpha)
+        )
+        let keptPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(stencilReference: 3)
+        )
+        let imported = try XCTUnwrap(resources.sceneModelMaterials(model: model, overrides: [])
+            .first { $0.materialSlot == 1 }?.material)
+        let faded = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: fadedPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        let kept = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: keptPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        XCTAssertEqual(imported.transparency, .disabled)
+        XCTAssertEqual(faded.transparency, .alpha)
+        XCTAssertFalse(faded.castsShadow)
+        XCTAssertEqual(kept.transparency, imported.transparency, "an unset patch keeps the imported transparency")
+    }
+
     func testDescriptorAndModelPatchPreservePBRMaterialChannels() throws {
         let platform = GPUPlatform(request: .platformDefault, debugMode: true)
         try platform.openWindow(.init(

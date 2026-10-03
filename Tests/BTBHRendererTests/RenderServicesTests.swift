@@ -936,6 +936,21 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertFalse(PostChainDescriptor.empty.mirrorHorizontally)
     }
 
+    func testMaterialsCastShadowsUnlessTheyOptOut() {
+        XCTAssertTrue(MaterialDescriptor.default.castsShadow)
+        XCTAssertNil(ModelMaterialPatch.identity.castsShadow)
+        var descriptor = MaterialDescriptor.default
+        descriptor.castsShadow = false
+        XCTAssertNotEqual(descriptor, MaterialDescriptor.default)
+        XCTAssertEqual(ModelMaterialPatch(castsShadow: false).castsShadow, false)
+    }
+
+    func testModelPatchesKeepImportedTransparencyUnlessSet() {
+        XCTAssertNil(ModelMaterialPatch.identity.transparency)
+        XCTAssertEqual(ModelMaterialPatch(transparency: .alpha).transparency, .alpha)
+        XCTAssertNotEqual(ModelMaterialPatch(transparency: .alpha), ModelMaterialPatch.identity)
+    }
+
     func testHDRCompositeDescriptorsDefaultOffForUnrelatedCallers() {
         XCTAssertEqual(EnvironmentDescriptor.default.fog, .disabled)
         XCTAssertFalse(FogDescriptor.disabled.isEnabled)

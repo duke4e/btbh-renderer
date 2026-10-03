@@ -1113,6 +1113,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             surface: surface
         )
         material.legacySortKey = .init(descriptor: descriptor)
+        material.castsShadow = descriptor.castsShadow
         return material
     }
 
@@ -1207,7 +1208,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                 }
                 let base = modelResource.materials[override.slot]
                 let surface = try sceneSurface(patch.surfaceShader)
-                material = .init(
+                var patched = GPUSceneMaterialProbe(
                     albedoTexture: texture ?? base.albedoTexture,
                     albedoColor:
                         patch.albedoColor ?? base.albedoColor,
@@ -1241,10 +1242,12 @@ final class GPUResourceBackend: RenderResourceBackend {
                     stencilDepthFail: base.stencilDepthFail,
                     stencilPass: base.stencilPass,
                     cullMode: patch.cullMode ?? base.cullMode,
-                    transparency: base.transparency,
+                    transparency: patch.transparency ?? base.transparency,
                     unlit: base.unlit,
                     surface: surface
                 )
+                patched.castsShadow = patch.castsShadow ?? base.castsShadow
+                material = patched
             }
             materialsBySlot[override.slot] = material
         }

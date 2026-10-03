@@ -254,6 +254,9 @@ public struct MaterialDescriptor: Hashable, Sendable {
     public var blend: MaterialBlendMode
     public var unlit: Bool
     public var surfaceShader: SurfaceShaderHandle
+    /// false keeps the geometry out of the directional and spot shadow maps (small fast objects such
+    /// as projectiles, which draw their own ground shadow).
+    public var castsShadow: Bool
 
     public init(
         albedoTexture: TextureHandle,
@@ -286,7 +289,8 @@ public struct MaterialDescriptor: Hashable, Sendable {
         billboard: BillboardMode,
         blend: MaterialBlendMode,
         unlit: Bool,
-        surfaceShader: SurfaceShaderHandle
+        surfaceShader: SurfaceShaderHandle,
+        castsShadow: Bool = true
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -319,6 +323,7 @@ public struct MaterialDescriptor: Hashable, Sendable {
         self.blend = blend
         self.unlit = unlit
         self.surfaceShader = surfaceShader
+        self.castsShadow = castsShadow
     }
 
     public static let `default` = Self(
@@ -362,6 +367,10 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var stencilReference: UInt8?
     public var cullMode: CullMode?
     public var surfaceShader: SurfaceShaderHandle?
+    /// nil keeps the imported material's shadow casting.
+    public var castsShadow: Bool?
+    /// nil keeps the imported material's transparency; `.alpha` blends the model by its instance alpha.
+    public var transparency: TransparencyMode?
 
     public init(
         albedoTexture: TextureHandle? = nil,
@@ -374,7 +383,9 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         minimumEmissionEnergy: Float? = nil,
         stencilReference: UInt8? = nil,
         cullMode: CullMode? = nil,
-        surfaceShader: SurfaceShaderHandle? = nil
+        surfaceShader: SurfaceShaderHandle? = nil,
+        castsShadow: Bool? = nil,
+        transparency: TransparencyMode? = nil
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -387,6 +398,8 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.stencilReference = stencilReference
         self.cullMode = cullMode
         self.surfaceShader = surfaceShader
+        self.castsShadow = castsShadow
+        self.transparency = transparency
     }
 
     public static let identity = Self()
