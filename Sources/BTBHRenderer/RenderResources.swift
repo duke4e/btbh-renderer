@@ -557,6 +557,21 @@ public enum LightKind: UInt8, Sendable {
     case directional, spot, omni
 }
 
+/// Where a directional light spends its shadow map: a sphere of `radius` around the camera
+/// target, moved `forwardShift` along the camera's forward direction flattened onto the ground
+/// (a tilted view sees more ground ahead of its target than behind it), instead of the camera
+/// frustum up to the light's `range`. The centre snaps to whole shadow texels, so shadows stay
+/// still while the camera follows something.
+public struct ShadowFocus: Sendable, Equatable {
+    public let radius: Float
+    public let forwardShift: Float
+
+    public init(radius: Float, forwardShift: Float = 0) {
+        self.radius = radius
+        self.forwardShift = forwardShift
+    }
+}
+
 public struct LightDescriptor: Sendable {
     public let kind: LightKind
     public let active: Bool
@@ -575,6 +590,8 @@ public struct LightDescriptor: Sendable {
     /// A value of one requests continuous updates. Backends may update more
     /// frequently, but must not retain a shadow map beyond this frame budget.
     public let shadowUpdatePeriodFrames: UInt32
+    /// Directional lights only: when set, the shadow covers this sphere and `range` is unused.
+    public let shadowFocus: ShadowFocus?
 
     public init(
         kind: LightKind,
@@ -587,7 +604,8 @@ public struct LightDescriptor: Sendable {
         castsShadow: Bool,
         shadowSoftness: Float,
         shadowUpdatePeriodFrames: UInt32 = 1,
-        indirectEnergy: Float = 0
+        indirectEnergy: Float = 0,
+        shadowFocus: ShadowFocus? = nil
     ) {
         self.kind = kind
         self.active = active
@@ -600,6 +618,7 @@ public struct LightDescriptor: Sendable {
         self.castsShadow = castsShadow
         self.shadowSoftness = shadowSoftness
         self.shadowUpdatePeriodFrames = shadowUpdatePeriodFrames
+        self.shadowFocus = shadowFocus
     }
 }
 

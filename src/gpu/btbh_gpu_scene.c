@@ -19,6 +19,8 @@
 #define BTBH_GPU_SCENE_INSTANCE_STRIDE \
     (BTBH_GPU_SCENE_INSTANCE_FLOATS * sizeof(float))
 #define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u
+/* The primary directional light (the sun) covers the whole view: 16 MB of D32. */
+#define BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE 2048u
 #define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 1024u
 #define BTBH_GPU_OMNI_SHADOW_MAP_SIZE 512u
 #define BTBH_GPU_OMNI_SHADOW_FACE_COUNT 6u
@@ -2502,7 +2504,7 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
     shadow_info.num_levels = 1u;
     shadow_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
     const uint32_t shadow_map_sizes[3] = {
-        BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE,
+        BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE,
         BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE,
         BTBH_GPU_SPOT_SHADOW_MAP_SIZE
     };

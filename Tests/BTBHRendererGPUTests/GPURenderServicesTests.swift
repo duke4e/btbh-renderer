@@ -4399,6 +4399,46 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertGreaterThan(materiallyDarkerPixels, 100)
         XCTAssertGreaterThan(litPixels, 1_000)
 
+        // The same caster through a focus sphere around the camera target instead of the
+        // frustum range (the sun's mode in the game).
+        try RenderServices.resources.updateLight(
+            light,
+            descriptor: .init(
+                kind: .directional,
+                active: true,
+                position: .zero,
+                direction: unshadowedDescriptor.direction,
+                color: unshadowedDescriptor.color,
+                energy: unshadowedDescriptor.energy,
+                range: 0,
+                castsShadow: true,
+                shadowSoftness: unshadowedDescriptor.shadowSoftness,
+                shadowFocus: .init(radius: 3)
+            )
+        )
+        try renderFrame()
+        let focused =
+            try RenderServices.canvas.readbackPresentedFrame()
+        var focusedDarkerPixels = 0
+        for offset in stride(
+            from: 0,
+            to: focused.rgba8.count,
+            by: 4
+        ) {
+            let before =
+                Int(unshadowed.rgba8[offset]) +
+                Int(unshadowed.rgba8[offset + 1]) +
+                Int(unshadowed.rgba8[offset + 2])
+            let after =
+                Int(focused.rgba8[offset]) +
+                Int(focused.rgba8[offset + 1]) +
+                Int(focused.rgba8[offset + 2])
+            if before - after >= 24 {
+                focusedDarkerPixels += 1
+            }
+        }
+        XCTAssertGreaterThan(focusedDarkerPixels, 100)
+
         try RenderServices.resources.updateLight(
             light,
             descriptor: .init(

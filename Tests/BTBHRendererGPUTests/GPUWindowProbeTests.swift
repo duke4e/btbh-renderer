@@ -1482,8 +1482,14 @@ final class GPUWindowProbeTests: XCTestCase {
             encoding: .utf8
         )
 
+        // The sun (primary directional) covers the whole view, so it gets the large map; the
+        // secondary directional keeps the small one.
+        XCTAssertEqual(GPUSceneDirectionalShadowProbe.primaryMapSize, 2048)
         XCTAssertEqual(GPUSceneDirectionalShadowProbe.mapSize, 512)
         XCTAssertEqual(GPUSceneOmniShadowProbe.mapSize, 512)
+        XCTAssertTrue(nativeScene.contains(
+            "#define BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE 2048u"
+        ))
         XCTAssertTrue(nativeScene.contains(
             "#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u"
         ))
@@ -1505,7 +1511,11 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertEqual(
             shader.components(separatedBy: "512.0f").count - 1,
-            3
+            2
+        )
+        XCTAssertEqual(
+            shader.components(separatedBy: "2048.0f").count - 1,
+            1
         )
         XCTAssertEqual(
             shader.components(separatedBy: "1024.0f").count - 1,
@@ -2545,6 +2555,105 @@ final class GPUWindowProbeTests: XCTestCase {
             projection.directionalShadow.viewProjection,
             GPUSceneDirectionalShadowProbe.disabled.viewProjection
         )
+    }
+
+    func testDirectionalShadowFocusCoversASphereAroundTheCameraTarget()
+        throws
+    {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH directional shadow focus",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        // Range 0 leaves the frustum fit without a shadow; the focus spends the map on a sphere
+        // of radius 6 around the camera target, moved 2 along the camera's flattened forward (+Z).
+        let sun = try resources.createLight(.init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 2,
+            range: 0,
+            castsShadow: true,
+            shadowSoftness: 1.5,
+            shadowFocus: .init(radius: 6, forwardShift: 2)
+        ))
+        let camera = RenderCamera(
+            position: .init(x: 10, y: 8, z: -3),
+            target: .init(x: 10, y: 0, z: 5),
+            up: .up,
+            verticalFOVDegrees: 45,
+            projection: .perspective
+        )
+        let shadow = try resources.sceneLighting(
+            environment: .default,
+            camera: camera,
+            aspect: 16 / 9
+        ).directionalShadow
+        XCTAssertTrue(shadow.enabled)
+        XCTAssertEqual(shadow.softness, 1.5)
+
+        func project(_ point: RenderVec3) -> RenderVec3 {
+            let m = shadow.viewProjection
+            return RenderVec3(
+                x: m[0] * point.x + m[4] * point.y + m[8] * point.z + m[12],
+                y: m[1] * point.x + m[5] * point.y + m[9] * point.z + m[13],
+                z: m[2] * point.x + m[6] * point.y + m[10] * point.z + m[14]
+            )
+        }
+        let center = RenderVec3(x: 10, y: 0, z: 7)
+        // The centre snaps to whole texels of the 2048 map, two NDC units wide.
+        let snap = 2 / GPUSceneDirectionalShadowProbe.primaryMapSize * 1.01
+        let projectedCenter = project(center)
+        XCTAssertLessThanOrEqual(abs(projectedCenter.x), snap)
+        XCTAssertLessThanOrEqual(abs(projectedCenter.y), snap)
+        let inside: [RenderVec3] = [
+            .init(x: 5.9, y: 0, z: 0), .init(x: -5.9, y: 0, z: 0),
+            .init(x: 0, y: 0, z: 5.9), .init(x: 0, y: 0, z: -5.9),
+            .init(x: 0, y: 5.9, z: 0), .init(x: 0, y: -5.9, z: 0),
+        ]
+        for offset in inside {
+            let point = project(center + offset)
+            XCTAssertTrue(
+                (-1...1).contains(point.x) && (-1...1).contains(point.y) &&
+                    (0...1).contains(point.z),
+                "\(offset) projects to \(point)"
+            )
+        }
+        let outside: [RenderVec3] = [.init(x: 7.2, y: 0, z: 0), .init(x: 0, y: 0, z: -7.2)]
+        for offset in outside {
+            let point = project(center + offset)
+            XCTAssertGreaterThan(max(abs(point.x), abs(point.y)), 1, "\(offset) projects to \(point)")
+        }
+
+        // A focus without a radius casts nothing rather than falling back to the frustum.
+        try resources.updateLight(sun, descriptor: .init(
+            kind: .directional,
+            active: true,
+            position: .zero,
+            direction: .down,
+            color: .white,
+            energy: 2,
+            range: 30,
+            castsShadow: true,
+            shadowSoftness: 1.5,
+            shadowFocus: .init(radius: 0)
+        ))
+        XCTAssertFalse(try resources.sceneLighting(
+            environment: .default,
+            camera: camera,
+            aspect: 16 / 9
+        ).directionalShadow.enabled)
     }
 
     func testSpotLightingProjectionPreservesLegacyDefaultsAndShadowMatrix()

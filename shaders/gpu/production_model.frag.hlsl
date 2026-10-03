@@ -477,6 +477,11 @@ float3 evaluate_spot_light(
 }
 
 #if BTBH_DIRECTIONAL_SHADOWS
+// The sun's map (BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE).
+static const float primary_directional_shadow_map_size = 2048.0f;
+
+// `normal` is the interpolated surface normal without normal maps or the surface-detail bump,
+// which would speckle flat ground with acne.
 float primary_directional_visibility(
     float3 world_position,
     float3 normal
@@ -486,9 +491,30 @@ float primary_directional_visibility(
     {
         return 1.0f;
     }
+    const float3 light = stable_normalize(
+        -directional_direction_energy.xyz,
+        float3(0.0f, 1.0f, 0.0f)
+    );
+    const float normal_dot_light = saturate(dot(normal, light));
+    // Biases in shadow texels, so they hold at every zoom: the light-space rows are orthonormal
+    // axes scaled by 1 / half extent (x, y) and 1 / depth range (z), so one texel spans
+    // 2 / (size * |row x|) world units. The receiver moves off its surface by up to two texels on
+    // grazing faces and compares a texel per filter step nearer the light.
+    const float texel_world =
+        2.0f / (
+            primary_directional_shadow_map_size *
+            max(
+                length(directional_shadow_view_projection[0].xyz),
+                0.000001f
+            )
+        );
+    const float softness = max(directional_shadow_controls.y, 0.0f);
+    const float3 receiver =
+        world_position +
+        normal * texel_world * (0.5f + 1.5f * (1.0f - normal_dot_light));
     const float4 clip = mul(
         directional_shadow_view_projection,
-        float4(world_position, 1.0f)
+        float4(receiver, 1.0f)
     );
     if (clip.w <= 0.0f)
     {
@@ -507,15 +533,11 @@ float primary_directional_visibility(
         projected.x * 0.5f + 0.5f,
         -projected.y * 0.5f + 0.5f
     );
-    const float3 light = stable_normalize(
-        -directional_direction_energy.xyz,
-        float3(0.0f, 1.0f, 0.0f)
-    );
-    const float normal_dot_light = saturate(dot(normal, light));
     const float bias =
-        0.001f + 0.0015f * (1.0f - normal_dot_light);
+        texel_world * (1.0f + softness) *
+        length(directional_shadow_view_projection[2].xyz);
     const float texel_radius =
-        max(directional_shadow_controls.y, 0.0f) / 512.0f;
+        softness / primary_directional_shadow_map_size;
     float visibility = 0.0f;
     [unroll]
     for (int y = -1; y <= 1; ++y)
@@ -1081,6 +1103,8 @@ FragmentOutput main(FragmentInput input)
     {
         normal = -normal;
     }
+    const float3 shadow_normal =
+        flip_normal ? -geometric_normal : geometric_normal;
     const float occlusion =
         saturate(orm.r * material_factors.y);
     const float roughness = saturate(orm.g * material_factors.z);
@@ -1213,7 +1237,7 @@ FragmentOutput main(FragmentInput input)
 #if BTBH_DIRECTIONAL_SHADOWS
         primary_directional_visibility(
             input.world_position,
-            normal
+            shadow_normal
         )
 #else
         1.0f

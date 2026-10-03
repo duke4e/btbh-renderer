@@ -1011,6 +1011,9 @@ struct GPUScenePostProbe {
 }
 
 struct GPUSceneDirectionalShadowProbe: Equatable {
+    /// The primary directional light (the sun) covers the whole view, so it gets the large map
+    /// (BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE); the secondary keeps `mapSize`.
+    static let primaryMapSize: Float = 2048
     static let mapSize: Float = 512
     static let disabled = Self(
         enabled: false,

@@ -1305,12 +1305,14 @@ final class GPUResourceBackend: RenderResourceBackend {
         let directionalShadow = Self.directionalShadow(
             primary,
             camera: camera,
-            aspect: aspect
+            aspect: aspect,
+            mapSize: GPUSceneDirectionalShadowProbe.primaryMapSize
         )
         let secondaryDirectionalShadow = Self.directionalShadow(
             secondary,
             camera: camera,
-            aspect: aspect
+            aspect: aspect,
+            mapSize: GPUSceneDirectionalShadowProbe.mapSize
         )
         let spotShadow = spot?.kind == .spot
             ? Self.spotShadow(spot)
@@ -1533,7 +1535,8 @@ final class GPUResourceBackend: RenderResourceBackend {
     private static func directionalShadow(
         _ descriptor: LightDescriptor?,
         camera: RenderCamera,
-        aspect: Float
+        aspect: Float,
+        mapSize: Float
     ) -> GPUSceneDirectionalShadowProbe {
         guard let descriptor else { return .disabled }
         let disabled = GPUSceneDirectionalShadowProbe(
@@ -1548,31 +1551,50 @@ final class GPUResourceBackend: RenderResourceBackend {
         let cameraForward = (camera.target - camera.position).normalized()
         guard descriptor.castsShadow,
               descriptor.energy > 0,
-              descriptor.range > 0,
-              aspect.isFinite,
-              aspect > 0,
-              camera.verticalFOVDegrees.isFinite,
-              camera.verticalFOVDegrees > 0,
-              camera.verticalFOVDegrees < 180,
               direction.lengthSquared > 0,
               cameraForward.lengthSquared > 0 else {
             return disabled
         }
 
-        let shadowNear = descriptor.range / 1_000
-        let shadowFar = descriptor.range
-        let farHeight = shadowFar * tan(
-            camera.verticalFOVDegrees * .pi / 360
-        )
-        let halfDepth = (shadowFar - shadowNear) * 0.5
-        let radius = sqrt(
-            farHeight * farHeight * (1 + aspect * aspect) +
-            halfDepth * halfDepth
-        )
+        let radius: Float
+        let frustumCenter: RenderVec3
+        if let focus = descriptor.shadowFocus {
+            guard focus.radius.isFinite,
+                  focus.radius > 0,
+                  focus.forwardShift.isFinite else {
+                return disabled
+            }
+            let flatForward =
+                cameraForward - RenderVec3.up * cameraForward.dot(.up)
+            let ahead = flatForward.lengthSquared > 0.000_001
+                ? flatForward.normalized()
+                : RenderVec3.zero
+            radius = focus.radius
+            frustumCenter = camera.target + ahead * focus.forwardShift
+        } else {
+            guard descriptor.range > 0,
+                  aspect.isFinite,
+                  aspect > 0,
+                  camera.verticalFOVDegrees.isFinite,
+                  camera.verticalFOVDegrees > 0,
+                  camera.verticalFOVDegrees < 180 else {
+                return disabled
+            }
+            let shadowNear = descriptor.range / 1_000
+            let shadowFar = descriptor.range
+            let farHeight = shadowFar * tan(
+                camera.verticalFOVDegrees * .pi / 360
+            )
+            let halfDepth = (shadowFar - shadowNear) * 0.5
+            radius = sqrt(
+                farHeight * farHeight * (1 + aspect * aspect) +
+                halfDepth * halfDepth
+            )
+            frustumCenter =
+                camera.position +
+                cameraForward * ((shadowNear + shadowFar) * 0.5)
+        }
         guard radius.isFinite, radius > 0 else { return disabled }
-        let frustumCenter =
-            camera.position +
-            cameraForward * ((shadowNear + shadowFar) * 0.5)
 
         let absolute = RenderVec3(
             x: abs(direction.x),
@@ -1594,8 +1616,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             return disabled
         }
 
-        let texelSize =
-            radius * 2 / GPUSceneDirectionalShadowProbe.mapSize
+        let texelSize = radius * 2 / mapSize
         let snappedX =
             floor(frustumCenter.dot(lightRight) / texelSize) * texelSize
         let snappedY =
@@ -3361,6 +3382,15 @@ final class GPUResourceBackend: RenderResourceBackend {
             throw GPUResourceStagingError.invalidLightDescriptor(
                 "Light vectors and nonnegative scalar fields must be finite; shadow update period must be 1...60 frames"
             )
+        }
+        if let focus = descriptor.shadowFocus {
+            guard focus.radius.isFinite,
+                  focus.radius >= 0,
+                  focus.forwardShift.isFinite else {
+                throw GPUResourceStagingError.invalidLightDescriptor(
+                    "Shadow focus radius must be finite and nonnegative and its forward shift finite"
+                )
+            }
         }
     }
 
