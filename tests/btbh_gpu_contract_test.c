@@ -152,6 +152,23 @@ static void test_scene_post_hdr_composite_defaults_off(void) {
     }
 }
 
+/* Surface detail was appended after the surface parameters, so a zeroed
+ * geometry batch keeps every older field and draws without detail. */
+_Static_assert(
+    offsetof(BTBHGPUSceneGeometryBatch, detail_parameters) ==
+        offsetof(BTBHGPUSceneGeometryBatch, surface_parameters1) +
+            4u * sizeof(float),
+    "detail_parameters must follow surface_parameters1"
+);
+
+static void test_geometry_batch_detail_defaults_off(void) {
+    BTBHGPUSceneGeometryBatch batch = {0};
+    if (batch.detail_parameters[3] != 0.0f) {
+        fprintf(stderr, "zeroed geometry batch must not draw surface detail\n");
+        abort();
+    }
+}
+
 static int file_dialog_callback_count = 0;
 
 static void file_dialog_callback(
@@ -211,6 +228,7 @@ int main(void) {
     test_matching_snapshot_passes();
     test_scene_post_mirror_flag_defaults_off();
     test_scene_post_hdr_composite_defaults_off();
+    test_geometry_batch_detail_defaults_off();
     test_file_dialog_rejects_invalid_ownership_transfer();
     return 0;
 }
