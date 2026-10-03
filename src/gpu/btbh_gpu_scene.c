@@ -89,6 +89,7 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float sun_color_energy[4];
     float sun_direction_size[4];
     float procedural_controls[4];
+    float detail_parameters[4];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
@@ -3342,6 +3343,14 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->surface_parameters1[1]) &&
             isfinite(batch->surface_parameters1[2]) &&
             isfinite(batch->surface_parameters1[3]) &&
+            isfinite(batch->detail_parameters[0]) &&
+            isfinite(batch->detail_parameters[1]) &&
+            isfinite(batch->detail_parameters[2]) &&
+            isfinite(batch->detail_parameters[3]) &&
+            batch->detail_parameters[3] >= 0.0f &&
+            batch->detail_parameters[3] <= 3.0f &&
+            (batch->detail_parameters[3] < 0.5f ||
+             batch->detail_parameters[2] > 0.0f) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&
@@ -5713,6 +5722,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->sun_curve;
             fragment_uniforms.procedural_controls[1] =
                 (float)lighting->ibl_enabled;
+            (void)memcpy(
+                fragment_uniforms.detail_parameters,
+                batch->detail_parameters,
+                sizeof(fragment_uniforms.detail_parameters)
+            );
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

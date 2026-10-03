@@ -2817,6 +2817,82 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(GPUSceneBatchShadowCulling.castsDirectionalShadow(batch(nil)))
     }
 
+    func testSurfaceDetailReachesTheSceneMaterialAndShader() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH surface detail",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let grass = SurfaceDetail(pattern: .grass, albedoVariation: 0.2, bumpHeight: 0.004, frequency: 9)
+        var descriptor = MaterialDescriptor.default
+        descriptor.detail = grass
+        XCTAssertEqual(try resources.sceneMaterial(resources.createMaterial(descriptor)).detail, grass)
+        XCTAssertEqual(try resources.sceneMaterial(resources.createMaterial(.default)).detail, .none)
+
+        let model = try resources.loadModel(
+            path: packageRoot.appendingPathComponent("Tests/Fixtures/material-factor-triangle.gltf").path,
+            flags: [.meshData]
+        )
+        let detailedPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(detail: grass)
+        )
+        let keptPatch = try resources.createMaterialOverride(
+            from: model, materialIndex: 1, patch: .init(stencilReference: 3)
+        )
+        let detailed = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: detailedPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        let kept = try XCTUnwrap(resources.sceneModelMaterials(
+            model: model, overrides: [.init(slot: 1, material: keptPatch)]
+        ).first { $0.materialSlot == 1 }?.material)
+        XCTAssertEqual(detailed.detail, grass)
+        XCTAssertEqual(kept.detail, .none, "an unset patch keeps the imported material's detail")
+
+        let native = GPUSceneSurfaceDetailParameters.native(grass)
+        XCTAssertEqual(native.0, 0.2)
+        XCTAssertEqual(native.1, 0.004)
+        XCTAssertEqual(native.2, 9)
+        XCTAssertEqual(native.3, 2)
+        let off = GPUSceneSurfaceDetailParameters.native(
+            SurfaceDetail(pattern: .facade, albedoVariation: 0, bumpHeight: 0, frequency: 9)
+        )
+        XCTAssertEqual(off.0, 0)
+        XCTAssertEqual(off.1, 0)
+        XCTAssertEqual(off.2, 1)
+        XCTAssertEqual(off.3, 0)
+
+        // The fragment uniform block carries the detail right after the procedural sky controls, in the
+        // shader and in the native struct alike (both stop before the shadow block when shadows are off).
+        let shader = try String(
+            contentsOf: packageRoot.appendingPathComponent("shaders/gpu/production_model.frag.hlsl"),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+        let scene = try String(
+            contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
+            encoding: .utf8
+        ).replacingOccurrences(of: "\r\n", with: "\n")
+        XCTAssertTrue(shader.contains("float4 procedural_controls;\n"))
+        XCTAssertTrue(shader.contains("    float4 detail_parameters;\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        XCTAssertTrue(scene.contains(
+            "    float procedural_controls[4];\n    float detail_parameters[4];\n"
+                + "    float directional_shadow_view_projection[16];"
+        ))
+        XCTAssertTrue(shader.contains("const float3 detail_gradient = apply_surface_detail(input, albedo_sample);"))
+    }
+
     func testModelPatchCanFadeAnImportedMaterial() throws {
         let platform = GPUPlatform(request: .platformDefault, debugMode: true)
         try platform.openWindow(.init(

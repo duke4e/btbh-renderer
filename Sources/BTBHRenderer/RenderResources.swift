@@ -222,6 +222,44 @@ public enum MaterialBlendMode: UInt8, Hashable, Sendable {
     case mix, additive, multiplied, premultipliedAlpha
 }
 
+/// Procedural world-space surface detail drawn by the scene shader without textures: an albedo
+/// variation and a bump from value noise. It fades out where a noise cell gets smaller than a few
+/// pixels, so distant surfaces do not shimmer.
+public struct SurfaceDetail: Hashable, Sendable {
+    public enum Pattern: UInt8, Hashable, Sendable {
+        case none
+        /// Fine grain and broad stains on the ground plane (asphalt, paving, sand, soil).
+        case ground
+        /// Ground grain plus a slow drift between warm and cool greens (lawns).
+        case grass
+        /// Triplanar grain for walls and roofs, darkened toward the ground.
+        case facade
+    }
+
+    public var pattern: Pattern
+    /// The albedo varies by up to plus or minus this fraction.
+    public var albedoVariation: Float
+    /// Bump height in render units.
+    public var bumpHeight: Float
+    /// Noise cells per render unit.
+    public var frequency: Float
+
+    public init(pattern: Pattern, albedoVariation: Float, bumpHeight: Float, frequency: Float) {
+        self.pattern = pattern
+        self.albedoVariation = albedoVariation
+        self.bumpHeight = bumpHeight
+        self.frequency = frequency
+    }
+
+    public static let none = Self(pattern: .none, albedoVariation: 0, bumpHeight: 0, frequency: 1)
+
+    public var isEnabled: Bool {
+        pattern != .none && frequency > 0 && frequency.isFinite
+            && albedoVariation.isFinite && bumpHeight.isFinite
+            && (albedoVariation != 0 || bumpHeight != 0)
+    }
+}
+
 public struct MaterialDescriptor: Hashable, Sendable {
     public var albedoTexture: TextureHandle
     public var albedoColor: RenderColor
@@ -257,6 +295,8 @@ public struct MaterialDescriptor: Hashable, Sendable {
     /// false keeps the geometry out of the directional and spot shadow maps (small fast objects such
     /// as projectiles, which draw their own ground shadow).
     public var castsShadow: Bool
+    /// Procedural surface detail (off by default).
+    public var detail: SurfaceDetail
 
     public init(
         albedoTexture: TextureHandle,
@@ -290,7 +330,8 @@ public struct MaterialDescriptor: Hashable, Sendable {
         blend: MaterialBlendMode,
         unlit: Bool,
         surfaceShader: SurfaceShaderHandle,
-        castsShadow: Bool = true
+        castsShadow: Bool = true,
+        detail: SurfaceDetail = .none
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -324,6 +365,7 @@ public struct MaterialDescriptor: Hashable, Sendable {
         self.unlit = unlit
         self.surfaceShader = surfaceShader
         self.castsShadow = castsShadow
+        self.detail = detail
     }
 
     public static let `default` = Self(
@@ -371,6 +413,8 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var castsShadow: Bool?
     /// nil keeps the imported material's transparency; `.alpha` blends the model by its instance alpha.
     public var transparency: TransparencyMode?
+    /// nil keeps the imported material's surface detail.
+    public var detail: SurfaceDetail?
 
     public init(
         albedoTexture: TextureHandle? = nil,
@@ -385,7 +429,8 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         cullMode: CullMode? = nil,
         surfaceShader: SurfaceShaderHandle? = nil,
         castsShadow: Bool? = nil,
-        transparency: TransparencyMode? = nil
+        transparency: TransparencyMode? = nil,
+        detail: SurfaceDetail? = nil
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -400,6 +445,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.surfaceShader = surfaceShader
         self.castsShadow = castsShadow
         self.transparency = transparency
+        self.detail = detail
     }
 
     public static let identity = Self()

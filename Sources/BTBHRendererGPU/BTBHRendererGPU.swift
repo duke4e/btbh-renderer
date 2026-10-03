@@ -827,6 +827,16 @@ struct GPUSceneMaterialProbe: Equatable {
     let surface: GPUSceneSurfaceProjection
     var legacySortKey: GPULegacyMaterialSortKey? = nil
     var castsShadow = true
+    var detail = SurfaceDetail.none
+}
+
+enum GPUSceneSurfaceDetailParameters {
+    /// (albedo variation, bump height, cells per render unit, pattern); disabled detail is all zero
+    /// but for a frequency of one, so the shader's pattern test skips it.
+    static func native(_ detail: SurfaceDetail) -> (Float, Float, Float, Float) {
+        guard detail.isEnabled else { return (0, 0, 1, 0) }
+        return (detail.albedoVariation, detail.bumpHeight, detail.frequency, Float(detail.pattern.rawValue))
+    }
 }
 
 struct GPUSceneLightingProbe {
@@ -2549,6 +2559,9 @@ public final class GPUWindowProbe {
             nativeBatch.surface_time = surfaceTime
             nativeBatch.surface_parameters0 = surfaceParameters0
             nativeBatch.surface_parameters1 = surfaceParameters1
+            nativeBatch.detail_parameters = GPUSceneSurfaceDetailParameters.native(
+                material?.detail ?? .none
+            )
             nativeSceneBatches.append(nativeBatch)
         }
         var report = BTBHGPUSceneReport()

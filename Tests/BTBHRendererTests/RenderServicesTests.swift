@@ -945,6 +945,21 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(ModelMaterialPatch(castsShadow: false).castsShadow, false)
     }
 
+    func testSurfaceDetailIsOffUnlessAMaterialAsksForIt() {
+        XCTAssertEqual(MaterialDescriptor.default.detail, .none)
+        XCTAssertFalse(SurfaceDetail.none.isEnabled)
+        XCTAssertNil(ModelMaterialPatch.identity.detail)
+        let grass = SurfaceDetail(pattern: .grass, albedoVariation: 0.2, bumpHeight: 0.004, frequency: 9)
+        XCTAssertTrue(grass.isEnabled)
+        XCTAssertFalse(SurfaceDetail(pattern: .ground, albedoVariation: 0, bumpHeight: 0, frequency: 9).isEnabled)
+        XCTAssertFalse(SurfaceDetail(pattern: .ground, albedoVariation: 0.1, bumpHeight: 0, frequency: 0).isEnabled)
+        XCTAssertFalse(SurfaceDetail(pattern: .none, albedoVariation: 0.1, bumpHeight: 0.01, frequency: 4).isEnabled)
+        var descriptor = MaterialDescriptor.default
+        descriptor.detail = grass
+        XCTAssertNotEqual(descriptor, MaterialDescriptor.default)
+        XCTAssertEqual(ModelMaterialPatch(detail: grass).detail, grass)
+    }
+
     func testModelPatchesKeepImportedTransparencyUnlessSet() {
         XCTAssertNil(ModelMaterialPatch.identity.transparency)
         XCTAssertEqual(ModelMaterialPatch(transparency: .alpha).transparency, .alpha)

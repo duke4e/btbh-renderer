@@ -1114,6 +1114,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         )
         material.legacySortKey = .init(descriptor: descriptor)
         material.castsShadow = descriptor.castsShadow
+        material.detail = descriptor.detail
         return material
     }
 
@@ -1247,6 +1248,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                     surface: surface
                 )
                 patched.castsShadow = patch.castsShadow ?? base.castsShadow
+                patched.detail = patch.detail ?? base.detail
                 material = patched
             }
             materialsBySlot[override.slot] = material

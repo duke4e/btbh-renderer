@@ -65,6 +65,9 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_color_energy;
     float4 sun_direction_size;
     float4 procedural_controls;
+    // x albedo variation, y bump height (render units), z noise cells per render unit,
+    // w pattern (0 none, 1 ground, 2 grass, 3 facade)
+    float4 detail_parameters;
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
@@ -955,6 +958,72 @@ FragmentOutput rc_material_output(
 }
 #endif
 
+// Procedural surface detail (SurfaceDetail): albedo grain, broad stains and a bump, all from world-space
+// noise. Returns the bump as a surface gradient (Mikkelsen) built from screen-space derivatives, so it
+// needs no tangent frame. The frame and the triplanar weights use the face normal of the position
+// derivatives, not the interpolated vertex normal, which some imported production map instances
+// carry nearly in the surface plane. detail_parameters is per draw, so every branch here is uniform
+// and the derivatives stay valid; it runs before any discard.
+float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
+{
+    const uint pattern = (uint)(detail_parameters.w + 0.5f);
+    if (pattern == 0u)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float3 position = input.world_position * detail_parameters.z;
+    const float footprint = max(length(ddx(position)), length(ddy(position)));
+    const float3 position_dx = ddx(input.world_position);
+    const float3 position_dy = ddy(input.world_position);
+    const float3 face = cross(position_dx, position_dy);
+    const float face_area = length(face);
+    const float3 face_normal = face_area > 0.0f ? face / face_area : float3(0.0f, 1.0f, 0.0f);
+    float height;
+    if (pattern == 3u)
+    {
+        float3 weights = abs(face_normal);
+        weights *= weights;
+        weights *= weights;
+        weights /= max(weights.x + weights.y + weights.z, 0.0001f);
+        height = weights.x * btbh_detail_fbm(position.zy, footprint)
+            + weights.y * btbh_detail_fbm(position.xz, footprint)
+            + weights.z * btbh_detail_fbm(position.xy, footprint);
+    }
+    else
+    {
+        height = btbh_detail_fbm(position.xz, footprint);
+    }
+    // Broad stains a dozen cells wide never alias, so they stay at any distance (far growth stages
+    // keep only these).
+    const float stain = btbh_detail_noise(position.xz * 0.083f + 5.17f) - 0.5f;
+    float3 tint = float3(1.0f, 1.0f, 1.0f) + detail_parameters.x * (2.0f * height + 1.0f * stain);
+    if (pattern == 2u)
+    {
+        const float drift = saturate(btbh_detail_noise(position.xz * 0.041f + 11.3f) * 1.4f - 0.2f);
+        tint *= lerp(
+            float3(1.0f, 1.0f, 1.0f) + detail_parameters.x * float3(0.35f, 0.1f, -0.55f),
+            float3(1.0f, 1.0f, 1.0f) + detail_parameters.x * float3(-0.45f, 0.08f, 0.3f),
+            drift
+        );
+    }
+    else if (pattern == 3u)
+    {
+        // Walls darken over their lowest render unit fifth, which grounds buildings on the street.
+        tint *= lerp(0.8f, 1.0f, saturate(input.world_position.y * 4.0f));
+    }
+    albedo.rgb *= max(tint, float3(0.0f, 0.0f, 0.0f));
+
+    const float bump = height * detail_parameters.y;
+    // With the face normal the determinant is the pixel footprint area itself.
+    const float3 r1 = cross(position_dy, face_normal);
+    const float3 r2 = cross(face_normal, position_dx);
+    if (face_area < 0.000000000001f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    return (ddx(bump) * r1 + ddy(bump) * r2) / face_area;
+}
+
 FragmentOutput main(FragmentInput input)
 {
     const float4 raw_albedo_sample = albedo_texture.Sample(
@@ -984,6 +1053,7 @@ FragmentOutput main(FragmentInput input)
         mapped_normal,
         orm
     );
+    const float3 detail_gradient = apply_surface_detail(input, albedo_sample);
     if (albedo_sample.a < alpha_cutoff)
     {
         discard;
@@ -1002,6 +1072,7 @@ FragmentOutput main(FragmentInput input)
         input.world_normal * mapped_normal.z,
         geometric_normal
     );
+    normal = stable_normalize(normal - detail_gradient, normal);
     const bool flip_normal =
         input.animated_model > 0.5f
             ? input.is_front_face

@@ -651,6 +651,10 @@ typedef struct BTBHGPUSceneGeometryBatch {
     float surface_time;
     float surface_parameters0[4];
     float surface_parameters1[4];
+    /* Procedural surface detail: albedo variation, bump height (render units),
+     * noise cells per render unit, pattern (0 none, 1 ground, 2 grass, 3 facade).
+     * A zeroed batch has none. */
+    float detail_parameters[4];
 } BTBHGPUSceneGeometryBatch;
 
 typedef struct BTBHGPUSceneLighting {

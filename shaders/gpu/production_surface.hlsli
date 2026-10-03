@@ -46,6 +46,50 @@ float btbh_surface_value_noise(float2 value)
     return lerp(lerp(a, b, curve.x), lerp(c, d, curve.x), curve.y);
 }
 
+// Integer hash for the surface detail noise: stable at the large world coordinates of a city,
+// where the sin-based hashes above lose precision.
+float btbh_detail_hash(float2 cell)
+{
+    const int2 integer_cell = (int2)cell;
+    uint hash = (uint)integer_cell.x * 0x8da6b343u ^ (uint)integer_cell.y * 0xd8163841u;
+    hash ^= hash >> 15;
+    hash *= 0x2c1b3c6du;
+    hash ^= hash >> 12;
+    hash *= 0x297a2d39u;
+    hash ^= hash >> 15;
+    return (float)(hash & 0x00ffffffu) * (1.0f / 16777216.0f);
+}
+
+float btbh_detail_noise(float2 value)
+{
+    const float2 cell = floor(value);
+    const float2 fraction = value - cell;
+    const float2 curve = fraction * fraction * (3.0f - 2.0f * fraction);
+    const float a = btbh_detail_hash(cell);
+    const float b = btbh_detail_hash(cell + float2(1.0f, 0.0f));
+    const float c = btbh_detail_hash(cell + float2(0.0f, 1.0f));
+    const float d = btbh_detail_hash(cell + float2(1.0f, 1.0f));
+    return lerp(lerp(a, b, curve.x), lerp(c, d, curve.x), curve.y);
+}
+
+// Three octaves around 0.5; each octave fades out once its cells shrink below about two pixels
+// (footprint = noise cells per pixel of the first octave).
+float btbh_detail_fbm(float2 value, float footprint)
+{
+    float result = 0.0f;
+    float amplitude = 0.5f;
+    float scale = 1.0f;
+    [unroll]
+    for (int octave = 0; octave < 3; ++octave)
+    {
+        const float fade = saturate((0.6f - footprint * scale) * 2.5f);
+        result += (btbh_detail_noise(value * scale + octave * 17.31f) - 0.5f) * amplitude * fade;
+        amplitude *= 0.5f;
+        scale *= 2.03f;
+    }
+    return result;
+}
+
 float btbh_surface_fbm(float2 value)
 {
     float result = 0.0f;
