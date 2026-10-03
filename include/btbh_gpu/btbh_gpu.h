@@ -757,6 +757,34 @@ typedef struct BTBHGPUScenePost {
     /* 1 flips the final scene image left-right before it is composited. */
     uint8_t mirror_horizontal;
     BTBHGPUSceneRadianceCascades radiance_cascades;
+    /* HDR composite before grading. Fog blends toward linear fog_color by
+     * 1 - exp(-((view distance - start) * density)^2), capped at the maximum
+     * opacity; the cleared background counts as infinitely far. */
+    float fog_color[3];
+    float fog_density;
+    float fog_start_distance;
+    float fog_maximum_opacity;
+    /* Edge fade: within fog_edge_fade_distance of the world XZ rectangle
+     * (min x, min z, max x, max z) the fog rises to full, so the end of the
+     * world dissolves into the fog colour. Surfaces nearer than
+     * fog_edge_clear_distance (view depth) keep a crisp edge; the fade ramps
+     * in over the next fog_edge_fade_distance. */
+    float fog_edge_bounds[4];
+    float fog_edge_fade_distance;
+    float fog_edge_clear_distance;
+    /* Soft-threshold bloom added to the HDR image before grading; the
+     * threshold is in exposed units (scene colour times exposure). */
+    float bloom_intensity;
+    float bloom_threshold;
+    float bloom_soft_knee;
+    float bloom_scatter;
+    /* Round vignette that darkens the HDR image toward the corners. */
+    float vignette_intensity;
+    float vignette_smoothness;
+    uint8_t fog_enabled;
+    uint8_t bloom_enabled;
+    uint8_t vignette_enabled;
+    uint8_t fog_edge_enabled;
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

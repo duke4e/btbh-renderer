@@ -61,11 +61,13 @@ float3 post_cas(float2 uv)
     );
     const float amplitude =
         1.0f / lerp(8.0f, 5.0f, saturate(cas_sharpness));
-    const float amount = sqrt(
+    // AMD CAS: the neighbour lobe is negative, so the filter sharpens. saturate() keeps HDR
+    // input (green above 1) from taking the square root of a negative number.
+    const float amount = sqrt(saturate(
         min(1.0f - maximum_green, minimum_green) /
         max(maximum_green, 0.0001f)
-    );
-    const float weight = amplitude * amount;
+    ));
+    const float weight = -amplitude * amount;
     return
         (e + (a + b + c + d) * weight) /
         (1.0f + 4.0f * weight);

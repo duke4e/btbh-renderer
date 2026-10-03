@@ -923,7 +923,10 @@ struct GPUScenePostProbe {
         upscaleMode: .linear,
         radianceCascades: .off,
         heroOmniLightSourceIndex: -1,
-        mirrorHorizontally: false
+        mirrorHorizontally: false,
+        fog: .disabled,
+        bloom: .disabled,
+        vignette: .disabled
     )
 
     let lutTexture: OpaquePointer?
@@ -949,6 +952,9 @@ struct GPUScenePostProbe {
     let radianceCascades: RadianceCascadesDescriptor
     let heroOmniLightSourceIndex: Int32
     let mirrorHorizontally: Bool
+    let fog: FogDescriptor
+    let bloom: BloomDescriptor
+    let vignette: VignetteDescriptor
 
     func withRadianceCascades(
         _ radianceCascades: RadianceCascadesDescriptor
@@ -976,7 +982,10 @@ struct GPUScenePostProbe {
             upscaleMode: upscaleMode,
             radianceCascades: radianceCascades,
             heroOmniLightSourceIndex: heroOmniLightSourceIndex,
-            mirrorHorizontally: mirrorHorizontally
+            mirrorHorizontally: mirrorHorizontally,
+            fog: fog,
+            bloom: bloom,
+            vignette: vignette
         )
     }
 }
@@ -2220,6 +2229,31 @@ public final class GPUWindowProbe {
         nativePost.upscale_mode =
             GPUUpscaleModeProjection.native(post.upscaleMode)
         nativePost.mirror_horizontal = post.mirrorHorizontally ? 1 : 0
+        nativePost.fog_enabled = post.fog.isEnabled ? 1 : 0
+        nativePost.fog_color = (
+            GPUColorSpace.linearComponent(post.fog.color.r),
+            GPUColorSpace.linearComponent(post.fog.color.g),
+            GPUColorSpace.linearComponent(post.fog.color.b)
+        )
+        nativePost.fog_density = post.fog.density
+        nativePost.fog_start_distance = post.fog.startDistance
+        nativePost.fog_maximum_opacity = post.fog.maximumOpacity
+        if let edge = post.fog.edge {
+            nativePost.fog_edge_enabled = post.fog.isEnabled ? 1 : 0
+            nativePost.fog_edge_bounds = (edge.minimumX, edge.minimumZ, edge.maximumX, edge.maximumZ)
+            nativePost.fog_edge_fade_distance = edge.fadeDistance
+            nativePost.fog_edge_clear_distance = edge.clearDistance
+        } else {
+            nativePost.fog_edge_enabled = 0
+        }
+        nativePost.bloom_enabled = post.bloom.isEnabled ? 1 : 0
+        nativePost.bloom_intensity = post.bloom.intensity
+        nativePost.bloom_threshold = post.bloom.threshold
+        nativePost.bloom_soft_knee = post.bloom.softKnee
+        nativePost.bloom_scatter = post.bloom.scatter
+        nativePost.vignette_enabled = post.vignette.isEnabled ? 1 : 0
+        nativePost.vignette_intensity = post.vignette.intensity
+        nativePost.vignette_smoothness = post.vignette.smoothness
         nativePost.radiance_cascades.tier =
             Self.radianceCascadesTier(post.radianceCascades.tier)
         nativePost.radiance_cascades.backend =
@@ -2910,6 +2944,29 @@ public final class GPUWindowProbe {
         ].allSatisfy(\.isFinite)
     }
 
+    /// Fog, bloom and vignette ranges; the native validator checks the same bounds.
+    static func hdrCompositeIsValid(
+        fog: FogDescriptor,
+        bloom: BloomDescriptor,
+        vignette: VignetteDescriptor
+    ) -> Bool {
+        fog.density.isFinite && fog.density >= 0 &&
+            fog.startDistance.isFinite && fog.startDistance >= 0 &&
+            fog.maximumOpacity.isFinite && fog.maximumOpacity >= 0 && fog.maximumOpacity <= 1 &&
+            (fog.edge.map { edge in
+                [edge.minimumX, edge.minimumZ, edge.maximumX, edge.maximumZ].allSatisfy(\.isFinite) &&
+                    edge.maximumX > edge.minimumX && edge.maximumZ > edge.minimumZ &&
+                    edge.fadeDistance.isFinite && edge.fadeDistance > 0 &&
+                    edge.clearDistance.isFinite && edge.clearDistance >= 0
+            } ?? true) &&
+            bloom.intensity.isFinite && bloom.intensity >= 0 &&
+            bloom.threshold.isFinite && bloom.threshold >= 0 &&
+            bloom.softKnee.isFinite && bloom.softKnee >= 0 && bloom.softKnee <= 1 &&
+            bloom.scatter.isFinite && bloom.scatter >= 0 && bloom.scatter <= 1 &&
+            vignette.intensity.isFinite && vignette.intensity >= 0 && vignette.intensity <= 1 &&
+            vignette.smoothness.isFinite && vignette.smoothness > 0 && vignette.smoothness <= 1
+    }
+
     private static func scenePostIsValid(
         _ post: GPUScenePostProbe
     ) -> Bool {
@@ -2940,7 +2997,10 @@ public final class GPUWindowProbe {
         post.maximumRadiusPixels >= 0 &&
         post.blurCurve > 0 &&
         (!post.lutEnabled || post.lutTexture != nil)
-        guard scalarFieldsValid else { return false }
+        guard scalarFieldsValid,
+              Self.hdrCompositeIsValid(fog: post.fog, bloom: post.bloom, vignette: post.vignette) else {
+            return false
+        }
         let emittersValid = post.radianceCascades.emitters
             .allSatisfy { emitter in
                 emitter.position.x.isFinite &&

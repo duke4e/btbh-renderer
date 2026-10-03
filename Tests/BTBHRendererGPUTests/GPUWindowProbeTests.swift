@@ -1226,6 +1226,152 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(MemoryLayout<BTBHGPUScenePost>.offset(of: \.radiance_cascades), 72)
     }
 
+    func testScenePostCarriesFogBloomAndVignetteOnlyWhenRequested() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH scene post HDR composite projection",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        XCTAssertEqual(GPUScenePostProbe.default.fog, .disabled)
+        XCTAssertEqual(GPUScenePostProbe.default.bloom, .disabled)
+        XCTAssertEqual(GPUScenePostProbe.default.vignette, .disabled)
+        let plain = try resources.scenePost(
+            environment: .default,
+            chain: .empty,
+            antiAliasing: .fxaa,
+            upscaleMode: .linear
+        )
+        XCTAssertFalse(plain.fog.isEnabled)
+        XCTAssertFalse(plain.bloom.isEnabled)
+        XCTAssertFalse(plain.vignette.isEnabled)
+
+        let fog = FogDescriptor(color: .white, density: 0.05, startDistance: 18, maximumOpacity: 1)
+        let bloom = BloomDescriptor(intensity: 0.6, threshold: 1.4, softKnee: 0.5, scatter: 0.65)
+        let vignette = VignetteDescriptor(intensity: 0.25, smoothness: 0.6)
+        let composed = try resources.scenePost(
+            environment: .init(
+                backgroundColor: .black, backgroundEnergy: 1, ambientColor: .white, ambientEnergy: 1,
+                ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: true, tonemap: .pbrNeutral,
+                tonemapWhite: 1, fog: fog
+            ),
+            chain: .init(screenShaders: [], casSharpness: 0, tiltShiftEnabled: false, bloom: bloom, vignette: vignette),
+            antiAliasing: .fxaa,
+            upscaleMode: .linear
+        )
+        XCTAssertEqual(composed.fog, fog)
+        XCTAssertEqual(composed.bloom, bloom)
+        XCTAssertEqual(composed.vignette, vignette)
+        let rebuilt = composed.withRadianceCascades(.off)
+        XCTAssertEqual(rebuilt.fog, fog, "rebuilding the probe keeps the HDR composite")
+        XCTAssertEqual(rebuilt.bloom, bloom)
+        XCTAssertEqual(rebuilt.vignette, vignette)
+
+        XCTAssertTrue(GPUWindowProbe.hdrCompositeIsValid(fog: fog, bloom: bloom, vignette: vignette))
+        XCTAssertTrue(GPUWindowProbe.hdrCompositeIsValid(fog: .disabled, bloom: .disabled, vignette: .disabled))
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: .init(color: .white, density: 0.05, startDistance: 0, maximumOpacity: 1.5),
+            bloom: bloom, vignette: vignette
+        ))
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: fog, bloom: .init(intensity: 0.6, threshold: 1, softKnee: 2, scatter: 0.5), vignette: vignette
+        ))
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: fog, bloom: bloom, vignette: .init(intensity: 0.3, smoothness: 0)
+        ))
+        let edge = FogEdgeDescriptor(minimumX: -10, minimumZ: -20, maximumX: 30, maximumZ: 40, fadeDistance: 6)
+        let edgedFog = FogDescriptor(color: .white, density: 0.05, startDistance: 18, maximumOpacity: 1, edge: edge)
+        XCTAssertTrue(GPUWindowProbe.hdrCompositeIsValid(fog: edgedFog, bloom: bloom, vignette: vignette))
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: .init(color: .white, density: 0.05, startDistance: 18, maximumOpacity: 1,
+                       edge: .init(minimumX: 30, minimumZ: -20, maximumX: -10, maximumZ: 40, fadeDistance: 6)),
+            bloom: bloom, vignette: vignette
+        ), "an inverted edge rectangle is rejected")
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: .init(color: .white, density: 0.05, startDistance: 18, maximumOpacity: 1,
+                       edge: .init(minimumX: -10, minimumZ: -20, maximumX: 30, maximumZ: 40, fadeDistance: 0)),
+            bloom: bloom, vignette: vignette
+        ), "the edge needs a fade band")
+        XCTAssertFalse(GPUWindowProbe.hdrCompositeIsValid(
+            fog: .init(color: .white, density: 0.05, startDistance: 18, maximumOpacity: 1,
+                       edge: .init(minimumX: -10, minimumZ: -20, maximumX: 30, maximumZ: 40, fadeDistance: 6,
+                                   clearDistance: -1)),
+            bloom: bloom, vignette: vignette
+        ), "the clear depth cannot be negative")
+        let edged = try resources.scenePost(
+            environment: .init(
+                backgroundColor: .black, backgroundEnergy: 1, ambientColor: .white, ambientEnergy: 1,
+                ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: true, tonemap: .pbrNeutral,
+                tonemapWhite: 1, fog: edgedFog
+            ),
+            chain: .empty,
+            antiAliasing: .fxaa,
+            upscaleMode: .linear
+        )
+        XCTAssertEqual(edged.fog.edge, edge)
+
+        // The new fields follow the radiance block, so every earlier offset is unchanged.
+        let radianceOffset = try XCTUnwrap(MemoryLayout<BTBHGPUScenePost>.offset(of: \.radiance_cascades))
+        let fogOffset = try XCTUnwrap(MemoryLayout<BTBHGPUScenePost>.offset(of: \.fog_color))
+        XCTAssertGreaterThan(fogOffset, radianceOffset)
+        XCTAssertEqual(
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.vignette_enabled),
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.bloom_enabled).map { $0 + 1 }
+        )
+        XCTAssertEqual(
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.fog_edge_enabled),
+            MemoryLayout<BTBHGPUScenePost>.offset(of: \.vignette_enabled).map { $0 + 1 }
+        )
+    }
+
+    func testHDRCompositeRunsBeforeGradingFromItsOwnShaders() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
+            encoding: .utf8
+        )
+        let cmake = try String(contentsOf: packageRoot.appendingPathComponent("CMakeLists.txt"), encoding: .utf8)
+        let composite = try String(
+            contentsOf: packageRoot.appendingPathComponent("shaders/gpu/production_hdr_composite.frag.hlsl"),
+            encoding: .utf8
+        )
+        let cas = try String(
+            contentsOf: packageRoot.appendingPathComponent("shaders/gpu/production_cas.frag.hlsl"),
+            encoding: .utf8
+        )
+        for name in ["production_bloom_downsample.frag", "production_bloom_upsample.frag", "production_hdr_composite.frag"] {
+            XCTAssertTrue(cmake.contains("\"\(name)|fragment\""), name)
+            XCTAssertTrue(nativeScene.contains("\"\(name)\""), name)
+        }
+        let compositeRange = try XCTUnwrap(nativeScene.range(of: "\"BTBH HDR Composite\""))
+        let lutRange = try XCTUnwrap(nativeScene.range(of: "\"BTBH Post LUT\""))
+        XCTAssertLessThan(compositeRange.lowerBound, lutRange.lowerBound, "the composite runs on HDR, before grading")
+        XCTAssertTrue(nativeScene.contains("runtime->post_pong_texture,\n                &composite_uniforms") ||
+            nativeScene.contains("runtime->post_pong_texture,\r\n                &composite_uniforms"),
+            "the LUT stage writes post_ping, so the composite must write post_pong")
+        XCTAssertTrue(composite.contains("depth >= 0.99999f"), "the composite leaves the cleared background alone")
+        XCTAssertTrue(
+            nativeScene.contains("if (hdr_composite_active && post->fog_enabled != 0u) {"),
+            "the scene pass clears the background to the fog colour, so effects over it stay visible"
+        )
+        XCTAssertTrue(composite.contains("float4 fog_edge_bounds;"), "the edge rectangle follows the vignette")
+        XCTAssertTrue(composite.contains("(distance - fog_edge.z)"), "the play area keeps a crisp edge")
+        // AMD CAS sharpens with a negative neighbour lobe and stays finite for HDR input.
+        XCTAssertTrue(cas.contains("const float weight = -amplitude * amount;"))
+        XCTAssertTrue(cas.contains("sqrt(saturate("))
+    }
+
     func testProductionSSAOUsesLegacyWorldSpaceObscurance() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

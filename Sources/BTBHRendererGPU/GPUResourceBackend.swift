@@ -1518,7 +1518,10 @@ final class GPUResourceBackend: RenderResourceBackend {
             upscaleMode: upscaleMode,
             radianceCascades: mergedRadianceCascades,
             heroOmniLightSourceIndex: heroOmniLightSourceIndex,
-            mirrorHorizontally: chain.mirrorHorizontally
+            mirrorHorizontally: chain.mirrorHorizontally,
+            fog: environment.fog,
+            bloom: chain.bloom,
+            vignette: chain.vignette
         )
     }
 

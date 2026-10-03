@@ -936,6 +936,44 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertFalse(PostChainDescriptor.empty.mirrorHorizontally)
     }
 
+    func testHDRCompositeDescriptorsDefaultOffForUnrelatedCallers() {
+        XCTAssertEqual(EnvironmentDescriptor.default.fog, .disabled)
+        XCTAssertFalse(FogDescriptor.disabled.isEnabled)
+        XCTAssertEqual(PostChainDescriptor.empty.bloom, .disabled)
+        XCTAssertEqual(PostChainDescriptor.empty.vignette, .disabled)
+        XCTAssertFalse(BloomDescriptor.disabled.isEnabled)
+        XCTAssertFalse(VignetteDescriptor.disabled.isEnabled)
+        let plainChain = PostChainDescriptor(screenShaders: [], casSharpness: 0.5, tiltShiftEnabled: false)
+        XCTAssertEqual(plainChain.bloom, .disabled)
+        XCTAssertEqual(plainChain.vignette, .disabled)
+
+        let fog = FogDescriptor(color: .white, density: 0.02, startDistance: 18, maximumOpacity: 1)
+        XCTAssertTrue(fog.isEnabled)
+        XCTAssertFalse(FogDescriptor(color: .white, density: 0.02, startDistance: 0, maximumOpacity: 0).isEnabled)
+        let environment = EnvironmentDescriptor(
+            backgroundColor: .black, backgroundEnergy: 1, ambientColor: .white, ambientEnergy: 1,
+            ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: true, tonemap: .pbrNeutral,
+            tonemapWhite: 1, fog: fog
+        )
+        XCTAssertEqual(environment.fog, fog)
+        XCTAssertNil(fog.edge)
+        let edge = FogEdgeDescriptor(minimumX: -10, minimumZ: -20, maximumX: 30, maximumZ: 40, fadeDistance: 6)
+        let edged = FogDescriptor(color: .white, density: 0.02, startDistance: 18, maximumOpacity: 1, edge: edge)
+        XCTAssertEqual(edged.edge, edge)
+        XCTAssertEqual(edge.clearDistance, 0, "without a clear depth the whole edge fades")
+        XCTAssertNotEqual(edged, fog)
+
+        let bloom = BloomDescriptor(intensity: 0.6, threshold: 1.4, softKnee: 0.5, scatter: 0.65)
+        let vignette = VignetteDescriptor(intensity: 0.25, smoothness: 0.6)
+        let chain = PostChainDescriptor(
+            screenShaders: [], casSharpness: 0.5, tiltShiftEnabled: false, bloom: bloom, vignette: vignette
+        )
+        XCTAssertTrue(chain.bloom.isEnabled)
+        XCTAssertEqual(chain.bloom, bloom)
+        XCTAssertTrue(chain.vignette.isEnabled)
+        XCTAssertEqual(chain.vignette, vignette)
+    }
+
     func testScenePublicInitializersAndFrameDefaultsAreAvailable() {
         let size = PixelSize2D(width: 64, height: 32)
         let model = ModelHandle(rawValue: 4)

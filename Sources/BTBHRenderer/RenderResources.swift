@@ -900,6 +900,68 @@ public struct RadianceCascadesDescriptor: Sendable, Equatable {
     public static let off = Self(tier: .off)
 }
 
+/// The world XZ rectangle a fog closes over: across `fadeDistance` inside its border the fog
+/// rises to full, so the end of the world dissolves into the fog colour instead of a hard line.
+/// Surfaces nearer than `clearDistance` (view depth) keep a crisp edge, and the fade ramps in over
+/// the next `fadeDistance`, so the play area around the camera target stays readable.
+public struct FogEdgeDescriptor: Sendable, Equatable {
+    public let minimumX: Float
+    public let minimumZ: Float
+    public let maximumX: Float
+    public let maximumZ: Float
+    public let fadeDistance: Float
+    public let clearDistance: Float
+
+    public init(
+        minimumX: Float,
+        minimumZ: Float,
+        maximumX: Float,
+        maximumZ: Float,
+        fadeDistance: Float,
+        clearDistance: Float = 0
+    ) {
+        self.minimumX = minimumX
+        self.minimumZ = minimumZ
+        self.maximumX = maximumX
+        self.maximumZ = maximumZ
+        self.fadeDistance = fadeDistance
+        self.clearDistance = clearDistance
+    }
+}
+
+/// Distance fog toward a horizon colour, applied to the HDR image before grading.
+///
+/// The amount is `1 - exp(-((viewDistance - startDistance) * density)^2)`, capped at
+/// `maximumOpacity`; the cleared background counts as infinitely far, so with an opacity of 1 it
+/// is cleared to the fog colour and geometry fades into it (transparent effects drawn over the
+/// background keep their colour). An `edge` also fades the border of the world fully into the
+/// fog, and then the background is fully fog too.
+public struct FogDescriptor: Sendable, Equatable {
+    public let color: RenderColor
+    public let density: Float
+    public let startDistance: Float
+    public let maximumOpacity: Float
+    public let edge: FogEdgeDescriptor?
+
+    public init(
+        color: RenderColor,
+        density: Float,
+        startDistance: Float,
+        maximumOpacity: Float,
+        edge: FogEdgeDescriptor? = nil
+    ) {
+        self.color = color
+        self.density = density
+        self.startDistance = startDistance
+        self.maximumOpacity = maximumOpacity
+        self.edge = edge
+    }
+
+    public var isEnabled: Bool { density > 0 && maximumOpacity > 0 }
+
+    public static let disabled = Self(color: .black, density: 0, startDistance: 0, maximumOpacity: 0)
+}
+
 public struct EnvironmentDescriptor: Sendable {
     public let backgroundColor: RenderColor
     public let backgroundEnergy: Float
@@ -914,6 +976,7 @@ public struct EnvironmentDescriptor: Sendable {
     public let contrast: Float
     public let saturation: Float
     public let radianceCascades: RadianceCascadesDescriptor
+    public let fog: FogDescriptor
 
     public init(
         backgroundColor: RenderColor,
@@ -928,7 +991,8 @@ public struct EnvironmentDescriptor: Sendable {
         exposure: Float = 1,
         contrast: Float = 1,
         saturation: Float = 1,
-        radianceCascades: RadianceCascadesDescriptor = .off
+        radianceCascades: RadianceCascadesDescriptor = .off,
+        fog: FogDescriptor = .disabled
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -943,6 +1007,7 @@ public struct EnvironmentDescriptor: Sendable {
         self.contrast = contrast
         self.saturation = saturation
         self.radianceCascades = radianceCascades
+        self.fog = fog
     }
 
     public static let `default` = Self(
@@ -1069,6 +1134,44 @@ public enum UpscaleMode: UInt8, Sendable {
     case linear, lanczos
 }
 
+/// Soft-threshold bloom on the HDR image before grading. `threshold` is in exposed linear units
+/// (scene colour times the environment exposure), so it holds when the exposure changes;
+/// `softKnee` (0...1) widens the transition below it, and `scatter` (0...1) moves weight from the
+/// tight to the wide blur levels.
+public struct BloomDescriptor: Sendable, Equatable {
+    public let intensity: Float
+    public let threshold: Float
+    public let softKnee: Float
+    public let scatter: Float
+
+    public init(intensity: Float, threshold: Float, softKnee: Float, scatter: Float) {
+        self.intensity = intensity
+        self.threshold = threshold
+        self.softKnee = softKnee
+        self.scatter = scatter
+    }
+
+    public var isEnabled: Bool { intensity > 0 }
+
+    public static let disabled = Self(intensity: 0, threshold: 1, softKnee: 0.5, scatter: 0.7)
+}
+
+/// A round vignette that darkens the HDR image toward the corners by up to `intensity` (0...1);
+/// `smoothness` (above 0, at most 1) is how far from the corners the falloff starts.
+public struct VignetteDescriptor: Sendable, Equatable {
+    public let intensity: Float
+    public let smoothness: Float
+
+    public init(intensity: Float, smoothness: Float) {
+        self.intensity = intensity
+        self.smoothness = smoothness
+    }
+
+    public var isEnabled: Bool { intensity > 0 }
+
+    public static let disabled = Self(intensity: 0, smoothness: 0.5)
+}
+
 public struct PostChainDescriptor: Sendable {
     public let screenShaders: [ScreenShaderHandle]
     public let casSharpness: Float
@@ -1076,17 +1179,23 @@ public struct PostChainDescriptor: Sendable {
     /// Flips the final world image left-right after anti-aliasing. The canvas pass draws on top of
     /// the flipped image unchanged, and the world geometry, culling and handedness are untouched.
     public let mirrorHorizontally: Bool
+    public let bloom: BloomDescriptor
+    public let vignette: VignetteDescriptor
 
     public init(
         screenShaders: [ScreenShaderHandle],
         casSharpness: Float,
         tiltShiftEnabled: Bool,
-        mirrorHorizontally: Bool = false
+        mirrorHorizontally: Bool = false,
+        bloom: BloomDescriptor = .disabled,
+        vignette: VignetteDescriptor = .disabled
     ) {
         self.screenShaders = screenShaders
         self.casSharpness = casSharpness
         self.tiltShiftEnabled = tiltShiftEnabled
         self.mirrorHorizontally = mirrorHorizontally
+        self.bloom = bloom
+        self.vignette = vignette
     }
 
     public static let empty = Self(screenShaders: [], casSharpness: 0, tiltShiftEnabled: false)

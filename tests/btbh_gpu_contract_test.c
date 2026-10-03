@@ -135,6 +135,23 @@ static void test_scene_post_mirror_flag_defaults_off(void) {
     }
 }
 
+/* Fog, bloom and vignette were appended after the radiance block, so older
+ * offsets are unchanged and a zeroed post keeps the composite off. */
+_Static_assert(
+    offsetof(BTBHGPUScenePost, fog_color) >
+        offsetof(BTBHGPUScenePost, radiance_cascades),
+    "the HDR composite fields must follow the radiance block"
+);
+
+static void test_scene_post_hdr_composite_defaults_off(void) {
+    BTBHGPUScenePost post = {0};
+    if (post.fog_enabled != 0u || post.bloom_enabled != 0u ||
+        post.vignette_enabled != 0u || post.fog_edge_enabled != 0u) {
+        fprintf(stderr, "zeroed scene post must not fog, bloom or vignette\n");
+        abort();
+    }
+}
+
 static int file_dialog_callback_count = 0;
 
 static void file_dialog_callback(
@@ -193,6 +210,7 @@ int main(void) {
     test_missing_features_are_reported_exactly();
     test_matching_snapshot_passes();
     test_scene_post_mirror_flag_defaults_off();
+    test_scene_post_hdr_composite_defaults_off();
     test_file_dialog_rejects_invalid_ownership_transfer();
     return 0;
 }
