@@ -3211,6 +3211,8 @@ public final class GPUWindowProbe {
             BTBH_GPU_SCENE_SURFACE_SHATTER
         case .glitter:
             BTBH_GPU_SCENE_SURFACE_GLITTER
+        case .softParticle:
+            BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE
         }
     }
 

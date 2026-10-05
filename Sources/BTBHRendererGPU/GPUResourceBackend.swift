@@ -35,6 +35,7 @@ enum GPUSceneSurfaceVariant: UInt32, Equatable {
     case dissolve = 3
     case shatter = 4
     case glitter = 5
+    case softParticle = 6
 }
 
 struct GPUSceneSurfaceProjection: Equatable {
@@ -108,6 +109,17 @@ struct GPUSceneSurfaceProjection: Equatable {
                     z: 0,
                     w: 0
                 )
+            )
+        case "soft_particle":
+            return .init(
+                variant: .softParticle,
+                parameters0: .init(
+                    x: float("u_fadeDistance", default: 0.5),
+                    y: 0,
+                    z: 0,
+                    w: 0
+                ),
+                parameters1: .init(x: 0, y: 0, z: 0, w: 0)
             )
         case "glitter":
             let player = vec3("u_playerPos", default: .zero)

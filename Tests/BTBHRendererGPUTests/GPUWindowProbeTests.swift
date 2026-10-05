@@ -998,8 +998,9 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(nativeScene.contains(
             "!radiance_cascades_debug_output;"
         ))
+        // Resolved at the start of the transparent phase, on the opaque scene only.
         XCTAssertTrue(nativeScene.contains(
-            "if (ssao_resolve_active) {"
+            "if (transparent_phase && ssao_resolve_active) {"
         ))
         XCTAssertFalse(nativeScene.contains(
             "post->ssao_enabled != 0u && !radiance_cascades_active"
@@ -2466,6 +2467,45 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(fastShader.contains("model_column_3"))
     }
 
+    /// Soft particles fade against the opaque scene's distance, written between the opaque and
+    /// transparent passes into the normal map's slot of soft batches only.
+    func testSoftParticlesFadeAgainstTheSceneDistancePass() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        func source(_ path: String) throws -> String {
+            try String(contentsOf: packageRoot.appendingPathComponent(path), encoding: .utf8)
+        }
+        let model = try source("shaders/gpu/production_model.frag.hlsl")
+        XCTAssertTrue(model.contains("surface_variant == 6u"))
+        XCTAssertTrue(model.contains("normal_texture.Load(int3(input.pixel_position.xy, 0)).r"))
+        let distance = try source("shaders/gpu/production_scene_distance.frag.hlsl")
+        XCTAssertTrue(distance.contains("length(world.xyz / world.w - camera_position.xyz)"))
+        XCTAssertTrue(try source("CMakeLists.txt").contains("\"production_scene_distance.frag|fragment\""))
+        let scene = try source("src/gpu/btbh_gpu_scene.c")
+        XCTAssertTrue(scene.contains("\"BTBH Scene Distance\""))
+        XCTAssertTrue(scene.contains("samplers[2].texture = runtime->scene_distance_texture;"))
+    }
+
+    /// Ambient occlusion resolves on the opaque scene before the transparent pass draws over it,
+    /// so an effect over a dark corner keeps its light (the resolve used to darken everything).
+    func testAmbientOcclusionResolvesBeforeTheTransparentPass() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let scene = try String(
+            contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
+            encoding: .utf8
+        )
+        let resolve = try XCTUnwrap(scene.range(of: "\"BTBH SSAO Resolve\""))
+        let transparent = try XCTUnwrap(scene.range(of: "SDL_GPUColorTargetInfo transparent_target;"))
+        XCTAssertLessThan(resolve.lowerBound, transparent.lowerBound)
+        XCTAssertTrue(scene.contains("if (transparent_phase && ssao_resolve_active) {"))
+        XCTAssertEqual(scene.components(separatedBy: "post_input = runtime->ssao_resolved_texture;").count - 1, 1)
+    }
+
     func testProductionSurfaceShadersClassifyKnownVariantsAndParameters()
         throws
     {
@@ -2510,6 +2550,16 @@ final class GPUWindowProbeTests: XCTestCase {
                 parameters: [:]
             ).variant,
             .dissolve
+        )
+        let soft = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "C:/game/Shaders/soft_particle.glsl",
+            parameters: ["u_fadeDistance": .float(0.8)]
+        )
+        XCTAssertEqual(soft.variant, .softParticle)
+        XCTAssertEqual(soft.parameters0.x, 0.8)
+        XCTAssertEqual(
+            GPUSceneSurfaceVariant.softParticle.rawValue,
+            UInt32(BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE.rawValue)
         )
         XCTAssertThrowsError(
             try GPUSceneSurfaceProjection.classify(

@@ -205,6 +205,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
+        "production_scene_distance.frag|fragment"
         "production_rc_source.vert|vertex"
         "production_rc_source.frag|fragment"
         "production_rc_directional_source.vert|vertex"

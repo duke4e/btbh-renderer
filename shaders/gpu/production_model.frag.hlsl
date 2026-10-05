@@ -307,6 +307,22 @@ void apply_surface(
             );
         }
     }
+    else if (surface_variant == 6u)
+    {
+        // Soft particle: the normal map's slot carries the opaque scene's distance from the
+        // camera (production_scene_distance), and the billboard fades over
+        // surface_parameters0.x render units where it meets the scene instead of cutting a
+        // straight edge through the ground.
+        normal_map = float3(0.0f, 0.0f, 1.0f);
+        const float scene_distance =
+            normal_texture.Load(int3(input.pixel_position.xy, 0)).r;
+        const float fragment_distance =
+            length(input.world_position - camera_position.xyz);
+        albedo.a *= saturate(
+            (scene_distance - fragment_distance) /
+            max(surface_parameters0.x, 0.001f)
+        );
+    }
 }
 
 float schlick_fresnel(float value)
