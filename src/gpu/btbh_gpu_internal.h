@@ -46,6 +46,7 @@ struct BTBHGPUWindow {
     bool claimed;
     bool should_close;
     bool cursor_visible;
+    bool fullscreen_toggle;
     uint64_t last_frame_ticks;
     float mouse_delta_x;
     float mouse_delta_y;

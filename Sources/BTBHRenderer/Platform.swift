@@ -18,12 +18,27 @@ public struct WindowDescriptor: Equatable, Sendable {
         case borderless
     }
 
+    /// How the window picks its initial size.
+    public enum Sizing: Equatable, Sendable {
+        /// Exactly `width` x `height`.
+        case exact
+        /// The `width`:`height` aspect at this percentage (1...100) of the primary display,
+        /// fitted into its usable area. Display sizes are physical pixels on Windows, so the
+        /// DPI scale does not shrink the window. Falls back to `width` x `height`.
+        case displayPercent(Int)
+    }
+
     public let title: String
     public let width: Int
     public let height: Int
     public let mode: Mode
     public let frameRatePolicy: FrameRatePolicy
     public let drawableScalePolicy: DrawableScalePolicy
+    public let sizing: Sizing
+    /// The user may resize and maximize the window; the drawable size follows.
+    public let resizable: Bool
+    /// Alt+Enter switches between the window and borderless desktop fullscreen.
+    public let fullscreenToggle: Bool
 
     public init(
         title: String,
@@ -31,7 +46,10 @@ public struct WindowDescriptor: Equatable, Sendable {
         height: Int,
         mode: Mode,
         frameRatePolicy: FrameRatePolicy = .displayRefresh(minimum: 30),
-        drawableScalePolicy: DrawableScalePolicy = .system
+        drawableScalePolicy: DrawableScalePolicy = .system,
+        sizing: Sizing = .exact,
+        resizable: Bool = false,
+        fullscreenToggle: Bool = false
     ) {
         self.title = title
         self.width = width
@@ -39,6 +57,9 @@ public struct WindowDescriptor: Equatable, Sendable {
         self.mode = mode
         self.frameRatePolicy = frameRatePolicy
         self.drawableScalePolicy = drawableScalePolicy
+        self.sizing = sizing
+        self.resizable = resizable
+        self.fullscreenToggle = fullscreenToggle
     }
 }
 
@@ -166,6 +187,10 @@ public protocol GamePlatform: AnyObject {
     func beginFrame() -> PlatformFrame
     var shouldClose: Bool { get }
     var isWindowFocused: Bool { get }
+    /// The window is minimized: frames still run, but nothing reaches the screen.
+    var isWindowMinimized: Bool { get }
+    /// The platform closed the window because an operation failed, not because the user did.
+    var closedByFailure: Bool { get }
     var refreshRate: Int { get }
     var framesPerSecond: Int { get }
     var logicalSize: PixelSize2D { get }
@@ -192,4 +217,9 @@ public protocol GamePlatform: AnyObject {
         _ request: FileDialogRequest,
         completion: @escaping @Sendable (Result<[URL], FileDialogError>) -> Void
     )
+}
+
+public extension GamePlatform {
+    var isWindowMinimized: Bool { false }
+    var closedByFailure: Bool { false }
 }

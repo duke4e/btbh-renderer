@@ -281,6 +281,65 @@ static uint32_t btbh_gpu_allowed_frames_in_flight(void) {
     );
 }
 
+/* Fits the width:height aspect into `percent` of the primary display. Display bounds are
+   physical pixels on Windows (SDL is per-monitor DPI aware there), so the DPI scale never
+   shrinks the window; the usable area keeps the title bar and the taskbar clear. The
+   requested size stays when the display cannot be queried. */
+static void btbh_gpu_fit_window_to_display(
+    uint8_t percent,
+    uint32_t *width,
+    uint32_t *height
+) {
+    const SDL_DisplayID display = SDL_GetPrimaryDisplay();
+    SDL_Rect bounds;
+    SDL_Rect usable;
+    if (display == 0 ||
+        !SDL_GetDisplayBounds(display, &bounds) ||
+        bounds.w <= 0 ||
+        bounds.h <= 0) {
+        return;
+    }
+    if (!SDL_GetDisplayUsableBounds(display, &usable) ||
+        usable.w <= 0 ||
+        usable.h <= 0) {
+        usable = bounds;
+    }
+    const double fraction = (percent > 100u ? 100u : percent) / 100.0;
+    double max_width = bounds.w * fraction;
+    double max_height = bounds.h * fraction;
+    if (max_width > usable.w * 0.98) {
+        max_width = usable.w * 0.98;
+    }
+    if (max_height > usable.h * 0.92) {
+        max_height = usable.h * 0.92;
+    }
+    const double aspect = (double) *width / (double) *height;
+    double fitted_width = max_width;
+    double fitted_height = fitted_width / aspect;
+    if (fitted_height > max_height) {
+        fitted_height = max_height;
+        fitted_width = fitted_height * aspect;
+    }
+    if (fitted_width < 320.0 || fitted_height < 180.0) {
+        return;
+    }
+    *width = (uint32_t) (fitted_width + 0.5);
+    *height = (uint32_t) (fitted_height + 0.5);
+}
+
+/* Alt+Enter: borderless desktop fullscreen (a NULL mode), so there is no display mode
+   switch and the scene follows the display's native resolution through the drawable size. */
+static void btbh_gpu_window_toggle_fullscreen(BTBHGPUWindow *window) {
+    const bool fullscreen =
+        (SDL_GetWindowFlags(window->window) & SDL_WINDOW_FULLSCREEN) != 0;
+    if (!fullscreen) {
+        (void) SDL_SetWindowFullscreenMode(window->window, NULL);
+    }
+    if (SDL_SetWindowFullscreen(window->window, !fullscreen)) {
+        (void) SDL_SyncWindow(window->window);
+    }
+}
+
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
     BTBHGPUWindowReport *report
@@ -343,10 +402,23 @@ BTBHGPUWindow *btbh_gpu_window_create(
     if (descriptor->high_pixel_density != 0) {
         flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     }
+    if (descriptor->resizable != 0) {
+        flags |= SDL_WINDOW_RESIZABLE;
+    }
+    uint32_t width = descriptor->width;
+    uint32_t height = descriptor->height;
+    if (descriptor->display_percent != 0) {
+        btbh_gpu_fit_window_to_display(
+            descriptor->display_percent,
+            &width,
+            &height
+        );
+    }
+    window->fullscreen_toggle = descriptor->fullscreen_toggle != 0;
     window->window = SDL_CreateWindow(
         descriptor->title,
-        (int) descriptor->width,
-        (int) descriptor->height,
+        (int) width,
+        (int) height,
         flags
     );
     if (window->window == NULL) {
@@ -641,12 +713,29 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return report->result;
     }
     if (window->pending_swapchain == NULL) {
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_set_window_error(
-            report,
-            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
-            "SDL_GPU swapchain is unavailable"
-        );
+        // A minimized or hidden window has no swapchain image. Submit the frame's offscreen
+        // work and present nothing; only a requested readback needs the image.
+        if (window->presented_frame_readback_requested) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                "SDL_GPU swapchain is unavailable"
+            );
+            return report->result;
+        }
+        if (!btbh_gpu_window_finish_pending_frame(window, true) ||
+            !btbh_gpu_refresh_window_sizes(window, report)) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                SDL_GetError()
+            );
+            return report->result;
+        }
+        report->result = BTBH_GPU_OK;
+        report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
+        report->message[0] = '\0';
         return report->result;
     }
     SDL_GPUTexture *present_target =
@@ -851,7 +940,16 @@ BTBHGPUResult btbh_gpu_window_poll_events(
             !event.key.repeat &&
             event.key.scancode < SDL_SCANCODE_COUNT
         ) {
-            window->key_pressed[event.key.scancode] = true;
+            const bool fullscreen_toggle =
+                window->fullscreen_toggle &&
+                (event.key.mod & SDL_KMOD_ALT) != 0 &&
+                (event.key.scancode == SDL_SCANCODE_RETURN ||
+                 event.key.scancode == SDL_SCANCODE_KP_ENTER);
+            if (fullscreen_toggle) {
+                btbh_gpu_window_toggle_fullscreen(window);
+            } else {
+                window->key_pressed[event.key.scancode] = true;
+            }
         } else if (
             event.type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
             event.button.windowID == window_id &&

@@ -1247,6 +1247,9 @@ public final class GPUWindowProbe {
         height: UInt32,
         hidden: Bool,
         highPixelDensity: Bool = true,
+        resizable: Bool = false,
+        fullscreenToggle: Bool = false,
+        displayPercent: UInt8 = 0,
         debugMode: Bool
     ) throws {
         deviceProbe = try GPUDeviceProbe(
@@ -1260,6 +1263,9 @@ public final class GPUWindowProbe {
         descriptor.height = height
         descriptor.hidden = hidden ? 1 : 0
         descriptor.high_pixel_density = highPixelDensity ? 1 : 0
+        descriptor.resizable = resizable ? 1 : 0
+        descriptor.fullscreen_toggle = fullscreenToggle ? 1 : 0
+        descriptor.display_percent = min(displayPercent, 100)
         createdWindow = title.withCString { titlePointer in
             descriptor.title = titlePointer
             return btbh_gpu_window_create(&descriptor, &report)

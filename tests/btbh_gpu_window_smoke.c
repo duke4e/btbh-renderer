@@ -1,6 +1,11 @@
+/* The smoke checks run through assert(), so keep them in Release builds too. */
+#undef NDEBUG
+
 #include "btbh_gpu/btbh_gpu.h"
 
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_timer.h>
+#include <SDL3/SDL_video.h>
 
 #include <assert.h>
 #include <stdio.h>
@@ -23,7 +28,8 @@ int main(void) {
         .width = 640,
         .height = 360,
         .hidden = 0,
-        .high_pixel_density = 1
+        .high_pixel_density = 1,
+        .fullscreen_toggle = 1
     };
     BTBHGPUWindowReport window_report = {0};
     BTBHGPUWindow *window = btbh_gpu_window_create(
@@ -111,6 +117,20 @@ int main(void) {
     assert(minimize_report.present_mode == present_report.present_mode);
     assert(minimize_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
 
+    /* A minimized window may have no swapchain image; presenting still submits the frame
+       and succeeds instead of failing the window. */
+    BTBHGPUWindowReport minimized_present_report = {0};
+    assert(
+        btbh_gpu_window_present_clear(
+            window,
+            18u,
+            52u,
+            86u,
+            255u,
+            &minimized_present_report
+        ) == BTBH_GPU_OK
+    );
+
     BTBHGPUWindowReport restore_report = {0};
     assert(
         btbh_gpu_window_restore(window, &restore_report) == BTBH_GPU_OK
@@ -144,21 +164,47 @@ int main(void) {
     assert(final_present_report.present_mode == present_report.present_mode);
     assert(final_present_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
 
-    BTBHGPUFrameTelemetrySample telemetry[2] = {0};
+    BTBHGPUFrameTelemetrySample telemetry[3] = {0};
     const uint32_t telemetry_count =
         btbh_gpu_window_finish_frame_telemetry(
             window,
             telemetry,
-            2u
+            3u
         );
-    assert(telemetry_count == 2u);
+    assert(telemetry_count == 3u);
     assert(telemetry[0].frame_serial == 1u);
     assert(telemetry[1].frame_serial == 2u);
+    assert(telemetry[2].frame_serial == 3u);
     assert(telemetry[0].cpu_submit_milliseconds >= 0.0);
     assert(
         telemetry[0].fence_completion_milliseconds >=
         telemetry[0].cpu_submit_milliseconds
     );
+
+    /* Alt+Enter enters borderless desktop fullscreen and leaves it again; the key press never
+       reaches the project key state, so Enter bindings do not fire with it. */
+    int window_count = 0;
+    SDL_Window **windows = SDL_GetWindows(&window_count);
+    assert(windows != NULL && window_count == 1);
+    SDL_Window *sdl_window = windows[0];
+    SDL_free(windows);
+    for (int toggle = 0; toggle < 2; ++toggle) {
+        SDL_Event alt_enter;
+        SDL_zero(alt_enter);
+        alt_enter.type = SDL_EVENT_KEY_DOWN;
+        alt_enter.key.windowID = SDL_GetWindowID(sdl_window);
+        alt_enter.key.scancode = SDL_SCANCODE_RETURN;
+        alt_enter.key.key = SDLK_RETURN;
+        alt_enter.key.mod = SDL_KMOD_LALT;
+        alt_enter.key.down = true;
+        assert(SDL_PushEvent(&alt_enter));
+        BTBHGPUPlatformSnapshot snapshot = {0};
+        assert(btbh_gpu_window_poll_events(window, &snapshot) == BTBH_GPU_OK);
+        const bool fullscreen =
+            (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN) != 0;
+        assert(fullscreen == (toggle == 0));
+        assert(btbh_gpu_window_key_pressed(window, 4u) == 0u);
+    }
 
     btbh_gpu_window_destroy(window);
     btbh_gpu_device_shutdown(device);

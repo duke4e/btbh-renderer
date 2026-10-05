@@ -1123,8 +1123,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             &window->pending_swapchain,
             &window->pending_drawable_width,
             &window->pending_drawable_height
-        ) ||
-        window->pending_swapchain == NULL) {
+        )) {
         if (window->pending_command != NULL) {
             (void)btbh_gpu_window_finish_pending_frame(
                 window,
@@ -1139,9 +1138,23 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         );
         return report->result;
     }
-    SDL_GPUTexture *present_target =
-        btbh_gpu_window_present_target(window);
-    if (present_target == NULL) {
+    // A minimized or hidden window has no swapchain image. That is not an error: the
+    // frame's offscreen work (scene and canvas target passes) still runs and is
+    // submitted, and only the screen passes are skipped.
+    const bool presentable = window->pending_swapchain != NULL;
+    if (!presentable && window->presented_frame_readback_requested) {
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_WINDOW_FAILURE,
+            "The window has no swapchain image to read back"
+        );
+        return report->result;
+    }
+    SDL_GPUTexture *present_target = presentable
+        ? btbh_gpu_window_present_target(window)
+        : NULL;
+    if (presentable && present_target == NULL) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_canvas_error(
             report,
@@ -1150,7 +1163,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         );
         return report->result;
     }
-    if (had_scene &&
+    if (presentable && had_scene &&
         !btbh_gpu_window_blit_pending_scene(
             window,
             window->pending_command,
@@ -1245,6 +1258,9 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
          ++pass_index) {
         const BTBHGPUCanvasPass *canvas_pass = &passes[pass_index];
         const bool is_screen = canvas_pass->target == NULL;
+        if (is_screen && !presentable) {
+            continue;
+        }
         SDL_GPUTexture *target_texture = is_screen
             ? present_target
             : canvas_pass->target->texture;
@@ -1393,7 +1409,7 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
             screen_touched = true;
         }
     }
-    if (!screen_touched) {
+    if (presentable && !screen_touched) {
         SDL_InsertGPUDebugLabel(
             window->pending_command,
             "BTBH Canvas Clear Screen"

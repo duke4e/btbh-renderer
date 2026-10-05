@@ -127,7 +127,15 @@ typedef struct BTBHGPUWindowDescriptor {
     uint32_t height;
     uint8_t hidden;
     uint8_t high_pixel_density;
-    uint8_t reserved[6];
+    /* Non-zero lets the user resize and maximize the window. */
+    uint8_t resizable;
+    /* Non-zero makes Alt+Enter switch between the window and borderless desktop
+       fullscreen; that key press never reaches the key state. */
+    uint8_t fullscreen_toggle;
+    /* 1...100 sizes the window to that percentage of the primary display (keeping the
+       width:height aspect and fitting the usable area); 0 uses width x height exactly. */
+    uint8_t display_percent;
+    uint8_t reserved[3];
 } BTBHGPUWindowDescriptor;
 
 typedef struct BTBHGPUWindowReport {

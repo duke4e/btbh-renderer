@@ -162,6 +162,19 @@ public final class GPUPlatform: GamePlatform {
         guard descriptor.mode == .windowed else {
             throw GPUPlatformError.unsupportedWindowMode
         }
+        let displayPercent: UInt8
+        switch descriptor.sizing {
+        case .exact:
+            displayPercent = 0
+        case .displayPercent(let percent):
+            guard (1...100).contains(percent),
+                  descriptor.drawableScalePolicy == .system else {
+                throw GPUPlatformError.invalidWindowDescriptor(
+                    "Display-relative GPU windows need 1...100 percent and the system drawable scale"
+                )
+            }
+            displayPercent = UInt8(percent)
+        }
         guard descriptor.width > 0,
               descriptor.height > 0,
               descriptor.width <= Int(Int32.max),
@@ -182,6 +195,9 @@ public final class GPUPlatform: GamePlatform {
             height: UInt32(descriptor.height),
             hidden: false,
             highPixelDensity: descriptor.drawableScalePolicy == .system,
+            resizable: descriptor.resizable,
+            fullscreenToggle: descriptor.fullscreenToggle,
+            displayPercent: displayPercent,
             debugMode: debugMode
         )
         window.setFrameTelemetryEnabled(frameTelemetryEnabled)
@@ -277,6 +293,14 @@ public final class GPUPlatform: GamePlatform {
 
     public var isWindowFocused: Bool {
         state.isWindowFocused
+    }
+
+    public var isWindowMinimized: Bool {
+        window?.windowDiagnostics.minimized ?? false
+    }
+
+    public var closedByFailure: Bool {
+        forcedClose
     }
 
     public var refreshRate: Int {
