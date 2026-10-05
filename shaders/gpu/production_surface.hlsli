@@ -226,24 +226,9 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     result.normal = normal;
     result.data = float4(0.0f, 1.0f, 0.0f, (float)surface_variant);
 
-    if (surface_variant == 2u)
-    {
-        const float2 scaled_position = position.xz * 7.5f;
-        const float2 warp = float2(
-            sin(scaled_position.y * 0.23f + surface_time * 0.20f),
-            cos(scaled_position.x * 0.17f + surface_time * 0.28f)
-        );
-        const float wave =
-            btbh_surface_waves(
-                scaled_position + warp * 2.6f,
-                5,
-                surface_time
-            ) -
-            0.42f;
-        result.position.y += wave * 0.08f;
-        result.data.x = wave;
-    }
-    else if (surface_variant == 3u && instance_custom.x > 0.0f)
+    // Water (variant 2) stays flat: a bob in model space split the seams between its tiles, and
+    // the fragment's world-space waves carry the motion.
+    if (surface_variant == 3u && instance_custom.x > 0.0f)
     {
         const float duration = max(0.01f, instance_custom.z);
         const float time = saturate(instance_custom.x / duration);

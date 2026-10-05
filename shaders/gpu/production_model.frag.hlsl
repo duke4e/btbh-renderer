@@ -166,6 +166,8 @@ void apply_surface(
     }
     else if (surface_variant == 2u)
     {
+        // World-space waves, so neighbouring water tiles share one surface. The asset keeps its
+        // colour: ripples shade it, crests catch a pale foam and the low roughness a sun glint.
         const float2 position = input.world_position.xz * 7.5f;
         const float2 warp = float2(
             sin(position.y * 0.23f + surface_time * 0.20f),
@@ -177,28 +179,41 @@ void apply_surface(
             0.55f,
             surface_time
         );
-        const float foam =
-            smoothstep(0.18f, 0.62f, input.surface_data.x);
-        const float ripple = btbh_surface_waves(
-            position * 0.72f + warp,
+        // The swell and fine ripples riding it shade the water, crest pale and tilt its normal.
+        const float swell = btbh_surface_waves(
+            position * 1.6f + warp,
             4,
             surface_time
         );
-        albedo.rgb = lerp(
-            float3(0.035f, 0.145f, 0.230f),
-            float3(0.125f, 0.355f, 0.455f),
-            0.35f + 0.20f * ripple
-        );
+        const float2 fine_position = position * 4.2f + warp * 1.7f;
+        const float fine_time = surface_time * 1.4f;
+        const float fine = btbh_surface_waves(fine_position, 4, fine_time);
+        const float fine_dx = btbh_surface_waves(
+            fine_position + float2(0.04f, 0.0f),
+            4,
+            fine_time
+        ) - fine;
+        const float fine_dz = btbh_surface_waves(
+            fine_position + float2(0.0f, 0.04f),
+            4,
+            fine_time
+        ) - fine;
+        const float shade = swell * 0.6f + fine * 0.4f;
+        const float crest = smoothstep(0.58f, 0.90f, shade);
+        albedo.rgb *= lerp(0.80f, 1.12f, shade);
         albedo.rgb = lerp(
             albedo.rgb,
-            float3(0.660f, 0.870f, 0.900f),
-            foam * 0.20f
+            float3(0.860f, 0.950f, 0.970f),
+            crest * 0.30f
         );
         albedo.a = 1.0f;
-        normal_map = normalize(
-            float3(wave_normal.x * 0.42f, wave_normal.z * 0.42f, 1.0f)
-        ) * 2.0f - 1.0f;
-        orm = float3(1.0f, 0.18f, 0.0f);
+        // Tangent space, as the sampled normal map is after its decode.
+        normal_map = normalize(float3(
+            wave_normal.x * 0.42f - fine_dx * 6.0f,
+            wave_normal.z * 0.42f - fine_dz * 6.0f,
+            1.0f
+        ));
+        orm = float3(1.0f, 0.12f, 0.0f);
     }
     else if (surface_variant == 3u && input.instance_custom.x > 0.0f)
     {

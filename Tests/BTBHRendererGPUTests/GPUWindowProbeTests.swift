@@ -1773,7 +1773,7 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
-    func testProductionWaterMatchesLegacyDeferredNormalDecode() throws {
+    func testProductionWaterWavesAreWorldSpaceWithOneNormalDecode() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -1795,8 +1795,20 @@ final class GPUWindowProbeTests: XCTestCase {
             )
         )
         let waterSource = shader[waterStart.lowerBound..<waterEnd.lowerBound]
+        XCTAssertTrue(waterSource.contains("input.world_position.xz"))
+        XCTAssertTrue(waterSource.contains("albedo.rgb *= lerp("))
         XCTAssertTrue(waterSource.contains("normal_map = normalize("))
-        XCTAssertTrue(waterSource.contains(") * 2.0f - 1.0f;"))
+        // A second decode laid the wave normal in the tangent plane: the sun lit water as a wall.
+        XCTAssertFalse(waterSource.contains(") * 2.0f - 1.0f;"))
+
+        // No vertex bob: in model space it split the seams between water tiles.
+        let surface = try String(
+            contentsOf: packageRoot.appendingPathComponent(
+                "shaders/gpu/production_surface.hlsli"
+            ),
+            encoding: .utf8
+        )
+        XCTAssertFalse(surface.contains("surface_variant == 2u"))
     }
 
     func testProductionSurfaceVertexAndShadowPassesShareDeformationContract()
