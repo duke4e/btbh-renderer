@@ -136,5 +136,34 @@ int main(void) {
     free(last);
     free(first);
     btbh_gpu_animation_library_destroy(library);
+
+    // The skeleton root comes after its joint in the node list, as Blender
+    // exports write it: the joint still sits under the root's transform.
+    BTBHGPUAnimationLibrary *root_last =
+        btbh_gpu_animation_library_load(
+            BTBH_GPU_ROOT_AFTER_CHILDREN_FIXTURE_PATH,
+            &report
+        );
+    assert(root_last != NULL);
+    assert(btbh_gpu_animation_library_skin_joint_count(root_last, 0u) == 1u);
+    float joint[16] = {0};
+    assert(btbh_gpu_animation_library_sample_skin(
+        root_last,
+        0u,
+        0.5f,
+        0u,
+        joint,
+        1u
+    ));
+    const float expected[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        3.0f, 1.0f, 0.0f, 1.0f
+    };
+    for (uint32_t index = 0u; index < 16u; index += 1u) {
+        assert_near(joint[index], expected[index]);
+    }
+    btbh_gpu_animation_library_destroy(root_last);
     return 0;
 }

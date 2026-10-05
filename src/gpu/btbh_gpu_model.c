@@ -3141,10 +3141,7 @@ static bool btbh_gpu_animation_build_skin_matrices(
         free(local_matrices);
         return false;
     }
-    bool valid = true;
-    for (cgltf_size index = 0u;
-         valid && index < data->nodes_count;
-         index += 1u) {
+    for (cgltf_size index = 0u; index < data->nodes_count; index += 1u) {
         const cgltf_node *node = &data->nodes[index];
         float *local = &local_matrices[index * 16u];
         if (node->has_matrix && animated_nodes[index] == 0u) {
@@ -3157,6 +3154,14 @@ static bool btbh_gpu_animation_build_skin_matrices(
                 local
             );
         }
+    }
+    // Every local transform is set before any world transform is composed:
+    // a parent may come after its children in the node list (Blender exports
+    // put the armature last), and composing early multiplied by a zero matrix.
+    bool valid = true;
+    for (cgltf_size index = 0u;
+         valid && index < data->nodes_count;
+         index += 1u) {
         valid = btbh_gpu_animation_world_matrix(
             data,
             local_matrices,

@@ -549,6 +549,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         btbh_gpu_animation_math_test
         PRIVATE
             BTBH_GPU_ANIMATION_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/blended-animation.gltf"
+            BTBH_GPU_ROOT_AFTER_CHILDREN_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/root-after-children-skin.gltf"
     )
     target_link_libraries(
         btbh_gpu_animation_math_test
