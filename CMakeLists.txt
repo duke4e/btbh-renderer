@@ -297,6 +297,16 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         if(
+            _shader_name STREQUAL "production_hrc_trace.comp" OR
+            _shader_name STREQUAL "production_hrc_finish.comp"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_hrc_source_transport.hlsli"
+            )
+        endif()
+        if(
             _shader_name STREQUAL "production_lut.frag" OR
             _shader_name STREQUAL "production_post.frag" OR
             _shader_name STREQUAL "production_tilt_shift.frag"

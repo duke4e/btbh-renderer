@@ -34,6 +34,8 @@ static const float two_pi = 6.28318530718f;
 static const uint2 directional_source_tile = uint2(8u, 8u);
 static const uint directional_source_count = 64u;
 
+#include "production_hrc_source_transport.hlsli"
+
 float2 rotation_vector(uint rotation)
 {
     const float angle = float(rotation & 3u) * (pi * 0.5f);
@@ -162,6 +164,8 @@ float4 trace_display_segment(float2 start, float2 end)
     {
         receiver_height = start_occlusion.y;
     }
+    const float3 boundary_radiance = evaluate_boundary_radiance(ray_direction);
+    const float background_luminance = hrc_source_luminance(boundary_radiance);
     float distance_display = 0.0f;
     float3 radiance = 0.0f;
     float transmittance = 1.0f;
@@ -176,7 +180,7 @@ float4 trace_display_segment(float2 start, float2 end)
         if (any(display_position < 0.0f) ||
             any(display_position >= float(display_size)))
         {
-            radiance += evaluate_boundary_radiance(ray_direction);
+            radiance += transmittance * boundary_radiance;
             transmittance = 0.0f;
             break;
         }
@@ -204,10 +208,14 @@ float4 trace_display_segment(float2 start, float2 end)
             0.0f
         );
         const float4 directed_source = directional_source(uv, angle);
-        if (source.a > 0.001f || directed_source.a > 0.001f)
+        if (hrc_source_composite(
+                source,
+                directed_source,
+                background_luminance,
+                radiance,
+                transmittance
+            ))
         {
-            radiance = source.rgb + directed_source.rgb;
-            transmittance = 0.0f;
             break;
         }
         const float sdf_source_cells = abs(field.x) * origin_cell.w;
@@ -220,7 +228,7 @@ float4 trace_display_segment(float2 start, float2 end)
     if (transmittance > 0.0f &&
         (any(end < 0.0f) || any(end >= float(display_size))))
     {
-        radiance += evaluate_boundary_radiance(ray_direction);
+        radiance += transmittance * boundary_radiance;
         transmittance = 0.0f;
     }
     radiance *= (pi * 0.25f) / two_pi;

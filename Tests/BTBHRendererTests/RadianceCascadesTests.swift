@@ -679,6 +679,33 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(descriptor.invalidate)
     }
 
+    /// A source sample used to stop every ray outright, however dim, so fading impacts and
+    /// sparks cast dark tails away from the sun that flickered as shadows. Both marches now
+    /// composite sources by their brightness against the sky behind them and let the sky
+    /// through what they do not absorb.
+    func testTraceAndFinishCompositeSourcesAgainstTheirBackground() throws {
+        let shaderDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("shaders/gpu", isDirectory: true)
+        func shader(_ name: String) throws -> String {
+            try String(contentsOf: shaderDirectory.appendingPathComponent(name), encoding: .utf8)
+        }
+        let transport = try shader("production_hrc_source_transport.hlsli")
+        XCTAssertTrue(transport.contains("coverage * saturate((ratio - 0.5f) / 1.5f)"))
+        XCTAssertTrue(transport.contains("radiance += transmittance * (opacity / coverage) * premultiplied;"))
+        XCTAssertTrue(transport.contains("transmittance *= 1.0f - opacity;"))
+        for name in ["production_hrc_trace.comp.hlsl", "production_hrc_finish.comp.hlsl"] {
+            let march = try shader(name)
+            XCTAssertTrue(march.contains("#include \"production_hrc_source_transport.hlsli\""), name)
+            XCTAssertTrue(march.contains("hrc_source_composite("), name)
+            XCTAssertTrue(march.contains("radiance += transmittance * boundary_radiance;"), name)
+            XCTAssertFalse(march.contains("source.a > 0.001f"), name)
+            XCTAssertFalse(march.contains("radiance = source.rgb + directed_source.rgb;"), name)
+        }
+    }
+
     func testHolographicShadersKeepPaperPipelineStages() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
