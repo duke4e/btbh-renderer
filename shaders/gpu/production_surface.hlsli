@@ -33,6 +33,23 @@ float2 btbh_surface_hash22(float2 value)
     return frac(sin(value) * 43758.5453f);
 }
 
+// Value noise with smooth interpolation: continuous in `value`, two channels in [0, 1).
+float2 btbh_surface_smooth_noise22(float2 value)
+{
+    const float2 cell = floor(value);
+    const float2 fraction = value - cell;
+    const float2 blend = fraction * fraction * (3.0f - 2.0f * fraction);
+    const float2 corner00 = btbh_surface_hash22(cell);
+    const float2 corner10 = btbh_surface_hash22(cell + float2(1.0f, 0.0f));
+    const float2 corner01 = btbh_surface_hash22(cell + float2(0.0f, 1.0f));
+    const float2 corner11 = btbh_surface_hash22(cell + float2(1.0f, 1.0f));
+    return lerp(
+        lerp(corner00, corner10, blend.x),
+        lerp(corner01, corner11, blend.x),
+        blend.y
+    );
+}
+
 float btbh_surface_value_noise(float2 value)
 {
     const float2 cell = floor(value);
@@ -258,6 +275,11 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     }
     else if (surface_variant == 4u && instance_custom.y > 0.0f)
     {
+        // Collapse: the structure pancakes onto its base (local y = 0), sinks into the ground
+        // and crumbles along a smooth noise field. Every term is continuous over the model, so
+        // faces bend instead of tearing. Shard cells per vertex used to send the corners of a
+        // large low-poly facade different ways, stretching it into slabs as big as the building
+        // that rose toward the camera and threw huge shadows over the map.
         const float duration = max(0.01f, surface_parameters0.x);
         const float time = saturate(instance_custom.y / duration);
         const float local_scale = max(1.0f, instance_custom.w);
@@ -265,22 +287,6 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
             0.01f,
             surface_parameters0.y * local_scale
         );
-        const float2 cell = floor(position.xz / cell_size);
-        const float2 cell_hash = btbh_surface_hash22(
-            cell +
-            float2(
-                instance_custom.z * 17.3f,
-                instance_custom.z * 31.7f
-            )
-        );
-        const float shard_seed = cell_hash.x + instance_custom.z;
-        const float direction_angle = cell_hash.x * 6.2832f;
-        const float speed = 0.5f + cell_hash.y * 0.8f;
-        const float2 drift =
-            float2(cos(direction_angle), sin(direction_angle)) *
-            speed *
-            surface_parameters0.w *
-            local_scale;
         const float spread_time =
             1.0f - (1.0f - time) * (1.0f - time);
         const float drop =
@@ -289,39 +295,22 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
             instance_custom.y *
             instance_custom.y *
             local_scale;
-        const float3 offset = float3(
-            drift.x * spread_time * instance_custom.y,
-            drop,
-            drift.y * spread_time * instance_custom.y
-        );
-        float3 spin_axis = float3(
-            btbh_surface_hash11(shard_seed * 3.7f) * 2.0f - 1.0f,
-            btbh_surface_hash11(shard_seed * 1.9f) * 0.3f,
-            btbh_surface_hash11(shard_seed * 5.3f) * 2.0f - 1.0f
-        );
-        spin_axis = dot(spin_axis, spin_axis) > 0.00000001f
-            ? normalize(spin_axis)
-            : float3(1.0f, 0.0f, 0.0f);
-        const float2 cell_center_xz =
-            (cell + 0.5f) * cell_size;
-        const float3 cell_center =
-            float3(cell_center_xz.x, position.y, cell_center_xz.y);
-        const float spin_angle =
-            time *
-            surface_parameters1.x *
-            (0.6f + cell_hash.x * 0.8f);
-        result.position =
-            cell_center +
-            btbh_surface_rotate_axis_angle(
-                position - cell_center,
-                spin_axis,
-                spin_angle
-            ) +
-            offset;
-        result.normal = btbh_surface_rotate_axis_angle(
-            normal,
-            spin_axis,
-            spin_angle
+        // Upper floors crumble further than the base; 4 local units is the reference extent.
+        const float height_share =
+            0.3f + 0.7f * saturate(position.y / (4.0f * local_scale));
+        const float2 crumble =
+            (btbh_surface_smooth_noise22(
+                position.xz / (cell_size * 2.0f) +
+                instance_custom.z * 0.37f
+            ) - 0.5f) *
+            cell_size *
+            surface_parameters0.w *
+            height_share *
+            spread_time;
+        result.position = float3(
+            position.x + crumble.x,
+            position.y * (1.0f - 0.55f * spread_time) + drop,
+            position.z + crumble.y
         );
         result.data.y =
             1.0f - smoothstep(0.6f, 1.0f, time);
