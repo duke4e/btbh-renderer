@@ -1234,7 +1234,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                     alphaCutoff: base.alphaCutoff,
                     blendMode: base.blendMode,
                     billboardMode: base.billboardMode,
-                    depthCompare: base.depthCompare,
+                    depthCompare: patch.depthCompare ?? base.depthCompare,
                     stencilCompare: base.stencilCompare,
                     stencilReference:
                         patch.stencilReference ?? base.stencilReference,

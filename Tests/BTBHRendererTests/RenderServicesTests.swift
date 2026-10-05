@@ -963,6 +963,9 @@ final class RenderServicesTests: XCTestCase {
     func testModelPatchesKeepImportedTransparencyUnlessSet() {
         XCTAssertNil(ModelMaterialPatch.identity.transparency)
         XCTAssertEqual(ModelMaterialPatch(transparency: .alpha).transparency, .alpha)
+        XCTAssertNil(ModelMaterialPatch.identity.depthCompare)
+        XCTAssertEqual(ModelMaterialPatch(depthCompare: .lessEqual).depthCompare, .lessEqual)
+        XCTAssertNotEqual(ModelMaterialPatch(depthCompare: .lessEqual), ModelMaterialPatch.identity)
         XCTAssertNotEqual(ModelMaterialPatch(transparency: .alpha), ModelMaterialPatch.identity)
     }
 

@@ -415,6 +415,9 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var transparency: TransparencyMode?
     /// nil keeps the imported material's surface detail.
     public var detail: SurfaceDetail?
+    /// nil keeps the imported material's depth test. `.lessEqual` lets a second draw of the same
+    /// model at the same transforms (a tint over its body) pass where the body already wrote depth.
+    public var depthCompare: CompareFunction?
 
     public init(
         albedoTexture: TextureHandle? = nil,
@@ -430,7 +433,8 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         surfaceShader: SurfaceShaderHandle? = nil,
         castsShadow: Bool? = nil,
         transparency: TransparencyMode? = nil,
-        detail: SurfaceDetail? = nil
+        detail: SurfaceDetail? = nil,
+        depthCompare: CompareFunction? = nil
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -446,6 +450,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.castsShadow = castsShadow
         self.transparency = transparency
         self.detail = detail
+        self.depthCompare = depthCompare
     }
 
     public static let identity = Self()
