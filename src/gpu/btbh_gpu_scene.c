@@ -6923,6 +6923,103 @@ bool btbh_gpu_window_blit_pending_scene(
     return true;
 }
 
+/* Copies the finished scene into `destination` (a capture of the same size and format) and
+   releases the frame, so another scene can render before the canvas presents. The frame is
+   submitted here; the canvas then composites only what renders after it. */
+BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *destination,
+    BTBHGPUTextureReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->pending_scene_ready ||
+        window->scene_runtime == NULL ||
+        window->scene_runtime->composite_color_texture == NULL ||
+        destination == NULL ||
+        destination->owner != window ||
+        destination->texture == NULL ||
+        destination->width != window->scene_runtime->composite_width ||
+        destination->height != window->scene_runtime->composite_height ||
+        destination->format != SDL_GetGPUSwapchainTextureFormat(
+            window->device->gpu,
+            window->window
+        )
+    ) {
+        report->result = BTBH_GPU_INVALID_ARGUMENT;
+        (void)snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            "GPU scene frame cannot be copied into that texture"
+        );
+        return report->result;
+    }
+
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUCommandBuffer *command = window->pending_command;
+    window->pending_command = NULL;
+    if (command == NULL) {
+        command = SDL_AcquireGPUCommandBuffer(device);
+    }
+    window->pending_scene_ready = false;
+    if (command == NULL) {
+        btbh_gpu_window_scene_submission_finished(window, false);
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void)snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    SDL_InsertGPUDebugLabel(command, "BTBH Scene Copy");
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    if (copy != NULL) {
+        SDL_GPUTextureLocation source;
+        SDL_GPUTextureLocation target;
+        SDL_zero(source);
+        SDL_zero(target);
+        source.texture = window->scene_runtime->composite_color_texture;
+        target.texture = destination->texture;
+        SDL_CopyGPUTextureToTexture(
+            copy,
+            &source,
+            &target,
+            destination->width,
+            destination->height,
+            1u,
+            false
+        );
+        SDL_EndGPUCopyPass(copy);
+    }
+    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+    btbh_gpu_window_scene_submission_finished(window, submitted);
+    if (copy == NULL || !submitted) {
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void)snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            SDL_GetError()
+        );
+        return report->result;
+    }
+    report->result = BTBH_GPU_OK;
+    report->width = destination->width;
+    report->height = destination->height;
+    report->mip_count = 1u;
+    return report->result;
+}
+
 static void btbh_gpu_scene_release_pipeline_array(
     SDL_GPUDevice *device,
     SDL_GPUGraphicsPipeline **pipelines,

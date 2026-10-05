@@ -1326,9 +1326,16 @@ final class GPUSceneBackend: SceneBackend {
         )
     }
 
+    func copyWorldFrame(into texture: TextureHandle) throws {
+        try platform.copyPendingSceneTexture(
+            into: try resources.canvasTexture(texture)
+        )
+    }
+
     func shutdown() {
         currentFrame = nil
         frustumCullingState = nil
+        sunShadowLightDirection = nil
         pendingModelDraws.removeAll(keepingCapacity: false)
         pendingDebugDraws.removeAll(keepingCapacity: false)
         submissionScratch.release()
@@ -1457,7 +1464,25 @@ final class GPUSceneBackend: SceneBackend {
                 0, 0, -near / (far - near), 1,
             ]
         }
-        return Self.multiply(projection, view)
+        return Self.multiply(
+            Self.viewportPlacement(viewport),
+            Self.multiply(projection, view)
+        )
+    }
+
+    /// Places the camera's clip space inside `viewport`: the frame still renders the whole
+    /// drawable, but the camera's image lands exactly in that sub-rectangle (normalized, y down),
+    /// so a canvas can show the region 1:1. Screen-space passes invert the full matrix, so they
+    /// stay consistent. The full viewport is the identity.
+    static func viewportPlacement(_ viewport: NormalizedViewport) -> [Float] {
+        let centerX = 2 * viewport.x + viewport.width - 1
+        let centerY = 1 - 2 * viewport.y - viewport.height
+        return [
+            viewport.width, 0, 0, 0,
+            0, viewport.height, 0, 0,
+            0, 0, 1, 0,
+            centerX, centerY, 0, 1,
+        ]
     }
 
     private static func multiply(

@@ -410,10 +410,19 @@ public protocol SceneBackend: AnyObject {
     func intersectsFrustum(_ bounds: RenderBounds3) -> Bool
     func readbackWorldFrame() throws -> FrameReadback
     func captureWorldFrameTexture() throws -> TextureHandle
+    /// Copies the finished world frame into `texture`, a `captureWorldFrameTexture()` capture of
+    /// the current drawable size, and releases the frame so another world frame can render
+    /// before the canvas presents. The canvas then shows only the last frame; earlier ones are
+    /// drawn from their copies.
+    func copyWorldFrame(into texture: TextureHandle) throws
     func shutdown()
 }
 
 public extension SceneBackend {
+    func copyWorldFrame(into texture: TextureHandle) throws {
+        throw RenderResourceBackendError.unsupportedOperation("scene.copyWorldFrame")
+    }
+
     func projectNormalized(
         _ world: RenderVec3,
         camera: RenderCamera

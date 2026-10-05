@@ -723,6 +723,13 @@ public final class GPUPlatform: GamePlatform {
         return try window.capturePendingSceneTexture()
     }
 
+    func copyPendingSceneTexture(into texture: GPUTextureProbeResource) throws {
+        guard let window else {
+            throw GPUPlatformError.windowNotOpen
+        }
+        try window.copyPendingSceneTexture(into: texture)
+    }
+
     func readbackPresentedFrame() throws -> FrameReadback {
         guard let window else {
             throw GPUPlatformError.windowNotOpen

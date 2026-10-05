@@ -3406,6 +3406,24 @@ public final class GPUWindowProbe {
         }
     }
 
+    func copyPendingSceneTexture(into texture: GPUTextureProbeResource) throws {
+        guard let window, !isShutdown else {
+            throw GPUTextureProbeError.operationFailed(
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUTextureReport()
+        guard btbh_gpu_window_copy_pending_scene_texture(
+            window,
+            texture.pointer,
+            &report
+        ) == BTBH_GPU_OK else {
+            throw GPUTextureProbeError.operationFailed(
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
+    }
+
     func capturePendingSceneTexture() throws -> GPUTextureProbeResource {
         guard let window, !isShutdown else {
             throw GPUTextureProbeError.operationFailed(

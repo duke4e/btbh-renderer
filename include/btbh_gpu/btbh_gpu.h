@@ -997,6 +997,13 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
     BTBHGPUWindow *window,
     BTBHGPUTextureReport *report
 );
+/* Copies the finished scene into a capture of the same size and format and releases the frame,
+   so another scene can render before the canvas presents. */
+BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *destination,
+    BTBHGPUTextureReport *report
+);
 void btbh_gpu_window_request_presented_frame_readback(
     BTBHGPUWindow *window
 );
