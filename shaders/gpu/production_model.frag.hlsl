@@ -477,6 +477,97 @@ float3 evaluate_spot_light(
 }
 
 #if BTBH_DIRECTIONAL_SHADOWS
+// Tent-filtered percentage-closer filtering. Every texel in a window around the receiver is
+// compared and weighted by a tent of `radius_texels` centred on the exact sample position, so
+// the weights move continuously with the receiver and edges fade without the steps of a few
+// hard taps. Gathers fetch the window two by two texels (3x3 gathers cover radius 2, 4x4
+// cover radius 3). Gather components: w = (0, 0), z = (1, 0), x = (0, 1), y = (1, 1).
+float tent_shadow_lit(
+    float4 depths,
+    float2 corner,
+    float2 texel,
+    float reference_depth,
+    float radius_texels,
+    inout float weight_sum
+)
+{
+    const float4 dx =
+        float4(corner.x, corner.x + 1.0f, corner.x + 1.0f, corner.x) - texel.x;
+    const float4 dy =
+        float4(corner.y + 1.0f, corner.y + 1.0f, corner.y, corner.y) - texel.y;
+    const float4 weights =
+        saturate(1.0f - abs(dx) / radius_texels) *
+        saturate(1.0f - abs(dy) / radius_texels);
+    weight_sum += dot(weights, 1.0f);
+    return dot(weights, step(reference_depth, depths));
+}
+
+float tent_shadow_visibility_3x3(
+    Texture2D<float> shadow_map,
+    SamplerState shadow_sampler,
+    float2 uv,
+    float reference_depth,
+    float map_size,
+    float radius_texels
+)
+{
+    const float radius = clamp(radius_texels, 1.0f, 2.0f);
+    const float2 texel = uv * map_size - 0.5f;
+    const float2 origin = floor(texel) - 2.0f;
+    float lit = 0.0f;
+    float weight_sum = 0.0f;
+    [unroll]
+    for (int y = 0; y < 3; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < 3; ++x)
+        {
+            const float2 corner = origin + float2(x, y) * 2.0f;
+            const float4 depths = shadow_map.Gather(
+                shadow_sampler,
+                (corner + 1.0f) / map_size
+            );
+            lit += tent_shadow_lit(
+                depths, corner, texel, reference_depth, radius, weight_sum
+            );
+        }
+    }
+    return weight_sum > 0.0f ? lit / weight_sum : 1.0f;
+}
+
+float tent_shadow_visibility_4x4(
+    Texture2D<float> shadow_map,
+    SamplerState shadow_sampler,
+    float2 uv,
+    float reference_depth,
+    float map_size,
+    float radius_texels
+)
+{
+    const float radius = clamp(radius_texels, 1.0f, 3.0f);
+    const float2 texel = uv * map_size - 0.5f;
+    const float2 origin = floor(texel) - 3.0f;
+    float lit = 0.0f;
+    float weight_sum = 0.0f;
+    [unroll]
+    for (int y = 0; y < 4; ++y)
+    {
+        [unroll]
+        for (int x = 0; x < 4; ++x)
+        {
+            const float2 corner = origin + float2(x, y) * 2.0f;
+            const float4 depths = shadow_map.Gather(
+                shadow_sampler,
+                (corner + 1.0f) / map_size
+            );
+            lit += tent_shadow_lit(
+                depths, corner, texel, reference_depth, radius, weight_sum
+            );
+        }
+    }
+    return weight_sum > 0.0f ? lit / weight_sum : 1.0f;
+}
+
 // The sun's map (BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE).
 static const float primary_directional_shadow_map_size = 2048.0f;
 
@@ -533,27 +624,20 @@ float primary_directional_visibility(
         projected.x * 0.5f + 0.5f,
         -projected.y * 0.5f + 0.5f
     );
+    // The tent spans one texel more than the softness (up to three), and the depth bias grows
+    // with it because the farthest texels compared sit that far along the receiver's slope.
+    const float radius_texels = min(1.0f + softness, 3.0f);
     const float bias =
-        texel_world * (1.0f + softness) *
+        texel_world * radius_texels *
         length(directional_shadow_view_projection[2].xyz);
-    const float texel_radius =
-        softness / primary_directional_shadow_map_size;
-    float visibility = 0.0f;
-    [unroll]
-    for (int y = -1; y <= 1; ++y)
-    {
-        [unroll]
-        for (int x = -1; x <= 1; ++x)
-        {
-            const float stored_depth = directional_shadow_texture.Sample(
-                directional_shadow_sampler,
-                uv + float2(x, y) * texel_radius
-            );
-            visibility +=
-                projected.z - bias <= stored_depth ? 1.0f : 0.0f;
-        }
-    }
-    return visibility / 9.0f;
+    return tent_shadow_visibility_4x4(
+        directional_shadow_texture,
+        directional_shadow_sampler,
+        uv,
+        projected.z - bias,
+        primary_directional_shadow_map_size,
+        radius_texels
+    );
 }
 
 float secondary_directional_visibility(
@@ -593,26 +677,14 @@ float secondary_directional_visibility(
     const float normal_dot_light = saturate(dot(normal, light));
     const float bias =
         0.001f + 0.0015f * (1.0f - normal_dot_light);
-    const float texel_radius =
-        max(secondary_directional_shadow_controls.y, 0.0f) /
-        512.0f;
-    float visibility = 0.0f;
-    [unroll]
-    for (int y = -1; y <= 1; ++y)
-    {
-        [unroll]
-        for (int x = -1; x <= 1; ++x)
-        {
-            const float stored_depth =
-                secondary_directional_shadow_texture.Sample(
-                    secondary_directional_shadow_sampler,
-                    uv + float2(x, y) * texel_radius
-                );
-            visibility +=
-                projected.z - bias <= stored_depth ? 1.0f : 0.0f;
-        }
-    }
-    return visibility / 9.0f;
+    return tent_shadow_visibility_3x3(
+        secondary_directional_shadow_texture,
+        secondary_directional_shadow_sampler,
+        uv,
+        projected.z - bias,
+        512.0f,
+        1.0f + max(secondary_directional_shadow_controls.y, 0.0f)
+    );
 }
 
 float omni_projected_depth(
@@ -733,24 +805,14 @@ float spot_visibility(
     const float normal_dot_light = saturate(dot(normal, light));
     const float bias =
         0.0001f + 0.0005f * (1.0f - normal_dot_light);
-    const float texel_radius =
-        max(spot_shadow_controls.y, 0.0f) / 1024.0f;
-    float visibility = 0.0f;
-    [unroll]
-    for (int y = -1; y <= 1; ++y)
-    {
-        [unroll]
-        for (int x = -1; x <= 1; ++x)
-        {
-            const float stored_depth = spot_shadow_texture.Sample(
-                spot_shadow_sampler,
-                uv + float2(x, y) * texel_radius
-            );
-            visibility +=
-                projected.z - bias <= stored_depth ? 1.0f : 0.0f;
-        }
-    }
-    return visibility / 9.0f;
+    return tent_shadow_visibility_3x3(
+        spot_shadow_texture,
+        spot_shadow_sampler,
+        uv,
+        projected.z - bias,
+        1024.0f,
+        1.0f + max(spot_shadow_controls.y, 0.0f)
+    );
 }
 #endif
 

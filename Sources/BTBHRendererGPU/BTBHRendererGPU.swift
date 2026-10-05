@@ -556,6 +556,41 @@ enum GPUSceneBatchShadowCulling {
         batch.spotShadowVisible && batch.material?.castsShadow != false
     }
 
+    /// The ground a box can darken under a directional light travelling along `lightDirection`:
+    /// the box joined with its top swept down to its base. Nil for invalid bounds or a light at
+    /// or below the horizon; a light lower than about 5 degrees reaches no further than that.
+    static func sunShadowFootprint(
+        of bounds: RenderBounds3,
+        lightDirection: RenderVec3
+    ) -> RenderBounds3? {
+        let length = (
+            lightDirection.x * lightDirection.x +
+            lightDirection.y * lightDirection.y +
+            lightDirection.z * lightDirection.z
+        ).squareRoot()
+        guard length.isFinite, length > 0,
+              GPUSceneFrustumCullingState.boundsAreValid(bounds) else {
+            return nil
+        }
+        let descent = -lightDirection.y / length
+        guard descent > 0.01 else { return nil }
+        let reach = (bounds.maximum.y - bounds.minimum.y) / max(descent, 0.08)
+        let dx = lightDirection.x / length * reach
+        let dz = lightDirection.z / length * reach
+        return RenderBounds3(
+            minimum: RenderVec3(
+                x: bounds.minimum.x + min(0, dx),
+                y: bounds.minimum.y,
+                z: bounds.minimum.z + min(0, dz)
+            ),
+            maximum: RenderVec3(
+                x: bounds.maximum.x + max(0, dx),
+                y: bounds.maximum.y,
+                z: bounds.maximum.z + max(0, dz)
+            )
+        )
+    }
+
     static func applyingSpotFrustum(
         to batches: [GPUSceneGeometryProbeBatch],
         shadow: GPUSceneDirectionalShadowProbe

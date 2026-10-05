@@ -2321,6 +2321,65 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(culled[2].spotShadowVisible)
     }
 
+    /// A low sun throws building shadows several times their height. A range the camera does not
+    /// see stays in the sun's shadow pass while the ground its shadow covers is in view, so those
+    /// shadows no longer pop in and out at the screen edges, and nothing farther joins the pass.
+    func testSunShadowFootprintSweepsTheTopDownToTheBase() throws {
+        let tower = RenderBounds3(
+            minimum: .init(x: 0, y: 0, z: 0),
+            maximum: .init(x: 1, y: 2, z: 1)
+        )
+        // Overhead sun: the shadow stays under the box.
+        XCTAssertEqual(
+            GPUSceneBatchShadowCulling.sunShadowFootprint(of: tower, lightDirection: .init(x: 0, y: -1, z: 0)),
+            tower
+        )
+        // 45 degrees toward +x and -z: the shadow reaches one height out along the light.
+        let slanted = try XCTUnwrap(GPUSceneBatchShadowCulling.sunShadowFootprint(
+            of: tower, lightDirection: .init(x: 1, y: -1.4142135, z: -1)
+        ))
+        XCTAssertEqual(slanted.minimum.x, 0, accuracy: 1e-5)
+        XCTAssertEqual(slanted.maximum.x, 1 + 2 / 1.4142135, accuracy: 1e-4)
+        XCTAssertEqual(slanted.minimum.z, -2 / 1.4142135, accuracy: 1e-4)
+        XCTAssertEqual(slanted.maximum.z, 1, accuracy: 1e-5)
+        XCTAssertEqual(slanted.minimum.y, 0)
+        XCTAssertEqual(slanted.maximum.y, 2)
+        // A level light, or invalid bounds, casts nothing into view from off screen.
+        XCTAssertNil(GPUSceneBatchShadowCulling.sunShadowFootprint(of: tower, lightDirection: .init(x: 1, y: 0, z: 0)))
+        XCTAssertNil(GPUSceneBatchShadowCulling.sunShadowFootprint(
+            of: .init(minimum: .init(x: 1, y: 0, z: 0), maximum: .init(x: 0, y: 1, z: 1)),
+            lightDirection: .init(x: 0, y: -1, z: 0)
+        ))
+    }
+
+    func testShadowOnlyRangesStayOutOfTheScenePassAndDoNotMergeWithVisibleOnes() {
+        let geometry = OpaquePointer(bitPattern: 1)!
+        let instanceBuffer = OpaquePointer(bitPattern: 2)!
+        func batch(firstInstance: Int, sceneVisible: Bool) -> GPUSceneGeometryProbeBatch {
+            GPUSceneGeometryProbeBatch(
+                geometry: .model(geometry),
+                animation: nil,
+                material: nil,
+                materialSlot: 0,
+                legacyInstanced: true,
+                instanceBuffer: instanceBuffer,
+                firstInstance: firstInstance,
+                instanceCount: 1,
+                sceneVisible: sceneVisible
+            )
+        }
+        let shadowOnly = batch(firstInstance: 1, sceneVisible: false)
+
+        XCTAssertTrue(GPUSceneBatchShadowCulling.castsDirectionalShadow(shadowOnly))
+        XCTAssertEqual(
+            GPUSceneBatchConsolidation.adjacentPersistentRanges([
+                batch(firstInstance: 0, sceneVisible: true),
+                shadowOnly,
+            ]).count,
+            2
+        )
+    }
+
     func testPersistentRangesWithDifferentSpotVisibilityDoNotMerge() {
         let geometry = OpaquePointer(bitPattern: 1)!
         let instanceBuffer = OpaquePointer(bitPattern: 2)!

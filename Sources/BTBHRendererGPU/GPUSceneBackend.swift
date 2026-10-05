@@ -217,6 +217,12 @@ final class GPUSceneBackend: SceneBackend {
     private let submissionScratch = GPUSceneSubmissionScratch()
     private var modelBatchBuildSeconds = 0.0
     private var modelBatchOverrideEntryCount = 0
+    /// The sun's direction from the previous frame, while it casts shadows. Persistent ranges the
+    /// camera does not see still draw into the sun's shadow pass when the ground their shadow
+    /// covers is in view: a low sun throws building shadows several times their height, and
+    /// culling those casters to the view made shadows pop in and out at the screen edges as the
+    /// camera followed and shook.
+    private var sunShadowLightDirection: RenderVec3?
     private(set) var lastPresentationReport:
         GPUScenePresentationProbeReport?
     var pendingModelDrawCountForTesting: Int {
@@ -346,6 +352,7 @@ final class GPUSceneBackend: SceneBackend {
         var packedInstances = submissionScratch.takePackedInstances()
         var batches = submissionScratch.takeBatches()
         var visiblePersistentRanges: [PersistentModelInstanceRange] = []
+        var shadowOnlyPersistentRanges: [PersistentModelInstanceRange] = []
         var logicalInstanceCount = 0
         defer {
             submissionScratch.reclaim(
@@ -441,6 +448,7 @@ final class GPUSceneBackend: SceneBackend {
                     overrides: draw.overrides
                 )
                 visiblePersistentRanges.removeAll(keepingCapacity: true)
+                shadowOnlyPersistentRanges.removeAll(keepingCapacity: true)
                 for range in draw.ranges {
                     guard range.isValid(
                         instanceCount: draw.instances.count
@@ -451,6 +459,9 @@ final class GPUSceneBackend: SceneBackend {
                         )
                     }
                     guard intersectsFrustum(range.bounds) else {
+                        if castsIntoSunShadow(range.bounds) {
+                            shadowOnlyPersistentRanges.append(range)
+                        }
                         continue
                     }
                     visiblePersistentRanges.append(range)
@@ -468,6 +479,22 @@ final class GPUSceneBackend: SceneBackend {
                                 persistentResource.storage.pointer,
                             firstInstance: range.sourceStart,
                             instanceCount: range.count,
+                            shadowBounds: range.bounds,
+                            spotShadowVisible: true
+                        ))
+                    }
+                    for range in shadowOnlyPersistentRanges {
+                        batches.append(.init(
+                            geometry: geometry,
+                            animation: nil,
+                            material: entry.material,
+                            materialSlot: entry.materialSlot,
+                            legacyInstanced: true,
+                            instanceBuffer:
+                                persistentResource.storage.pointer,
+                            firstInstance: range.sourceStart,
+                            instanceCount: range.count,
+                            sceneVisible: false,
                             shadowBounds: range.bounds,
                             spotShadowVisible: true
                         ))
@@ -747,6 +774,7 @@ final class GPUSceneBackend: SceneBackend {
                     legacyInstanced: true,
                     firstInstance: firstInstance,
                     instanceCount: draw.count,
+                    directionalShadowVisible: draw.castsSunShadow,
                     to: &batches
                 )
                 logicalInstanceCount += draw.count
@@ -825,6 +853,9 @@ final class GPUSceneBackend: SceneBackend {
                 Float(drawableSize.width) /
                 Float(drawableSize.height)
         )
+        sunShadowLightDirection = lighting.directionalShadow.enabled
+            ? lighting.directionalDirection
+            : nil
         let lightingResolveFinished = telemetryEnabled
             ? platform.monotonicElapsedSeconds
             : 0
@@ -1269,6 +1300,18 @@ final class GPUSceneBackend: SceneBackend {
         }
         guard let frustumCullingState else { return true }
         return frustumCullingState.intersectsValidated(bounds)
+    }
+
+    /// Whether bounds the camera does not see still throw sun shadow onto ground it does see.
+    private func castsIntoSunShadow(_ bounds: RenderBounds3) -> Bool {
+        guard let sunShadowLightDirection,
+              let footprint = GPUSceneBatchShadowCulling.sunShadowFootprint(
+                of: bounds,
+                lightDirection: sunShadowLightDirection
+              ) else {
+            return false
+        }
+        return intersectsFrustum(footprint)
     }
 
     func readbackWorldFrame() throws -> FrameReadback {

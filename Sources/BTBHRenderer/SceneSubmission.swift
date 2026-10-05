@@ -296,6 +296,9 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
     public let overrides: [MaterialOverride]
     public let sourceStart: Int
     public let count: Int
+    /// False keeps the draw out of the sun's shadow maps, for a body whose own lamp alone
+    /// throws its shadow.
+    public let castsSunShadow: Bool
 
     public init(
         model: ModelHandle,
@@ -308,7 +311,8 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         customs: [RenderVec4]? = nil,
         overrides: [MaterialOverride] = [],
         sourceStart: Int = 0,
-        count: Int
+        count: Int,
+        castsSunShadow: Bool = true
     ) {
         self.model = model
         self.player = player
@@ -321,6 +325,7 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         self.overrides = overrides
         self.sourceStart = sourceStart
         self.count = count
+        self.castsSunShadow = castsSunShadow
     }
 }
 
