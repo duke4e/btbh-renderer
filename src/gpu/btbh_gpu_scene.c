@@ -18,7 +18,7 @@
 #define BTBH_GPU_SCENE_INSTANCE_FLOATS 24u
 #define BTBH_GPU_SCENE_INSTANCE_STRIDE \
     (BTBH_GPU_SCENE_INSTANCE_FLOATS * sizeof(float))
-#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 512u
+#define BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE 2048u
 #define BTBH_GPU_SPOT_SHADOW_MAP_SIZE 1024u
 #define BTBH_GPU_OMNI_SHADOW_MAP_SIZE 512u
 #define BTBH_GPU_OMNI_SHADOW_FACE_COUNT 6u
@@ -3148,7 +3148,7 @@ static bool btbh_gpu_scene_validate_batches(
             batch->stencil_pass <
                 BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT &&
             batch->transparency_enabled <= 1u &&
-            batch->unlit_enabled <= 1u &&
+            batch->unlit_enabled <= 2u &&
             (scene_visibility == NULL ||
              scene_visibility[index] <= 1u) &&
             (directional_shadow_visibility == NULL ||

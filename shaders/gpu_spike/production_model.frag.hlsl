@@ -1,3 +1,7 @@
+#ifndef BTBH_UNLIT_SHADOW_LIGHT
+// How much light unlit surfaces that receive shadows (unlit_enabled 2) keep in shadow.
+#define BTBH_UNLIT_SHADOW_LIGHT 0.45f
+#endif
 #ifndef BTBH_DIRECTIONAL_SHADOWS
 #define BTBH_DIRECTIONAL_SHADOWS 1
 #endif
@@ -1016,6 +1020,21 @@ FragmentOutput main(FragmentInput input)
     const float metalness = saturate(orm.b * material_factors.w);
     if (unlit_enabled != 0u)
     {
+#if BTBH_DIRECTIONAL_SHADOWS
+        // unlit_enabled 2: unlit, but darkened in the primary directional light's shadow.
+        if (unlit_enabled == 2u)
+        {
+            const float shadow_visibility = primary_directional_visibility(
+                input.world_position,
+                normal
+            );
+            albedo_sample.rgb *= lerp(
+                BTBH_UNLIT_SHADOW_LIGHT,
+                1.0f,
+                shadow_visibility
+            );
+        }
+#endif
 #if BTBH_RC_MATERIAL_OUTPUT
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),

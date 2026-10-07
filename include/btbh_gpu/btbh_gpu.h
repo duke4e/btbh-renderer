@@ -646,7 +646,7 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t stencil_reference;
     uint8_t stencil_mask;
     uint8_t transparency_enabled;
-    uint8_t unlit_enabled;
+    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow
     uint8_t spot_shadow_visible;
     BTBHGPUSceneSurfaceVariant surface_variant;
     float surface_time;
@@ -1082,6 +1082,44 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     uint32_t transient_instance_count,
     uint32_t logical_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+);
+// As btbh_gpu_window_scene_present_instances, with per-batch visibility: scene_visibility
+// (drawn in the scene) and directional_shadow_visibility (cast into the directional shadow
+// maps), one byte (0 or 1) per batch; NULL means every batch.
+BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
     uint32_t batch_count,
     uint8_t clear_red,
     uint8_t clear_green,
