@@ -1115,6 +1115,31 @@ void btbh_gpu_animation_library_destroy(
 );
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 
+/* Raw-pixel textures. Pixels are tightly packed RGBA8, row 0 at the top. */
+BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+);
+/* Replaces a region of a raw-pixel texture. Submits its own upload, so call it
+ * before the scene or canvas present that samples the texture. */
+BTBHGPUResult btbh_gpu_texture_update_rgba8(
+    BTBHGPUTexture *texture,
+    const uint8_t *pixels,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height
+);
+/* The SDL_Window behind a BTBH window, for hosts that drive SDL themselves. */
+struct SDL_Window *btbh_gpu_window_sdl_window(BTBHGPUWindow *window);
+
 #if defined(__cplusplus)
 }
 #endif
