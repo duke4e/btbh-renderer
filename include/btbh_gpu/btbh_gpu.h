@@ -408,7 +408,11 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     BTBH_GPU_SCENE_SURFACE_DISSOLVE = 3,
     BTBH_GPU_SCENE_SURFACE_SHATTER = 4,
     BTBH_GPU_SCENE_SURFACE_GLITTER = 5,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 6
+    // The primary light's highlights on moving waves where the ORM texture's blue channel says,
+    // added to the surface's own colours (also unlit ones). surface_parameters0: wave scale,
+    // strength, sharpness, tilt.
+    BTBH_GPU_SCENE_SURFACE_GLINTS = 6,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 7
 } BTBHGPUSceneSurfaceVariant;
 
 typedef enum BTBHGPUSceneBillboardMode {

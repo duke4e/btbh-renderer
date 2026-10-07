@@ -308,6 +308,52 @@ void apply_surface(
             );
         }
     }
+    else if (surface_variant == 6u)
+    {
+        // Glints: the primary light's highlights on moving waves, added to the colour where
+        // the ORM texture's blue channel (the mask) says so; the surface keeps its own colours
+        // (for pre-shaded, unlit surfaces such as water drawn in a texture).
+        // surface_parameters0: x = scale of the waves, y = strength, z = sharpness, w = how
+        // much the waves tilt the surface.
+        const float mask = orm.b;
+        if (mask > 0.0f)
+        {
+            const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 0.35f;
+            const float2 position = input.world_position.xz * scale;
+            const float3 wave = btbh_surface_wave_normal(
+                position,
+                0.02f,
+                0.6f,
+                surface_time
+            );
+            const float tilt = surface_parameters0.w > 0.0f ? surface_parameters0.w : 3.0f;
+            const float3 normal = stable_normalize(
+                float3(wave.x * tilt, 1.0f, wave.z * tilt),
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 light = stable_normalize(
+                -directional_direction_energy.xyz,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 view = stable_normalize(
+                camera_position.xyz - input.world_position,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 half_vector = stable_normalize(
+                light + view,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float sharpness =
+                surface_parameters0.z > 0.0f ? surface_parameters0.z : 90.0f;
+            const float highlight = pow(
+                saturate(dot(normal, half_vector)),
+                sharpness
+            );
+            albedo.rgb +=
+                directional_color.rgb *
+                (highlight * mask * surface_parameters0.y);
+        }
+    }
 }
 
 float schlick_fresnel(float value)
