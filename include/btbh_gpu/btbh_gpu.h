@@ -760,6 +760,13 @@ typedef struct BTBHGPUScenePost {
     uint8_t anti_aliasing;
     uint8_t upscale_mode;
     BTBHGPUSceneRadianceCascades radiance_cascades;
+    /* Bloom: light from what is brighter than bloom_threshold, spread around it and added before
+     * tone mapping. bloom_intensity 0 turns it off. bloom_knee softens the threshold;
+     * bloom_radius scales the spread (1 is the default filter). */
+    float bloom_intensity;
+    float bloom_threshold;
+    float bloom_knee;
+    float bloom_radius;
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

@@ -34,6 +34,7 @@
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 #define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 #define BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE 2u
+#define BTBH_GPU_SCENE_BLOOM_LEVELS 6u
 
 typedef enum BTBHGPUSceneStencilVariant {
     BTBH_GPU_SCENE_STENCIL_DISABLED = 0,
@@ -211,6 +212,9 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *post_lut_pipeline;
     SDL_GPUGraphicsPipeline *post_cas_pipeline;
     SDL_GPUGraphicsPipeline *post_tilt_shift_pipeline;
+    SDL_GPUGraphicsPipeline *bloom_down_pipeline;
+    SDL_GPUGraphicsPipeline *bloom_up_pipeline;
+    SDL_GPUGraphicsPipeline *bloom_composite_pipeline;
     SDL_GPUGraphicsPipeline *upscale_lanczos_pipeline;
     SDL_GPUGraphicsPipeline *post_pipeline;
     SDL_GPUGraphicsPipeline *smaa_edge_pipelines[
@@ -244,6 +248,13 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUTexture *post_color_texture;
     SDL_GPUTexture *smaa_edges_texture;
     SDL_GPUTexture *smaa_weights_texture;
+    SDL_GPUTexture *bloom_down_textures[BTBH_GPU_SCENE_BLOOM_LEVELS];
+    SDL_GPUTexture *bloom_up_textures[BTBH_GPU_SCENE_BLOOM_LEVELS];
+    uint32_t bloom_widths[BTBH_GPU_SCENE_BLOOM_LEVELS];
+    uint32_t bloom_heights[BTBH_GPU_SCENE_BLOOM_LEVELS];
+    uint32_t bloom_source_width;
+    uint32_t bloom_source_height;
+    uint32_t bloom_level_count;
     SDL_GPUTexture *directional_shadow_textures[3];
     SDL_GPUTexture *omni_shadow_texture;
     SDL_GPUSampler *directional_shadow_sampler;
@@ -1095,6 +1106,222 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline(
         return false;
     }
     return true;
+}
+
+typedef struct BTBHGPUSceneBloomUniforms {
+    float source_texel[2];
+    float threshold;
+    float knee;
+    float intensity;
+    float radius;
+    uint32_t prefilter;
+    uint32_t padding;
+} BTBHGPUSceneBloomUniforms;
+
+static void btbh_gpu_scene_release_bloom_targets(
+    SDL_GPUDevice *device,
+    BTBHGPUSceneRuntime *runtime
+) {
+    for (uint32_t level = 0u; level < BTBH_GPU_SCENE_BLOOM_LEVELS; ++level) {
+        if (runtime->bloom_down_textures[level] != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->bloom_down_textures[level]);
+            runtime->bloom_down_textures[level] = NULL;
+        }
+        if (runtime->bloom_up_textures[level] != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->bloom_up_textures[level]);
+            runtime->bloom_up_textures[level] = NULL;
+        }
+    }
+    runtime->bloom_source_width = 0u;
+    runtime->bloom_source_height = 0u;
+    runtime->bloom_level_count = 0u;
+}
+
+static SDL_GPUTexture *btbh_gpu_scene_create_smaa_target(
+    SDL_GPUDevice *device,
+    uint32_t width,
+    uint32_t height,
+    SDL_GPUTextureFormat format
+);
+
+/* The bloom pipelines and the chain of half-size levels below the render size. */
+static bool btbh_gpu_scene_ensure_bloom(
+    BTBHGPUWindow *window,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    const char *extension =
+        shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+            ? "metallib"
+            : "spv";
+    const struct {
+        const char *name;
+        uint32_t samplers;
+        SDL_GPUGraphicsPipeline **pipeline;
+    } pipelines[] = {
+        { "production_bloom_down.frag", 1u, &runtime->bloom_down_pipeline },
+        { "production_bloom_up.frag", 2u, &runtime->bloom_up_pipeline },
+        { "production_bloom_composite.frag", 2u, &runtime->bloom_composite_pipeline },
+    };
+    for (size_t i = 0u; i < SDL_arraysize(pipelines); ++i) {
+        if (*pipelines[i].pipeline != NULL) {
+            continue;
+        }
+        char filename[128];
+        char path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        (void)snprintf(filename, sizeof(filename), "%s.%s", pipelines[i].name, extension);
+        if (!btbh_gpu_scene_sibling_path(post_fragment_shader_path, filename, path) ||
+            !btbh_gpu_scene_create_fullscreen_pipeline(
+                window,
+                post_vertex_shader_path,
+                path,
+                shader_format,
+                SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                pipelines[i].samplers,
+                pipelines[i].pipeline,
+                report
+            )) {
+            return false;
+        }
+    }
+
+    if (runtime->bloom_level_count != 0u &&
+        runtime->bloom_source_width == width &&
+        runtime->bloom_source_height == height) {
+        return true;
+    }
+    btbh_gpu_scene_release_bloom_targets(device, runtime);
+    uint32_t level_width = width, level_height = height;
+    uint32_t count = 0u;
+    while (count < BTBH_GPU_SCENE_BLOOM_LEVELS && level_width > 2u && level_height > 2u) {
+        level_width = (level_width + 1u) / 2u;
+        level_height = (level_height + 1u) / 2u;
+        runtime->bloom_widths[count] = level_width;
+        runtime->bloom_heights[count] = level_height;
+        runtime->bloom_down_textures[count] = btbh_gpu_scene_create_smaa_target(
+            device, level_width, level_height, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+        runtime->bloom_up_textures[count] = btbh_gpu_scene_create_smaa_target(
+            device, level_width, level_height, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+        ++count;
+        if (runtime->bloom_down_textures[count - 1u] == NULL ||
+            runtime->bloom_up_textures[count - 1u] == NULL) {
+            btbh_gpu_scene_release_bloom_targets(device, runtime);
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+    }
+    if (count < 2u) {
+        btbh_gpu_scene_release_bloom_targets(device, runtime);
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "render size too small for bloom");
+        return false;
+    }
+    runtime->bloom_level_count = count;
+    runtime->bloom_source_width = width;
+    runtime->bloom_source_height = height;
+    return true;
+}
+
+static bool btbh_gpu_scene_render_fullscreen(
+    SDL_GPUCommandBuffer *command,
+    const char *debug_label,
+    SDL_GPUGraphicsPipeline *pipeline,
+    SDL_GPUTexture *target,
+    const void *uniforms,
+    uint32_t uniform_size,
+    SDL_GPUTextureSamplerBinding *samplers,
+    uint32_t sampler_count
+);
+
+/* Down the chain from source (the scene, before tone mapping), back up, and the result added to
+ * source into target. */
+static bool btbh_gpu_scene_encode_bloom(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUScenePost *post,
+    SDL_GPUTexture *source,
+    uint32_t source_width,
+    uint32_t source_height,
+    SDL_GPUTexture *target
+) {
+    BTBHGPUSceneBloomUniforms uniforms;
+    SDL_zero(uniforms);
+    uniforms.threshold = post->bloom_threshold;
+    uniforms.knee = SDL_max(post->bloom_knee, 0.0001f);
+    uniforms.intensity = post->bloom_intensity;
+    uniforms.radius = post->bloom_radius > 0.0f ? post->bloom_radius : 1.0f;
+    const uint32_t count = runtime->bloom_level_count;
+    bool ok = true;
+
+    for (uint32_t level = 0u; ok && level < count; ++level) {
+        SDL_GPUTextureSamplerBinding sampler;
+        SDL_zero(sampler);
+        sampler.texture = level == 0u ? source : runtime->bloom_down_textures[level - 1u];
+        sampler.sampler = runtime->scene_color_sampler;
+        const uint32_t w = level == 0u ? source_width : runtime->bloom_widths[level - 1u];
+        const uint32_t h = level == 0u ? source_height : runtime->bloom_heights[level - 1u];
+        uniforms.source_texel[0] = 1.0f / (float)w;
+        uniforms.source_texel[1] = 1.0f / (float)h;
+        uniforms.prefilter = level == 0u ? 1u : 0u;
+        ok = btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH Bloom Down",
+            runtime->bloom_down_pipeline,
+            runtime->bloom_down_textures[level],
+            &uniforms,
+            (uint32_t)sizeof(uniforms),
+            &sampler,
+            1u
+        );
+    }
+    /* up[i] = down[i] + spread(up[i + 1]); the smallest level goes up as it is. */
+    for (int32_t level = (int32_t)count - 2; ok && level >= 0; --level) {
+        SDL_GPUTextureSamplerBinding samplers[2];
+        SDL_zeroa(samplers);
+        samplers[0].texture = level == (int32_t)count - 2
+            ? runtime->bloom_down_textures[level + 1]
+            : runtime->bloom_up_textures[level + 1];
+        samplers[0].sampler = runtime->scene_color_sampler;
+        samplers[1].texture = runtime->bloom_down_textures[level];
+        samplers[1].sampler = runtime->scene_color_sampler;
+        uniforms.source_texel[0] = 1.0f / (float)runtime->bloom_widths[level + 1];
+        uniforms.source_texel[1] = 1.0f / (float)runtime->bloom_heights[level + 1];
+        uniforms.prefilter = 0u;
+        ok = btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH Bloom Up",
+            runtime->bloom_up_pipeline,
+            runtime->bloom_up_textures[level],
+            &uniforms,
+            (uint32_t)sizeof(uniforms),
+            samplers,
+            2u
+        );
+    }
+    if (ok) {
+        SDL_GPUTextureSamplerBinding samplers[2];
+        SDL_zeroa(samplers);
+        samplers[0].texture = source;
+        samplers[0].sampler = runtime->scene_color_sampler;
+        samplers[1].texture = runtime->bloom_up_textures[0];
+        samplers[1].sampler = runtime->scene_color_sampler;
+        ok = btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH Bloom Composite",
+            runtime->bloom_composite_pipeline,
+            target,
+            &uniforms,
+            (uint32_t)sizeof(uniforms),
+            samplers,
+            2u
+        );
+    }
+    return ok;
 }
 
 static bool btbh_gpu_scene_ensure_post_stage_pipelines(
@@ -3704,6 +3931,15 @@ static bool btbh_gpu_scene_post_valid(
         post->tonemap_mode < BTBH_GPU_SCENE_TONEMAP_COUNT &&
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
+        isfinite(post->bloom_intensity) &&
+        post->bloom_intensity >= 0.0f &&
+        (post->bloom_intensity == 0.0f ||
+         (isfinite(post->bloom_threshold) &&
+          post->bloom_threshold >= 0.0f &&
+          isfinite(post->bloom_knee) &&
+          post->bloom_knee >= 0.0f &&
+          isfinite(post->bloom_radius) &&
+          post->bloom_radius >= 0.0f)) &&
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL);
 }
@@ -5050,6 +5286,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             shader_format,
             report
         ) &&
+        (post->bloom_intensity <= 0.0f ||
+         btbh_gpu_scene_ensure_bloom(
+             window,
+             post_vertex_shader_path,
+             post_fragment_shader_path,
+             shader_format,
+             render_width,
+             render_height,
+             report
+         )) &&
         btbh_gpu_scene_ensure_post_pipeline(
             window,
             post_vertex_shader_path,
@@ -5952,6 +6198,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         post_input = runtime->ssao_resolved_texture;
     }
     SDL_GPUTexture *post_stage_input = post_input;
+    if (fullscreen_ok && post->bloom_intensity > 0.0f) {
+        fullscreen_ok = btbh_gpu_scene_encode_bloom(
+            command,
+            runtime,
+            post,
+            post_stage_input,
+            render_width,
+            render_height,
+            runtime->post_pong_texture
+        );
+        post_stage_input = runtime->post_pong_texture;
+    }
     if (fullscreen_ok && post->lut_enabled != 0u) {
         SDL_GPUTextureSamplerBinding lut_samplers[2];
         SDL_zeroa(lut_samplers);
@@ -6788,6 +7046,16 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 window->scene_runtime->post_tilt_shift_pipeline
             );
         }
+        if (window->scene_runtime->bloom_down_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, window->scene_runtime->bloom_down_pipeline);
+        }
+        if (window->scene_runtime->bloom_up_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, window->scene_runtime->bloom_up_pipeline);
+        }
+        if (window->scene_runtime->bloom_composite_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, window->scene_runtime->bloom_composite_pipeline);
+        }
+        btbh_gpu_scene_release_bloom_targets(device, window->scene_runtime);
         if (window->scene_runtime->upscale_lanczos_pipeline != NULL) {
             SDL_ReleaseGPUGraphicsPipeline(
                 device,
