@@ -2777,6 +2777,45 @@ final class GPUWindowProbeTests: XCTestCase {
         ).directionalShadow.enabled)
     }
 
+    /// A spot's occluder shadow (the share of the sun, fill and sky its near occluder takes) reaches the
+    /// scene lighting only while the spot casts its shadow, and out-of-range shares are refused.
+    func testSpotOccluderShadowReachesTheSceneLightingWithItsShadow() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        try platform.openWindow(.init(
+            title: "BTBH spot occluder shadow",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        let resources = GPUResourceBackend(platform: platform)
+        defer {
+            resources.shutdown()
+            platform.closeWindow()
+        }
+        func lamp(castsShadow: Bool, strength: Float, reach: Float) -> LightDescriptor {
+            LightDescriptor(kind: .spot, active: true, position: .init(x: 0, y: 2, z: 0),
+                direction: .init(x: 0, y: -1, z: 1), color: .white, energy: 1, range: 50,
+                castsShadow: castsShadow, shadowSoftness: 4, occluderShadowStrength: strength,
+                occluderShadowReach: reach)
+        }
+        let camera = RenderCamera(position: .init(x: 0, y: 6, z: -8), target: .zero, up: .up,
+                                      verticalFOVDegrees: 60, projection: .perspective)
+        let handle = try resources.createLight(lamp(castsShadow: true, strength: 0.55, reach: 2.8))
+        var lighting = try resources.sceneLighting(environment: .default, camera: camera, aspect: 320 / 180)
+        XCTAssertEqual(lighting.spotOccluderShadowStrength, 0.55)
+        XCTAssertEqual(lighting.spotOccluderShadowReach, 2.8)
+
+        try resources.updateLight(handle, descriptor: lamp(castsShadow: false, strength: 0.55, reach: 2.8))
+        lighting = try resources.sceneLighting(environment: .default, camera: camera, aspect: 320 / 180)
+        XCTAssertEqual(lighting.spotOccluderShadowStrength, 0, "no shadow, no occluder")
+        XCTAssertEqual(lighting.spotOccluderShadowReach, 0)
+
+        XCTAssertThrowsError(try resources.updateLight(handle, descriptor: lamp(castsShadow: true, strength: 1.5, reach: 2.8)))
+        XCTAssertThrowsError(try resources.updateLight(handle, descriptor: lamp(castsShadow: true, strength: 0.5, reach: -1)))
+    }
+
     func testSpotLightingProjectionPreservesLegacyDefaultsAndShadowMatrix()
         throws
     {
@@ -2850,6 +2889,8 @@ final class GPUWindowProbeTests: XCTestCase {
             projection.spotShadow.viewProjection.allSatisfy(\.isFinite)
         )
         XCTAssertFalse(projection.heroOmniShadow.enabled)
+        XCTAssertEqual(projection.spotOccluderShadowStrength, 0, "the classic spot shadow by default")
+        XCTAssertEqual(projection.spotOccluderShadowReach, 0)
         let post = try resources.scenePost(
             environment: .init(
                 backgroundColor: .black,
@@ -3103,6 +3144,16 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(off.1, 0)
         XCTAssertEqual(off.2, 1)
         XCTAssertEqual(off.3, 0)
+        // The native batch check bounds the pattern: paving (4) is the last one it accepts.
+        let paving = GPUSceneSurfaceDetailParameters.native(
+            SurfaceDetail(pattern: .paving, albedoVariation: 0.1, bumpHeight: 0.003, frequency: 10)
+        )
+        XCTAssertEqual(paving.3, 4)
+        let nativeScene = try String(
+            contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 4.0f"))
 
         // The fragment uniform block carries the detail right after the procedural sky controls, in the
         // shader and in the native struct alike (both stop before the shadow block when shadows are off).

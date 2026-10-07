@@ -3461,8 +3461,9 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->detail_parameters[1]) &&
             isfinite(batch->detail_parameters[2]) &&
             isfinite(batch->detail_parameters[3]) &&
+            /* SurfaceDetail.Pattern: none, ground, grass, facade, paving. */
             batch->detail_parameters[3] >= 0.0f &&
-            batch->detail_parameters[3] <= 3.0f &&
+            batch->detail_parameters[3] <= 4.0f &&
             (batch->detail_parameters[3] < 0.5f ||
              batch->detail_parameters[2] > 0.0f) &&
             (batch->albedo_texture == NULL ||
@@ -3871,6 +3872,11 @@ bool btbh_gpu_scene_lighting_valid(
         !isfinite(lighting->spot_inner_cutoff) ||
         !isfinite(lighting->spot_outer_cutoff) ||
         lighting->spot_inner_cutoff <= lighting->spot_outer_cutoff ||
+        !isfinite(lighting->spot_occluder_shadow_strength) ||
+        lighting->spot_occluder_shadow_strength < 0.0f ||
+        lighting->spot_occluder_shadow_strength > 1.0f ||
+        !isfinite(lighting->spot_occluder_shadow_reach) ||
+        lighting->spot_occluder_shadow_reach < 0.0f ||
         lighting->ibl_enabled > 1u ||
         lighting->directional_shadow_enabled > 1u ||
         !isfinite(lighting->directional_shadow_softness) ||
@@ -5931,6 +5937,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->spot_inner_cutoff;
             fragment_uniforms.spot_cutoffs[1] =
                 lighting->spot_outer_cutoff;
+            fragment_uniforms.spot_cutoffs[2] =
+                lighting->spot_occluder_shadow_strength;
+            fragment_uniforms.spot_cutoffs[3] =
+                lighting->spot_occluder_shadow_reach;
             fragment_uniforms.material_factors[0] =
                 batch->normal_scale;
             fragment_uniforms.material_factors[1] =

@@ -1356,6 +1356,12 @@ final class GPUResourceBackend: RenderResourceBackend {
             spotOuterCutoff: spotIsOmni
                 ? -2
                 : GPUSceneLightingProbe.legacySpotOuterCutoff,
+            spotOccluderShadowStrength: spot?.kind == .spot && spotShadow.enabled
+                ? max(0, min(1, spot?.occluderShadowStrength ?? 0))
+                : 0,
+            spotOccluderShadowReach: spot?.kind == .spot && spotShadow.enabled
+                ? max(0, spot?.occluderShadowReach ?? 0)
+                : 0,
             directionalShadow: directionalShadow,
             secondaryDirectionalShadow: secondaryDirectionalShadow,
             spotShadow: spotShadow,
@@ -3389,10 +3395,13 @@ final class GPUResourceBackend: RenderResourceBackend {
             descriptor.shadowSoftness.isFinite,
             descriptor.shadowSoftness >= 0,
             descriptor.shadowUpdatePeriodFrames >= 1,
-            descriptor.shadowUpdatePeriodFrames <= 60
+            descriptor.shadowUpdatePeriodFrames <= 60,
+            (0...1).contains(descriptor.occluderShadowStrength),
+            descriptor.occluderShadowReach.isFinite,
+            descriptor.occluderShadowReach >= 0
         else {
             throw GPUResourceStagingError.invalidLightDescriptor(
-                "Light vectors and nonnegative scalar fields must be finite; shadow update period must be 1...60 frames"
+                "Light vectors and nonnegative scalar fields must be finite; shadow update period must be 1...60 frames; occluder shadow strength must be 0...1"
             )
         }
         if let focus = descriptor.shadowFocus {

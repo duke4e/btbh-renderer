@@ -901,6 +901,9 @@ struct GPUSceneLightingProbe {
     let spotFalloff: Float
     let spotInnerCutoff: Float
     let spotOuterCutoff: Float
+    /// The share of the sun, fill and sky light the spot's near occluder takes, and how near.
+    let spotOccluderShadowStrength: Float
+    let spotOccluderShadowReach: Float
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
@@ -924,6 +927,8 @@ struct GPUSceneLightingProbe {
         spotFalloff: Float = 1,
         spotInnerCutoff: Float = Self.legacySpotInnerCutoff,
         spotOuterCutoff: Float = Self.legacySpotOuterCutoff,
+        spotOccluderShadowStrength: Float = 0,
+        spotOccluderShadowReach: Float = 0,
         directionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         spotShadow: GPUSceneDirectionalShadowProbe = .disabled,
@@ -947,6 +952,8 @@ struct GPUSceneLightingProbe {
         self.spotFalloff = spotFalloff
         self.spotInnerCutoff = spotInnerCutoff
         self.spotOuterCutoff = spotOuterCutoff
+        self.spotOccluderShadowStrength = spotOccluderShadowStrength
+        self.spotOccluderShadowReach = spotOccluderShadowReach
         self.directionalShadow = directionalShadow
         self.secondaryDirectionalShadow = secondaryDirectionalShadow
         self.spotShadow = spotShadow
@@ -2166,6 +2173,8 @@ public final class GPUWindowProbe {
         nativeLighting.spot_falloff = lighting.spotFalloff
         nativeLighting.spot_inner_cutoff = lighting.spotInnerCutoff
         nativeLighting.spot_outer_cutoff = lighting.spotOuterCutoff
+        nativeLighting.spot_occluder_shadow_strength = lighting.spotOccluderShadowStrength
+        nativeLighting.spot_occluder_shadow_reach = lighting.spotOccluderShadowReach
         nativeLighting.directional_shadow_enabled =
             lighting.directionalShadow.enabled ? 1 : 0
         nativeLighting.directional_shadow_softness =
@@ -2947,8 +2956,12 @@ public final class GPUWindowProbe {
             lighting.spotFalloff,
             lighting.spotInnerCutoff,
             lighting.spotOuterCutoff,
+            lighting.spotOccluderShadowStrength,
+            lighting.spotOccluderShadowReach,
         ]
         guard values.allSatisfy(\.isFinite),
+              (0...1).contains(lighting.spotOccluderShadowStrength),
+              lighting.spotOccluderShadowReach >= 0,
               lighting.ambientEnergy >= 0,
               lighting.directionalEnergy >= 0,
               lighting.secondaryDirectionalEnergy >= 0,

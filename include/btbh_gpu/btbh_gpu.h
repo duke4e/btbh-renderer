@@ -701,7 +701,10 @@ typedef struct BTBHGPUSceneLighting {
     float spot_falloff;
     float spot_inner_cutoff;
     float spot_outer_cutoff;
-    float spot_reserved[2];
+    /* The share of the sun, fill and sky light the spot's shadow also takes where its occluder lies
+       within spot_occluder_shadow_reach of the light (0 = the classic spot shadow). */
+    float spot_occluder_shadow_strength;
+    float spot_occluder_shadow_reach;
     float irradiance_sh[27];
     uint32_t ibl_enabled;
     float ground_bottom_red;

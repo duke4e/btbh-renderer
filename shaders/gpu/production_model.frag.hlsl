@@ -847,6 +847,61 @@ float spot_visibility(
 }
 #endif
 
+#if BTBH_DIRECTIONAL_SHADOWS
+/* The share of the sun, fill and sky light the spot's own occluder takes where it shadows the
+   receiver: spot_cutoffs.z of it within spot_cutoffs.w of the light. A lamp carried by a character
+   then shadows the ground with the character; its own light, all the classic spot shadow removes, is
+   a small part of daylight. Farther occluders (buildings in the cone) keep the classic shadow. */
+float spot_occluder_share(
+    float3 world_position,
+    float visibility
+)
+{
+    const float strength = saturate(spot_cutoffs.z);
+    const float reach = spot_cutoffs.w;
+    if (
+        strength <= 0.0f || reach <= 0.0f || visibility >= 0.999f ||
+        spot_shadow_controls.x < 0.5f || spot_shadow_controls.z > 0.5f
+    )
+    {
+        return 0.0f;
+    }
+    const float4 clip = mul(
+        spot_shadow_view_projection,
+        float4(world_position, 1.0f)
+    );
+    if (clip.w <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float3 projected = clip.xyz / clip.w;
+    if (
+        projected.x < -1.0f || projected.x > 1.0f ||
+        projected.y < -1.0f || projected.y > 1.0f ||
+        projected.z < 0.0f || projected.z > 1.0f
+    )
+    {
+        return 0.0f;
+    }
+    const float2 uv = float2(
+        projected.x * 0.5f + 0.5f,
+        -projected.y * 0.5f + 0.5f
+    );
+    /* The nearest occluder around the receiver, as a distance from the light: the spot shadow
+       projection is perspective from a near plane of 0.05 to the light's range. */
+    const float4 depths = spot_shadow_texture.Gather(spot_shadow_sampler, uv);
+    const float nearest = min(min(depths.x, depths.y), min(depths.z, depths.w));
+    const float near_plane = 0.05f;
+    const float far_plane = max(spot_position_range.w, near_plane * 2.0f);
+    const float occluder_distance =
+        near_plane * far_plane /
+        max(far_plane - nearest * (far_plane - near_plane), 0.0001f);
+    const float close =
+        1.0f - smoothstep(reach * 0.75f, reach, occluder_distance);
+    return strength * (1.0f - visibility) * close;
+}
+#endif
+
 float3 evaluate_irradiance_sh(float3 direction)
 {
     const float x = direction.x;
@@ -1073,6 +1128,23 @@ FragmentOutput rc_material_output(
 }
 #endif
 
+// Paving slab profile at `value` (in cells: a slab is two cells long and one wide, every other row
+// shifted by half a slab): 1 on a slab's top, 0 in its joints, with a short bevel between. `shade`
+// returns the slab's own shade in -0.5..0.5. Joints and bevels widen with the pixel footprint (cells
+// per pixel), so they never get thinner than a pixel.
+float btbh_paving_slab(float2 value, float footprint, out float shade)
+{
+    const float row = floor(value.y);
+    const float along = value.x * 0.5f + (fmod(row, 2.0f) != 0.0f ? 0.5f : 0.0f);
+    const float column = floor(along);
+    shade = btbh_detail_hash(float2(column, row) + float2(3.0f, 7.0f)) - 0.5f;
+    const float2 local = float2(frac(along) * 2.0f, frac(value.y));
+    const float2 to_joint = min(local, float2(2.0f, 1.0f) - local);
+    const float edge = min(to_joint.x, to_joint.y);
+    const float joint = 0.04f + footprint * 0.5f;
+    return smoothstep(joint, joint + 0.1f + footprint, edge);
+}
+
 // Procedural surface detail (SurfaceDetail): albedo grain, broad stains and a bump, all from world-space
 // noise. Returns the bump as a surface gradient (Mikkelsen) built from screen-space derivatives, so it
 // needs no tangent frame. The frame and the triplanar weights use the face normal of the position
@@ -1094,6 +1166,8 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     const float face_area = length(face);
     const float3 face_normal = face_area > 0.0f ? face / face_area : float3(0.0f, 1.0f, 0.0f);
     float height;
+    float slab_shade = 0.0f;
+    float joint = 0.0f;
     if (pattern == 3u)
     {
         float3 weights = abs(face_normal);
@@ -1103,6 +1177,16 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
         height = weights.x * btbh_detail_fbm(position.zy, footprint)
             + weights.y * btbh_detail_fbm(position.xz, footprint)
             + weights.z * btbh_detail_fbm(position.xy, footprint);
+    }
+    else if (pattern == 4u)
+    {
+        // Slabs narrower than about three pixels fade into the plain grain, so far growth stages
+        // do not shimmer.
+        const float slab = btbh_paving_slab(position.xz, footprint, slab_shade);
+        const float visible = saturate((0.34f - footprint) * 5.0f);
+        slab_shade *= visible;
+        joint = (1.0f - slab) * visible;
+        height = btbh_detail_fbm(position.xz * 2.5f, footprint * 2.5f) * 0.35f - joint;
     }
     else
     {
@@ -1125,6 +1209,11 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     {
         // Walls darken over their lowest render unit fifth, which grounds buildings on the street.
         tint *= lerp(0.8f, 1.0f, saturate(input.world_position.y * 4.0f));
+    }
+    else if (pattern == 4u)
+    {
+        // Each slab a shade apart; dirt settles in the joints.
+        tint *= (1.0f + detail_parameters.x * 2.4f * slab_shade) * (1.0f - 0.26f * joint);
     }
     albedo.rgb *= max(tint, float3(0.0f, 0.0f, 0.0f));
 
@@ -1314,6 +1403,15 @@ FragmentOutput main(FragmentInput input)
         ambient_diffuse_lighting,
         ambient_specular_lighting
     );
+#if BTBH_DIRECTIONAL_SHADOWS
+    const float spot_shadow_visibility =
+        spot_visibility(input.world_position, normal);
+    const float spot_occluder =
+        spot_occluder_share(input.world_position, spot_shadow_visibility);
+#else
+    const float spot_shadow_visibility = 1.0f;
+    const float spot_occluder = 0.0f;
+#endif
     float3 lighting =
         ambient_diffuse_lighting +
         ambient_specular_lighting;
@@ -1355,6 +1453,9 @@ FragmentOutput main(FragmentInput input)
         1.0f
 #endif
     );
+    /* The sun, fill and sky dim where the spot's own occluder shadows them (see
+       spot_occluder_share); the spot then adds its own light, shadowed as before. */
+    lighting *= 1.0f - spot_occluder;
     lighting += evaluate_spot_light(
         input.world_position,
         albedo_sample.rgb,
@@ -1363,19 +1464,17 @@ FragmentOutput main(FragmentInput input)
         roughness,
         metalness,
         f0,
-#if BTBH_DIRECTIONAL_SHADOWS
-        spot_visibility(input.world_position, normal)
-#else
-        1.0f
-#endif
+        spot_shadow_visibility
     );
 #if BTBH_RC_MATERIAL_OUTPUT
+    /* The cascades' light is scaled by this occlusion: the occluder's shadow keeps its share out of
+       it too, or the resolve's max() fills the shadow back in. */
     return rc_material_output(
         float4(lighting + emission, albedo_sample.a),
         albedo_sample,
         emission,
         normal,
-        occlusion,
+        occlusion * (1.0f - spot_occluder),
         roughness,
         metalness,
         false

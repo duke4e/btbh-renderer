@@ -234,6 +234,9 @@ public struct SurfaceDetail: Hashable, Sendable {
         case grass
         /// Triplanar grain for walls and roofs, darkened toward the ground.
         case facade
+        /// World-aligned slabs in running bond, each a shade lighter or darker, with recessed
+        /// joints (footpaths, sidewalks, plazas). A slab is one cell wide and two long.
+        case paving
     }
 
     public var pattern: Pattern
@@ -597,6 +600,13 @@ public struct LightDescriptor: Sendable {
     public let shadowUpdatePeriodFrames: UInt32
     /// Directional lights only: when set, the shadow covers this sphere and `range` is unused.
     public let shadowFocus: ShadowFocus?
+    /// Spot lights only: the share (0-1) of the sun, fill and sky light that the spot's shadow also
+    /// takes where its occluder lies within `occluderShadowReach` of the light. A lamp carried by a
+    /// character then shadows the ground with the character: its own light alone is a small part of
+    /// daylight. Farther occluders keep the classic spot shadow. 0 turns it off.
+    public let occluderShadowStrength: Float
+    /// Spot lights only: how far from the light an occluder counts for `occluderShadowStrength`.
+    public let occluderShadowReach: Float
 
     public init(
         kind: LightKind,
@@ -610,7 +620,9 @@ public struct LightDescriptor: Sendable {
         shadowSoftness: Float,
         shadowUpdatePeriodFrames: UInt32 = 1,
         indirectEnergy: Float = 0,
-        shadowFocus: ShadowFocus? = nil
+        shadowFocus: ShadowFocus? = nil,
+        occluderShadowStrength: Float = 0,
+        occluderShadowReach: Float = 0
     ) {
         self.kind = kind
         self.active = active
@@ -624,6 +636,8 @@ public struct LightDescriptor: Sendable {
         self.shadowSoftness = shadowSoftness
         self.shadowUpdatePeriodFrames = shadowUpdatePeriodFrames
         self.shadowFocus = shadowFocus
+        self.occluderShadowStrength = occluderShadowStrength
+        self.occluderShadowReach = occluderShadowReach
     }
 }
 
