@@ -90,6 +90,8 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float sun_color_energy[4];
     float sun_direction_size[4];
     float procedural_controls[4];
+    float point_light_count[4];
+    float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS * 2][4];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
@@ -5614,6 +5616,26 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->spot_inner_cutoff;
             fragment_uniforms.spot_cutoffs[1] =
                 lighting->spot_outer_cutoff;
+            {
+                const uint32_t point_count = SDL_min(
+                    lighting->point_light_count,
+                    (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
+                );
+                fragment_uniforms.point_light_count[0] =
+                    (float)point_count;
+                for (uint32_t light = 0u; light < point_count; ++light) {
+                    (void)memcpy(
+                        fragment_uniforms.point_lights[light * 2u],
+                        &lighting->point_lights[light][0],
+                        4u * sizeof(float)
+                    );
+                    (void)memcpy(
+                        fragment_uniforms.point_lights[light * 2u + 1u],
+                        &lighting->point_lights[light][4],
+                        4u * sizeof(float)
+                    );
+                }
+            }
             fragment_uniforms.material_factors[0] =
                 batch->normal_scale;
             fragment_uniforms.material_factors[1] =

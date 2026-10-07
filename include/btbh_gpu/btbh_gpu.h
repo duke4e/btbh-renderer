@@ -658,6 +658,8 @@ typedef struct BTBHGPUSceneGeometryBatch {
     float surface_parameters1[4];
 } BTBHGPUSceneGeometryBatch;
 
+#define BTBH_GPU_SCENE_POINT_LIGHTS 8
+
 typedef struct BTBHGPUSceneLighting {
     float ambient_red;
     float ambient_green;
@@ -734,6 +736,10 @@ typedef struct BTBHGPUSceneLighting {
     float spot_shadow_softness;
     uint32_t spot_shadow_is_omni;
     float spot_shadow_near;
+    // Small point lights without shadows (explosions' flashes): per light x, y, z, radius, red,
+    // green, blue, energy. They light lit surfaces (diffuse) and brighten unlit ones.
+    uint32_t point_light_count;
+    float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
