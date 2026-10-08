@@ -70,7 +70,7 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_direction_size;
     float4 procedural_controls;
     float4 point_light_count;   // x: how many of point_lights are used
-    float4 point_lights[16];    // per light: position, radius; colour, energy
+    float4 point_lights[64];    // per light: position, radius; colour, energy
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
@@ -552,7 +552,7 @@ float3 evaluate_directional_light(
 float3 evaluate_point_lights(float3 world_position, float3 normal)
 {
     float3 light = float3(0.0f, 0.0f, 0.0f);
-    const uint count = min((uint)point_light_count.x, 8u);
+    const uint count = min((uint)point_light_count.x, 32u);
     for (uint i = 0u; i < count; ++i)
     {
         const float4 position_radius = point_lights[i * 2u];

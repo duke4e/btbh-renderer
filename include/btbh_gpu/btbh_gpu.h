@@ -663,7 +663,7 @@ typedef struct BTBHGPUSceneGeometryBatch {
     float surface_parameters1[4];
 } BTBHGPUSceneGeometryBatch;
 
-#define BTBH_GPU_SCENE_POINT_LIGHTS 8
+#define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
 typedef struct BTBHGPUSceneLighting {
     float ambient_red;
