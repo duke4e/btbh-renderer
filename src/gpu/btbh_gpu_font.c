@@ -405,7 +405,7 @@ BTBHGPUFont *btbh_gpu_window_font_load(
         rgba,
         atlas_width,
         atlas_height,
-        BTBH_GPU_TEXTURE_FILTER_NEAREST,
+        BTBH_GPU_TEXTURE_FILTER_LINEAR,  /* text drawn at any size */
         BTBH_GPU_TEXTURE_WRAP_CLAMP,
         &texture_report
     );
