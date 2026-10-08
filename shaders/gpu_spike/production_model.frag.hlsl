@@ -1092,13 +1092,16 @@ FragmentOutput rc_material_output(
 )
 {
     FragmentOutput output;
-    const float3 source_emission = unlit
+    // An unlit receiver (unlit_enabled bit 2) keeps its albedo for the bounce light it takes, and
+    // marks itself with 0.75 in the emission's alpha (unlit surfaces 1, lit ones 0).
+    const bool receiver = unlit && (unlit_enabled & 4u) != 0u;
+    const float3 source_emission = unlit && !receiver
         ? albedo.rgb + emission
         : emission;
     output.color = lit_color;
-    output.ambient = unlit
+    output.ambient = unlit && !receiver
         ? float4(0.0f, 0.0f, 0.0f, 0.0f)
-        : float4(albedo.rgb, metalness);
+        : float4(albedo.rgb, unlit ? 0.0f : metalness);
     output.normal = float4(
         normal * 0.5f + 0.5f,
         unlit ? 1.0f : occlusion
@@ -1109,7 +1112,7 @@ FragmentOutput rc_material_output(
     );
     output.emission = float4(
         source_emission,
-        unlit ? 1.0f : 0.0f
+        receiver ? 0.75f : unlit ? 1.0f : 0.0f
     );
     return output;
 }
@@ -1176,11 +1179,12 @@ FragmentOutput main(FragmentInput input)
         saturate(orm.r * material_factors.y);
     const float roughness = saturate(orm.g * material_factors.z);
     const float metalness = saturate(orm.b * material_factors.w);
-    if (unlit_enabled != 0u)
+    // unlit_enabled: 1 or 2 (bits 0-1), and bit 2 (4): takes the radiance cascades' light.
+    if ((unlit_enabled & 3u) != 0u)
     {
 #if BTBH_DIRECTIONAL_SHADOWS
         // unlit_enabled 2: unlit, but darkened in the primary directional light's shadow.
-        if (unlit_enabled == 2u)
+        if ((unlit_enabled & 3u) == 2u)
         {
             const float shadow_visibility = primary_directional_visibility(
                 input.world_position,

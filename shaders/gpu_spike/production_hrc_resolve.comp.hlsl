@@ -24,7 +24,8 @@ cbuffer HRCResolveUniforms : register(b0, space2)
     uint2 quadrant_atlas_resolution;
     float indirect_strength;
     uint debug_view;
-    uint2 padding0;
+    uint additive;  // only add the bounce light of what glows (BTBHGPUSceneRadianceCascades.additive)
+    uint padding0;
     float4x4 inverse_view_projection;
     float4 origin_cell;
     uint2 field_dimensions;
@@ -208,6 +209,9 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
     );
     const float3 emission = emission_material.rgb;
     const bool unlit_material = emission_material.a > 0.5f;
+    // An unlit receiver (0.75): its albedo takes the bounce light, added to the scene's colour
+    // (alpha 2 tells the compose step).
+    const bool unlit_receiver = unlit_material && emission_material.a < 0.9f;
     if (any(field_cell < 0.0f) ||
         any(field_cell >= float2(field_dimensions)))
     {
@@ -237,6 +241,28 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
     );
     const float3 f0 = specular_material.rgb;
     const float roughness = max(saturate(specular_material.a), 0.05f);
+    if (additive != 0u && unlit_material && !unlit_receiver)
+    {
+        // A source (what glows): as the scene draws it.
+        indirect_output[dispatch_id.xy] = float4(0.0f, 0.0f, 0.0f, -1.0f);
+        return;
+    }
+    if (unlit_receiver || additive != 0u)
+    {
+        float3 bounce = 0.0f;
+        [unroll]
+        for (uint rotation = 0u; rotation < 4u; ++rotation)
+        {
+            const float2 direction = rotation_vector(rotation);
+            const float3 light = normalize(float3(direction.x, 0.65f, direction.y));
+            bounce += quadrant_radiance(field_cell, rotation).rgb * saturate(dot(normal, light));
+        }
+        indirect_output[dispatch_id.xy] = float4(
+            albedo * (1.0f - metalness) * bounce * (2.0f * indirect_strength),
+            2.0f
+        );
+        return;
+    }
     if (unlit_material)
     {
         indirect_output[dispatch_id.xy] = debug_view == 10u

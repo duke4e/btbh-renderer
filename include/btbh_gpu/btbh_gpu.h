@@ -561,7 +561,11 @@ typedef struct BTBHGPUSceneRadianceCascades {
     uint32_t occlusion_cascade_count;
     uint8_t allow_auto_transition;
     uint8_t invalidate;
-    uint8_t reserved[2];
+    /* Only add light: no sky or sun at the field's edges, and every surface takes the bounce light
+     * of what glows on top of the scene's own lighting (rather than being lit again by the
+     * cascades). */
+    uint8_t additive;
+    uint8_t reserved[1];
     const BTBHGPUSceneRadianceEmitter *emitters;
     BTBHGPUSceneRadianceCascadesOcclusionCascade
         occlusion_cascades[BTBH_GPU_RC_MAX_OCCLUSION_CASCADES];
@@ -657,6 +661,9 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t transparency_enabled;
     uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow
     uint8_t spot_shadow_visible;
+    /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
+     * source of it (unlit surfaces are, unless this is set). */
+    uint8_t rc_receiver;
     BTBHGPUSceneSurfaceVariant surface_variant;
     float surface_time;
     float surface_parameters0[4];

@@ -106,5 +106,9 @@ float4 main(FragmentInput input) : SV_Target0
         return float4(scene_texture.Sample(scene_sampler, uv).rgb, 1.0f);
     }
     const float3 scene = scene_texture.Sample(scene_sampler, uv).rgb;
+    if (indirect.a > 1.5f)  // an unlit receiver: the bounce light added
+    {
+        return float4(scene + indirect.rgb, 1.0f);
+    }
     return float4(max(scene, indirect.rgb), 1.0f);
 }

@@ -3896,6 +3896,7 @@ static bool btbh_gpu_hrc_profiled_dispatch(
 
 static void btbh_gpu_hrc_fill_lighting_uniforms(
     const BTBHGPUSceneLighting *lighting,
+    bool additive,
     float environment_radiance[4],
     float directional_direction_energy[4],
     float directional_color_lobe[4],
@@ -3945,6 +3946,14 @@ static void btbh_gpu_hrc_fill_lighting_uniforms(
     sky_horizon_curve[1] = lighting->sky_horizon_green;
     sky_horizon_curve[2] = lighting->sky_horizon_blue;
     sky_horizon_curve[3] = lighting->sky_horizon_curve;
+    if (additive) {
+        /* No light from the field's edges: only what glows lights. */
+        environment_radiance[0] = environment_radiance[1] =
+            environment_radiance[2] = 0.0f;
+        directional_direction_energy[3] = 0.0f;
+        secondary_directional_direction_energy[3] = 0.0f;
+        sky_top_energy[3] = 0.0f;
+    }
 }
 
 static bool btbh_gpu_hrc_temporal_history_offset(
@@ -4100,6 +4109,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
             uniforms.max_step_count = 128u;
             btbh_gpu_hrc_fill_lighting_uniforms(
                 lighting,
+                config->additive != 0u,
                 uniforms.environment_radiance,
                 uniforms.directional_direction_energy,
                 uniforms.directional_color_lobe,
@@ -4282,6 +4292,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     finish_uniforms.max_step_count = 64u;
     btbh_gpu_hrc_fill_lighting_uniforms(
         lighting,
+        config->additive != 0u,
         finish_uniforms.environment_radiance,
         finish_uniforms.directional_direction_energy,
         finish_uniforms.directional_color_lobe,
@@ -4427,6 +4438,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
         layout->quadrant_atlas_height;
     resolve_uniforms.indirect_strength = config->indirect_intensity;
     resolve_uniforms.debug_view = (uint32_t)config->debug_view;
+    resolve_uniforms.padding0[0] = config->additive != 0u ? 1u : 0u;  /* additive */
     (void)memcpy(
         resolve_uniforms.inverse_view_projection,
         inverse_view_projection,

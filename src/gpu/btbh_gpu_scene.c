@@ -4338,7 +4338,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
         const bool material_emits =
-            batch->unlit_enabled != 0u ||
+            (batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
             (batch->emission_energy > 0.0f &&
              (batch->emission_red != 0u ||
               batch->emission_green != 0u ||
@@ -4440,7 +4440,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             fragment_uniforms.emission_color_energy[3] =
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
-                (uint32_t)batch->unlit_enabled;
+                (uint32_t)batch->unlit_enabled |
+                (batch->rc_receiver != 0u ? 4u : 0u);
             fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
                 (uint32_t)batch->surface_variant;
@@ -5653,7 +5654,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             fragment_uniforms.emission_color_energy[3] =
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
-                uniforms.unlit_enabled;
+                uniforms.unlit_enabled |
+                (batch->rc_receiver != 0u ? 4u : 0u);
             fragment_uniforms.alpha_cutoff =
                 batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
