@@ -412,7 +412,12 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     // added to the surface's own colours (also unlit ones). surface_parameters0: wave scale,
     // strength, sharpness, tilt.
     BTBH_GPU_SCENE_SURFACE_GLINTS = 6,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 7
+    // Procedural water where the ORM texture's blue channel says, instead of the texture (also
+    // unlit surfaces): surface_parameters0 x = wave scale, y = highlight strength, z = sharpness;
+    // surface_parameters1 rgb = the water's colour (linear), w = how much of the texture's detail
+    // shows in it.
+    BTBH_GPU_SCENE_SURFACE_PIXEL_WATER = 7,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 8
 } BTBHGPUSceneSurfaceVariant;
 
 typedef enum BTBHGPUSceneBillboardMode {
