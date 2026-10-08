@@ -5737,6 +5737,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->sun_curve;
             fragment_uniforms.procedural_controls[1] =
                 (float)lighting->ibl_enabled;
+            fragment_uniforms.procedural_controls[2] =
+                lighting->unlit_darkness;
+            fragment_uniforms.procedural_controls[3] =
+                lighting->unlit_glow_threshold;
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

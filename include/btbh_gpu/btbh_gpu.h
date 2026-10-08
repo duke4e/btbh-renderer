@@ -752,6 +752,11 @@ typedef struct BTBHGPUSceneLighting {
     // green, blue, energy. They light lit surfaces (diffuse) and brighten unlit ones.
     uint32_t point_light_count;
     float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
+    /* A dark scene: unlit surfaces keep 1 - unlit_darkness of their colour (0: all of it, as
+     * usual), the spot light lights them (with its shadow), and their pixels brighter than
+     * unlit_glow_threshold (luminance 0-1) glow on regardless. */
+    float unlit_darkness;
+    float unlit_glow_threshold;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {

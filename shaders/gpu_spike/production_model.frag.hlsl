@@ -1220,6 +1220,44 @@ FragmentOutput main(FragmentInput input)
                 -(height_down - height_up) * strength
             ));
         }
+        // A dark scene (procedural_controls.z, how dark): unlit surfaces keep that much less of
+        // their colour; the spot light lights them (with its shadow, and the relief), and their
+        // pixels brighter than procedural_controls.w glow on (lava, lamps).
+        if (procedural_controls.z > 0.0f)
+        {
+            const float darkness = saturate(procedural_controls.z);
+            float spot = 0.0f;
+            const float3 spot_delta = spot_position_range.xyz - input.world_position;
+            const float spot_distance = length(spot_delta);
+            if (spot_direction_energy.w > 0.0f && spot_position_range.w > 0.0f && spot_distance > 0.000001f)
+            {
+                const float3 to_spot = spot_delta / spot_distance;
+                const float range_attenuation = pow(
+                    1.0f - saturate(spot_distance / spot_position_range.w),
+                    spot_color_falloff.w
+                );
+                const float theta = dot(
+                    to_spot,
+                    -stable_normalize(spot_direction_energy.xyz, float3(0.0f, -1.0f, 0.0f))
+                );
+                const float angular = smoothstep(
+                    0.0f,
+                    1.0f,
+                    (theta - spot_cutoffs.y) / max(spot_cutoffs.x - spot_cutoffs.y, 0.0001f)
+                );
+#if BTBH_DIRECTIONAL_SHADOWS
+                const float spot_shadow = spot_visibility(input.world_position, normal);
+#else
+                const float spot_shadow = 1.0f;
+#endif
+                // (Less of the lamp than lit surfaces take: the pixel art holds its own light.)
+                spot = 0.6f * spot_direction_energy.w * range_attenuation * angular * spot_shadow *
+                    saturate(dot(lit_normal, to_spot) * 0.7f + 0.3f);
+            }
+            const float luminance = dot(albedo_sample.rgb, float3(0.299f, 0.587f, 0.114f));
+            const float glow = 0.7f * saturate((luminance - procedural_controls.w) * 4.0f);
+            albedo_sample.rgb *= (1.0f - darkness) + darkness * glow + spot * spot_color_falloff.rgb;
+        }
         albedo_sample.rgb += albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal);
 #if BTBH_RC_MATERIAL_OUTPUT
         return rc_material_output(
