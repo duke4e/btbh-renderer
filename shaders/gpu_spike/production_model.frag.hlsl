@@ -1108,8 +1108,30 @@ FragmentOutput main(FragmentInput input)
             );
         }
 #endif
-        // Flashes light up unlit surfaces too (the ground under an explosion).
-        albedo_sample.rgb += albedo_sample.rgb * evaluate_point_lights(input.world_position, normal);
+        // Flashes light up unlit surfaces too (the ground under an explosion). A negative
+        // normal_scale asks for relief from the texture's brightness (pixel art seen from above:
+        // a horizontal surface with u along +X and v along +Z), which only the flashes show.
+        float3 lit_normal = normal;
+        if (material_factors.x < 0.0f)
+        {
+            float texture_width;
+            float texture_height;
+            albedo_texture.GetDimensions(texture_width, texture_height);
+            const float2 texel = float2(1.0f / texture_width, 1.0f / texture_height);
+            const float3 luma = float3(0.299f, 0.587f, 0.114f);
+            const float2 uv = input.texture_coordinate;
+            const float height_left = dot(albedo_texture.Sample(albedo_sampler, uv - float2(texel.x, 0.0f)).rgb, luma);
+            const float height_right = dot(albedo_texture.Sample(albedo_sampler, uv + float2(texel.x, 0.0f)).rgb, luma);
+            const float height_up = dot(albedo_texture.Sample(albedo_sampler, uv - float2(0.0f, texel.y)).rgb, luma);
+            const float height_down = dot(albedo_texture.Sample(albedo_sampler, uv + float2(0.0f, texel.y)).rgb, luma);
+            const float strength = -material_factors.x;
+            lit_normal = normalize(float3(
+                -(height_right - height_left) * strength,
+                1.0f,
+                -(height_down - height_up) * strength
+            ));
+        }
+        albedo_sample.rgb += albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal);
 #if BTBH_RC_MATERIAL_OUTPUT
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
