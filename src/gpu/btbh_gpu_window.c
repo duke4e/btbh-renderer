@@ -415,12 +415,27 @@ BTBHGPUWindow *btbh_gpu_window_create(
         );
     }
     window->fullscreen_toggle = descriptor->fullscreen_toggle != 0;
-    window->window = SDL_CreateWindow(
-        descriptor->title,
-        (int) width,
-        (int) height,
-        flags
-    );
+    /* Centred on the primary display, the display the size was fitted to. SDL centres an
+       undefined position itself on Windows and macOS but leaves it to the window manager
+       on X11, which put the window in a corner; Wayland compositors place it themselves. */
+    const SDL_PropertiesID window_properties = SDL_CreateProperties();
+    if (window_properties == 0) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_WINDOW_CREATION,
+            SDL_GetError()
+        );
+        btbh_gpu_window_destroy(window);
+        return NULL;
+    }
+    (void) SDL_SetStringProperty(window_properties, SDL_PROP_WINDOW_CREATE_TITLE_STRING, descriptor->title);
+    (void) SDL_SetNumberProperty(window_properties, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED);
+    (void) SDL_SetNumberProperty(window_properties, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED);
+    (void) SDL_SetNumberProperty(window_properties, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, (Sint64) width);
+    (void) SDL_SetNumberProperty(window_properties, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, (Sint64) height);
+    (void) SDL_SetNumberProperty(window_properties, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, (Sint64) flags);
+    window->window = SDL_CreateWindowWithProperties(window_properties);
+    SDL_DestroyProperties(window_properties);
     if (window->window == NULL) {
         btbh_gpu_set_window_error(
             report,
