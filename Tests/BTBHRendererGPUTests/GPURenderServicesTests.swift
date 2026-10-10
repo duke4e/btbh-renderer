@@ -1345,6 +1345,46 @@ final class GPURenderServicesTests: XCTestCase {
         )))
     }
 
+    /// A range's LOD choice: the on-screen diameter of its biggest instance at the range's nearest point.
+    func testSceneFrustumStateSizesObjectsInViewportPixels() throws {
+        let camera = RenderCamera(
+            position: .zero,
+            target: .forward,
+            up: .up,
+            verticalFOVDegrees: 90,
+            projection: .perspective
+        )
+        let state = try XCTUnwrap(GPUSceneFrustumCullingState(
+            frame: .init(camera: camera, environment: .default),
+            drawableSize: .init(width: 1920, height: 1080)
+        ))
+        let ahead = RenderBounds3(
+            minimum: .init(x: -1, y: -1, z: 10),
+            maximum: .init(x: 1, y: 1, z: 30)
+        )
+        // tan(45 degrees) = 1: a radius of 1 ten units away spans a tenth of the view's height.
+        XCTAssertEqual(state.pixelDiameter(radius: 1, nearestPointOf: ahead), 108, accuracy: 0.01)
+        XCTAssertEqual(
+            state.pixelDiameter(radius: 1, nearestPointOf: .init(
+                minimum: .init(x: -1, y: -1, z: -1),
+                maximum: .init(x: 1, y: 1, z: 1)
+            )),
+            .infinity
+        )
+
+        let orthographic = try XCTUnwrap(GPUSceneFrustumCullingState(
+            frame: .init(camera: .init(
+                position: .zero,
+                target: .forward,
+                up: .up,
+                verticalFOVDegrees: 20,
+                projection: .orthographic
+            ), environment: .default),
+            drawableSize: .init(width: 1920, height: 1080)
+        ))
+        XCTAssertEqual(orthographic.pixelDiameter(radius: 1, nearestPointOf: ahead), 108, accuracy: 0.01)
+    }
+
     func testSceneProjectAndUnprojectAreDrawableScaleIndependent() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }

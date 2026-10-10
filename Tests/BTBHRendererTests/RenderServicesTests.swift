@@ -104,6 +104,25 @@ final class RenderServicesTests: XCTestCase {
         )
     }
 
+    /// Backends without LOD support draw the base model for every range.
+    func testPersistentModelRangeListDefaultIgnoresTheLOD() {
+        let recording = RecordingRenderBundle()
+        recording.frustumResult = true
+        let bounds = RenderBounds3(
+            minimum: .init(x: -1, y: -1, z: -1),
+            maximum: .init(x: 1, y: 1, z: 1)
+        )
+        recording.submitPersistentModelRanges(.init(
+            model: .init(rawValue: 7),
+            instances: [RenderInstance(transform: .identity, color: .white, custom: .init(x: 0, y: 0, z: 0, w: 0))],
+            overrides: [],
+            persistentBuffer: .init(rawValue: 9),
+            ranges: [.init(sourceStart: 0, count: 1, bounds: bounds, objectRadius: 0.5)],
+            lod: .init(model: .init(rawValue: 11), maximumPixelDiameter: 1_000_000)
+        ))
+        XCTAssertEqual(recording.submittedModelInstanceDraws.map(\.model), [.init(rawValue: 7)])
+    }
+
     func testPersistentModelRangeListDefaultRejectsCulledRanges() {
         let recording = RecordingRenderBundle()
         recording.frustumResult = false

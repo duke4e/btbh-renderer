@@ -50,6 +50,7 @@ struct GPUSceneFrustumCullingState {
     private let right: RenderVec3
     private let up: RenderVec3
     private let projection: Projection
+    private let viewportPixelHeight: Float
 
     init?(frame: FrameDescriptor, drawableSize: PixelSize2D) {
         guard drawableSize.width > 0,
@@ -81,6 +82,7 @@ struct GPUSceneFrustumCullingState {
             return nil
         }
         let aspect = viewportWidth / viewportHeight
+        viewportPixelHeight = viewportHeight
         switch camera.projection {
         case .perspective:
             guard camera.verticalFOVDegrees < 180 else {
@@ -179,6 +181,24 @@ struct GPUSceneFrustumCullingState {
             }
         }
         return true
+    }
+
+    /// The on-screen diameter, in pixels, of a sphere of `radius` at the point of `bounds`
+    /// nearest the camera. Infinite inside the bounds (a perspective camera there sees it close).
+    func pixelDiameter(radius: Float, nearestPointOf bounds: RenderBounds3) -> Float {
+        switch projection {
+        case let .perspective(_, verticalTangent):
+            let nearest = RenderVec3(
+                x: min(max(cameraPosition.x, bounds.minimum.x), bounds.maximum.x),
+                y: min(max(cameraPosition.y, bounds.minimum.y), bounds.maximum.y),
+                z: min(max(cameraPosition.z, bounds.minimum.z), bounds.maximum.z)
+            )
+            let distance = (nearest - cameraPosition).dot(forward)
+            guard distance > 0 else { return .infinity }
+            return radius / (distance * verticalTangent) * viewportPixelHeight
+        case let .orthographic(_, halfHeight):
+            return radius / halfHeight * viewportPixelHeight
+        }
     }
 
     private static func projectedRadius(
@@ -352,6 +372,7 @@ final class GPUSceneBackend: SceneBackend {
         var packedInstances = submissionScratch.takePackedInstances()
         var batches = submissionScratch.takeBatches()
         var visiblePersistentRanges: [PersistentModelInstanceRange] = []
+        var visibleLODPersistentRanges: [PersistentModelInstanceRange] = []
         var shadowOnlyPersistentRanges: [PersistentModelInstanceRange] = []
         var logicalInstanceCount = 0
         defer {
@@ -448,7 +469,11 @@ final class GPUSceneBackend: SceneBackend {
                     overrides: draw.overrides
                 )
                 visiblePersistentRanges.removeAll(keepingCapacity: true)
+                visibleLODPersistentRanges.removeAll(keepingCapacity: true)
                 shadowOnlyPersistentRanges.removeAll(keepingCapacity: true)
+                let lodGeometry = try draw.lod.map {
+                    GPUSceneGeometryProbe.model(try resources.modelPointer($0.model))
+                }
                 for range in draw.ranges {
                     guard range.isValid(
                         instanceCount: draw.instances.count
@@ -464,28 +489,38 @@ final class GPUSceneBackend: SceneBackend {
                         }
                         continue
                     }
-                    visiblePersistentRanges.append(range)
                     logicalInstanceCount += range.count
+                    if let lod = draw.lod, lodGeometry != nil,
+                       usesLOD(range: range, maximumPixelDiameter: lod.maximumPixelDiameter) {
+                        visibleLODPersistentRanges.append(range)
+                    } else {
+                        visiblePersistentRanges.append(range)
+                    }
                 }
+                // Materials come from the base model; an LOD swaps only the geometry (its
+                // primitives keep the base model's material slots).
                 for entry in materials {
-                    for range in visiblePersistentRanges {
-                        batches.append(.init(
-                            geometry: geometry,
-                            animation: nil,
-                            material: entry.material,
-                            materialSlot: entry.materialSlot,
-                            legacyInstanced: true,
-                            instanceBuffer:
-                                persistentResource.storage.pointer,
-                            firstInstance: range.sourceStart,
-                            instanceCount: range.count,
-                            shadowBounds: range.bounds,
-                            spotShadowVisible: true
-                        ))
+                    for lodPass in 0..<2 {
+                        let rangeGeometry = lodPass == 0 ? geometry : (lodGeometry ?? geometry)
+                        for range in lodPass == 0 ? visiblePersistentRanges : visibleLODPersistentRanges {
+                            batches.append(.init(
+                                geometry: rangeGeometry,
+                                animation: nil,
+                                material: entry.material,
+                                materialSlot: entry.materialSlot,
+                                legacyInstanced: true,
+                                instanceBuffer:
+                                    persistentResource.storage.pointer,
+                                firstInstance: range.sourceStart,
+                                instanceCount: range.count,
+                                shadowBounds: range.bounds,
+                                spotShadowVisible: true
+                            ))
+                        }
                     }
                     for range in shadowOnlyPersistentRanges {
                         batches.append(.init(
-                            geometry: geometry,
+                            geometry: lodGeometry ?? geometry,
                             animation: nil,
                             material: entry.material,
                             materialSlot: entry.materialSlot,
@@ -1300,6 +1335,16 @@ final class GPUSceneBackend: SceneBackend {
         }
         guard let frustumCullingState else { return true }
         return frustumCullingState.intersectsValidated(bounds)
+    }
+
+    /// Whether a range the camera sees is small enough on screen for its draw's LOD.
+    private func usesLOD(range: PersistentModelInstanceRange, maximumPixelDiameter: Float) -> Bool {
+        guard range.objectRadius > 0, maximumPixelDiameter > 0,
+              let frustumCullingState else { return false }
+        return frustumCullingState.pixelDiameter(
+            radius: range.objectRadius,
+            nearestPointOf: range.bounds
+        ) < maximumPixelDiameter
     }
 
     /// Whether bounds the camera does not see still throw sun shadow onto ground it does see.

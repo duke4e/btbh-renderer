@@ -78,15 +78,20 @@ public struct PersistentModelInstanceRange: Hashable, Sendable {
     public let sourceStart: Int
     public let count: Int
     public let bounds: RenderBounds3
+    /// The bounding-sphere radius of the range's biggest instance, which sizes it on screen for
+    /// a draw's `lod`. Zero keeps the full model wherever the camera sees the range.
+    public let objectRadius: Float
 
     public init(
         sourceStart: Int,
         count: Int,
-        bounds: RenderBounds3
+        bounds: RenderBounds3,
+        objectRadius: Float = 0
     ) {
         self.sourceStart = sourceStart
         self.count = count
         self.bounds = bounds
+        self.objectRadius = objectRadius
     }
 
     public func isValid(instanceCount: Int) -> Bool {
@@ -94,6 +99,22 @@ public struct PersistentModelInstanceRange: Hashable, Sendable {
             count > 0 &&
             sourceStart <= instanceCount &&
             count <= instanceCount - sourceStart
+    }
+}
+
+/// A simplified model drawn in place of a range-list draw's model. Its primitives must use the
+/// base model's material slots: backends resolve materials from the base model and take only
+/// the geometry from this one.
+public struct PersistentModelLOD: Sendable, Equatable {
+    public let model: ModelHandle
+    /// A range whose biggest instance spans fewer pixels than this on screen (its bounding
+    /// sphere's diameter at the range's nearest point) draws the simplified model. Ranges the
+    /// camera does not see draw it into the shadow passes.
+    public let maximumPixelDiameter: Float
+
+    public init(model: ModelHandle, maximumPixelDiameter: Float) {
+        self.model = model
+        self.maximumPixelDiameter = maximumPixelDiameter
     }
 }
 
@@ -108,6 +129,8 @@ public struct PersistentModelRangeListDraw: Sendable {
     public let persistentBuffer: InstanceBufferHandle
     public let persistentRevision: UInt64?
     public let ranges: [PersistentModelInstanceRange]
+    /// Backends without LOD support draw `model` everywhere.
+    public let lod: PersistentModelLOD?
 
     public init(
         model: ModelHandle,
@@ -115,7 +138,8 @@ public struct PersistentModelRangeListDraw: Sendable {
         overrides: [MaterialOverride],
         persistentBuffer: InstanceBufferHandle,
         persistentRevision: UInt64? = nil,
-        ranges: [PersistentModelInstanceRange]
+        ranges: [PersistentModelInstanceRange],
+        lod: PersistentModelLOD? = nil
     ) {
         self.model = model
         self.instances = instances
@@ -123,6 +147,7 @@ public struct PersistentModelRangeListDraw: Sendable {
         self.persistentBuffer = persistentBuffer
         self.persistentRevision = persistentRevision
         self.ranges = ranges
+        self.lod = lod
     }
 }
 
