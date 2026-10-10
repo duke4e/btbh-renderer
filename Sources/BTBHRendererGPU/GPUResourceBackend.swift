@@ -38,6 +38,17 @@ enum GPUSceneSurfaceVariant: UInt32, Equatable {
     case softParticle = 6
 }
 
+/// A shader file's name without its directory and last extension, lower-cased (`glitter_static` for
+/// `Shaders/glitter_static.glsl`). Plain string work: `URL(fileURLWithPath:)` asks the file system whether the
+/// path is a directory, and on Windows that opens the file. `sceneMaterial` classified every material's surface
+/// shader that way on every frame, about 0.5 ms of a growth-5 Windows frame (2026-10-10).
+func gpuShaderFileStem(_ path: String) -> String {
+    let file = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+    // As URL's `deletingPathExtension`: a leading dot names the file, it does not start an extension.
+    guard let dot = file.lastIndex(of: "."), dot > file.startIndex else { return file.lowercased() }
+    return String(file[..<dot]).lowercased()
+}
+
 struct GPUSceneSurfaceProjection: Equatable {
     static let none = Self(
         variant: .none,
@@ -53,10 +64,7 @@ struct GPUSceneSurfaceProjection: Equatable {
         fragmentPath: String,
         parameters: [String: ShaderParameterValue]
     ) throws -> Self {
-        let name = URL(fileURLWithPath: fragmentPath)
-            .deletingPathExtension()
-            .lastPathComponent
-            .lowercased()
+        let name = gpuShaderFileStem(fragmentPath)
         func float(_ key: String, default fallback: Float) -> Float {
             guard case .float(let value)? = parameters[key] else {
                 return fallback
@@ -181,14 +189,7 @@ enum GPUProductionScreenShaderKind: Equatable {
     case unsupported(String)
 
     init(fragmentPath: String) {
-        let normalizedPath = fragmentPath.replacingOccurrences(
-            of: "\\",
-            with: "/"
-        )
-        let name = URL(fileURLWithPath: normalizedPath)
-            .deletingPathExtension()
-            .lastPathComponent
-            .lowercased()
+        let name = gpuShaderFileStem(fragmentPath)
         switch name {
         case "lut":
             self = .lut
