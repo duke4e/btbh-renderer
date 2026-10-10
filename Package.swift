@@ -32,7 +32,7 @@ var rendererTargets: [Target] = [
             .define("ASSIMP_DLL", .when(platforms: [.windows])),
             .define(
                 "BTBH_GPU_HAS_ASSIMP",
-                .when(platforms: [.macOS, .windows])
+                .when(platforms: [.macOS, .windows, .linux])
             ),
             .unsafeFlags(
                 ["-fno-implicit-module-maps"],
@@ -44,8 +44,15 @@ var rendererTargets: [Target] = [
         ],
         linkerSettings: [
             .linkedLibrary("SDL3-static", .when(platforms: [.windows])),
-            .linkedLibrary("SDL3", .when(platforms: [.macOS])),
-            .linkedLibrary("assimp", .when(platforms: [.macOS])),
+            .linkedLibrary("SDL3", .when(platforms: [.macOS, .linux])),
+            .linkedLibrary("assimp", .when(platforms: [.macOS, .linux])),
+            // Static SDL3 and Assimp from tools/build-gpu-game-linux.sh. SDL3 opens
+            // X11, Wayland, ALSA/PulseAudio/PipeWire and Vulkan itself at runtime.
+            .linkedLibrary("stdc++", .when(platforms: [.linux])),
+            .linkedLibrary("z", .when(platforms: [.linux])),
+            .linkedLibrary("m", .when(platforms: [.linux])),
+            .linkedLibrary("dl", .when(platforms: [.linux])),
+            .linkedLibrary("pthread", .when(platforms: [.linux])),
             .linkedLibrary("c++", .when(platforms: [.macOS])),
             .linkedLibrary("z", .when(platforms: [.macOS])),
             .linkedLibrary(

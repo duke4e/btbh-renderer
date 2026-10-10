@@ -3,14 +3,14 @@ import XCTest
 
 final class GPUBackendRequestTests: XCTestCase {
     func testPlatformDefaultRequestsTheShippingBackendExactly() {
-        #if os(Windows)
+        #if os(Windows) || os(Linux)
         XCTAssertEqual(GPUBackendRequest.platformDefault, .vulkan)
         XCTAssertEqual(GPUBackendRequest.platformDefault.driverName, "vulkan")
         #elseif os(macOS)
         XCTAssertEqual(GPUBackendRequest.platformDefault, .metal)
         XCTAssertEqual(GPUBackendRequest.platformDefault.driverName, "metal")
         #else
-        XCTFail("The production GPU renderer supports Windows and macOS only")
+        XCTFail("The production GPU renderer supports Windows, Linux and macOS only")
         #endif
     }
 

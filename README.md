@@ -14,8 +14,9 @@ package (`BTBHRenderer`, `BTBHRendererGPU`).
   fixtures.
 
 Build and stage the native dependencies and shaders through the game's
-`tools/build-gpu-game.ps1` (Windows) or `tools/build-gpu-game.sh` (macOS). Native tests
-build with `-DBTBH_BUILD_GPU_SPIKE=ON -DR3D_ASSIMP_VENDORED=ON` and run with `ctest`;
+`tools/build-gpu-game.ps1` (Windows) or `tools/build-gpu-game.sh` (macOS, Linux). Native tests
+build with `-DBTBH_BUILD_GPU_SPIKE=ON -DBTBH_BUILD_GPU_NATIVE_TESTS=ON -DR3D_ASSIMP_VENDORED=ON`
+(not every test source is committed) and run with `ctest`;
 Swift tests run through `.diagnostics/run-renderer-swift-test.ps1`.
 
 The repository started as a fork of [r3d](https://github.com/Bigfoot71/r3d) (zlib, see

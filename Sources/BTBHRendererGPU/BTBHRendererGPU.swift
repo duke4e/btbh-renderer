@@ -75,13 +75,13 @@ public enum GPUBackendRequest: String, Equatable, Sendable {
     }
 
     public static var platformDefault: Self {
-        #if os(Windows)
+        #if os(Windows) || os(Linux)
         .vulkan
         #elseif os(macOS)
         .metal
         #else
         preconditionFailure(
-            "The production GPU renderer supports Windows and macOS only"
+            "The production GPU renderer supports Windows, Linux and macOS only"
         )
         #endif
     }

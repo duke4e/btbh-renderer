@@ -33,6 +33,11 @@ option(
     OFF
 )
 option(
+    BTBH_BUILD_GPU_NATIVE_TESTS
+    "Build the SDL_GPU native test executables (with BTBH_BUILD_GPU_SPIKE)"
+    OFF
+)
+option(
     BTBH_BUILD_GPU_PACKAGE_RUNTIME
     "Build native dependencies for the production Swift GPU package"
     OFF
@@ -489,226 +494,230 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
     endif()
 
-    add_executable(btbh_gpu_contract_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_contract_test.c"
-    )
-    target_link_libraries(btbh_gpu_contract_test PRIVATE btbh_gpu)
-    add_test(NAME btbh_gpu_contract COMMAND btbh_gpu_contract_test)
-
-    add_executable(btbh_gpu_radiance_cascades_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_radiance_cascades_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_radiance_cascades_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_link_libraries(
-        btbh_gpu_radiance_cascades_test
-        PRIVATE btbh_gpu
-    )
-    add_test(
-        NAME btbh_gpu_radiance_cascades
-        COMMAND btbh_gpu_radiance_cascades_test
-    )
-
-    add_executable(btbh_gpu_scene_blend_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_scene_blend_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_scene_blend_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_link_libraries(
-        btbh_gpu_scene_blend_test
-        PRIVATE btbh_gpu SDL3::SDL3-static
-    )
-    add_test(
-        NAME btbh_gpu_scene_blend
-        COMMAND btbh_gpu_scene_blend_test
-    )
-
-    add_executable(btbh_gpu_gamepad_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_gamepad_test.c"
-    )
-    target_link_libraries(btbh_gpu_gamepad_test PRIVATE btbh_gpu SDL3::SDL3-static)
-    add_test(NAME btbh_gpu_gamepad COMMAND btbh_gpu_gamepad_test)
-
-    add_executable(btbh_gpu_window_config_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_config_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_window_config_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_link_libraries(
-        btbh_gpu_window_config_test
-        PRIVATE btbh_gpu SDL3::SDL3-static
-    )
-    add_test(
-        NAME btbh_gpu_window_config
-        COMMAND btbh_gpu_window_config_test
-    )
-
-    add_executable(btbh_gpu_animation_math_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_animation_math_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_animation_math_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_compile_definitions(
-        btbh_gpu_animation_math_test
-        PRIVATE
-            BTBH_GPU_ANIMATION_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/blended-animation.gltf"
-            BTBH_GPU_ROOT_AFTER_CHILDREN_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/root-after-children-skin.gltf"
-    )
-    target_link_libraries(
-        btbh_gpu_animation_math_test
-        PRIVATE btbh_gpu SDL3::SDL3-static
-    )
-    add_test(
-        NAME btbh_gpu_animation_math
-        COMMAND btbh_gpu_animation_math_test
-    )
-
-    add_executable(btbh_gpu_model_orm_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_orm_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_model_orm_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_link_libraries(
-        btbh_gpu_model_orm_test
-        PRIVATE btbh_gpu SDL3::SDL3-static
-    )
-    add_test(
-        NAME btbh_gpu_model_orm
-        COMMAND btbh_gpu_model_orm_test
-    )
-
-    add_executable(btbh_gpu_model_skinning_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_skinning_test.c"
-    )
-    target_include_directories(
-        btbh_gpu_model_skinning_test
-        PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
-    )
-    target_link_libraries(
-        btbh_gpu_model_skinning_test
-        PRIVATE btbh_gpu SDL3::SDL3-static
-    )
-    add_test(
-        NAME btbh_gpu_model_skinning
-        COMMAND btbh_gpu_model_skinning_test
-    )
-
-    add_executable(btbh_gpu_public_header_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
-    )
-    target_compile_definitions(
-        btbh_gpu_public_header_test
-        PRIVATE
-            BTBH_GPU_PUBLIC_HEADER_PATH="${BTBH_RENDERER_ROOT}/include/btbh_gpu/btbh_gpu.h"
-    )
-    add_test(
-        NAME btbh_gpu_public_header
-        COMMAND btbh_gpu_public_header_test
-    )
-
-    add_executable(btbh_gpu_resources_public_header_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
-    )
-    target_compile_definitions(
-        btbh_gpu_resources_public_header_test
-        PRIVATE
-            BTBH_GPU_PUBLIC_HEADER_PATH="${BTBH_RENDERER_ROOT}/include/btbh_gpu/btbh_gpu_resources.h"
-    )
-    add_test(
-        NAME btbh_gpu_resources_public_header
-        COMMAND btbh_gpu_resources_public_header_test
-    )
-
-    add_executable(btbh_gpu_resource_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_resource_test.c"
-    )
-    target_link_libraries(btbh_gpu_resource_test PRIVATE btbh_gpu)
-    if(MSVC)
-        target_compile_options(btbh_gpu_resource_test PRIVATE /W4 /WX)
-    else()
-        target_compile_options(btbh_gpu_resource_test PRIVATE
-            -Wall -Wextra -Wpedantic -Werror
+    # Not every native test source is committed, so a checkout configures without
+    # the tests unless they are asked for; the game builds need none of them.
+    if(BTBH_BUILD_GPU_NATIVE_TESTS)
+        add_executable(btbh_gpu_contract_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_contract_test.c"
         )
+        target_link_libraries(btbh_gpu_contract_test PRIVATE btbh_gpu)
+        add_test(NAME btbh_gpu_contract COMMAND btbh_gpu_contract_test)
+
+        add_executable(btbh_gpu_radiance_cascades_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_radiance_cascades_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_radiance_cascades_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_radiance_cascades_test
+            PRIVATE btbh_gpu
+        )
+        add_test(
+            NAME btbh_gpu_radiance_cascades
+            COMMAND btbh_gpu_radiance_cascades_test
+        )
+
+        add_executable(btbh_gpu_scene_blend_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_scene_blend_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_blend_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_blend_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_scene_blend
+            COMMAND btbh_gpu_scene_blend_test
+        )
+
+        add_executable(btbh_gpu_gamepad_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_gamepad_test.c"
+        )
+        target_link_libraries(btbh_gpu_gamepad_test PRIVATE btbh_gpu SDL3::SDL3-static)
+        add_test(NAME btbh_gpu_gamepad COMMAND btbh_gpu_gamepad_test)
+
+        add_executable(btbh_gpu_window_config_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_config_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_window_config_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_window_config_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_window_config
+            COMMAND btbh_gpu_window_config_test
+        )
+
+        add_executable(btbh_gpu_animation_math_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_animation_math_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_animation_math_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(
+            btbh_gpu_animation_math_test
+            PRIVATE
+                BTBH_GPU_ANIMATION_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/blended-animation.gltf"
+                BTBH_GPU_ROOT_AFTER_CHILDREN_FIXTURE_PATH="${BTBH_RENDERER_ROOT}/Tests/Fixtures/root-after-children-skin.gltf"
+        )
+        target_link_libraries(
+            btbh_gpu_animation_math_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_animation_math
+            COMMAND btbh_gpu_animation_math_test
+        )
+
+        add_executable(btbh_gpu_model_orm_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_orm_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_model_orm_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_model_orm_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_model_orm
+            COMMAND btbh_gpu_model_orm_test
+        )
+
+        add_executable(btbh_gpu_model_skinning_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_skinning_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_model_skinning_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_model_skinning_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_model_skinning
+            COMMAND btbh_gpu_model_skinning_test
+        )
+
+        add_executable(btbh_gpu_public_header_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
+        )
+        target_compile_definitions(
+            btbh_gpu_public_header_test
+            PRIVATE
+                BTBH_GPU_PUBLIC_HEADER_PATH="${BTBH_RENDERER_ROOT}/include/btbh_gpu/btbh_gpu.h"
+        )
+        add_test(
+            NAME btbh_gpu_public_header
+            COMMAND btbh_gpu_public_header_test
+        )
+
+        add_executable(btbh_gpu_resources_public_header_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
+        )
+        target_compile_definitions(
+            btbh_gpu_resources_public_header_test
+            PRIVATE
+                BTBH_GPU_PUBLIC_HEADER_PATH="${BTBH_RENDERER_ROOT}/include/btbh_gpu/btbh_gpu_resources.h"
+        )
+        add_test(
+            NAME btbh_gpu_resources_public_header
+            COMMAND btbh_gpu_resources_public_header_test
+        )
+
+        add_executable(btbh_gpu_resource_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_resource_test.c"
+        )
+        target_link_libraries(btbh_gpu_resource_test PRIVATE btbh_gpu)
+        if(MSVC)
+            target_compile_options(btbh_gpu_resource_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_resource_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
+
+        add_executable(btbh_gpu_phase2_shader_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_phase2_shader_test.c"
+        )
+        target_compile_definitions(btbh_gpu_phase2_shader_test
+            PRIVATE
+                BTBH_PRODUCTION_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.vert.json"
+                BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_model.vert.json"
+                BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow.vert.json"
+                BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow_fast.vert.json"
+                BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_shadow.vert.json"
+                BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
+                BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_2d_shadows.frag.json"
+                BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
+                BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
+                BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
+                BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
+                BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"
+                BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
+                BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
+                BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"
+                BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.vert.json"
+                BTBH_PRODUCTION_RC_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.frag.json"
+                BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.vert.json"
+                BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.frag.json"
+                BTBH_PRODUCTION_RC_DIRECT_LIGHT_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.vert.json"
+                BTBH_PRODUCTION_RC_DIRECT_LIGHT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.frag.json"
+                BTBH_PRODUCTION_RC_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.vert.json"
+                BTBH_PRODUCTION_RC_ANIMATED_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_animated_material_source.vert.json"
+                BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.frag.json"
+                BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_trace.comp.json"
+                BTBH_PRODUCTION_HRC_MERGE_UP_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_up.comp.json"
+                BTBH_PRODUCTION_HRC_MERGE_DOWN_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_down.comp.json"
+                BTBH_PRODUCTION_HRC_REPROJECT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reproject.comp.json"
+                BTBH_PRODUCTION_HRC_FINISH_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_finish.comp.json"
+                BTBH_PRODUCTION_HRC_BLUR_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_blur.comp.json"
+                BTBH_PRODUCTION_HRC_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_resolve.comp.json"
+                BTBH_PRODUCTION_HRC_RECONSTRUCT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reconstruct.comp.json"
+                BTBH_PRODUCTION_RC_COMPOSE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_compose.frag.json"
+                BTBH_PRODUCTION_LUT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_lut.frag.json"
+                BTBH_PRODUCTION_CAS_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_cas.frag.json"
+                BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_tilt_shift.frag.json"
+                BTBH_PRODUCTION_POST_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_post.frag.json"
+        )
+        add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)
+
+        add_executable(btbh_gpu_device_smoke
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_device_smoke.c"
+        )
+        target_compile_definitions(btbh_gpu_device_smoke PRIVATE SDL_MAIN_HANDLED)
+        target_link_libraries(
+            btbh_gpu_device_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        add_test(NAME btbh_gpu_device_smoke COMMAND btbh_gpu_device_smoke)
+
+        add_executable(btbh_gpu_window_smoke
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_smoke.c"
+        )
+        target_compile_definitions(btbh_gpu_window_smoke PRIVATE SDL_MAIN_HANDLED)
+        target_link_libraries(
+            btbh_gpu_window_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        add_test(NAME btbh_gpu_window_smoke COMMAND btbh_gpu_window_smoke)
     endif()
-    add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
-
-    add_executable(btbh_gpu_phase2_shader_test
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_phase2_shader_test.c"
-    )
-    target_compile_definitions(btbh_gpu_phase2_shader_test
-        PRIVATE
-            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.vert.json"
-            BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_model.vert.json"
-            BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow.vert.json"
-            BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow_fast.vert.json"
-            BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_shadow.vert.json"
-            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.frag.json"
-            BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_2d_shadows.frag.json"
-            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
-            BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
-            BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
-            BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
-            BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"
-            BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
-            BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
-            BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"
-            BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.vert.json"
-            BTBH_PRODUCTION_RC_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.frag.json"
-            BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.vert.json"
-            BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.frag.json"
-            BTBH_PRODUCTION_RC_DIRECT_LIGHT_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.vert.json"
-            BTBH_PRODUCTION_RC_DIRECT_LIGHT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_direct_light.frag.json"
-            BTBH_PRODUCTION_RC_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.vert.json"
-            BTBH_PRODUCTION_RC_ANIMATED_MATERIAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_animated_material_source.vert.json"
-            BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_material_source.frag.json"
-            BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_trace.comp.json"
-            BTBH_PRODUCTION_HRC_MERGE_UP_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_up.comp.json"
-            BTBH_PRODUCTION_HRC_MERGE_DOWN_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_merge_down.comp.json"
-            BTBH_PRODUCTION_HRC_REPROJECT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reproject.comp.json"
-            BTBH_PRODUCTION_HRC_FINISH_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_finish.comp.json"
-            BTBH_PRODUCTION_HRC_BLUR_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_blur.comp.json"
-            BTBH_PRODUCTION_HRC_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_resolve.comp.json"
-            BTBH_PRODUCTION_HRC_RECONSTRUCT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hrc_reconstruct.comp.json"
-            BTBH_PRODUCTION_RC_COMPOSE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_compose.frag.json"
-            BTBH_PRODUCTION_LUT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_lut.frag.json"
-            BTBH_PRODUCTION_CAS_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_cas.frag.json"
-            BTBH_PRODUCTION_TILT_SHIFT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_tilt_shift.frag.json"
-            BTBH_PRODUCTION_POST_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_post.frag.json"
-    )
-    add_dependencies(btbh_gpu_phase2_shader_test btbh_gpu_shaders)
-    add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)
-
-    add_executable(btbh_gpu_device_smoke
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_device_smoke.c"
-    )
-    target_compile_definitions(btbh_gpu_device_smoke PRIVATE SDL_MAIN_HANDLED)
-    target_link_libraries(
-        btbh_gpu_device_smoke
-        PRIVATE
-            btbh_gpu
-            SDL3::SDL3-static
-    )
-    add_test(NAME btbh_gpu_device_smoke COMMAND btbh_gpu_device_smoke)
-
-    add_executable(btbh_gpu_window_smoke
-        "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_smoke.c"
-    )
-    target_compile_definitions(btbh_gpu_window_smoke PRIVATE SDL_MAIN_HANDLED)
-    target_link_libraries(
-        btbh_gpu_window_smoke
-        PRIVATE
-            btbh_gpu
-            SDL3::SDL3-static
-    )
-    add_test(NAME btbh_gpu_window_smoke COMMAND btbh_gpu_window_smoke)
 endif()
