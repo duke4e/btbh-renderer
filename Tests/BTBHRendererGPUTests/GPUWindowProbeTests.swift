@@ -1136,6 +1136,35 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
     }
 
+    func testProductionFSR1UpscaleRunsEASUThenRCASAtTheDrawableSize() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        func read(_ path: String) throws -> String {
+            try String(contentsOf: packageRoot.appendingPathComponent(path), encoding: .utf8)
+                .replacingOccurrences(of: "\r\n", with: "\n")
+        }
+        let nativeScene = try read("src/gpu/btbh_gpu_scene.c")
+        let easu = try read("shaders/gpu/production_upscale_fsr_easu.frag.hlsl")
+        let rcas = try read("shaders/gpu/production_upscale_fsr_rcas.frag.hlsl")
+        let cmake = try read("CMakeLists.txt")
+
+        XCTAssertTrue(cmake.contains("\"production_upscale_fsr_easu.frag|fragment\""))
+        XCTAssertTrue(cmake.contains("\"production_upscale_fsr_rcas.frag|fragment\""))
+        // EASU reads the twelve texels around the output pixel; RCAS the cross of five.
+        XCTAssertEqual(easu.components(separatedBy: "= load_source(").count - 1, 12)
+        XCTAssertEqual(rcas.components(separatedBy: "= load_source(").count - 1, 5)
+        XCTAssertTrue(nativeScene.contains("post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1"))
+        XCTAssertTrue(nativeScene.contains("\"BTBH FSR1 EASU\""))
+        XCTAssertTrue(nativeScene.contains("\"BTBH FSR1 RCAS\""))
+        XCTAssertTrue(nativeScene.contains(
+            "runtime->composite_color_texture =\n" +
+                "                runtime->sharpened_color_texture;"
+        ))
+        XCTAssertEqual(GPUUpscaleModeProjection.native(.fsr1), 2)
+    }
+
     func testProductionMirrorFlipsTheFinishedImageBeforeUpscaleAndComposite() throws {
         let packageRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

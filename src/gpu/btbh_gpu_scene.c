@@ -32,7 +32,7 @@
 #define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_MAX 3u
 #define BTBH_GPU_SCENE_UPSCALE_MODE_MAX \
-    BTBH_GPU_SCENE_UPSCALE_LANCZOS
+    BTBH_GPU_SCENE_UPSCALE_FSR1
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 #define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 #define BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE 2u
@@ -239,6 +239,8 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *post_cas_pipeline;
     SDL_GPUGraphicsPipeline *post_tilt_shift_pipeline;
     SDL_GPUGraphicsPipeline *upscale_lanczos_pipeline;
+    SDL_GPUGraphicsPipeline *upscale_fsr_easu_pipeline;
+    SDL_GPUGraphicsPipeline *upscale_fsr_rcas_pipeline;
     SDL_GPUGraphicsPipeline *post_pipeline;
     SDL_GPUGraphicsPipeline *smaa_edge_pipelines[
         BTBH_GPU_SCENE_SMAA_QUALITY_COUNT
@@ -274,6 +276,8 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUTexture *post_pong_texture;
     SDL_GPUTexture *final_color_texture;
     SDL_GPUTexture *upscaled_color_texture;
+    /* FSR1's RCAS output, the size of upscaled_color_texture. */
+    SDL_GPUTexture *sharpened_color_texture;
     SDL_GPUTexture *composite_color_texture;
     SDL_GPUTexture *post_color_texture;
     SDL_GPUTexture *smaa_edges_texture;
@@ -1301,15 +1305,16 @@ static bool btbh_gpu_scene_ensure_hdr_composite_pipelines(
     return true;
 }
 
-static bool btbh_gpu_scene_ensure_upscale_lanczos_pipeline(
+static bool btbh_gpu_scene_ensure_upscale_pipeline(
     BTBHGPUWindow *window,
+    const char *shader_name,
+    SDL_GPUGraphicsPipeline **pipeline,
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
     BTBHGPUSceneReport *report
 ) {
-    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
-    if (runtime->upscale_lanczos_pipeline != NULL) {
+    if (*pipeline != NULL) {
         return true;
     }
     const char *extension =
@@ -1321,7 +1326,8 @@ static bool btbh_gpu_scene_ensure_upscale_lanczos_pipeline(
     (void)snprintf(
         filename,
         sizeof(filename),
-        "production_upscale_lanczos.frag.%s",
+        "%s.frag.%s",
+        shader_name,
         extension
     );
     return btbh_gpu_scene_sibling_path(
@@ -1339,8 +1345,39 @@ static bool btbh_gpu_scene_ensure_upscale_lanczos_pipeline(
                 window->window
             ),
             1u,
-            &runtime->upscale_lanczos_pipeline,
+            pipeline,
             report
+        );
+}
+
+static bool btbh_gpu_scene_ensure_upscale_pipelines(
+    BTBHGPUWindow *window,
+    uint8_t upscale_mode,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS) {
+        return btbh_gpu_scene_ensure_upscale_pipeline(
+            window, "production_upscale_lanczos",
+            &runtime->upscale_lanczos_pipeline,
+            post_vertex_shader_path, post_fragment_shader_path,
+            shader_format, report
+        );
+    }
+    return btbh_gpu_scene_ensure_upscale_pipeline(
+            window, "production_upscale_fsr_easu",
+            &runtime->upscale_fsr_easu_pipeline,
+            post_vertex_shader_path, post_fragment_shader_path,
+            shader_format, report
+        ) &&
+        btbh_gpu_scene_ensure_upscale_pipeline(
+            window, "production_upscale_fsr_rcas",
+            &runtime->upscale_fsr_rcas_pipeline,
+            post_vertex_shader_path, post_fragment_shader_path,
+            shader_format, report
         );
 }
 
@@ -3030,13 +3067,15 @@ static bool btbh_gpu_scene_ensure_upscaled_color_target(
     BTBHGPUWindow *window,
     uint32_t width,
     uint32_t height,
+    bool sharpened,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
     SDL_GPUDevice *device = window->device->gpu;
     if (runtime->upscaled_color_texture != NULL &&
         runtime->upscale_width == width &&
-        runtime->upscale_height == height) {
+        runtime->upscale_height == height &&
+        (!sharpened || runtime->sharpened_color_texture != NULL)) {
         return true;
     }
     if (runtime->upscaled_color_texture != NULL) {
@@ -3045,6 +3084,33 @@ static bool btbh_gpu_scene_ensure_upscaled_color_target(
             runtime->upscaled_color_texture
         );
         runtime->upscaled_color_texture = NULL;
+    }
+    if (runtime->sharpened_color_texture != NULL) {
+        SDL_ReleaseGPUTexture(
+            device,
+            runtime->sharpened_color_texture
+        );
+        runtime->sharpened_color_texture = NULL;
+    }
+    if (sharpened) {
+        runtime->sharpened_color_texture =
+            btbh_gpu_scene_create_smaa_target(
+                device,
+                width,
+                height,
+                SDL_GetGPUSwapchainTextureFormat(
+                    device,
+                    window->window
+                )
+            );
+        if (runtime->sharpened_color_texture == NULL) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return false;
+        }
     }
     runtime->upscale_width = 0u;
     runtime->upscale_height = 0u;
@@ -5367,11 +5433,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
             report
         ) &&
-        (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_LANCZOS ||
+        (post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR ||
          (render_width == drawable_width &&
           render_height == drawable_height) ||
-         (btbh_gpu_scene_ensure_upscale_lanczos_pipeline(
+         (btbh_gpu_scene_ensure_upscale_pipelines(
               window,
+              post->upscale_mode,
               post_vertex_shader_path,
               post_fragment_shader_path,
               shader_format,
@@ -5381,6 +5448,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
               window,
               drawable_width,
               drawable_height,
+              post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1,
               report
           ))) &&
         (!ssao_resolve_active ||
@@ -6752,6 +6820,55 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->post_color_texture;
     }
     if (fullscreen_ok &&
+        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 &&
+        (render_width != drawable_width ||
+         render_height != drawable_height)) {
+        BTBHGPUSceneSMAAUniforms easu_uniforms;
+        easu_uniforms.metrics[0] = 1.0f / (float)render_width;
+        easu_uniforms.metrics[1] = 1.0f / (float)render_height;
+        easu_uniforms.metrics[2] = (float)render_width;
+        easu_uniforms.metrics[3] = (float)render_height;
+        SDL_GPUTextureSamplerBinding easu_sampler;
+        SDL_zero(easu_sampler);
+        easu_sampler.texture = runtime->composite_color_texture;
+        easu_sampler.sampler = runtime->scene_color_sampler;
+        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH FSR1 EASU",
+            runtime->upscale_fsr_easu_pipeline,
+            runtime->upscaled_color_texture,
+            &easu_uniforms,
+            (uint32_t)sizeof(easu_uniforms),
+            &easu_sampler,
+            1u
+        );
+        BTBHGPUSceneSMAAUniforms rcas_uniforms;
+        rcas_uniforms.metrics[0] = 1.0f / (float)drawable_width;
+        rcas_uniforms.metrics[1] = 1.0f / (float)drawable_height;
+        rcas_uniforms.metrics[2] = (float)drawable_width;
+        rcas_uniforms.metrics[3] = (float)drawable_height;
+        SDL_GPUTextureSamplerBinding rcas_sampler;
+        SDL_zero(rcas_sampler);
+        rcas_sampler.texture = runtime->upscaled_color_texture;
+        rcas_sampler.sampler = runtime->scene_color_sampler;
+        fullscreen_ok = fullscreen_ok && btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH FSR1 RCAS",
+            runtime->upscale_fsr_rcas_pipeline,
+            runtime->sharpened_color_texture,
+            &rcas_uniforms,
+            (uint32_t)sizeof(rcas_uniforms),
+            &rcas_sampler,
+            1u
+        );
+        if (fullscreen_ok) {
+            runtime->composite_color_texture =
+                runtime->sharpened_color_texture;
+            runtime->composite_width = drawable_width;
+            runtime->composite_height = drawable_height;
+        }
+    }
+    if (fullscreen_ok &&
         post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS &&
         (render_width != drawable_width ||
          render_height != drawable_height)) {
@@ -7379,6 +7496,12 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 window->scene_runtime->upscaled_color_texture
             );
         }
+        if (window->scene_runtime->sharpened_color_texture != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->sharpened_color_texture
+            );
+        }
         if (window->scene_runtime->post_color_texture != NULL) {
             SDL_ReleaseGPUTexture(
                 device,
@@ -7516,6 +7639,18 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUGraphicsPipeline(
                 device,
                 window->scene_runtime->upscale_lanczos_pipeline
+            );
+        }
+        if (window->scene_runtime->upscale_fsr_easu_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(
+                device,
+                window->scene_runtime->upscale_fsr_easu_pipeline
+            );
+        }
+        if (window->scene_runtime->upscale_fsr_rcas_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(
+                device,
+                window->scene_runtime->upscale_fsr_rcas_pipeline
             );
         }
         if (window->scene_runtime->ssao_resolve_pipeline != NULL) {

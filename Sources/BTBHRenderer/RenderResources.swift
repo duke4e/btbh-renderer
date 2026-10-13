@@ -1228,7 +1228,8 @@ public enum AntiAliasing: UInt8, Sendable {
 }
 
 public enum UpscaleMode: UInt8, Sendable {
-    case linear, lanczos
+    /// `fsr1`: AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening); spatial, so it runs on every backend.
+    case linear, lanczos, fsr1
 }
 
 /// Soft-threshold bloom on the HDR image before grading. `threshold` is in exposed linear units

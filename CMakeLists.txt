@@ -236,6 +236,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_cas.frag|fragment"
         "production_tilt_shift.frag|fragment"
         "production_upscale_lanczos.frag|fragment"
+        "production_upscale_fsr_easu.frag|fragment"
+        "production_upscale_fsr_rcas.frag|fragment"
         "production_post.frag|fragment"
         "production_fxaa.frag|fragment"
         "production_smaa_edge_medium.frag|fragment"

@@ -456,7 +456,9 @@ typedef enum BTBHGPUSceneStencilOperation {
 
 typedef enum BTBHGPUSceneUpscaleMode {
     BTBH_GPU_SCENE_UPSCALE_LINEAR = 0,
-    BTBH_GPU_SCENE_UPSCALE_LANCZOS = 1
+    BTBH_GPU_SCENE_UPSCALE_LANCZOS = 1,
+    /* AMD FidelityFX Super Resolution 1: EASU upscale, then RCAS sharpening at the output size. */
+    BTBH_GPU_SCENE_UPSCALE_FSR1 = 2
 } BTBHGPUSceneUpscaleMode;
 
 typedef enum BTBHGPUSceneTonemapMode {

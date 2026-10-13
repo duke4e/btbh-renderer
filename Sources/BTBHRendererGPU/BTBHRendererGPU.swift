@@ -58,6 +58,7 @@ enum GPUUpscaleModeProjection {
         switch upscaleMode {
         case .linear: 0
         case .lanczos: 1
+        case .fsr1: 2
         }
     }
 }
