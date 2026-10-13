@@ -3227,6 +3227,8 @@ public final class GPUWindowProbe {
             BTBH_GPU_SCENE_SURFACE_GLITTER
         case .softParticle:
             BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE
+        case .rim:
+            BTBH_GPU_SCENE_SURFACE_RIM
         }
     }
 

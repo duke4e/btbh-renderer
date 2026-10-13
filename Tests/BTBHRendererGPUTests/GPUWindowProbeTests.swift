@@ -2561,6 +2561,19 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(glitter.parameters0.y, 0.5)
         XCTAssertEqual(glitter.parameters0.z, 0.25)
 
+        let rim = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "C:/game/Shaders/rim_light.glsl",
+            parameters: [
+                "u_color": .vec3(.init(x: 0.2, y: 0.9, z: 0.7)),
+                "u_strength": .float(1.5),
+                "u_glow": .float(0.2),
+            ]
+        )
+        XCTAssertEqual(rim.variant, .rim)
+        XCTAssertEqual(rim.parameters0.y, 0.9)
+        XCTAssertEqual(rim.parameters0.w, 1.5)
+        XCTAssertEqual(rim.parameters1.x, 0.2)
+
         let shatter = try GPUSceneSurfaceProjection.classify(
             fragmentPath: "C:/game/Shaders/shatter.glsl",
             parameters: [

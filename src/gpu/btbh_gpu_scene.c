@@ -4119,7 +4119,8 @@ static bool btbh_gpu_scene_surface_uses_fast_shadow_vertex(
     return
         surface_variant == BTBH_GPU_SCENE_SURFACE_NONE ||
         surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC ||
-        surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER;
+        surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER ||
+        surface_variant == BTBH_GPU_SCENE_SURFACE_RIM;
 }
 
 static bool btbh_gpu_scene_render_directional_shadow(

@@ -417,7 +417,9 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     BTBH_GPU_SCENE_SURFACE_SHATTER = 4,
     BTBH_GPU_SCENE_SURFACE_GLITTER = 5,
     BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE = 6,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 7
+    /* A self-lit rim in a tint (parameters0: rgb tint, w rim strength; parameters1.x body glow). */
+    BTBH_GPU_SCENE_SURFACE_RIM = 7,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 8
 } BTBHGPUSceneSurfaceVariant;
 
 typedef enum BTBHGPUSceneBillboardMode {

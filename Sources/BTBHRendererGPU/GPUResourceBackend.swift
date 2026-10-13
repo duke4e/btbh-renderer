@@ -36,6 +36,7 @@ enum GPUSceneSurfaceVariant: UInt32, Equatable {
     case shatter = 4
     case glitter = 5
     case softParticle = 6
+    case rim = 7
 }
 
 /// A shader file's name without its directory and last extension, lower-cased (`glitter_static` for
@@ -117,6 +118,18 @@ struct GPUSceneSurfaceProjection: Equatable {
                     z: 0,
                     w: 0
                 )
+            )
+        case "rim_light":
+            let color = vec3("u_color", default: .one)
+            return .init(
+                variant: .rim,
+                parameters0: .init(
+                    x: color.x,
+                    y: color.y,
+                    z: color.z,
+                    w: float("u_strength", default: 1.2)
+                ),
+                parameters1: .init(x: float("u_glow", default: 0.1), y: 0, z: 0, w: 0)
             )
         case "soft_particle":
             return .init(

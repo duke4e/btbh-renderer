@@ -257,6 +257,22 @@ void apply_surface(
             2.5f;
         albedo.rgb *= 1.0f - t * 0.4f;
     }
+    else if (surface_variant == 7u)
+    {
+        // A rim that lights the silhouette in the material's tint, and a faint glow over the whole body, so a
+        // body reads against a muted ground whatever light reaches it.
+        const float3 normal = stable_normalize(
+            input.world_normal,
+            float3(0.0f, 1.0f, 0.0f)
+        );
+        const float3 view = stable_normalize(
+            camera_position.xyz - input.world_position,
+            float3(0.0f, 1.0f, 0.0f)
+        );
+        const float rim = pow(1.0f - saturate(abs(dot(normal, view))), 2.5f);
+        emission += surface_parameters0.rgb *
+            (rim * surface_parameters0.w + surface_parameters1.x);
+    }
     else if (surface_variant == 5u)
     {
         const float level = input.instance_custom.x;
