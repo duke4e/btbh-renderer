@@ -1229,7 +1229,13 @@ public enum AntiAliasing: UInt8, Sendable {
 
 public enum UpscaleMode: UInt8, Sendable {
     /// `fsr1`: AMD FidelityFX Super Resolution 1 (EASU, then RCAS sharpening); spatial, so it runs on every backend.
-    case linear, lanczos, fsr1
+    /// `fsr3`: AMD FidelityFX Super Resolution 3.1, temporal (no frame generation): the scene renders with a
+    /// sub-pixel jitter and motion vectors and the upscaler accumulates frames at the output size, so a render
+    /// scale of 50-67 % keeps most of the native detail. It replaces the anti-aliasing and also runs at a render
+    /// scale of 1 (native anti-aliasing). Draws that move give their motion since the previous frame (`motions`,
+    /// `motion`); anything that moves without it smears. Backends without it, an orthographic camera or a
+    /// partial viewport use `fsr1`.
+    case linear, lanczos, fsr1, fsr3
 }
 
 /// Soft-threshold bloom on the HDR image before grading. `threshold` is in exposed linear units

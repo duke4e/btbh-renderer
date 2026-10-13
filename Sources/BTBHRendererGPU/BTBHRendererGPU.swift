@@ -59,6 +59,7 @@ enum GPUUpscaleModeProjection {
         case .linear: 0
         case .lanczos: 1
         case .fsr1: 2
+        case .fsr3: 3
         }
     }
 }
@@ -796,6 +797,20 @@ struct GPULegacyMaterialSortKey: Equatable {
         hash ^= UInt32(value)
         hash &*= 16_777_619
     }
+}
+
+/// Temporal upscaling (`UpscaleMode.fsr3`) inputs for one frame: each transient instance's world
+/// translation since the previous frame (x, y, z, 0; nil when nothing moves on its own), the camera's
+/// planes and vertical field of view, and whether the history restarts.
+struct GPUSceneTemporalProbe {
+    let instanceMotions: [SIMD4<Float>]?
+    let cameraNear: Float
+    let cameraFar: Float
+    let verticalFOVRadians: Float
+    let frameSeconds: Float
+    let metersPerUnit: Float
+    let reactiveScale: Float
+    let resetsHistory: Bool
 }
 
 final class GPUSceneSubmissionScratch {
@@ -2080,7 +2095,8 @@ public final class GPUWindowProbe {
         instances: [GPUInstanceRecord],
         logicalInstanceCount: Int? = nil,
         batches: [GPUSceneGeometryProbeBatch],
-        clearColor: RenderColor
+        clearColor: RenderColor,
+        temporal: GPUSceneTemporalProbe? = nil
     ) throws -> GPUScenePresentationProbeReport {
         let transientInstanceCount = instances.count
         let resolvedLogicalInstanceCount =
@@ -2328,6 +2344,20 @@ public final class GPUWindowProbe {
         nativePost.vignette_enabled = post.vignette.isEnabled ? 1 : 0
         nativePost.vignette_intensity = post.vignette.intensity
         nativePost.vignette_smoothness = post.vignette.smoothness
+        if let temporal {
+            guard temporal.instanceMotions.map({ $0.count == instances.count }) ?? true else {
+                throw GPUSceneProbeError.operationFailed(
+                    message: "GPU scene motion count differs from its instance count"
+                )
+            }
+            nativePost.temporal_camera_near = temporal.cameraNear
+            nativePost.temporal_camera_far = temporal.cameraFar
+            nativePost.temporal_vertical_fov = temporal.verticalFOVRadians
+            nativePost.temporal_frame_seconds = temporal.frameSeconds
+            nativePost.temporal_meters_per_unit = temporal.metersPerUnit
+            nativePost.temporal_reactive_scale = temporal.reactiveScale
+            nativePost.temporal_reset = temporal.resetsHistory ? 1 : 0
+        }
         nativePost.radiance_cascades.tier =
             Self.radianceCascadesTier(post.radianceCascades.tier)
         nativePost.radiance_cascades.backend =
@@ -2620,7 +2650,15 @@ public final class GPUWindowProbe {
         }
         var report = BTBHGPUSceneReport()
         let encodeStarted = Self.monotonicElapsedSeconds
-        let result = vertexShaderPath.withCString { vertexPath in
+        let instanceMotions = temporal?.instanceMotions ?? []
+        let result = instanceMotions.withUnsafeBufferPointer {
+            motionData -> BTBHGPUResult in
+        if let motionBase = motionData.baseAddress, !motionData.isEmpty {
+            nativePost.temporal_instance_motions = UnsafeRawPointer(motionBase)
+                .assumingMemoryBound(to: Float.self)
+            nativePost.temporal_instance_motion_count = UInt32(motionData.count)
+        }
+        return vertexShaderPath.withCString { vertexPath in
             animatedVertexShaderPath.withCString { animatedVertexPath in
                 fastShadowVertexShaderPath.withCString {
                     fastShadowVertexPath in
@@ -2723,6 +2761,7 @@ public final class GPUWindowProbe {
                     }
                 }
             }
+        }
         }
         }
         }

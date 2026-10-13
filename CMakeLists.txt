@@ -228,6 +228,16 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_hrc_blur.comp|compute"
         "production_hrc_resolve.comp|compute"
         "production_hrc_reconstruct.comp|compute"
+        "production_fsr3_prepare_inputs.comp|compute"
+        "production_fsr3_luma_pyramid.comp|compute"
+        "production_fsr3_shading_change_pyramid.comp|compute"
+        "production_fsr3_shading_change.comp|compute"
+        "production_fsr3_prepare_reactivity.comp|compute"
+        "production_fsr3_luma_instability.comp|compute"
+        "production_fsr3_accumulate.comp|compute"
+        "production_fsr3_debug_view.comp|compute"
+        "production_fsr3_clear.comp|compute"
+        "production_fsr3_motion_view.comp|compute"
         "production_rc_compose.frag|fragment"
         "production_bloom_downsample.frag|fragment"
         "production_bloom_upsample.frag|fragment"
@@ -288,6 +298,26 @@ if(BTBH_BUILD_GPU_SPIKE)
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.frag.hlsl"
             )
+        endif()
+        if(
+            _shader_name MATCHES "^production_model" OR
+            _shader_name MATCHES "^production_animated_model" OR
+            _shader_name MATCHES "^production_rc_.*material_source"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_temporal.hlsli"
+            )
+        endif()
+        if(_shader_name MATCHES "^production_fsr3_")
+            file(
+                GLOB_RECURSE
+                _fsr3_headers
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/fsr3/*.h"
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/fsr3/*.hlsli"
+            )
+            list(APPEND _shader_dependencies ${_fsr3_headers})
         endif()
         if(_shader_name MATCHES "^production_smaa_")
             list(
@@ -453,6 +483,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_device.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_font.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_frame.c"
+        "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_fsr3.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_instance_buffer.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_model.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_holographic_radiance_cascades.c"

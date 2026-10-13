@@ -460,7 +460,12 @@ typedef enum BTBHGPUSceneUpscaleMode {
     BTBH_GPU_SCENE_UPSCALE_LINEAR = 0,
     BTBH_GPU_SCENE_UPSCALE_LANCZOS = 1,
     /* AMD FidelityFX Super Resolution 1: EASU upscale, then RCAS sharpening at the output size. */
-    BTBH_GPU_SCENE_UPSCALE_FSR1 = 2
+    BTBH_GPU_SCENE_UPSCALE_FSR1 = 2,
+    /* AMD FidelityFX Super Resolution 3.1 (temporal, no frame generation): the scene renders with a
+     * sub-pixel jitter, motion vectors and a reactive mask, and the upscaler accumulates the frames at
+     * the output size, then RCAS sharpens. It replaces the anti-aliasing. A device without its storage
+     * formats falls back to FSR 1. */
+    BTBH_GPU_SCENE_UPSCALE_FSR3 = 3
 } BTBHGPUSceneUpscaleMode;
 
 typedef enum BTBHGPUSceneTonemapMode {
@@ -805,6 +810,22 @@ typedef struct BTBHGPUScenePost {
     uint8_t bloom_enabled;
     uint8_t vignette_enabled;
     uint8_t fog_edge_enabled;
+    /* Temporal upscaling (BTBH_GPU_SCENE_UPSCALE_FSR3). Per transient instance its world translation
+     * since the previous frame (four floats: x, y, z, 0; the count must equal the transient instance
+     * count), or NULL when nothing moves on its own. The camera's near and far planes and vertical
+     * field of view (radians), the seconds since the previous frame, metres per world unit (0 for 1),
+     * and the reactive mask's scale for transparent effects. temporal_reset starts a new history
+     * (a camera cut). */
+    const float *temporal_instance_motions;
+    uint32_t temporal_instance_motion_count;
+    float temporal_camera_near;
+    float temporal_camera_far;
+    float temporal_vertical_fov;
+    float temporal_frame_seconds;
+    float temporal_meters_per_unit;
+    float temporal_reactive_scale;
+    uint8_t temporal_reset;
+    uint8_t temporal_reserved[3];
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

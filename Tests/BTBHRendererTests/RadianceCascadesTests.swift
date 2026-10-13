@@ -644,7 +644,7 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(scene.contains("BTBH Opaque Draws"))
         XCTAssertTrue(scene.contains("BTBH Forward Transparent Draws"))
         XCTAssertTrue(scene.contains(
-            "transparent_target.texture = radiance_cascades_post_input"
+            "transparent_targets[0].texture = radiance_cascades_post_input"
         ))
         XCTAssertTrue(scene.contains(
             "transparent_depth_target.load_op = SDL_GPU_LOADOP_LOAD"

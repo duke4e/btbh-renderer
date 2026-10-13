@@ -43,10 +43,11 @@ final class GPUWindowProbeTests: XCTestCase {
         ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(source.contains(
-            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u"
+            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 8u"
         ))
         XCTAssertTrue(source.contains(
-            "(radiance_cascades_active ? 2u : 0u) +\n" +
+            "(temporal ? 4u : 0u) +\n" +
+                "        (radiance_cascades_active ? 2u : 0u) +\n" +
                 "        (auxiliary_geometry_outputs ? 1u : 0u)"
         ))
     }
@@ -713,7 +714,7 @@ final class GPUWindowProbeTests: XCTestCase {
             "#define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u"
         ))
         XCTAssertTrue(nativeSource.contains(
-            "post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA"
+            "anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA"
         ))
         XCTAssertTrue(nativeSource.contains(
             "runtime->fxaa_pipeline"
@@ -980,7 +981,7 @@ final class GPUWindowProbeTests: XCTestCase {
             "rc_contact_ao_strength"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "SDL_GPUColorTargetDescription color_targets[5];"
+            "SDL_GPUColorTargetDescription color_targets[6];"
         ))
         XCTAssertTrue(nativeScene.contains(
             "SDL_GPUTextureSamplerBinding resolve_samplers[7];"
@@ -1039,18 +1040,21 @@ final class GPUWindowProbeTests: XCTestCase {
         ).replacingOccurrences(of: "\r\n", with: "\n")
 
         XCTAssertTrue(nativeScene.contains(
-            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u"
+            "#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 8u"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "info.target_info.num_color_targets =\n" +
-                "        auxiliary_geometry_outputs ? 5u : 1u;"
+            "info.target_info.num_color_targets = temporal\n" +
+                "        ? (transparent ? 2u : 6u)\n" +
+                "        : (auxiliary_geometry_outputs ? 5u : 1u);"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "const uint32_t color_target_count =\n" +
-                "        auxiliary_geometry_outputs ? 5u : 1u;"
+            "const uint32_t color_target_count = temporal_active\n" +
+                "        ? 6u\n" +
+                "        : (auxiliary_geometry_outputs ? 5u : 1u);"
         ))
         XCTAssertTrue(nativeScene.contains(
-            "transparent_phase ? 1u : color_target_count,"
+            "                ? (temporal_active ? 2u : 1u)\n" +
+                "                : color_target_count,"
         ))
     }
 
@@ -1121,7 +1125,7 @@ final class GPUWindowProbeTests: XCTestCase {
             12
         )
         XCTAssertTrue(nativeScene.contains(
-            "post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS"
+            "upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS"
         ))
         XCTAssertTrue(nativeScene.contains(
             "\"BTBH Lanczos Upscale\""
@@ -1155,7 +1159,7 @@ final class GPUWindowProbeTests: XCTestCase {
         // EASU reads the twelve texels around the output pixel; RCAS the cross of five.
         XCTAssertEqual(easu.components(separatedBy: "= load_source(").count - 1, 12)
         XCTAssertEqual(rcas.components(separatedBy: "= load_source(").count - 1, 5)
-        XCTAssertTrue(nativeScene.contains("post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1"))
+        XCTAssertTrue(nativeScene.contains("upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1"))
         XCTAssertTrue(nativeScene.contains("\"BTBH FSR1 EASU\""))
         XCTAssertTrue(nativeScene.contains("\"BTBH FSR1 RCAS\""))
         XCTAssertTrue(nativeScene.contains(
@@ -1190,7 +1194,7 @@ final class GPUWindowProbeTests: XCTestCase {
         ))
         XCTAssertTrue(nativeScene.contains("post->mirror_horizontal <= 1u &&"))
         XCTAssertTrue(nativeScene.contains(
-            "post->anti_aliasing != 0u ||\n" +
+            "anti_aliasing != 0u ||\n" +
                 "                post->mirror_horizontal != 0u,"
         ))
         XCTAssertTrue(nativeScene.contains(
@@ -1207,7 +1211,8 @@ final class GPUWindowProbeTests: XCTestCase {
         let upscale = try XCTUnwrap(nativeScene.range(of: "\"BTBH Lanczos Upscale\""))
         XCTAssertLessThan(blend.lowerBound, mirror.lowerBound, "the mirror follows anti-aliasing")
         XCTAssertLessThan(mirror.lowerBound, upscale.lowerBound, "the upscale reads the mirrored image")
-        XCTAssertEqual(nativeScene.components(separatedBy: "flip_mode").count - 1, 1)
+        // FSR 3 mirrors after it upscales instead (its history and motion vectors stay unmirrored).
+        XCTAssertEqual(nativeScene.components(separatedBy: "flip_mode").count - 1, 2)
     }
 
     func testScenePostCarriesTheMirrorFlagOnlyWhenRequested() throws {
@@ -2541,7 +2546,7 @@ final class GPUWindowProbeTests: XCTestCase {
             encoding: .utf8
         )
         let resolve = try XCTUnwrap(scene.range(of: "\"BTBH SSAO Resolve\""))
-        let transparent = try XCTUnwrap(scene.range(of: "SDL_GPUColorTargetInfo transparent_target;"))
+        let transparent = try XCTUnwrap(scene.range(of: "SDL_GPUColorTargetInfo transparent_targets[2];"))
         XCTAssertLessThan(resolve.lowerBound, transparent.lowerBound)
         XCTAssertTrue(scene.contains("if (transparent_phase && ssao_resolve_active) {"))
         XCTAssertEqual(scene.components(separatedBy: "post_input = runtime->ssao_resolved_texture;").count - 1, 1)

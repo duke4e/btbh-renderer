@@ -3,6 +3,8 @@ SamplerState albedo_sampler : register(s0, space2);
 Texture2D<float4> emission_texture : register(t1, space2);
 SamplerState emission_sampler : register(s1, space2);
 
+#include "production_temporal.hlsli"
+
 cbuffer MaterialPBR : register(b0, space3)
 {
     float4 unused_material_prefix[11];
@@ -11,12 +13,17 @@ cbuffer MaterialPBR : register(b0, space3)
     float alpha_cutoff;
     uint unused_surface_variant;
     float unused_surface_time;
+    float4 unused_material_middle[17];
+    // z: the reactive mask's scale (transparent pass while the temporal upscaler runs, 0 otherwise).
+    float4 procedural_controls;
 };
 
 struct FragmentInput
 {
-    float4 color : TEXCOORD0;
-    float2 texture_coordinate : TEXCOORD1;
+    [[vk::location(0)]] float4 color : TEXCOORD0;
+    [[vk::location(1)]] float2 texture_coordinate : TEXCOORD1;
+    [[vk::location(9)]] float4 motion_clip_xy : TEXCOORD9;
+    [[vk::location(10)]] float2 motion_clip_w : TEXCOORD10;
 };
 
 struct FragmentOutput
@@ -26,6 +33,7 @@ struct FragmentOutput
     float4 normal : SV_Target2;
     float4 ambient_specular : SV_Target3;
     float4 emission : SV_Target4;
+    float4 velocity : SV_Target5;
 };
 
 FragmentOutput main(FragmentInput input)
@@ -52,5 +60,19 @@ FragmentOutput main(FragmentInput input)
     output.normal = 0.0f;
     output.ambient_specular = 0.0f;
     output.emission = float4(emission, 1.0f);
+    output.velocity = float4(
+        btbh_temporal_velocity(input.motion_clip_xy, input.motion_clip_w),
+        0.0f,
+        0.0f
+    );
+    if (procedural_controls.z > 0.0f)
+    {
+        output.ambient = float4(
+            btbh_temporal_reactive(output.color, procedural_controls.z),
+            0.0f,
+            0.0f,
+            0.0f
+        );
+    }
     return output;
 }

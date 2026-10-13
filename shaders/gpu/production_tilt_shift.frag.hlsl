@@ -113,8 +113,11 @@ float3 post_tilt_shift(float2 uv)
         return scene_sample(uv);
     }
 
-    const float angle =
-        hash12(legacy_uv / inverse_resolution) * 6.2831853f;
+    // 2 while the temporal upscaler runs: one turn everywhere (a per-pixel random turn is screen-fixed
+    // noise it cannot reproject; its jitter smooths the fixed kernel instead).
+    const float angle = tilt_shift_enabled >= 2u
+        ? 0.5235988f
+        : hash12(legacy_uv / inverse_resolution) * 6.2831853f;
     const float cosine = cos(angle);
     const float sine = sin(angle);
     const float2 directions[6] = {

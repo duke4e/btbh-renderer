@@ -1,4 +1,5 @@
 #include "production_surface.hlsli"
+#include "production_temporal.hlsli"
 
 #ifndef BTBH_RC_SOURCE_PROJECTION
 #define BTBH_RC_SOURCE_PROJECTION 0
@@ -12,6 +13,10 @@ struct InstanceData
 };
 
 StructuredBuffer<InstanceData> instances : register(t0, space0);
+#if !BTBH_RC_SOURCE_PROJECTION
+// Each instance's world translation since the previous frame (xyz), read while temporal_controls.z is set.
+StructuredBuffer<float4> instance_motion : register(t1, space0);
+#endif
 
 cbuffer SceneUniforms : register(b0, space1)
 {
@@ -33,6 +38,7 @@ cbuffer SceneUniforms : register(b0, space1)
     float4 surface_controls;
     float4 surface_parameters0;
     float4 surface_parameters1;
+    BTBH_TEMPORAL_UNIFORMS
 };
 
 struct VertexInput
@@ -56,6 +62,8 @@ struct VertexOutput
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
     nointerpolation float animated_model : TEXCOORD8;
+    float4 motion_clip_xy : TEXCOORD9;
+    float2 motion_clip_w : TEXCOORD10;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -191,8 +199,22 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         0.0f,
         1.0f
     );
+    output.motion_clip_xy = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    output.motion_clip_w = float2(0.0f, 0.0f);
 #else
     output.position = mul(view_projection, world_position);
+    const float3 previous_world_position = temporal_controls.z > 0.5f
+        ? world_position.xyz - instance_motion[instance_id].xyz
+        : world_position.xyz;
+    const BTBHTemporalClip motion_clip = btbh_temporal_clip(
+        output.position,
+        world_position.xyz,
+        previous_world_position,
+        previous_view_projection,
+        temporal_controls
+    );
+    output.motion_clip_xy = motion_clip.xy;
+    output.motion_clip_w = motion_clip.w;
 #endif
     output.color =
         input.color *

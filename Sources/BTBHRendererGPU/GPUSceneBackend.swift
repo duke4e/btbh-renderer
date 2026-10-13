@@ -243,6 +243,20 @@ final class GPUSceneBackend: SceneBackend {
     /// culling those casters to the view made shadows pop in and out at the screen edges as the
     /// camera followed and shook.
     private var sunShadowLightDirection: RenderVec3?
+    /// Each transient instance's world translation since the previous frame, packed beside the
+    /// instances while the temporal upscaler runs; empty when nothing this frame gave its motion.
+    private var packedMotions: [SIMD4<Float>] = []
+    /// The temporal upscaler's reactive-mask scale (`BTBH_FSR3_REACTIVE_SCALE`, default 1).
+    private static let temporalReactiveScale: Float = {
+        guard let value = ProcessInfo.processInfo.environment["BTBH_FSR3_REACTIVE_SCALE"]
+            .flatMap(Float.init), value.isFinite, value >= 0 else {
+            return 1
+        }
+        return value
+    }()
+    /// The projection's planes (`viewProjection(camera:viewport:)`).
+    static let cameraNearPlane: Float = 0.01
+    static let cameraFarPlane: Float = 1_000_000
     private(set) var lastPresentationReport:
         GPUScenePresentationProbeReport?
     var pendingModelDrawCountForTesting: Int {
@@ -369,6 +383,12 @@ final class GPUSceneBackend: SceneBackend {
             )
         }
         try validatePersistentInstanceReuse()
+        // FSR 3 needs a perspective camera over the whole drawable; other frames take FSR 1.
+        let temporalActive =
+            currentFrame.upscaleMode == .fsr3 &&
+            currentFrame.camera.projection == .perspective &&
+            currentFrame.viewport == .full
+        packedMotions.removeAll(keepingCapacity: true)
         var packedInstances = submissionScratch.takePackedInstances()
         var batches = submissionScratch.takeBatches()
         var visiblePersistentRanges: [PersistentModelInstanceRange] = []
@@ -391,6 +411,9 @@ final class GPUSceneBackend: SceneBackend {
                     custom: GPUInstanceRecordPacking.zeroCustom,
                     to: &packedInstances
                 )
+                if temporalActive, draw.motion != .zero {
+                    appendMotion(draw.motion, firstInstance: firstInstance)
+                }
                 try appendModelBatches(
                     model: draw.model,
                     overrides: draw.overrides,
@@ -561,6 +584,11 @@ final class GPUSceneBackend: SceneBackend {
                         draw.customs,
                         start: draw.sourceStart,
                         count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.motions,
+                        start: draw.sourceStart,
+                        count: draw.count
                       ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU model transform stream range"
@@ -583,6 +611,14 @@ final class GPUSceneBackend: SceneBackend {
                 ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Could not pack GPU model transform streams"
+                    )
+                }
+                if temporalActive, let motions = draw.motions {
+                    appendMotions(
+                        motions,
+                        sourceStart: draw.sourceStart,
+                        count: draw.count,
+                        firstInstance: firstInstance
                     )
                 }
                 try appendModelBatches(
@@ -676,7 +712,12 @@ final class GPUSceneBackend: SceneBackend {
                         draw.scales.count - draw.sourceStart,
                       draw.sourceStart <= draw.colors.count,
                       draw.count <=
-                        draw.colors.count - draw.sourceStart else {
+                        draw.colors.count - draw.sourceStart,
+                      Self.containsRange(
+                        draw.motions,
+                        start: draw.sourceStart,
+                        count: draw.count
+                      ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU mesh transform stream range"
                     )
@@ -695,6 +736,14 @@ final class GPUSceneBackend: SceneBackend {
                 ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Could not pack GPU mesh transform streams"
+                    )
+                }
+                if temporalActive, let motions = draw.motions {
+                    appendMotions(
+                        motions,
+                        sourceStart: draw.sourceStart,
+                        count: draw.count,
+                        firstInstance: firstInstance
                     )
                 }
                 batches.append(.init(
@@ -717,6 +766,9 @@ final class GPUSceneBackend: SceneBackend {
                     custom: GPUInstanceRecordPacking.zeroCustom,
                     to: &packedInstances
                 )
+                if temporalActive, draw.motion != .zero {
+                    appendMotion(draw.motion, firstInstance: firstInstance)
+                }
                 try appendModelBatches(
                     model: draw.model,
                     overrides: draw.overrides,
@@ -778,6 +830,11 @@ final class GPUSceneBackend: SceneBackend {
                         draw.customs,
                         start: draw.sourceStart,
                         count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.motions,
+                        start: draw.sourceStart,
+                        count: draw.count
                       ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU animated transform stream range"
@@ -796,6 +853,14 @@ final class GPUSceneBackend: SceneBackend {
                 ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Could not pack GPU animated transform streams"
+                    )
+                }
+                if temporalActive, let motions = draw.motions {
+                    appendMotions(
+                        motions,
+                        sourceStart: draw.sourceStart,
+                        count: draw.count,
+                        firstInstance: firstInstance
                     )
                 }
                 try appendModelBatches(
@@ -863,6 +928,9 @@ final class GPUSceneBackend: SceneBackend {
             }
         }
         guard !batches.isEmpty else { return }
+        if !packedMotions.isEmpty {
+            padMotions(to: packedInstances.count)
+        }
         let packingFinished = telemetryEnabled
             ? platform.monotonicElapsedSeconds
             : 0
@@ -904,8 +972,24 @@ final class GPUSceneBackend: SceneBackend {
             environment: currentFrame.environment,
             chain: currentFrame.postChain,
             antiAliasing: currentFrame.antiAliasing,
-            upscaleMode: currentFrame.upscaleMode
+            upscaleMode: temporalActive
+                ? .fsr3
+                : (currentFrame.upscaleMode == .fsr3 ? .fsr1 : currentFrame.upscaleMode)
         )
+        let temporal: GPUSceneTemporalProbe? = temporalActive
+            ? GPUSceneTemporalProbe(
+                instanceMotions: packedMotions.isEmpty ? nil : packedMotions,
+                cameraNear: Self.cameraNearPlane,
+                cameraFar: Self.cameraFarPlane,
+                verticalFOVRadians: currentFrame.camera.verticalFOVDegrees * .pi / 180,
+                frameSeconds: currentFrame.frameSeconds.isFinite
+                    ? max(0, currentFrame.frameSeconds)
+                    : 0,
+                metersPerUnit: 1,
+                reactiveScale: Self.temporalReactiveScale,
+                resetsHistory: currentFrame.resetsTemporalHistory
+            )
+            : nil
         let lightingPreparationFinished = telemetryEnabled
             ? platform.monotonicElapsedSeconds
             : 0
@@ -940,7 +1024,8 @@ final class GPUSceneBackend: SceneBackend {
             instances: packedInstances,
             logicalInstanceCount: logicalInstanceCount,
             batches: consolidatedBatches,
-            clearColor: clearColor
+            clearColor: clearColor,
+            temporal: temporal
         )
         if telemetryEnabled {
             let presentationFinished = platform.monotonicElapsedSeconds
@@ -997,6 +1082,33 @@ final class GPUSceneBackend: SceneBackend {
                 materialResolutionCount:
                     resources.sceneModelMaterialResolutionCount,
                 overrideEntryCount: modelBatchOverrideEntryCount
+            )
+        }
+    }
+
+    /// One instance's motion at `firstInstance`; instances packed before it without motion hold still.
+    private func appendMotion(_ motion: RenderVec3, firstInstance: Int) {
+        padMotions(to: firstInstance)
+        packedMotions.append(SIMD4<Float>(motion.x, motion.y, motion.z, 0))
+    }
+
+    private func appendMotions(
+        _ motions: [RenderVec3],
+        sourceStart: Int,
+        count: Int,
+        firstInstance: Int
+    ) {
+        padMotions(to: firstInstance)
+        for index in sourceStart..<(sourceStart + count) {
+            let motion = motions[index]
+            packedMotions.append(SIMD4<Float>(motion.x, motion.y, motion.z, 0))
+        }
+    }
+
+    private func padMotions(to count: Int) {
+        if packedMotions.count < count {
+            packedMotions.append(
+                contentsOf: repeatElement(SIMD4<Float>(repeating: 0), count: count - packedMotions.count)
             )
         }
     }
@@ -1487,8 +1599,8 @@ final class GPUSceneBackend: SceneBackend {
             -position.dot(geometry.forward),
             1,
         ]
-        let near: Float = 0.01
-        let far: Float = 1_000_000
+        let near = Self.cameraNearPlane
+        let far = Self.cameraFarPlane
         let depthScale = far / (far - near)
         let depthBias = -near * depthScale
         let projection: [Float]

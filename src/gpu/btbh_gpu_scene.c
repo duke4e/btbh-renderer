@@ -1,5 +1,6 @@
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_radiance_cascades_runtime.h"
+#include "btbh_gpu_fsr3.h"
 
 #include <float.h>
 #include <math.h>
@@ -27,12 +28,13 @@
 #define BTBH_GPU_SCENE_TRANSPARENCY_COUNT 2u
 #define BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT 2u
 #define BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT 3u
-#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 4u
+/* Bits: 1 auxiliary geometry outputs, 2 radiance cascades, 4 temporal upscaling. */
+#define BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT 8u
 #define BTBH_GPU_SCENE_SMAA_QUALITY_COUNT 2u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_FXAA 3u
 #define BTBH_GPU_SCENE_ANTI_ALIASING_MAX 3u
 #define BTBH_GPU_SCENE_UPSCALE_MODE_MAX \
-    BTBH_GPU_SCENE_UPSCALE_FSR1
+    BTBH_GPU_SCENE_UPSCALE_FSR3
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 #define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 #define BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE 2u
@@ -62,6 +64,11 @@ typedef struct BTBHGPUSceneUniforms {
     float surface_controls[4];
     float surface_parameters0[4];
     float surface_parameters1[4];
+    /* Temporal upscaling (production_temporal.hlsli): the previous frame's view-projection without
+       jitter; x, y the clip-space jitter, z 1 when the draw's instances carry their motion, w 1
+       while the upscaler runs. */
+    float previous_view_projection[16];
+    float temporal_controls[4];
 } BTBHGPUSceneUniforms;
 
 typedef struct BTBHGPUSceneFragmentUniforms {
@@ -323,6 +330,25 @@ struct BTBHGPUSceneRuntime {
     uint8_t retained_spot_shadow_is_omni;
     uint8_t omni_shadow_unavailable;
     BTBHGPUSceneRadianceCascadesRuntime radiance_cascades;
+    /* Temporal upscaling (FSR 3.1): motion vectors written by the opaque pass, the reactive mask
+       written by the transparent pass (both at the render size), each transient instance's motion,
+       and the previous frame's view-projection (without jitter) while it rendered temporally. */
+    BTBHGPUFSR3Runtime fsr3;
+    SDL_GPUTexture *velocity_texture;
+    SDL_GPUTexture *reactive_texture;
+    uint32_t temporal_target_width;
+    uint32_t temporal_target_height;
+    SDL_GPUBuffer *motion_buffer;
+    uint32_t motion_capacity;
+    float temporal_previous_view_projection[16];
+    bool temporal_previous_valid;
+    bool temporal_debug_view_read;
+    bool temporal_jitter_disabled;
+    BTBHGPUFSR3DebugView temporal_debug_view;
+    /* The previous frame's colour for the motion-error debug view. */
+    SDL_GPUTexture *temporal_previous_color;
+    uint32_t temporal_previous_color_width;
+    uint32_t temporal_previous_color_height;
 };
 
 static bool btbh_gpu_scene_shadow_resources_ready(
@@ -761,6 +787,7 @@ static bool btbh_gpu_scene_create_model_pipeline(
     bool animated,
     uint32_t fragment_sampler_count,
     bool auxiliary_geometry_outputs,
+    bool temporal,
     const BTBHGPUSceneGeometryBatch *batch,
     BTBHGPUSceneStencilVariant stencil_variant,
     SDL_GPUGraphicsPipeline **pipeline,
@@ -779,7 +806,8 @@ static bool btbh_gpu_scene_create_model_pipeline(
         entrypoint,
         format,
         SDL_GPU_SHADERSTAGE_VERTEX,
-        animated ? 2u : 1u,
+        /* Instances, the bone palette when animated, and the instances' motion. */
+        animated ? 3u : 2u,
         0u,
         1u,
         report
@@ -803,7 +831,7 @@ static bool btbh_gpu_scene_create_model_pipeline(
         return false;
     }
 
-    SDL_GPUColorTargetDescription color_targets[5];
+    SDL_GPUColorTargetDescription color_targets[6];
     SDL_GPUVertexBufferDescription vertex_buffer;
     SDL_GPUVertexAttribute attributes[7];
     SDL_GPUGraphicsPipelineCreateInfo info;
@@ -827,6 +855,8 @@ static bool btbh_gpu_scene_create_model_pipeline(
     color_targets[4].format =
         window->scene_runtime->scene_color_format;
     color_targets[4].blend_state.color_write_mask = 0x0fu;
+    color_targets[5].format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+    color_targets[5].blend_state.color_write_mask = 0x03u;
     vertex_buffer.slot = 0u;
     vertex_buffer.pitch = BTBH_GPU_MODEL_VERTEX_STRIDE;
     vertex_buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
@@ -910,8 +940,11 @@ static bool btbh_gpu_scene_create_model_pipeline(
             batch->transparency_enabled != 0u
         );
     info.target_info.color_target_descriptions = color_targets;
-    info.target_info.num_color_targets =
-        auxiliary_geometry_outputs ? 5u : 1u;
+    /* While the temporal upscaler runs the opaque pass adds the motion vectors (6 targets) and the
+       transparent pass the reactive mask (2). */
+    info.target_info.num_color_targets = temporal
+        ? (transparent ? 2u : 6u)
+        : (auxiliary_geometry_outputs ? 5u : 1u);
     info.target_info.depth_stencil_format =
         window->scene_runtime->depth_format;
     info.target_info.has_depth_stencil_target = true;
@@ -937,6 +970,21 @@ static bool btbh_gpu_scene_create_model_pipeline(
         transparent ? 0u : 0x0fu;
     color_targets[4].blend_state.color_write_mask =
         transparent ? 0u : 0x0fu;
+    color_targets[5].blend_state.color_write_mask =
+        transparent ? 0u : 0x03u;
+    if (temporal && transparent) {
+        /* The reactive mask keeps the strongest effect drawn over each pixel. */
+        SDL_zero(color_targets[1]);
+        color_targets[1].format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+        color_targets[1].blend_state.enable_blend = true;
+        color_targets[1].blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;
+        color_targets[1].blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
+        color_targets[1].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color_targets[1].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color_targets[1].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color_targets[1].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        color_targets[1].blend_state.color_write_mask = 0x01u;
+    }
     *pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment_shader);
     SDL_ReleaseGPUShader(device, vertex_shader);
@@ -2046,6 +2094,7 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
 static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     BTBHGPUSceneRuntime *runtime,
     bool auxiliary_geometry_outputs,
+    bool temporal,
     bool radiance_cascades_active,
     bool shadows_active,
     bool omni_shadows_active,
@@ -2063,6 +2112,7 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         !radiance_cascades_active &&
         btbh_gpu_scene_uses_fast_unlit_pipeline(batch) ? 1u : 0u;
     const uint32_t color_target_variant =
+        (temporal ? 4u : 0u) +
         (radiance_cascades_active ? 2u : 0u) +
         (auxiliary_geometry_outputs ? 1u : 0u);
     if (shadows_active) {
@@ -2100,6 +2150,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     const char *unshadowed_fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     bool auxiliary_geometry_outputs,
+    bool temporal,
     bool radiance_cascades_active,
     bool shadows_active,
     bool omni_shadows_active,
@@ -2119,6 +2170,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     SDL_GPUGraphicsPipeline **slot = btbh_gpu_scene_pipeline_slot(
         window->scene_runtime,
         auxiliary_geometry_outputs,
+        temporal,
         radiance_cascades_active,
         shadows_active,
         omni_shadows_active,
@@ -2239,6 +2291,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
                 ? (omni_shadows_active ? 9u : 8u)
                 : 5u),
         auxiliary_geometry_outputs,
+        temporal,
         batch,
         stencil_variant,
         slot,
@@ -3042,6 +3095,69 @@ static bool btbh_gpu_scene_ensure_color(
     return true;
 }
 
+/* The opaque pass's motion vectors (RG16F, UV units) and the transparent pass's reactive mask (R8),
+   at the render size, while the temporal upscaler runs. */
+static bool btbh_gpu_scene_ensure_temporal_targets(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    if (runtime->velocity_texture != NULL &&
+        runtime->reactive_texture != NULL &&
+        runtime->temporal_target_width == width &&
+        runtime->temporal_target_height == height) {
+        return true;
+    }
+    if (runtime->velocity_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->velocity_texture);
+        runtime->velocity_texture = NULL;
+    }
+    if (runtime->reactive_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->reactive_texture);
+        runtime->reactive_texture = NULL;
+    }
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+    info.usage =
+        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+        SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    runtime->velocity_texture = SDL_CreateGPUTexture(device, &info);
+    info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    runtime->reactive_texture = SDL_CreateGPUTexture(device, &info);
+    if (runtime->velocity_texture == NULL ||
+        runtime->reactive_texture == NULL) {
+        if (runtime->velocity_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->velocity_texture);
+            runtime->velocity_texture = NULL;
+        }
+        if (runtime->reactive_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, runtime->reactive_texture);
+            runtime->reactive_texture = NULL;
+        }
+        runtime->temporal_target_width = 0u;
+        runtime->temporal_target_height = 0u;
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return false;
+    }
+    runtime->temporal_target_width = width;
+    runtime->temporal_target_height = height;
+    return true;
+}
+
 static SDL_GPUTexture *btbh_gpu_scene_create_smaa_target(
     SDL_GPUDevice *device,
     uint32_t width,
@@ -3434,6 +3550,34 @@ static bool btbh_gpu_scene_ensure_upload_buffers(
             runtime->upload_capacity = 0u;
             return false;
         }
+    }
+    return true;
+}
+
+static bool btbh_gpu_scene_ensure_motion_buffer(
+    BTBHGPUWindow *window,
+    uint32_t motion_bytes
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (motion_bytes == 0u ||
+        (runtime->motion_buffer != NULL &&
+         runtime->motion_capacity >= motion_bytes)) {
+        return true;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    if (runtime->motion_buffer != NULL) {
+        SDL_ReleaseGPUBuffer(device, runtime->motion_buffer);
+        runtime->motion_buffer = NULL;
+    }
+    SDL_GPUBufferCreateInfo info;
+    SDL_zero(info);
+    info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    runtime->motion_capacity = btbh_gpu_scene_buffer_capacity(motion_bytes);
+    info.size = runtime->motion_capacity;
+    runtime->motion_buffer = SDL_CreateGPUBuffer(device, &info);
+    if (runtime->motion_buffer == NULL) {
+        runtime->motion_capacity = 0u;
+        return false;
     }
     return true;
 }
@@ -4063,6 +4207,21 @@ static bool btbh_gpu_scene_post_valid(
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
         post->mirror_horizontal <= 1u &&
+        (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
+         (isfinite(post->temporal_camera_near) &&
+          isfinite(post->temporal_camera_far) &&
+          post->temporal_camera_near > 0.0f &&
+          post->temporal_camera_far > post->temporal_camera_near &&
+          isfinite(post->temporal_vertical_fov) &&
+          post->temporal_vertical_fov > 0.0f &&
+          post->temporal_vertical_fov < 3.14159265f &&
+          isfinite(post->temporal_frame_seconds) &&
+          post->temporal_frame_seconds >= 0.0f &&
+          isfinite(post->temporal_meters_per_unit) &&
+          post->temporal_meters_per_unit >= 0.0f &&
+          isfinite(post->temporal_reactive_scale) &&
+          post->temporal_reactive_scale >= 0.0f &&
+          post->temporal_reset <= 1u)) &&
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL) &&
         post->fog_enabled <= 1u &&
@@ -4713,7 +4872,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     BTBHGPUShaderFormat shader_format,
     uint32_t render_width,
     uint32_t render_height,
-    const float view_projection[16],
+    const float requested_view_projection[16],
     const float camera_right[3],
     const float camera_up[3],
     const float camera_position[3],
@@ -4779,7 +4938,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         post_fragment_shader_path == NULL ||
         render_width == 0u ||
         render_height == 0u ||
-        view_projection == NULL ||
+        requested_view_projection == NULL ||
         camera_right == NULL ||
         camera_up == NULL ||
         camera_position == NULL ||
@@ -4789,6 +4948,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         !btbh_gpu_scene_lighting_valid(lighting) ||
         !btbh_gpu_scene_post_valid(post) ||
         (instances == NULL && transient_instance_count > 0u) ||
+        (post != NULL &&
+         post->temporal_instance_motions != NULL &&
+         post->temporal_instance_motion_count != transient_instance_count) ||
         logical_instance_count == 0u ||
         batches == NULL ||
         batch_count == 0u ||
@@ -4811,6 +4973,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    /* The scene renders with this view-projection: the requested one, plus a sub-pixel jitter
+       while the temporal upscaler runs. */
+    float view_projection[16];
+    (void)memcpy(
+        view_projection,
+        requested_view_projection,
+        sizeof(view_projection)
+    );
     float inverse_view_projection[16];
     const float projection_scale_y = sqrtf(
         view_projection[1] * view_projection[1] +
@@ -4892,6 +5062,131 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
          radiance_cascades_fallback_debug) &&
         post->radiance_cascades.debug_view !=
             BTBH_GPU_SCENE_RC_DEBUG_NONE;
+    /* Temporal upscaling (FSR 3.1): the projection takes a sub-pixel jitter, the opaque pass writes
+       motion vectors and the transparent pass a reactive mask, and the upscaler replaces FXAA and
+       FSR 1 after the post chain. A device without its storage formats or shaders keeps FSR 1. */
+    int temporal_window_width = 0;
+    int temporal_window_height = 0;
+    const bool temporal_requested =
+        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 &&
+        !radiance_cascades_debug_output &&
+        SDL_GetWindowSizeInPixels(
+            window->window,
+            &temporal_window_width,
+            &temporal_window_height
+        ) &&
+        temporal_window_width > 0 &&
+        temporal_window_height > 0;
+    bool temporal_active = false;
+    if (temporal_requested) {
+        char temporal_message[256];
+        temporal_active = btbh_gpu_fsr3_prepare(
+            window->device->gpu,
+            &runtime->fsr3,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            (uint32_t)temporal_window_width,
+            (uint32_t)temporal_window_height,
+            temporal_message,
+            sizeof(temporal_message)
+        );
+        if (!temporal_active && !runtime->fsr3.logged_failure) {
+            SDL_LogWarn(
+                SDL_LOG_CATEGORY_RENDER,
+                "FSR 3 upscaling unavailable, using FSR 1: %s",
+                temporal_message
+            );
+            runtime->fsr3.logged_failure = true;
+        }
+    }
+    if (!runtime->temporal_debug_view_read) {
+        /* BTBH_DEBUG_MOTION_VECTORS=1 shows the upscaler's inputs, =2 the motion vectors' reprojection
+           error; BTBH_FSR3_DEBUG_VIEW=1 AMD's view. */
+        const char *motion_view = SDL_getenv("BTBH_DEBUG_MOTION_VECTORS");
+        const char *upscaler_view = SDL_getenv("BTBH_FSR3_DEBUG_VIEW");
+        runtime->temporal_debug_view =
+            motion_view != NULL && motion_view[0] == '1'
+                ? BTBH_GPU_FSR3_DEBUG_MOTION_VECTORS
+                : (motion_view != NULL && motion_view[0] == '2'
+                    ? BTBH_GPU_FSR3_DEBUG_MOTION_ERROR
+                    : (upscaler_view != NULL && upscaler_view[0] == '1'
+                        ? BTBH_GPU_FSR3_DEBUG_UPSCALER
+                        : BTBH_GPU_FSR3_DEBUG_NONE));
+        /* BTBH_FSR3_JITTER=off renders without the sub-pixel jitter (to read the motion-error view). */
+        const char *jitter_mode = SDL_getenv("BTBH_FSR3_JITTER");
+        runtime->temporal_jitter_disabled =
+            jitter_mode != NULL && strcmp(jitter_mode, "off") == 0;
+        runtime->temporal_debug_view_read = true;
+    }
+    const uint8_t upscale_mode =
+        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 && !temporal_active
+            ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
+            : post->upscale_mode;
+    const uint8_t anti_aliasing = temporal_active ? 0u : post->anti_aliasing;
+    const bool temporal_motion_ready =
+        temporal_active &&
+        post->temporal_instance_motions != NULL &&
+        transient_instance_count > 0u;
+    float temporal_controls[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float previous_view_projection[16];
+    (void)memcpy(
+        previous_view_projection,
+        requested_view_projection,
+        sizeof(previous_view_projection)
+    );
+    if (temporal_active) {
+        const bool temporal_reset =
+            post->temporal_reset != 0u ||
+            !runtime->temporal_previous_valid;
+        if (temporal_reset) {
+            btbh_gpu_fsr3_invalidate_history(&runtime->fsr3);
+        } else {
+            (void)memcpy(
+                previous_view_projection,
+                runtime->temporal_previous_view_projection,
+                sizeof(previous_view_projection)
+            );
+        }
+        float jitter_x = 0.0f;
+        float jitter_y = 0.0f;
+        btbh_gpu_fsr3_next_jitter(
+            &runtime->fsr3,
+            render_width,
+            (uint32_t)temporal_window_width,
+            &jitter_x,
+            &jitter_y
+        );
+        if (runtime->temporal_jitter_disabled) {
+            jitter_x = 0.0f;
+            jitter_y = 0.0f;
+            runtime->fsr3.jitter_x = 0.0f;
+            runtime->fsr3.jitter_y = 0.0f;
+        }
+        /* AMD's convention: the jitter is in render pixels (y down), the projection moves by
+           (2 x / width, -2 y / height) in clip space. */
+        temporal_controls[0] = 2.0f * jitter_x / (float)render_width;
+        temporal_controls[1] = -2.0f * jitter_y / (float)render_height;
+        temporal_controls[3] = 1.0f;
+        for (uint32_t column = 0u; column < 4u; ++column) {
+            view_projection[column * 4u + 0u] +=
+                temporal_controls[0] * view_projection[column * 4u + 3u];
+            view_projection[column * 4u + 1u] +=
+                temporal_controls[1] * view_projection[column * 4u + 3u];
+        }
+        if (!btbh_gpu_scene_invert_matrix4(
+                view_projection,
+                inverse_view_projection
+            )) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "GPU scene jittered view-projection matrix is not invertible"
+            );
+            return report->result;
+        }
+    }
     const bool ssao_resolve_active =
         post->ssao_enabled != 0u &&
         !radiance_cascades_debug_output;
@@ -4909,7 +5204,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         batches != NULL &&
         btbh_gpu_scene_batches_have_soft_particles(batches, batch_count);
     const bool auxiliary_geometry_outputs =
-        ssao_resolve_active || radiance_cascades_active;
+        ssao_resolve_active || radiance_cascades_active || temporal_active;
     uint32_t shadow_enabled[3] = {
         lighting->directional_shadow_enabled,
         lighting->secondary_directional_shadow_enabled,
@@ -4946,19 +5241,19 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         shadow_enabled[1] != 0u ||
         shadow_enabled[2] != 0u;
 
-    if (post->anti_aliasing >= 1u &&
-        post->anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
+    if (anti_aliasing >= 1u &&
+        anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
         !btbh_gpu_scene_ensure_smaa_resources(
             window,
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
-            post->anti_aliasing,
+            anti_aliasing,
             report
         )) {
         return report->result;
     }
-    if (post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA &&
+    if (anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA &&
         !btbh_gpu_scene_ensure_fxaa_pipeline(
             window,
             post_vertex_shader_path,
@@ -5040,6 +5335,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     unshadowed_fragment_shader_path,
                     shader_format,
                     auxiliary_geometry_outputs,
+                    temporal_active,
                     radiance_cascades_active,
                     shadows_active,
                     omni_shadows_active,
@@ -5065,6 +5361,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     unshadowed_fragment_shader_path,
                     shader_format,
                     false,
+                    temporal_active,
                     radiance_cascades_active,
                     shadows_active,
                     omni_shadows_active,
@@ -5117,13 +5414,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    const uint32_t transfer_bytes = instance_bytes + bone_bytes;
+    const uint32_t motion_bytes = temporal_motion_ready
+        ? transient_instance_count * 4u * (uint32_t)sizeof(float)
+        : 0u;
+    if (motion_bytes > UINT32_MAX - instance_bytes - bone_bytes) {
+        free(bone_matrices);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene upload exceeds buffer limits"
+        );
+        return report->result;
+    }
+    const uint32_t transfer_bytes = instance_bytes + bone_bytes + motion_bytes;
     if (!btbh_gpu_scene_ensure_upload_buffers(
             window,
             instance_bytes,
             bone_bytes,
             transfer_bytes
-        )) {
+        ) ||
+        !btbh_gpu_scene_ensure_motion_buffer(window, motion_bytes)) {
         free(bone_matrices);
         free(bone_offsets);
         btbh_gpu_scene_error(
@@ -5142,6 +5453,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             : NULL;
     SDL_GPUBuffer *bone_buffer = bone_bytes > 0u
         ? runtime->bone_buffer
+        : NULL;
+    SDL_GPUBuffer *motion_buffer = motion_bytes > 0u
+        ? runtime->motion_buffer
         : NULL;
     SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
     const uint64_t buffers_finished_ticks = detailed_prepare_telemetry
@@ -5185,6 +5499,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 (uint8_t *)mapped + instance_bytes,
                 bone_matrices,
                 bone_bytes
+            );
+        }
+        if (motion_bytes > 0u) {
+            (void)memcpy(
+                (uint8_t *)mapped + instance_bytes + bone_bytes,
+                post->temporal_instance_motions,
+                motion_bytes
             );
         }
         SDL_UnmapGPUTransferBuffer(device, transfer);
@@ -5231,6 +5552,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             source.offset = instance_bytes;
             destination.buffer = bone_buffer;
             destination.size = bone_bytes;
+            SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        }
+        if (motion_buffer != NULL) {
+            source.offset = instance_bytes + bone_bytes;
+            destination.buffer = motion_buffer;
+            destination.size = motion_bytes;
             SDL_UploadToGPUBuffer(copy, &source, &destination, true);
         }
         SDL_EndGPUCopyPass(copy);
@@ -5427,19 +5754,29 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             window,
             render_width,
             render_height,
-            post->anti_aliasing != 0u ||
+            anti_aliasing != 0u ||
                 post->mirror_horizontal != 0u,
-            post->anti_aliasing >= 1u &&
-                post->anti_aliasing <=
+            anti_aliasing >= 1u &&
+                anti_aliasing <=
                     BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
             report
         ) &&
-        (post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR ||
-         (render_width == drawable_width &&
+        (!temporal_active ||
+         btbh_gpu_scene_ensure_temporal_targets(
+             window,
+             render_width,
+             render_height,
+             report
+         )) &&
+        (upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR ||
+         (!temporal_active &&
+          render_width == drawable_width &&
           render_height == drawable_height) ||
          (btbh_gpu_scene_ensure_upscale_pipelines(
               window,
-              post->upscale_mode,
+              temporal_active
+                  ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
+                  : upscale_mode,
               post_vertex_shader_path,
               post_fragment_shader_path,
               shader_format,
@@ -5449,7 +5786,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
               window,
               drawable_width,
               drawable_height,
-              post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1,
+              upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 ||
+                  temporal_active,
               report
           ))) &&
         (!ssao_resolve_active ||
@@ -5524,7 +5862,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
 
-    SDL_GPUColorTargetInfo color_targets[5];
+    SDL_GPUColorTargetInfo color_targets[6];
     SDL_GPUDepthStencilTargetInfo depth_target;
     SDL_zeroa(color_targets);
     SDL_zero(depth_target);
@@ -5577,8 +5915,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         window->scene_runtime->emission_texture;
     color_targets[4].load_op = SDL_GPU_LOADOP_CLEAR;
     color_targets[4].store_op = SDL_GPU_STOREOP_STORE;
-    const uint32_t color_target_count =
-        auxiliary_geometry_outputs ? 5u : 1u;
+    color_targets[5].texture = window->scene_runtime->velocity_texture;
+    color_targets[5].load_op = SDL_GPU_LOADOP_CLEAR;
+    color_targets[5].store_op = SDL_GPU_STOREOP_STORE;
+    const uint32_t color_target_count = temporal_active
+        ? 6u
+        : (auxiliary_geometry_outputs ? 5u : 1u);
     depth_target.texture = window->scene_runtime->depth_texture;
     depth_target.clear_depth = 1.0f;
     depth_target.clear_stencil = 0u;
@@ -5619,8 +5961,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_uniforms.highlight_gain = post->highlight_gain;
     post_uniforms.lut_enabled = post->lut_enabled;
     post_uniforms.cas_enabled = post->cas_enabled;
-    post_uniforms.tilt_shift_enabled =
-        post->tilt_shift_enabled;
+    /* 2: the tilt-shift blur turns its kernel the same way at every pixel. Its per-pixel random turn
+       is noise fixed to the screen, which the temporal upscaler cannot reproject with the city: it
+       left stripes over everything the blur touched while the camera moved; the jitter now smooths
+       the fixed kernel over the frames instead. */
+    post_uniforms.tilt_shift_enabled = post->tilt_shift_enabled != 0u
+        ? (temporal_active ? 2u : 1u)
+        : 0u;
     post_uniforms.ssao_enabled = ssao_resolve_active
         ? (radiance_cascades_active
             ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
@@ -5773,19 +6120,24 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 return report->result;
             }
         }
-        SDL_GPUColorTargetInfo transparent_target;
-        SDL_zero(transparent_target);
-        transparent_target.texture = radiance_cascades_post_input;
-        transparent_target.load_op = SDL_GPU_LOADOP_LOAD;
-        transparent_target.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPUColorTargetInfo transparent_targets[2];
+        SDL_zeroa(transparent_targets);
+        transparent_targets[0].texture = radiance_cascades_post_input;
+        transparent_targets[0].load_op = SDL_GPU_LOADOP_LOAD;
+        transparent_targets[0].store_op = SDL_GPU_STOREOP_STORE;
+        transparent_targets[1].texture = runtime->reactive_texture;
+        transparent_targets[1].load_op = SDL_GPU_LOADOP_CLEAR;
+        transparent_targets[1].store_op = SDL_GPU_STOREOP_STORE;
         SDL_GPUDepthStencilTargetInfo transparent_depth_target = depth_target;
         transparent_depth_target.load_op = SDL_GPU_LOADOP_LOAD;
         transparent_depth_target.stencil_load_op = SDL_GPU_LOADOP_LOAD;
         transparent_depth_target.cycle = false;
         SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
             command,
-            transparent_phase ? &transparent_target : color_targets,
-            transparent_phase ? 1u : color_target_count,
+            transparent_phase ? transparent_targets : color_targets,
+            transparent_phase
+                ? (temporal_active ? 2u : 1u)
+                : color_target_count,
             transparent_phase ? &transparent_depth_target : &depth_target
         );
         if (pass == NULL) {
@@ -5932,6 +6284,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->surface_parameters1,
                 sizeof(uniforms.surface_parameters1)
             );
+            (void)memcpy(
+                uniforms.previous_view_projection,
+                previous_view_projection,
+                sizeof(uniforms.previous_view_projection)
+            );
+            (void)memcpy(
+                uniforms.temporal_controls,
+                temporal_controls,
+                sizeof(uniforms.temporal_controls)
+            );
+            /* Persistent instances (the static city) have no motion of their own. */
+            const bool batch_motion =
+                temporal_motion_ready && batch->instance_buffer == NULL;
+            uniforms.temporal_controls[2] = batch_motion ? 1.0f : 0.0f;
             SDL_PushGPUVertexUniformData(
                 command,
                 0u,
@@ -6113,6 +6479,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->sun_curve;
             fragment_uniforms.procedural_controls[1] =
                 (float)lighting->ibl_enabled;
+            fragment_uniforms.procedural_controls[2] =
+                transparent_phase && temporal_active
+                    ? post->temporal_reactive_scale
+                    : 0.0f;
             (void)memcpy(
                 fragment_uniforms.detail_parameters,
                 batch->detail_parameters,
@@ -6225,6 +6595,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 *btbh_gpu_scene_pipeline_slot(
                     window->scene_runtime,
                     phase_auxiliary_geometry_outputs,
+                    temporal_active,
                     radiance_cascades_active,
                     shadows_active,
                     omni_shadows_active,
@@ -6241,23 +6612,33 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             } else if (detailed_prepare_telemetry) {
                 telemetry->geometry_pipeline_bind_skip_count += 1u;
             }
+            /* The motion slot takes the instance buffer when the draw has no motion; the shader
+               then never reads it. */
+            SDL_GPUBuffer *batch_motion_buffer = batch_motion
+                ? motion_buffer
+                : batch_instance_buffer;
             if (animated) {
+                SDL_GPUBuffer *storage_buffers[3] = {
+                    batch_instance_buffer,
+                    bone_buffer,
+                    batch_motion_buffer
+                };
+                SDL_BindGPUVertexStorageBuffers(
+                    pass,
+                    0u,
+                    storage_buffers,
+                    3u
+                );
+            } else {
                 SDL_GPUBuffer *storage_buffers[2] = {
                     batch_instance_buffer,
-                    bone_buffer
+                    batch_motion_buffer
                 };
                 SDL_BindGPUVertexStorageBuffers(
                     pass,
                     0u,
                     storage_buffers,
                     2u
-                );
-            } else {
-                SDL_BindGPUVertexStorageBuffers(
-                    pass,
-                    0u,
-                    &batch_instance_buffer,
-                    1u
                 );
             }
             BTBHGPUTexture *texture = batch->albedo_texture != NULL
@@ -6663,7 +7044,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     bool production_output_rendered = false;
     if (fullscreen_ok && post->tilt_shift_enabled != 0u) {
         SDL_GPUTexture *tilt_shift_target =
-            post->anti_aliasing != 0u
+            anti_aliasing != 0u
                 ? runtime->post_color_texture
                 : runtime->final_color_texture;
         SDL_GPUTextureSamplerBinding tilt_shift_sampler;
@@ -6688,7 +7069,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_sampler.texture = post_stage_input;
     post_sampler.sampler = runtime->scene_color_sampler;
     SDL_GPUTexture *post_target =
-        post->anti_aliasing != 0u
+        anti_aliasing != 0u
             ? runtime->post_color_texture
             : runtime->final_color_texture;
     if (fullscreen_ok && !production_output_rendered) {
@@ -6704,7 +7085,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
     }
     if (fullscreen_ok &&
-        post->anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA) {
+        anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA) {
         BTBHGPUSceneSMAAUniforms fxaa_uniforms;
         fxaa_uniforms.metrics[0] = 1.0f / (float)render_width;
         fxaa_uniforms.metrics[1] = 1.0f / (float)render_height;
@@ -6726,15 +7107,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
     }
     if (fullscreen_ok &&
-        post->anti_aliasing >= 1u &&
-        post->anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT) {
+        anti_aliasing >= 1u &&
+        anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT) {
         BTBHGPUSceneSMAAUniforms smaa_uniforms;
         smaa_uniforms.metrics[0] = 1.0f / (float)render_width;
         smaa_uniforms.metrics[1] = 1.0f / (float)render_height;
         smaa_uniforms.metrics[2] = (float)render_width;
         smaa_uniforms.metrics[3] = (float)render_height;
         const uint32_t quality_index =
-            (uint32_t)post->anti_aliasing - 1u;
+            (uint32_t)anti_aliasing - 1u;
 
         SDL_GPUTextureSamplerBinding edge_sampler;
         SDL_zero(edge_sampler);
@@ -6799,7 +7180,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         runtime->final_color_texture;
     runtime->composite_width = render_width;
     runtime->composite_height = render_height;
-    if (fullscreen_ok && post->mirror_horizontal != 0u) {
+    if (fullscreen_ok &&
+        post->mirror_horizontal != 0u &&
+        !temporal_active) {
         /* A same-size nearest blit mirrors pixel x to width - 1 - x
          * exactly. Anti-aliasing has already consumed
          * post_color_texture, so it holds the mirrored image, and the
@@ -6820,8 +7203,148 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         runtime->composite_color_texture =
             runtime->post_color_texture;
     }
+    if (fullscreen_ok && temporal_active) {
+        /* FSR 3.1 accumulates the jittered frames at the output size, the FSR 1 RCAS pass sharpens
+           the result into the swapchain format, and Mirror Curse mirrors it last (the history and
+           motion vectors stay unmirrored). */
+        BTBHGPUFSR3Inputs fsr3_inputs;
+        SDL_zero(fsr3_inputs);
+        fsr3_inputs.color = runtime->final_color_texture;
+        fsr3_inputs.depth = runtime->depth_texture;
+        fsr3_inputs.motion_vectors = runtime->velocity_texture;
+        fsr3_inputs.reactive = runtime->reactive_texture;
+        fsr3_inputs.render_width = render_width;
+        fsr3_inputs.render_height = render_height;
+        fsr3_inputs.output_width = drawable_width;
+        fsr3_inputs.output_height = drawable_height;
+        fsr3_inputs.camera_near = post->temporal_camera_near;
+        fsr3_inputs.camera_far = post->temporal_camera_far;
+        fsr3_inputs.vertical_fov_radians = post->temporal_vertical_fov;
+        fsr3_inputs.frame_seconds = post->temporal_frame_seconds;
+        fsr3_inputs.view_space_to_meters = post->temporal_meters_per_unit;
+        fsr3_inputs.debug_motion_pixels = 8.0f;
+        fsr3_inputs.debug_view = runtime->temporal_debug_view;
+        const bool motion_error_view =
+            runtime->temporal_debug_view == BTBH_GPU_FSR3_DEBUG_MOTION_ERROR;
+        if (motion_error_view &&
+            runtime->temporal_previous_color != NULL &&
+            runtime->temporal_previous_color_width == render_width &&
+            runtime->temporal_previous_color_height == render_height) {
+            fsr3_inputs.previous_color = runtime->temporal_previous_color;
+        }
+        const bool fsr3_encoded =
+            drawable_width == runtime->fsr3.output_width &&
+            drawable_height == runtime->fsr3.output_height &&
+            btbh_gpu_fsr3_encode(command, &runtime->fsr3, &fsr3_inputs);
+        if (!fsr3_encoded) {
+            /* The frame goes out at the render size (the canvas scales it) and later frames use
+               FSR 1, rather than the scene failing. */
+            SDL_LogWarn(
+                SDL_LOG_CATEGORY_RENDER,
+                "FSR 3 upscaling failed, using FSR 1 from now on: %s",
+                SDL_GetError()
+            );
+            runtime->fsr3.unavailable = true;
+            runtime->fsr3.logged_failure = true;
+        }
+        if (fsr3_encoded &&
+            runtime->temporal_debug_view == BTBH_GPU_FSR3_DEBUG_NONE) {
+            BTBHGPUSceneSMAAUniforms rcas_uniforms;
+            rcas_uniforms.metrics[0] = 1.0f / (float)drawable_width;
+            rcas_uniforms.metrics[1] = 1.0f / (float)drawable_height;
+            rcas_uniforms.metrics[2] = (float)drawable_width;
+            rcas_uniforms.metrics[3] = (float)drawable_height;
+            SDL_GPUTextureSamplerBinding rcas_sampler;
+            SDL_zero(rcas_sampler);
+            rcas_sampler.texture = runtime->fsr3.output;
+            rcas_sampler.sampler = runtime->scene_color_sampler;
+            fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+                command,
+                "BTBH FSR3 RCAS",
+                runtime->upscale_fsr_rcas_pipeline,
+                runtime->sharpened_color_texture,
+                &rcas_uniforms,
+                (uint32_t)sizeof(rcas_uniforms),
+                &rcas_sampler,
+                1u
+            );
+        } else if (fsr3_encoded && fullscreen_ok) {
+            SDL_GPUBlitInfo debug_blit;
+            SDL_zero(debug_blit);
+            debug_blit.source.texture = runtime->fsr3.output;
+            debug_blit.source.w = drawable_width;
+            debug_blit.source.h = drawable_height;
+            debug_blit.destination.texture = runtime->sharpened_color_texture;
+            debug_blit.destination.w = drawable_width;
+            debug_blit.destination.h = drawable_height;
+            debug_blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+            debug_blit.filter = SDL_GPU_FILTER_NEAREST;
+            SDL_BlitGPUTexture(command, &debug_blit);
+        }
+        if (fsr3_encoded && fullscreen_ok && motion_error_view) {
+            if (runtime->temporal_previous_color == NULL ||
+                runtime->temporal_previous_color_width != render_width ||
+                runtime->temporal_previous_color_height != render_height) {
+                if (runtime->temporal_previous_color != NULL) {
+                    SDL_ReleaseGPUTexture(device, runtime->temporal_previous_color);
+                }
+                runtime->temporal_previous_color = btbh_gpu_scene_create_smaa_target(
+                    device,
+                    render_width,
+                    render_height,
+                    SDL_GetGPUSwapchainTextureFormat(device, window->window)
+                );
+                runtime->temporal_previous_color_width = render_width;
+                runtime->temporal_previous_color_height = render_height;
+            }
+            SDL_GPUCopyPass *previous_copy = runtime->temporal_previous_color != NULL
+                ? SDL_BeginGPUCopyPass(command)
+                : NULL;
+            if (previous_copy != NULL) {
+                SDL_GPUTextureLocation copy_source;
+                SDL_GPUTextureLocation copy_target;
+                SDL_zero(copy_source);
+                SDL_zero(copy_target);
+                copy_source.texture = runtime->final_color_texture;
+                copy_target.texture = runtime->temporal_previous_color;
+                SDL_CopyGPUTextureToTexture(
+                    previous_copy,
+                    &copy_source,
+                    &copy_target,
+                    render_width,
+                    render_height,
+                    1u,
+                    false
+                );
+                SDL_EndGPUCopyPass(previous_copy);
+            }
+        }
+        if (fsr3_encoded && fullscreen_ok) {
+            runtime->composite_color_texture =
+                runtime->sharpened_color_texture;
+            runtime->composite_width = drawable_width;
+            runtime->composite_height = drawable_height;
+        }
+        if (fsr3_encoded && fullscreen_ok && post->mirror_horizontal != 0u) {
+            SDL_GPUBlitInfo mirror_blit;
+            SDL_zero(mirror_blit);
+            mirror_blit.source.texture = runtime->sharpened_color_texture;
+            mirror_blit.source.w = drawable_width;
+            mirror_blit.source.h = drawable_height;
+            mirror_blit.destination.texture = runtime->upscaled_color_texture;
+            mirror_blit.destination.w = drawable_width;
+            mirror_blit.destination.h = drawable_height;
+            mirror_blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+            mirror_blit.flip_mode = SDL_FLIP_HORIZONTAL;
+            mirror_blit.filter = SDL_GPU_FILTER_NEAREST;
+            SDL_InsertGPUDebugLabel(command, "BTBH Scene Mirror");
+            SDL_BlitGPUTexture(command, &mirror_blit);
+            runtime->composite_color_texture =
+                runtime->upscaled_color_texture;
+        }
+    }
     if (fullscreen_ok &&
-        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 &&
+        upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 &&
         (render_width != drawable_width ||
          render_height != drawable_height)) {
         BTBHGPUSceneSMAAUniforms easu_uniforms;
@@ -6870,7 +7393,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
     }
     if (fullscreen_ok &&
-        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS &&
+        upscale_mode == BTBH_GPU_SCENE_UPSCALE_LANCZOS &&
         (render_width != drawable_width ||
          render_height != drawable_height)) {
         BTBHGPUSceneSMAAUniforms upscale_uniforms;
@@ -6915,6 +7438,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
 
+    /* Only an unbroken run of temporal frames reprojects; any other frame restarts the history. */
+    runtime->temporal_previous_valid = temporal_active;
+    if (temporal_active) {
+        (void)memcpy(
+            runtime->temporal_previous_view_projection,
+            requested_view_projection,
+            sizeof(runtime->temporal_previous_view_projection)
+        );
+    }
     window->pending_command = command;
     window->pending_scene_ready = true;
     free(bone_offsets);
@@ -7375,6 +7907,31 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             device,
             &window->scene_runtime->radiance_cascades
         );
+        btbh_gpu_fsr3_release(device, &window->scene_runtime->fsr3);
+        if (window->scene_runtime->temporal_previous_color != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->temporal_previous_color
+            );
+        }
+        if (window->scene_runtime->velocity_texture != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->velocity_texture
+            );
+        }
+        if (window->scene_runtime->reactive_texture != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->reactive_texture
+            );
+        }
+        if (window->scene_runtime->motion_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(
+                device,
+                window->scene_runtime->motion_buffer
+            );
+        }
         if (window->scene_runtime->upload_transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(
                 device,

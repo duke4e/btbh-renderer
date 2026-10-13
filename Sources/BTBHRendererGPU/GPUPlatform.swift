@@ -599,7 +599,8 @@ public final class GPUPlatform: GamePlatform {
         instances: [GPUInstanceRecord],
         logicalInstanceCount: Int,
         batches: [GPUSceneGeometryProbeBatch],
-        clearColor: RenderColor
+        clearColor: RenderColor,
+        temporal: GPUSceneTemporalProbe? = nil
     ) throws -> GPUScenePresentationProbeReport {
         guard let window else {
             throw GPUPlatformError.windowNotOpen
@@ -636,7 +637,8 @@ public final class GPUPlatform: GamePlatform {
             instances: instances,
             logicalInstanceCount: logicalInstanceCount,
             batches: batches,
-            clearColor: clearColor
+            clearColor: clearColor,
+            temporal: temporal
         )
         if frameTelemetryEnabled {
             sceneEncodeTelemetry.append(report)

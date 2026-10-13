@@ -11,6 +11,7 @@
 #endif
 
 #include "production_surface.hlsli"
+#include "production_temporal.hlsli"
 
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
@@ -64,6 +65,8 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sky_horizon_curve;
     float4 sun_color_energy;
     float4 sun_direction_size;
+    // x sun curve, y 1 with image-based lighting, z the reactive mask's scale (transparent pass while
+    // the temporal upscaler runs, 0 otherwise)
     float4 procedural_controls;
     // x albedo variation, y bump height (render units), z noise cells per render unit,
     // w pattern (0 none, 1 ground, 2 grass, 3 facade)
@@ -91,6 +94,8 @@ struct FragmentInput
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
     nointerpolation float animated_model : TEXCOORD8;
+    float4 motion_clip_xy : TEXCOORD9;
+    float2 motion_clip_w : TEXCOORD10;
     bool is_front_face : SV_IsFrontFace;
 };
 
@@ -101,6 +106,8 @@ struct FragmentOutput
     float4 normal : SV_Target2;
     float4 ambient_specular : SV_Target3;
     float4 emission : SV_Target4;
+    // Motion vector (UV units) while the temporal upscaler runs; pipelines without a sixth target drop it.
+    float4 velocity : SV_Target5;
 };
 
 static const float inverse_pi = 0.3183098861837907f;
@@ -1105,6 +1112,7 @@ FragmentOutput fragment_output(
         ambient_specular,
         roughness
     );
+    output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }
 
@@ -1140,6 +1148,7 @@ FragmentOutput rc_material_output(
         source_emission,
         unlit ? 1.0f : 0.0f
     );
+    output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
 }
 #endif
@@ -1244,7 +1253,7 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     return (ddx(bump) * r1 + ddy(bump) * r2) / face_area;
 }
 
-FragmentOutput main(FragmentInput input)
+FragmentOutput shade_fragment(FragmentInput input)
 {
     const float4 raw_albedo_sample = albedo_texture.Sample(
         albedo_sampler,
@@ -1506,4 +1515,25 @@ FragmentOutput main(FragmentInput input)
         roughness
     );
 #endif
+}
+
+FragmentOutput main(FragmentInput input)
+{
+    FragmentOutput output = shade_fragment(input);
+    output.velocity = float4(
+        btbh_temporal_velocity(input.motion_clip_xy, input.motion_clip_w),
+        0.0f,
+        0.0f
+    );
+    if (procedural_controls.z > 0.0f)
+    {
+        // The transparent pass's second target is the reactive mask, not the ambient light.
+        output.ambient = float4(
+            btbh_temporal_reactive(output.color, procedural_controls.z),
+            0.0f,
+            0.0f,
+            0.0f
+        );
+    }
+    return output;
 }

@@ -34,11 +34,19 @@ public struct ModelDraw: Sendable {
     public let model: ModelHandle
     public let transform: RenderTransform
     public let overrides: [MaterialOverride]
+    /// World translation since the previous frame, for the temporal upscaler's motion vectors.
+    public let motion: RenderVec3
 
-    public init(model: ModelHandle, transform: RenderTransform, overrides: [MaterialOverride] = []) {
+    public init(
+        model: ModelHandle,
+        transform: RenderTransform,
+        overrides: [MaterialOverride] = [],
+        motion: RenderVec3 = .zero
+    ) {
         self.model = model
         self.transform = transform
         self.overrides = overrides
+        self.motion = motion
     }
 }
 
@@ -167,6 +175,9 @@ public struct ModelTransformStreamsDraw: Sendable {
     public let clusterBounds: RenderBounds3?
     public let sourceStart: Int
     public let count: Int
+    /// Each instance's world translation since the previous frame (indexed like `positions`), for the
+    /// temporal upscaler's motion vectors; nil when the instances hold still.
+    public let motions: [RenderVec3]?
 
     public init(
         model: ModelHandle,
@@ -178,7 +189,8 @@ public struct ModelTransformStreamsDraw: Sendable {
         overrides: [MaterialOverride] = [],
         clusterBounds: RenderBounds3? = nil,
         sourceStart: Int = 0,
-        count: Int
+        count: Int,
+        motions: [RenderVec3]? = nil
     ) {
         self.model = model
         self.positions = positions
@@ -190,6 +202,7 @@ public struct ModelTransformStreamsDraw: Sendable {
         self.clusterBounds = clusterBounds
         self.sourceStart = sourceStart
         self.count = count
+        self.motions = motions
     }
 }
 
@@ -240,6 +253,9 @@ public struct MeshTransformStreamsDraw: Sendable {
     public let colors: [RenderColor]
     public let sourceStart: Int
     public let count: Int
+    /// Each instance's world translation since the previous frame (indexed like `positions`); nil when
+    /// the instances hold still.
+    public let motions: [RenderVec3]?
 
     public init(
         mesh: MeshHandle,
@@ -249,7 +265,8 @@ public struct MeshTransformStreamsDraw: Sendable {
         scales: [RenderVec3],
         colors: [RenderColor],
         sourceStart: Int = 0,
-        count: Int
+        count: Int,
+        motions: [RenderVec3]? = nil
     ) {
         self.mesh = mesh
         self.material = material
@@ -259,6 +276,7 @@ public struct MeshTransformStreamsDraw: Sendable {
         self.colors = colors
         self.sourceStart = sourceStart
         self.count = count
+        self.motions = motions
     }
 }
 
@@ -268,19 +286,24 @@ public struct AnimatedModelDraw: Sendable {
     public let tree: AnimationTreeHandle?
     public let transform: RenderTransform
     public let overrides: [MaterialOverride]
+    /// World translation since the previous frame, for the temporal upscaler's motion vectors (the
+    /// skeleton's own motion is not tracked).
+    public let motion: RenderVec3
 
     public init(
         model: ModelHandle,
         player: AnimationPlayerHandle?,
         tree: AnimationTreeHandle?,
         transform: RenderTransform,
-        overrides: [MaterialOverride]
+        overrides: [MaterialOverride],
+        motion: RenderVec3 = .zero
     ) {
         self.model = model
         self.player = player
         self.tree = tree
         self.transform = transform
         self.overrides = overrides
+        self.motion = motion
     }
 }
 
@@ -324,6 +347,9 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
     /// False keeps the draw out of the sun's shadow maps, for a body whose own lamp alone
     /// throws its shadow.
     public let castsSunShadow: Bool
+    /// Each instance's world translation since the previous frame (indexed like `positions`); nil when
+    /// the instances hold still. The skeletons' own motion is not tracked.
+    public let motions: [RenderVec3]?
 
     public init(
         model: ModelHandle,
@@ -337,7 +363,8 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         overrides: [MaterialOverride] = [],
         sourceStart: Int = 0,
         count: Int,
-        castsSunShadow: Bool = true
+        castsSunShadow: Bool = true,
+        motions: [RenderVec3]? = nil
     ) {
         self.model = model
         self.player = player
@@ -351,6 +378,7 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         self.sourceStart = sourceStart
         self.count = count
         self.castsSunShadow = castsSunShadow
+        self.motions = motions
     }
 }
 
@@ -384,6 +412,11 @@ public struct FrameDescriptor: Sendable {
     public let upscaleMode: UpscaleMode
     public let postChain: PostChainDescriptor
     public let viewport: NormalizedViewport
+    /// `UpscaleMode.fsr3`: true when this frame does not continue the previous one (a camera cut, a run
+    /// or profile change), so the upscaler starts a new history instead of reprojecting the old one.
+    public let resetsTemporalHistory: Bool
+    /// Seconds since the previous frame, for the temporal upscaler.
+    public let frameSeconds: Float
 
     public init(
         camera: RenderCamera,
@@ -392,7 +425,9 @@ public struct FrameDescriptor: Sendable {
         antiAliasing: AntiAliasing = .smaaMedium,
         upscaleMode: UpscaleMode = .linear,
         postChain: PostChainDescriptor = .empty,
-        viewport: NormalizedViewport = .full
+        viewport: NormalizedViewport = .full,
+        resetsTemporalHistory: Bool = false,
+        frameSeconds: Float = 1.0 / 60.0
     ) {
         self.camera = camera
         self.environment = environment
@@ -401,6 +436,8 @@ public struct FrameDescriptor: Sendable {
         self.upscaleMode = upscaleMode
         self.postChain = postChain
         self.viewport = viewport
+        self.resetsTemporalHistory = resetsTemporalHistory
+        self.frameSeconds = frameSeconds
     }
 }
 
