@@ -15,7 +15,8 @@ struct InstanceData
 StructuredBuffer<InstanceData> instances : register(t0, space0);
 StructuredBuffer<float4x4> bones : register(t1, space0);
 #if !BTBH_RC_SOURCE_PROJECTION
-// Each instance's world translation since the previous frame (xyz), read while temporal_controls.z is set.
+// Each instance's world translation since the previous frame (xyz) and how many seconds its vertex-animated
+// surface (dissolve) advanced since then (w), read while temporal_controls.z is set.
 StructuredBuffer<float4> instance_motion : register(t2, space0);
 #endif
 
@@ -176,9 +177,40 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.motion_clip_w = float2(0.0f, 0.0f);
 #else
     output.position = mul(view_projection, world_position);
-    const float3 previous_world_position = temporal_controls.z > 0.5f
-        ? world_position.xyz - instance_motion[instance_id].xyz
-        : world_position.xyz;
+    float3 previous_world_position = world_position.xyz;
+    if (temporal_controls.w > 0.5f)
+    {
+        // The vertex one frame earlier: the instance's translation, the dissolve's previous time and
+        // the skeleton's previous pose.
+        float3 previous_local_position = surface.position;
+        float3 translation = float3(0.0f, 0.0f, 0.0f);
+        if (temporal_controls.z > 0.5f)
+        {
+            const float4 motion = instance_motion[instance_id];
+            translation = motion.xyz;
+            if (motion.w != 0.0f)
+            {
+                previous_local_position = btbh_apply_surface_vertex(
+                    input.position,
+                    input.normal,
+                    btbh_surface_previous_custom(instance.custom, surface_variant, motion.w),
+                    surface_variant,
+                    surface_controls.x,
+                    surface_parameters0,
+                    surface_parameters1
+                ).position;
+            }
+        }
+        const float4x4 previous_skin_matrix =
+            bones[previous_bone_offset + joint_indices.x] * input.weights.x +
+            bones[previous_bone_offset + joint_indices.y] * input.weights.y +
+            bones[previous_bone_offset + joint_indices.z] * input.weights.z +
+            bones[previous_bone_offset + joint_indices.w] * input.weights.w;
+        previous_world_position = mul(
+            instance.model,
+            mul(previous_skin_matrix, float4(previous_local_position, 1.0f))
+        ).xyz - translation;
+    }
     const BTBHTemporalClip motion_clip = btbh_temporal_clip(
         output.position,
         world_position.xyz,

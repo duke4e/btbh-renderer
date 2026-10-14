@@ -589,6 +589,11 @@ final class GPUSceneBackend: SceneBackend {
                         draw.motions,
                         start: draw.sourceStart,
                         count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.surfaceMotions,
+                        start: draw.sourceStart,
+                        count: draw.count
                       ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU model transform stream range"
@@ -613,9 +618,10 @@ final class GPUSceneBackend: SceneBackend {
                         message: "Could not pack GPU model transform streams"
                     )
                 }
-                if temporalActive, let motions = draw.motions {
+                if temporalActive, draw.motions != nil || draw.surfaceMotions != nil {
                     appendMotions(
-                        motions,
+                        draw.motions,
+                        surfaceMotions: draw.surfaceMotions,
                         sourceStart: draw.sourceStart,
                         count: draw.count,
                         firstInstance: firstInstance
@@ -835,6 +841,11 @@ final class GPUSceneBackend: SceneBackend {
                         draw.motions,
                         start: draw.sourceStart,
                         count: draw.count
+                      ),
+                      Self.containsRange(
+                        draw.surfaceMotions,
+                        start: draw.sourceStart,
+                        count: draw.count
                       ) else {
                     throw GPUSceneProbeError.operationFailed(
                         message: "Invalid GPU animated transform stream range"
@@ -855,9 +866,10 @@ final class GPUSceneBackend: SceneBackend {
                         message: "Could not pack GPU animated transform streams"
                     )
                 }
-                if temporalActive, let motions = draw.motions {
+                if temporalActive, draw.motions != nil || draw.surfaceMotions != nil {
                     appendMotions(
-                        motions,
+                        draw.motions,
+                        surfaceMotions: draw.surfaceMotions,
                         sourceStart: draw.sourceStart,
                         count: draw.count,
                         firstInstance: firstInstance
@@ -1089,19 +1101,31 @@ final class GPUSceneBackend: SceneBackend {
     /// One instance's motion at `firstInstance`; instances packed before it without motion hold still.
     private func appendMotion(_ motion: RenderVec3, firstInstance: Int) {
         padMotions(to: firstInstance)
-        packedMotions.append(SIMD4<Float>(motion.x, motion.y, motion.z, 0))
+        packedMotions.append(Self.packedMotion(motion, surfaceSeconds: 0))
     }
 
+    /// One instance's motion record (`instance_motion` in the model vertex shaders): its world
+    /// translation since the previous frame (xyz) and how far its vertex-animated surface advanced
+    /// since then (w, seconds; 0 when not finite).
+    static func packedMotion(_ motion: RenderVec3, surfaceSeconds: Float) -> SIMD4<Float> {
+        SIMD4<Float>(motion.x, motion.y, motion.z, surfaceSeconds.isFinite ? surfaceSeconds : 0)
+    }
+
+    /// A draw's instances: their translations (xyz) and surface animation time steps (w), each zero
+    /// where the draw leaves its channel out.
     private func appendMotions(
-        _ motions: [RenderVec3],
+        _ motions: [RenderVec3]?,
+        surfaceMotions: [Float]? = nil,
         sourceStart: Int,
         count: Int,
         firstInstance: Int
     ) {
         padMotions(to: firstInstance)
         for index in sourceStart..<(sourceStart + count) {
-            let motion = motions[index]
-            packedMotions.append(SIMD4<Float>(motion.x, motion.y, motion.z, 0))
+            packedMotions.append(Self.packedMotion(
+                motions?[index] ?? .zero,
+                surfaceSeconds: surfaceMotions?[index] ?? 0
+            ))
         }
     }
 

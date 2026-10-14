@@ -8,10 +8,13 @@
 // the scene (the reactive mask) to its second.
 
 // x, y: the jitter added to clip-space x and y (times w); z: 1 when the draw's instances carry their
-// motion since the previous frame; w: 1 while the upscaler runs.
+// motion since the previous frame; w: 1 while the upscaler runs. previous_bone_offset: where the bone
+// palette the previous frame drew a skinned geometry with starts (its bone_offset when there was none).
 #define BTBH_TEMPORAL_UNIFORMS \
     float4x4 previous_view_projection; \
-    float4 temporal_controls;
+    float4 temporal_controls; \
+    uint previous_bone_offset; \
+    uint3 temporal_reserved;
 
 // The vertex's clip position under this frame's projection without the jitter (xy) and under the
 // previous frame's (zw), and both w.

@@ -14,7 +14,8 @@ struct InstanceData
 
 StructuredBuffer<InstanceData> instances : register(t0, space0);
 #if !BTBH_RC_SOURCE_PROJECTION
-// Each instance's world translation since the previous frame (xyz), read while temporal_controls.z is set.
+// Each instance's world translation since the previous frame (xyz) and how many seconds its vertex-animated
+// surface (dissolve, shatter) advanced since then (w), read while temporal_controls.z is set.
 StructuredBuffer<float4> instance_motion : register(t1, space0);
 #endif
 
@@ -203,9 +204,30 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.motion_clip_w = float2(0.0f, 0.0f);
 #else
     output.position = mul(view_projection, world_position);
-    const float3 previous_world_position = temporal_controls.z > 0.5f
-        ? world_position.xyz - instance_motion[instance_id].xyz
-        : world_position.xyz;
+    float3 previous_world_position = world_position.xyz;
+    if (temporal_controls.z > 0.5f)
+    {
+        const float4 motion = instance_motion[instance_id];
+        previous_world_position -= motion.xyz;
+        if (motion.w != 0.0f && billboard_mode == 0)
+        {
+            // Where the dissolve or collapse had moved this vertex one frame earlier.
+            const BTBHSurfaceVertexResult previous_surface =
+                btbh_apply_surface_vertex(
+                    input.position,
+                    input.normal,
+                    btbh_surface_previous_custom(instance.custom, surface_variant, motion.w),
+                    surface_variant,
+                    surface_controls.x,
+                    surface_parameters0,
+                    surface_parameters1
+                );
+            previous_world_position += mul(
+                instance.model,
+                float4(previous_surface.position - surface.position, 0.0f)
+            ).xyz;
+        }
+    }
     const BTBHTemporalClip motion_clip = btbh_temporal_clip(
         output.position,
         world_position.xyz,

@@ -41,6 +41,8 @@ the tag (the two debug/clear passes excepted).
   where its motion vector points; black where the motion vectors are right (aliased edges stay lit).
 - `BTBH_FSR3_DEBUG_VIEW=1`: AMD's debug view (motion vectors, locks, depth; disocclusion, shading change,
   reactivity).
+- `BTBH_FSR3_MIP_BIAS=<bias>` or `=off`: a fixed texture LOD bias instead of AMD's
+  `log2(render width / display width) - 1` (material textures and the procedural surface detail).
 
 ## Updating
 

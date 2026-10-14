@@ -69,6 +69,10 @@ typedef struct BTBHGPUSceneUniforms {
        while the upscaler runs. */
     float previous_view_projection[16];
     float temporal_controls[4];
+    /* The bone palette the previous temporal frame drew this geometry's skin with
+       (bones[previous_bone_offset + joint]); bone_offset when that frame had none. */
+    uint32_t previous_bone_offset;
+    uint32_t temporal_reserved[3];
 } BTBHGPUSceneUniforms;
 
 typedef struct BTBHGPUSceneFragmentUniforms {
@@ -170,6 +174,14 @@ typedef struct BTBHGPUSceneCompositeUniforms {
     float fog_edge_bounds[4];
     float fog_edge[4];
 } BTBHGPUSceneCompositeUniforms;
+
+/* One skinned pose's bone palette as a temporal frame drew it (the next frame's previous palette). */
+typedef struct BTBHGPUSceneTemporalPalette {
+    const BTBHGPUAnimationPose *pose;
+    uint32_t skin_index;
+    uint32_t joint_count;
+    uint32_t first_matrix;
+} BTBHGPUSceneTemporalPalette;
 
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
@@ -344,6 +356,16 @@ struct BTBHGPUSceneRuntime {
     bool temporal_previous_valid;
     bool temporal_debug_view_read;
     bool temporal_jitter_disabled;
+    /* BTBH_FSR3_MIP_BIAS: a fixed texture LOD bias under FSR 3 instead of AMD's formula ("off" is 0). */
+    bool temporal_lod_bias_overridden;
+    float temporal_lod_bias_override;
+    /* The bone palettes the previous temporal frame drew, by animation pose and skin, so skinned limbs
+       get their own motion vectors (matrices: 16 floats each). */
+    BTBHGPUSceneTemporalPalette *temporal_palettes;
+    uint32_t temporal_palette_count;
+    uint32_t temporal_palette_capacity;
+    float *temporal_palette_matrices;
+    uint32_t temporal_palette_matrix_capacity;
     BTBHGPUFSR3DebugView temporal_debug_view;
     /* The previous frame's colour for the motion-error debug view. */
     SDL_GPUTexture *temporal_previous_color;
@@ -3786,6 +3808,112 @@ static bool btbh_gpu_scene_animation_sample_matches(
             btbh_gpu_scene_float_bits(batch->animation_time);
 }
 
+/* Temporal frames: points each skinned geometry's previous offset at its pose's palette from the previous
+   temporal frame, appended after this frame's palettes (matrices has room for twice the current bones),
+   then keeps this frame's pose palettes for the next. A pose without one keeps its current palette, so
+   its skeleton draws no motion of its own. */
+static void btbh_gpu_scene_apply_temporal_palettes(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneAnimationSample *samples,
+    uint32_t sample_count,
+    const uint32_t *offsets,
+    uint32_t *previous_offsets,
+    uint32_t geometry_count,
+    float *matrices,
+    uint32_t *bone_index
+) {
+    for (uint32_t sample_index = 0u; sample_index < sample_count; ++sample_index) {
+        const BTBHGPUSceneAnimationSample *sample = &samples[sample_index];
+        if (sample->pose == NULL) {
+            continue;
+        }
+        for (uint32_t entry_index = 0u;
+             entry_index < runtime->temporal_palette_count;
+             ++entry_index) {
+            const BTBHGPUSceneTemporalPalette *entry =
+                &runtime->temporal_palettes[entry_index];
+            if (entry->pose != sample->pose ||
+                entry->skin_index != sample->skin_index ||
+                entry->joint_count != sample->joint_count) {
+                continue;
+            }
+            if (sample->joint_count > UINT32_MAX - *bone_index) {
+                break;
+            }
+            (void)memcpy(
+                &matrices[(size_t)*bone_index * 16u],
+                &runtime->temporal_palette_matrices[(size_t)entry->first_matrix * 16u],
+                (size_t)sample->joint_count * 16u * sizeof(float)
+            );
+            for (uint32_t geometry = 0u; geometry < geometry_count; ++geometry) {
+                if (offsets[geometry] == sample->bone_offset) {
+                    previous_offsets[geometry] = *bone_index;
+                }
+            }
+            *bone_index += sample->joint_count;
+            break;
+        }
+    }
+
+    uint32_t palette_count = 0u;
+    size_t matrix_count = 0u;
+    for (uint32_t sample_index = 0u; sample_index < sample_count; ++sample_index) {
+        if (samples[sample_index].pose != NULL) {
+            palette_count += 1u;
+            matrix_count += samples[sample_index].joint_count;
+        }
+    }
+    runtime->temporal_palette_count = 0u;
+    if (palette_count == 0u || matrix_count > UINT32_MAX) {
+        return;
+    }
+    if (runtime->temporal_palette_capacity < palette_count) {
+        BTBHGPUSceneTemporalPalette *grown = realloc(
+            runtime->temporal_palettes,
+            (size_t)palette_count * sizeof(*grown)
+        );
+        if (grown == NULL) {
+            return;
+        }
+        runtime->temporal_palettes = grown;
+        runtime->temporal_palette_capacity = palette_count;
+    }
+    if (runtime->temporal_palette_matrix_capacity < matrix_count) {
+        float *grown = realloc(
+            runtime->temporal_palette_matrices,
+            matrix_count * 16u * sizeof(float)
+        );
+        if (grown == NULL) {
+            return;
+        }
+        runtime->temporal_palette_matrices = grown;
+        runtime->temporal_palette_matrix_capacity = (uint32_t)matrix_count;
+    }
+    uint32_t first_matrix = 0u;
+    for (uint32_t sample_index = 0u; sample_index < sample_count; ++sample_index) {
+        const BTBHGPUSceneAnimationSample *sample = &samples[sample_index];
+        if (sample->pose == NULL) {
+            continue;
+        }
+        (void)memcpy(
+            &runtime->temporal_palette_matrices[(size_t)first_matrix * 16u],
+            &matrices[(size_t)sample->bone_offset * 16u],
+            (size_t)sample->joint_count * 16u * sizeof(float)
+        );
+        BTBHGPUSceneTemporalPalette *entry =
+            &runtime->temporal_palettes[runtime->temporal_palette_count];
+        entry->pose = sample->pose;
+        entry->skin_index = sample->skin_index;
+        entry->joint_count = sample->joint_count;
+        entry->first_matrix = first_matrix;
+        runtime->temporal_palette_count += 1u;
+        first_matrix += sample->joint_count;
+    }
+}
+
+/* bone_offsets holds each geometry's palette offset (UINT32_MAX when it is not skinned), then, at
+   geometry_count + index, the palette the previous temporal frame drew it with (the same offset outside
+   temporal frames). temporal_runtime is the runtime while the frame renders temporally, NULL otherwise. */
 static bool btbh_gpu_scene_prepare_bones(
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
@@ -3794,7 +3922,8 @@ static bool btbh_gpu_scene_prepare_bones(
     float **bone_matrices,
     uint32_t *bone_count,
     bool detailed_telemetry,
-    BTBHGPUSceneTelemetryReport *telemetry
+    BTBHGPUSceneTelemetryReport *telemetry,
+    BTBHGPUSceneRuntime *temporal_runtime
 ) {
     const uint64_t count_started_ticks = detailed_telemetry
         ? SDL_GetTicksNS()
@@ -3862,23 +3991,26 @@ static bool btbh_gpu_scene_prepare_bones(
             (double)(count_finished_ticks - count_started_ticks) /
             1000000.0;
     }
+    /* Temporal frames also hold the previous palettes: at most one per current one. */
+    const size_t matrix_capacity =
+        (size_t)total_bone_count * (temporal_runtime != NULL ? 2u : 1u);
     if (
         total_geometry_count == 0u ||
         (size_t)total_geometry_count >
-            SIZE_MAX / sizeof(uint32_t) ||
+            SIZE_MAX / (sizeof(uint32_t) * 2u) ||
         (size_t)total_animated_geometry_count >
             SIZE_MAX / sizeof(BTBHGPUSceneAnimationSample) ||
-        (size_t)total_bone_count >
+        matrix_capacity >
             SIZE_MAX / (sizeof(float) * 16u)
     ) {
         return false;
     }
     uint32_t *offsets = malloc(
-        (size_t)total_geometry_count * sizeof(*offsets)
+        (size_t)total_geometry_count * 2u * sizeof(*offsets)
     );
     float *matrices = total_bone_count > 0u
         ? malloc(
-            (size_t)total_bone_count *
+            matrix_capacity *
             sizeof(float) *
             16u
         )
@@ -4017,6 +4149,24 @@ static bool btbh_gpu_scene_prepare_bones(
         free(matrices);
         free(offsets);
         return false;
+    }
+    uint32_t *previous_offsets = offsets + total_geometry_count;
+    (void)memcpy(
+        previous_offsets,
+        offsets,
+        (size_t)total_geometry_count * sizeof(*offsets)
+    );
+    if (temporal_runtime != NULL) {
+        btbh_gpu_scene_apply_temporal_palettes(
+            temporal_runtime,
+            samples,
+            sample_count,
+            offsets,
+            previous_offsets,
+            total_geometry_count,
+            matrices,
+            &bone_index
+        );
     }
     const uint64_t sample_finished_ticks = detailed_telemetry
         ? SDL_GetTicksNS()
@@ -5118,6 +5268,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         const char *jitter_mode = SDL_getenv("BTBH_FSR3_JITTER");
         runtime->temporal_jitter_disabled =
             jitter_mode != NULL && strcmp(jitter_mode, "off") == 0;
+        /* BTBH_FSR3_MIP_BIAS=<bias> or =off fixes the texture LOD bias (A/B captures). */
+        const char *lod_bias = SDL_getenv("BTBH_FSR3_MIP_BIAS");
+        runtime->temporal_lod_bias_overridden = false;
+        if (lod_bias != NULL && strcmp(lod_bias, "off") == 0) {
+            runtime->temporal_lod_bias_overridden = true;
+            runtime->temporal_lod_bias_override = 0.0f;
+        } else if (lod_bias != NULL && lod_bias[0] != '\0') {
+            char *end = NULL;
+            const float value = strtof(lod_bias, &end);
+            if (end != lod_bias && isfinite(value)) {
+                runtime->temporal_lod_bias_overridden = true;
+                runtime->temporal_lod_bias_override = value;
+            }
+        }
         runtime->temporal_debug_view_read = true;
     }
     const uint8_t upscale_mode =
@@ -5125,6 +5289,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
             : post->upscale_mode;
     const uint8_t anti_aliasing = temporal_active ? 0u : post->anti_aliasing;
+    /* Under FSR 3 the material textures and the procedural surface detail pick their detail for the
+       output size, not the render size (AMD's guide: log2(render width / display width) - 1, so -1 at
+       a render scale of 1 and -2 at 50 %): the upscaler accumulates the jittered frames into that
+       detail, which a render-size LOD had already blurred away (paving faded at 50 %). */
+    float temporal_lod_bias = 0.0f;
+    if (temporal_active) {
+        temporal_lod_bias = runtime->temporal_lod_bias_overridden
+            ? runtime->temporal_lod_bias_override
+            : log2f((float)render_width / (float)temporal_window_width) - 1.0f;
+        temporal_lod_bias = fmaxf(-4.0f, fminf(0.0f, temporal_lod_bias));
+    }
     const bool temporal_motion_ready =
         temporal_active &&
         post->temporal_instance_motions != NULL &&
@@ -5276,6 +5451,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             (double)(bones_started_ticks - prepare_started_ticks) /
             1000000.0;
     }
+    if (!temporal_active ||
+        post->temporal_reset != 0u ||
+        !runtime->temporal_previous_valid) {
+        runtime->temporal_palette_count = 0u;
+    }
     if (
         !btbh_gpu_scene_prepare_bones(
             batches,
@@ -5285,7 +5465,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &bone_matrices,
             &bone_count,
             detailed_prepare_telemetry,
-            telemetry
+            telemetry,
+            temporal_active ? runtime : NULL
         ) ||
         bone_count > UINT32_MAX / (sizeof(float) * 16u)
     ) {
@@ -6181,6 +6362,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             }
             const uint32_t bone_offset =
                 bone_offsets[geometry_cursor];
+            const uint32_t previous_bone_offset =
+                bone_offsets[prepared_geometry_count + geometry_cursor];
             geometry_cursor += 1u;
             const uint32_t batch_transparency_phase =
                 btbh_gpu_scene_uses_transparent_pass(
@@ -6266,6 +6449,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->secondary_directional_blue;
             uniforms.secondary_directional_color[3] = 1.0f;
             uniforms.bone_offset = animated ? bone_offset : 0u;
+            uniforms.previous_bone_offset =
+                animated ? previous_bone_offset : 0u;
             uniforms.billboard_mode =
                 (uint32_t)batch->billboard_mode;
             uniforms.unlit_enabled =
@@ -6483,6 +6668,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 transparent_phase && temporal_active
                     ? post->temporal_reactive_scale
                     : 0.0f;
+            fragment_uniforms.procedural_controls[3] =
+                temporal_lod_bias;
             (void)memcpy(
                 fragment_uniforms.detail_parameters,
                 batch->detail_parameters,
@@ -8344,6 +8531,8 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
         );
     }
     window->pending_scene_ready = false;
+    free(window->scene_runtime->temporal_palettes);
+    free(window->scene_runtime->temporal_palette_matrices);
     free(window->scene_runtime);
     window->scene_runtime = NULL;
 }

@@ -178,6 +178,11 @@ public struct ModelTransformStreamsDraw: Sendable {
     /// Each instance's world translation since the previous frame (indexed like `positions`), for the
     /// temporal upscaler's motion vectors; nil when the instances hold still.
     public let motions: [RenderVec3]?
+    /// Each instance's surface animation time advance since the previous frame, in seconds (indexed
+    /// like `positions`): the dissolve and shatter surfaces move their vertices by the time in
+    /// `customs` (dissolve x, shatter y), and the motion vectors follow that movement; nil or 0 when
+    /// it holds still.
+    public let surfaceMotions: [Float]?
 
     public init(
         model: ModelHandle,
@@ -190,7 +195,8 @@ public struct ModelTransformStreamsDraw: Sendable {
         clusterBounds: RenderBounds3? = nil,
         sourceStart: Int = 0,
         count: Int,
-        motions: [RenderVec3]? = nil
+        motions: [RenderVec3]? = nil,
+        surfaceMotions: [Float]? = nil
     ) {
         self.model = model
         self.positions = positions
@@ -203,6 +209,7 @@ public struct ModelTransformStreamsDraw: Sendable {
         self.sourceStart = sourceStart
         self.count = count
         self.motions = motions
+        self.surfaceMotions = surfaceMotions
     }
 }
 
@@ -287,7 +294,7 @@ public struct AnimatedModelDraw: Sendable {
     public let transform: RenderTransform
     public let overrides: [MaterialOverride]
     /// World translation since the previous frame, for the temporal upscaler's motion vectors (the
-    /// skeleton's own motion is not tracked).
+    /// skeleton's own motion comes from the pose the previous frame drew).
     public let motion: RenderVec3
 
     public init(
@@ -348,8 +355,12 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
     /// throws its shadow.
     public let castsSunShadow: Bool
     /// Each instance's world translation since the previous frame (indexed like `positions`); nil when
-    /// the instances hold still. The skeletons' own motion is not tracked.
+    /// the instances hold still. The skeleton's own motion comes from the pose its animation tree drew
+    /// in the previous frame (the renderer keeps that palette while the temporal upscaler runs).
     public let motions: [RenderVec3]?
+    /// Each instance's surface animation time advance since the previous frame, in seconds (indexed
+    /// like `positions`; the dissolve's time is `customs.x`), as in `ModelTransformStreamsDraw`.
+    public let surfaceMotions: [Float]?
 
     public init(
         model: ModelHandle,
@@ -364,7 +375,8 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         sourceStart: Int = 0,
         count: Int,
         castsSunShadow: Bool = true,
-        motions: [RenderVec3]? = nil
+        motions: [RenderVec3]? = nil,
+        surfaceMotions: [Float]? = nil
     ) {
         self.model = model
         self.player = player
@@ -379,6 +391,7 @@ public struct AnimatedModelTransformStreamsDraw: Sendable {
         self.count = count
         self.castsSunShadow = castsSunShadow
         self.motions = motions
+        self.surfaceMotions = surfaceMotions
     }
 }
 

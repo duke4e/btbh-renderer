@@ -116,4 +116,98 @@ final class GPUTemporalUpscaleTests: XCTestCase {
             model: model, positions: [.zero], rotations: [.identity], scales: [.one], count: 1
         ).motions)
     }
+
+    func testFSR3PicksTextureDetailForTheOutputSize() throws {
+        let scene = try read("src/gpu/btbh_gpu_scene.c")
+        let fragment = try read("shaders/gpu/production_model.frag.hlsl")
+        // AMD's guide, log2(render width / display width) - 1, and only while FSR 3 runs: FSR 1 and
+        // native frames keep a bias of 0.
+        XCTAssertTrue(scene.contains(": log2f((float)render_width / (float)temporal_window_width) - 1.0f;"))
+        XCTAssertTrue(scene.contains("float temporal_lod_bias = 0.0f;\n    if (temporal_active) {"))
+        XCTAssertTrue(scene.contains("fragment_uniforms.procedural_controls[3] =\n                temporal_lod_bias;"))
+        XCTAssertTrue(scene.contains("SDL_getenv(\"BTBH_FSR3_MIP_BIAS\")"))
+        // Every material texture samples with it, and the surface detail's footprint follows it.
+        for texture in ["albedo", "emission", "normal", "orm"] {
+            XCTAssertTrue(fragment.contains(
+                "\(texture)_texture.SampleBias(\n        \(texture)_sampler,\n        input.texture_coordinate,\n" +
+                    "        lod_bias\n    )"
+            ), texture)
+            XCTAssertFalse(fragment.contains("\(texture)_texture.Sample("), texture)
+        }
+        XCTAssertTrue(fragment.contains("const float lod_bias = procedural_controls.w;"))
+        XCTAssertTrue(fragment.contains("* exp2(procedural_controls.w);"))
+    }
+
+    @preconcurrency @MainActor
+    func testVertexAnimatedSurfacesCarryTheirMotion() throws {
+        let draw = ModelTransformStreamsDraw(
+            model: ModelHandle(rawValue: 1),
+            positions: [.zero],
+            rotations: [.identity],
+            scales: [.one],
+            customs: [.init(x: 0.2, y: 0, z: 0.5, w: 0)],
+            count: 1,
+            surfaceMotions: [0.25]
+        )
+        XCTAssertEqual(draw.surfaceMotions, [0.25])
+        XCTAssertNil(draw.motions)
+        let animated = AnimatedModelTransformStreamsDraw(
+            model: ModelHandle(rawValue: 1), player: nil, tree: AnimationTreeHandle(rawValue: 1),
+            positions: [.zero], rotations: [.identity], scales: [.one], count: 1, surfaceMotions: [0.5]
+        )
+        XCTAssertEqual(animated.surfaceMotions, [0.5])
+        // The motion record: translation in xyz, the surface's time step in w.
+        XCTAssertEqual(
+            GPUSceneBackend.packedMotion(.init(x: 1, y: 2, z: 3), surfaceSeconds: 0.25),
+            SIMD4<Float>(1, 2, 3, 0.25)
+        )
+        XCTAssertEqual(GPUSceneBackend.packedMotion(.zero, surfaceSeconds: .nan), SIMD4<Float>(0, 0, 0, 0))
+        // The vertex shaders run the dissolve (time in custom x) or shatter (custom y) once more at the
+        // previous frame's time for the previous position.
+        let surface = try read("shaders/gpu/production_surface.hlsli")
+        XCTAssertTrue(surface.contains("if (surface_variant == 3u && instance_custom.x > 0.0f)"))
+        XCTAssertTrue(surface.contains("else if (surface_variant == 4u && instance_custom.y > 0.0f)"))
+        XCTAssertTrue(surface.contains(
+            "float4 btbh_surface_previous_custom(float4 instance_custom, uint surface_variant, float seconds)"
+        ))
+        XCTAssertTrue(surface.contains("if (surface_variant == 3u)\n    {\n        previous.x -= seconds;"))
+        XCTAssertTrue(surface.contains("else if (surface_variant == 4u)\n    {\n        previous.y -= seconds;"))
+        for shader in ["production_model.vert.hlsl", "production_animated_model.vert.hlsl"] {
+            let vertex = try read("shaders/gpu/\(shader)")
+            XCTAssertTrue(
+                vertex.contains("btbh_surface_previous_custom(instance.custom, surface_variant, motion.w)"),
+                shader
+            )
+        }
+        XCTAssertTrue(try read("shaders/gpu/production_model.vert.hlsl").contains(
+            "previous_world_position -= motion.xyz;"
+        ))
+    }
+
+    func testSkinnedLimbsMoveWithThePreviousFramesBonePalette() throws {
+        let scene = try read("src/gpu/btbh_gpu_scene.c")
+        let animated = try read("shaders/gpu/production_animated_model.vert.hlsl")
+        let temporal = try read("shaders/gpu/production_temporal.hlsli")
+        // The C vertex uniforms and the shaders' cbuffer end alike.
+        XCTAssertTrue(scene.contains(
+            "    uint32_t previous_bone_offset;\n    uint32_t temporal_reserved[3];\n} BTBHGPUSceneUniforms;"
+        ))
+        XCTAssertTrue(temporal.contains(
+            "    float4 temporal_controls; \\\n    uint previous_bone_offset; \\\n    uint3 temporal_reserved;"
+        ))
+        // The previous palettes sit in the bone buffer after this frame's, one per pose and skin, and
+        // only a temporal frame that continues the previous one reads them.
+        XCTAssertTrue(scene.contains("temporal_active ? runtime : NULL"))
+        XCTAssertTrue(scene.contains(
+            "if (!temporal_active ||\n        post->temporal_reset != 0u ||\n        !runtime->temporal_previous_valid) {\n" +
+                "        runtime->temporal_palette_count = 0u;"
+        ))
+        XCTAssertTrue(scene.contains("bone_offsets[prepared_geometry_count + geometry_cursor];"))
+        XCTAssertTrue(scene.contains("uniforms.previous_bone_offset =\n                animated ? previous_bone_offset : 0u;"))
+        XCTAssertTrue(scene.contains("entry->pose != sample->pose ||"))
+        // The vertex skinned with the previous pose, moved back by the instance's translation.
+        XCTAssertTrue(animated.contains("bones[previous_bone_offset + joint_indices.x] * input.weights.x +"))
+        XCTAssertTrue(animated.contains("mul(previous_skin_matrix, float4(previous_local_position, 1.0f))"))
+        XCTAssertTrue(animated.contains(").xyz - translation;"))
+    }
 }

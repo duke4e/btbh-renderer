@@ -66,7 +66,8 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_color_energy;
     float4 sun_direction_size;
     // x sun curve, y 1 with image-based lighting, z the reactive mask's scale (transparent pass while
-    // the temporal upscaler runs, 0 otherwise)
+    // the temporal upscaler runs, 0 otherwise), w the texture LOD bias (negative while the temporal
+    // upscaler runs, so textures and the surface detail keep the output size's detail; 0 otherwise)
     float4 procedural_controls;
     // x albedo variation, y bump height (render units), z noise cells per render unit,
     // w pattern (0 none, 1 ground, 2 grass, 3 facade)
@@ -1184,7 +1185,10 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
         return float3(0.0f, 0.0f, 0.0f);
     }
     const float3 position = input.world_position * detail_parameters.z;
-    const float footprint = max(length(ddx(position)), length(ddy(position)));
+    // The texture LOD bias scales the footprint the same way, so the slabs, joints and grain fade for
+    // the output's pixels rather than the render's while the temporal upscaler runs.
+    const float footprint = max(length(ddx(position)), length(ddy(position)))
+        * exp2(procedural_controls.w);
     const float3 position_dx = ddx(input.world_position);
     const float3 position_dy = ddy(input.world_position);
     const float3 face = cross(position_dx, position_dy);
@@ -1255,25 +1259,30 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
 
 FragmentOutput shade_fragment(FragmentInput input)
 {
-    const float4 raw_albedo_sample = albedo_texture.Sample(
+    const float lod_bias = procedural_controls.w;
+    const float4 raw_albedo_sample = albedo_texture.SampleBias(
         albedo_sampler,
-        input.texture_coordinate
+        input.texture_coordinate,
+        lod_bias
     );
     float4 albedo_sample = float4(
         raw_albedo_sample.rgb * input.color.rgb,
         raw_albedo_sample.a * input.color.a
     );
-    float3 emission = emission_texture.Sample(
+    float3 emission = emission_texture.SampleBias(
         emission_sampler,
-        input.texture_coordinate
+        input.texture_coordinate,
+        lod_bias
     ).rgb * emission_color_energy.rgb * emission_color_energy.w;
-    float3 mapped_normal = normal_texture.Sample(
+    float3 mapped_normal = normal_texture.SampleBias(
         normal_sampler,
-        input.texture_coordinate
+        input.texture_coordinate,
+        lod_bias
     ).xyz * 2.0f - 1.0f;
-    float3 orm = orm_texture.Sample(
+    float3 orm = orm_texture.SampleBias(
         orm_sampler,
-        input.texture_coordinate
+        input.texture_coordinate,
+        lod_bias
     ).rgb;
     apply_surface(
         input,

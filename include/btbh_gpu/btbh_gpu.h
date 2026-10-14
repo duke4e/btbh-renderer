@@ -811,8 +811,9 @@ typedef struct BTBHGPUScenePost {
     uint8_t vignette_enabled;
     uint8_t fog_edge_enabled;
     /* Temporal upscaling (BTBH_GPU_SCENE_UPSCALE_FSR3). Per transient instance its world translation
-     * since the previous frame (four floats: x, y, z, 0; the count must equal the transient instance
-     * count), or NULL when nothing moves on its own. The camera's near and far planes and vertical
+     * since the previous frame and the seconds its vertex-animated surface (dissolve, shatter) advanced
+     * since then (four floats: x, y, z, seconds; the count must equal the transient instance count),
+     * or NULL when nothing moves on its own. The camera's near and far planes and vertical
      * field of view (radians), the seconds since the previous frame, metres per world unit (0 for 1),
      * and the reactive mask's scale for transparent effects. temporal_reset starts a new history
      * (a camera cut). */

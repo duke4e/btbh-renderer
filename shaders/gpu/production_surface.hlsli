@@ -305,6 +305,23 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     return result;
 }
 
+// The instance custom one frame earlier for the vertex-animated surfaces, whose animation time is in
+// the custom (dissolve x, shatter y) and advanced `seconds` since then; other surfaces keep it. Before
+// its start (time 0) a surface stands undeformed, as btbh_apply_surface_vertex draws it.
+float4 btbh_surface_previous_custom(float4 instance_custom, uint surface_variant, float seconds)
+{
+    float4 previous = instance_custom;
+    if (surface_variant == 3u)
+    {
+        previous.x -= seconds;
+    }
+    else if (surface_variant == 4u)
+    {
+        previous.y -= seconds;
+    }
+    return previous;
+}
+
 // Ordered coverage keeps fading debris in the opaque RC/depth path.
 bool btbh_surface_coverage_visible(float coverage, float2 pixel_position)
 {
