@@ -920,8 +920,10 @@ float spot_occluder_share(
     const float occluder_distance =
         near_plane * far_plane /
         max(far_plane - nearest * (far_plane - near_plane), 0.0001f);
+    /* Eased in over most of the reach: across the last quarter alone, a building the carrier walked up
+       to darkened its whole shadow in a few steps (the shadow "jumped", play-test 2026-10-14). */
     const float close =
-        1.0f - smoothstep(reach * 0.75f, reach, occluder_distance);
+        1.0f - smoothstep(reach * 0.4f, reach, occluder_distance);
     return strength * (1.0f - visibility) * close;
 }
 #endif
