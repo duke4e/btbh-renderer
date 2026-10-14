@@ -6,11 +6,14 @@ import Foundation
 /// point differences from changing simulation decisions that depend on camera
 /// rays, such as spawn positions just outside the visible ground footprint.
 public enum RenderCameraProjection {
+    /// Where `world` shows on screen, after the camera's world curvature moved it (labels and rings stay on
+    /// what they mark).
     public static func projectNormalized(
-        _ world: RenderVec3,
+        _ flatWorld: RenderVec3,
         camera: RenderCamera,
         aspectRatio: Float
     ) -> NormalizedViewportPoint {
+        let world = RenderWorldCurvature.bend(flatWorld, camera: camera)
         guard let geometry = geometry(
             camera: camera,
             aspectRatio: aspectRatio
@@ -122,5 +125,153 @@ public enum RenderCameraProjection {
             return nil
         }
         return (forward, right, up, halfWidth, halfHeight)
+    }
+}
+
+/// The render-only world curvature (`RenderCamera.worldCurvature`), the same formula as `btbh_world_bend` in
+/// production_temporal.hlsli. Gameplay keeps the flat world: these map its points to where they are drawn, back
+/// for the ground, and widen bounds so culling keeps everything a bend moves into view.
+public enum RenderWorldCurvature {
+    /// Curvatures smaller than this draw the world flat.
+    public static let flatThreshold: Float = 1e-5
+
+    public static func center(of camera: RenderCamera) -> RenderVec3 {
+        camera.worldCurvatureCenter ?? camera.target
+    }
+
+    public static func isFlat(_ curvature: Float) -> Bool {
+        !(abs(curvature) >= flatThreshold) || !curvature.isFinite
+    }
+
+    public static func bend(_ point: RenderVec3, camera: RenderCamera) -> RenderVec3 {
+        bend(point, curvature: camera.worldCurvature, center: center(of: camera))
+    }
+
+    /// Where a flat-world point is drawn.
+    public static func bend(_ point: RenderVec3, curvature k: Float, center: RenderVec3) -> RenderVec3 {
+        guard !isFlat(k) else { return point }
+        let dx = point.x - center.x
+        let dz = point.z - center.z
+        let r = (dx * dx + dz * dz).squareRoot()
+        guard r > 1e-6 else { return point }
+        let directionX = dx / r
+        let directionZ = dz / r
+        if k > 0 {
+            let angle = min(r * k, Float.pi)
+            let sag = (1 - cos(angle)) / k
+            let lean = point.y * sin(angle)
+            return RenderVec3(
+                x: center.x + directionX * (r + lean),
+                y: point.y * cos(angle) - sag,
+                z: center.z + directionZ * (r + lean)
+            )
+        }
+        let span = 2 / -k
+        let u = r / span
+        let compressed = span * tanh(u)
+        let shrink = 1 / (cosh(u) * cosh(u))
+        return RenderVec3(
+            x: center.x + directionX * compressed,
+            y: point.y * shrink,
+            z: center.z + directionZ * compressed
+        )
+    }
+
+    /// The flat-world ground point (y = 0) drawn where `ray` meets the drawn ground; nil when it misses.
+    public static func flatGroundHit(_ ray: RenderRay, camera: RenderCamera) -> RenderVec3? {
+        flatGroundHit(ray, curvature: camera.worldCurvature, center: center(of: camera))
+    }
+
+    public static func flatGroundHit(_ ray: RenderRay, curvature k: Float, center: RenderVec3) -> RenderVec3? {
+        let origin = ray.origin
+        let direction = ray.direction
+        if isFlat(k) || k < 0 {
+            // The hyperbolic ground stays at y = 0 (only its distances shrink).
+            guard abs(direction.y) > 1e-6 else { return nil }
+            let t = -origin.y / direction.y
+            guard t > 0 else { return nil }
+            let drawn = RenderVec3(x: origin.x + direction.x * t, y: 0, z: origin.z + direction.z * t)
+            guard !isFlat(k) else { return drawn }
+            let span = 2 / -k
+            let dx = drawn.x - center.x
+            let dz = drawn.z - center.z
+            let compressed = (dx * dx + dz * dz).squareRoot()
+            guard compressed > 1e-6 else { return drawn }
+            // Points at the ring's edge are infinitely far in the flat world.
+            guard compressed < span * 0.9999 else { return nil }
+            let r = span * atanh(compressed / span)
+            return RenderVec3(x: center.x + dx / compressed * r, y: 0, z: center.z + dz / compressed * r)
+        }
+        // The planet's ground keeps its x and z and sinks by the sag: march to the first crossing, then bisect.
+        guard direction.y < 0 else { return nil }
+        func height(_ t: Float) -> Float {
+            let x = origin.x + direction.x * t - center.x
+            let z = origin.z + direction.z * t - center.z
+            let angle = min((x * x + z * z).squareRoot() * k, Float.pi)
+            return origin.y + direction.y * t + (1 - cos(angle)) / k
+        }
+        let lowest = 2 / k
+        let farthest = (origin.y + lowest) / -direction.y
+        guard farthest.isFinite, farthest > 0, height(0) > 0 else { return nil }
+        let steps = 96
+        var previous: Float = 0
+        for step in 1...steps {
+            let t = farthest * Float(step) / Float(steps)
+            if height(t) <= 0 {
+                var low = previous
+                var high = t
+                for _ in 0..<24 {
+                    let middle = (low + high) * 0.5
+                    if height(middle) > 0 { low = middle } else { high = middle }
+                }
+                let hit = (low + high) * 0.5
+                return RenderVec3(x: origin.x + direction.x * hit, y: 0, z: origin.z + direction.z * hit)
+            }
+            previous = t
+        }
+        return nil
+    }
+
+    /// Bounds that hold everything a bend can draw from `bounds` (culling must not drop what it moves in).
+    public static func drawnBounds(_ bounds: RenderBounds3, curvature k: Float, center: RenderVec3) -> RenderBounds3 {
+        guard !isFlat(k) else { return bounds }
+        let minimum = bounds.minimum
+        let maximum = bounds.maximum
+        if k > 0 {
+            let nearX = max(0, max(minimum.x - center.x, center.x - maximum.x))
+            let nearZ = max(0, max(minimum.z - center.z, center.z - maximum.z))
+            let farX = max(abs(minimum.x - center.x), abs(maximum.x - center.x))
+            let farZ = max(abs(minimum.z - center.z), abs(maximum.z - center.z))
+            let nearAngle = min((nearX * nearX + nearZ * nearZ).squareRoot() * k, Float.pi)
+            let farAngle = min((farX * farX + farZ * farZ).squareRoot() * k, Float.pi)
+            let tallest = max(abs(minimum.y), abs(maximum.y))
+            let lean = tallest * sin(min(farAngle, Float.pi / 2))
+            return RenderBounds3(
+                minimum: RenderVec3(
+                    x: minimum.x - lean,
+                    y: -(1 - cos(farAngle)) / k - tallest,
+                    z: minimum.z - lean
+                ),
+                maximum: RenderVec3(
+                    x: maximum.x + lean,
+                    y: -(1 - cos(nearAngle)) / k + max(0, maximum.y),
+                    z: maximum.z + lean
+                )
+            )
+        }
+        // The hyperbolic map never stretches a distance: the box lands within its half-diagonal of where its
+        // centre goes, and heights only shrink.
+        let middle = bend(
+            RenderVec3(x: (minimum.x + maximum.x) * 0.5, y: 0, z: (minimum.z + maximum.z) * 0.5),
+            curvature: k,
+            center: center
+        )
+        let halfX = (maximum.x - minimum.x) * 0.5
+        let halfZ = (maximum.z - minimum.z) * 0.5
+        let reach = (halfX * halfX + halfZ * halfZ).squareRoot()
+        return RenderBounds3(
+            minimum: RenderVec3(x: middle.x - reach, y: min(0, minimum.y), z: middle.z - reach),
+            maximum: RenderVec3(x: middle.x + reach, y: max(0, maximum.y), z: middle.z + reach)
+        )
     }
 }

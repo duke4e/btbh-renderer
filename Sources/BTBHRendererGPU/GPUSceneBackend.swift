@@ -51,6 +51,9 @@ struct GPUSceneFrustumCullingState {
     private let up: RenderVec3
     private let projection: Projection
     private let viewportPixelHeight: Float
+    /// The camera's world curvature: bounds widen to what the bend can draw from them.
+    private let worldCurvature: Float
+    private let worldCurvatureCenter: RenderVec3
 
     init?(frame: FrameDescriptor, drawableSize: PixelSize2D) {
         guard drawableSize.width > 0,
@@ -120,6 +123,8 @@ struct GPUSceneFrustumCullingState {
         self.forward = forward
         self.right = right
         self.up = up
+        worldCurvature = camera.worldCurvature
+        worldCurvatureCenter = RenderWorldCurvature.center(of: camera)
     }
 
     static func boundsAreValid(_ bounds: RenderBounds3) -> Bool {
@@ -141,7 +146,12 @@ struct GPUSceneFrustumCullingState {
         return intersectsValidated(bounds)
     }
 
-    func intersectsValidated(_ bounds: RenderBounds3) -> Bool {
+    func intersectsValidated(_ flatBounds: RenderBounds3) -> Bool {
+        let bounds = RenderWorldCurvature.drawnBounds(
+            flatBounds,
+            curvature: worldCurvature,
+            center: worldCurvatureCenter
+        )
         let minimum = bounds.minimum
         let maximum = bounds.maximum
         let center = (minimum + maximum) * 0.5
@@ -980,7 +990,7 @@ final class GPUSceneBackend: SceneBackend {
         let clearColorResolveFinished = telemetryEnabled
             ? platform.monotonicElapsedSeconds
             : 0
-        let post = try resources.scenePost(
+        var post = try resources.scenePost(
             environment: currentFrame.environment,
             chain: currentFrame.postChain,
             antiAliasing: currentFrame.antiAliasing,
@@ -988,6 +998,12 @@ final class GPUSceneBackend: SceneBackend {
                 ? .fsr3
                 : (currentFrame.upscaleMode == .fsr3 ? .fsr1 : currentFrame.upscaleMode)
         )
+        if !RenderWorldCurvature.isFlat(currentFrame.camera.worldCurvature) {
+            let center = RenderWorldCurvature.center(of: currentFrame.camera)
+            post.worldCurvature = currentFrame.camera.worldCurvature
+            post.worldCurvatureCenterX = center.x
+            post.worldCurvatureCenterZ = center.z
+        }
         let temporal: GPUSceneTemporalProbe? = temporalActive
             ? GPUSceneTemporalProbe(
                 instanceMotions: packedMotions.isEmpty ? nil : packedMotions,

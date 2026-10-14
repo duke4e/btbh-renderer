@@ -827,6 +827,11 @@ typedef struct BTBHGPUScenePost {
     float temporal_reactive_scale;
     uint8_t temporal_reset;
     uint8_t temporal_reserved[3];
+    /* Render-only world curvature: x the signed curvature (1 / radius in world units; positive bends
+     * the ground down around the centre like a small planet, negative compresses distance like a
+     * hyperbolic plane, 0 draws the world flat), y and z the world x and z it bends around. Gameplay,
+     * lighting and shadows stay flat; only where the scene's vertices are drawn moves. */
+    float world_curvature[4];
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

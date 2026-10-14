@@ -64,6 +64,9 @@ typedef struct BTBHGPUSceneUniforms {
     float surface_controls[4];
     float surface_parameters0[4];
     float surface_parameters1[4];
+    /* The world curvature this frame and the previous temporal frame drew with (BTBHGPUScenePost). */
+    float world_curvature[4];
+    float previous_world_curvature[4];
     /* Temporal upscaling (production_temporal.hlsli): the previous frame's view-projection without
        jitter; x, y the clip-space jitter, z 1 when the draw's instances carry their motion, w 1
        while the upscaler runs. */
@@ -353,6 +356,7 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUBuffer *motion_buffer;
     uint32_t motion_capacity;
     float temporal_previous_view_projection[16];
+    float temporal_previous_world_curvature[4];
     bool temporal_previous_valid;
     bool temporal_debug_view_read;
     bool temporal_jitter_disabled;
@@ -5311,6 +5315,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         requested_view_projection,
         sizeof(previous_view_projection)
     );
+    float previous_world_curvature[4];
+    (void)memcpy(
+        previous_world_curvature,
+        post->world_curvature,
+        sizeof(previous_world_curvature)
+    );
     if (temporal_active) {
         const bool temporal_reset =
             post->temporal_reset != 0u ||
@@ -5322,6 +5332,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 previous_view_projection,
                 runtime->temporal_previous_view_projection,
                 sizeof(previous_view_projection)
+            );
+            (void)memcpy(
+                previous_world_curvature,
+                runtime->temporal_previous_world_curvature,
+                sizeof(previous_world_curvature)
             );
         }
         float jitter_x = 0.0f;
@@ -6473,6 +6488,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 uniforms.previous_view_projection,
                 previous_view_projection,
                 sizeof(uniforms.previous_view_projection)
+            );
+            (void)memcpy(
+                uniforms.world_curvature,
+                post->world_curvature,
+                sizeof(uniforms.world_curvature)
+            );
+            (void)memcpy(
+                uniforms.previous_world_curvature,
+                previous_world_curvature,
+                sizeof(uniforms.previous_world_curvature)
             );
             (void)memcpy(
                 uniforms.temporal_controls,
@@ -7632,6 +7657,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->temporal_previous_view_projection,
             requested_view_projection,
             sizeof(runtime->temporal_previous_view_projection)
+        );
+        (void)memcpy(
+            runtime->temporal_previous_world_curvature,
+            post->world_curvature,
+            sizeof(runtime->temporal_previous_world_curvature)
         );
     }
     window->pending_command = command;

@@ -454,9 +454,17 @@ public enum RenderProjection: UInt8, Hashable, Sendable {
 public struct RenderCamera: Hashable, Sendable {
     public var position: RenderVec3; public var target: RenderVec3; public var up: RenderVec3
     public var verticalFOVDegrees: Float; public var projection: RenderProjection
-    public init(position: RenderVec3, target: RenderVec3, up: RenderVec3, verticalFOVDegrees: Float, projection: RenderProjection) {
+    /// Render-only world curvature (`RenderWorldCurvature`): 1 / radius in world units, positive for a small
+    /// planet, negative for a hyperbolic look, 0 for the flat world.
+    public var worldCurvature: Float
+    /// The world point the curvature bends around; nil bends around `target`.
+    public var worldCurvatureCenter: RenderVec3?
+    public init(position: RenderVec3, target: RenderVec3, up: RenderVec3, verticalFOVDegrees: Float, projection: RenderProjection,
+                worldCurvature: Float = 0, worldCurvatureCenter: RenderVec3? = nil) {
         self.position = position; self.target = target; self.up = up
         self.verticalFOVDegrees = verticalFOVDegrees; self.projection = projection
+        self.worldCurvature = worldCurvature.isFinite ? worldCurvature : 0
+        self.worldCurvatureCenter = worldCurvatureCenter
     }
 
     var core: BTBHCamera {

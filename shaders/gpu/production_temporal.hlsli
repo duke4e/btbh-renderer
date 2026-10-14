@@ -16,6 +16,42 @@
     uint previous_bone_offset; \
     uint3 temporal_reserved;
 
+// Render-only world curvature (curvature: x the signed curvature, 1 / radius; y, z the world x and z it
+// bends around). Positive: a small planet. The ground keeps its x and z and drops by the sphere's sag,
+// and anything above it leans out along the sphere's normal. Negative: a hyperbolic look. Distance from
+// the centre compresses to 2R tanh(r / 2R), so the whole city fits inside a ring, and heights shrink
+// with it. Zero draws the world flat. Lighting, shadows and world_position stay flat; only where a
+// vertex is drawn moves (RenderWorldCurvature.bend in Swift is the same formula).
+float3 btbh_world_bend(float3 position, float4 curvature)
+{
+    const float k = curvature.x;
+    if (abs(k) < 1e-5f)
+    {
+        return position;
+    }
+    const float2 offset = position.xz - curvature.yz;
+    const float r = length(offset);
+    if (r < 1e-6f)
+    {
+        return position;
+    }
+    const float2 direction = offset / r;
+    if (k > 0.0f)
+    {
+        const float angle = min(r * k, 3.14159265f);
+        const float sag = (1.0f - cos(angle)) / k;
+        const float lean = position.y * sin(angle);
+        const float2 xz = curvature.yz + direction * (r + lean);
+        return float3(xz.x, position.y * cos(angle) - sag, xz.y);
+    }
+    const float span = 2.0f / -k;
+    const float u = r / span;
+    const float compressed = span * tanh(u);
+    const float shrink = 1.0f / (cosh(u) * cosh(u));
+    const float2 xz = curvature.yz + direction * compressed;
+    return float3(xz.x, position.y * shrink, xz.y);
+}
+
 // The vertex's clip position under this frame's projection without the jitter (xy) and under the
 // previous frame's (zw), and both w.
 struct BTBHTemporalClip

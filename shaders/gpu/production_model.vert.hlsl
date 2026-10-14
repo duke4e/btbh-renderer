@@ -39,6 +39,8 @@ cbuffer SceneUniforms : register(b0, space1)
     float4 surface_controls;
     float4 surface_parameters0;
     float4 surface_parameters1;
+    float4 world_curvature;
+    float4 previous_world_curvature;
     BTBH_TEMPORAL_UNIFORMS
 };
 
@@ -203,7 +205,7 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.motion_clip_xy = float4(0.0f, 0.0f, 0.0f, 0.0f);
     output.motion_clip_w = float2(0.0f, 0.0f);
 #else
-    output.position = mul(view_projection, world_position);
+    output.position = mul(view_projection, float4(btbh_world_bend(world_position.xyz, world_curvature), 1.0f));
     float3 previous_world_position = world_position.xyz;
     if (temporal_controls.z > 0.5f)
     {
@@ -231,7 +233,7 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     const BTBHTemporalClip motion_clip = btbh_temporal_clip(
         output.position,
         world_position.xyz,
-        previous_world_position,
+        btbh_world_bend(previous_world_position, previous_world_curvature),
         previous_view_projection,
         temporal_controls
     );

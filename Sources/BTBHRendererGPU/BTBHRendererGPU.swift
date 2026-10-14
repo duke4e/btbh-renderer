@@ -1033,6 +1033,10 @@ struct GPUScenePostProbe {
     let fog: FogDescriptor
     let bloom: BloomDescriptor
     let vignette: VignetteDescriptor
+    /// The camera's render-only world curvature (`RenderWorldCurvature`) and the world x and z it bends around.
+    var worldCurvature: Float = 0
+    var worldCurvatureCenterX: Float = 0
+    var worldCurvatureCenterZ: Float = 0
 
     func withRadianceCascades(
         _ radianceCascades: RadianceCascadesDescriptor
@@ -2344,6 +2348,12 @@ public final class GPUWindowProbe {
         nativePost.vignette_enabled = post.vignette.isEnabled ? 1 : 0
         nativePost.vignette_intensity = post.vignette.intensity
         nativePost.vignette_smoothness = post.vignette.smoothness
+        nativePost.world_curvature = (
+            post.worldCurvature,
+            post.worldCurvatureCenterX,
+            post.worldCurvatureCenterZ,
+            0
+        )
         if let temporal {
             guard temporal.instanceMotions.map({ $0.count == instances.count }) ?? true else {
                 throw GPUSceneProbeError.operationFailed(
