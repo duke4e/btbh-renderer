@@ -18,10 +18,13 @@
 
 // Render-only world curvature (curvature: x the signed curvature, 1 / radius; y, z the world x and z it
 // bends around). Positive: a small planet. The ground keeps its x and z and drops by the sphere's sag,
-// and anything above it leans out along the sphere's normal. Negative: a hyperbolic look. Distance from
-// the centre compresses to 2R tanh(r / 2R), so the whole city fits inside a ring, and heights shrink
-// with it. Zero draws the world flat. Lighting, shadows and world_position stay flat; only where a
+// and anything above it leans out along the sphere's normal. Negative: a hyperbolic bowl. Distance from
+// the centre compresses to 2R tanh(r / 2R), so the whole city fits inside a ring, heights shrink with
+// it, and the ground rises toward the ring (BTBH_WORLD_BOWL of its radius), so the far city climbs up
+// around the kaiju where the planet's falls away. Zero draws the world flat. Lighting, shadows and world_position stay flat; only where a
 // vertex is drawn moves (RenderWorldCurvature.bend in Swift is the same formula).
+#define BTBH_WORLD_BOWL 0.75f
+
 float3 btbh_world_bend(float3 position, float4 curvature)
 {
     const float k = curvature.x;
@@ -49,7 +52,8 @@ float3 btbh_world_bend(float3 position, float4 curvature)
     const float compressed = span * tanh(u);
     const float shrink = 1.0f / (cosh(u) * cosh(u));
     const float2 xz = curvature.yz + direction * compressed;
-    return float3(xz.x, position.y * shrink, xz.y);
+    const float rim = compressed / span;
+    return float3(xz.x, position.y * shrink + BTBH_WORLD_BOWL * span * rim * rim, xz.y);
 }
 
 // The vertex's clip position under this frame's projection without the jitter (xy) and under the

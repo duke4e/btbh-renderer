@@ -23,7 +23,7 @@ final class RenderWorldCurvatureTests: XCTestCase {
         XCTAssertGreaterThan(roof.y, bent.y)
     }
 
-    func testHyperbolicLookFitsTheWholePlaneInsideItsRing() {
+    func testHyperbolicBowlFitsTheWholePlaneInsideItsRingAndRisesTowardIt() {
         let k: Float = -1 / 20
         let span: Float = 40
         var previous: Float = 0
@@ -35,9 +35,15 @@ final class RenderWorldCurvatureTests: XCTestCase {
             XCTAssertLessThan(compressed, span)
             XCTAssertGreaterThan(compressed, previous)
             XCTAssertLessThanOrEqual(compressed, distance)
-            XCTAssertLessThanOrEqual(bent.y, 3)
+            XCTAssertLessThanOrEqual(bent.y, 3 + RenderWorldCurvature.hyperbolicBowl * span)
             previous = compressed
         }
+    }
+
+    func testHyperbolicGroundClimbsWhereThePlanetsFalls() {
+        let far = RenderVec3(x: center.x + 30, y: 0, z: center.z)
+        XCTAssertGreaterThan(RenderWorldCurvature.bend(far, curvature: -1 / 20, center: center).y, 0)
+        XCTAssertLessThan(RenderWorldCurvature.bend(far, curvature: 1 / 20, center: center).y, 0)
     }
 
     func testGroundHitFindsTheFlatPointDrawnUnderTheRay() throws {

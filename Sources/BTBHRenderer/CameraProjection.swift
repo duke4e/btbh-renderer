@@ -134,6 +134,9 @@ public enum RenderCameraProjection {
 public enum RenderWorldCurvature {
     /// Curvatures smaller than this draw the world flat.
     public static let flatThreshold: Float = 1e-5
+    /// How high the hyperbolic ground climbs at its ring, as a share of the ring's radius (BTBH_WORLD_BOWL):
+    /// the far city rises around the kaiju, where the planet's falls away.
+    public static let hyperbolicBowl: Float = 0.75
 
     public static func center(of camera: RenderCamera) -> RenderVec3 {
         camera.worldCurvatureCenter ?? camera.target
@@ -170,9 +173,10 @@ public enum RenderWorldCurvature {
         let u = r / span
         let compressed = span * tanh(u)
         let shrink = 1 / (cosh(u) * cosh(u))
+        let rim = compressed / span
         return RenderVec3(
             x: center.x + directionX * compressed,
-            y: point.y * shrink,
+            y: point.y * shrink + hyperbolicBowl * span * rim * rim,
             z: center.z + directionZ * compressed
         )
     }
@@ -185,14 +189,35 @@ public enum RenderWorldCurvature {
     public static func flatGroundHit(_ ray: RenderRay, curvature k: Float, center: RenderVec3) -> RenderVec3? {
         let origin = ray.origin
         let direction = ray.direction
-        if isFlat(k) || k < 0 {
-            // The hyperbolic ground stays at y = 0 (only its distances shrink).
+        if isFlat(k) {
             guard abs(direction.y) > 1e-6 else { return nil }
             let t = -origin.y / direction.y
             guard t > 0 else { return nil }
-            let drawn = RenderVec3(x: origin.x + direction.x * t, y: 0, z: origin.z + direction.z * t)
-            guard !isFlat(k) else { return drawn }
+            return RenderVec3(x: origin.x + direction.x * t, y: 0, z: origin.z + direction.z * t)
+        }
+        if k < 0 {
+            // The hyperbolic bowl: y = bowl * s^2 / span over the drawn distance s, a quadratic in t.
             let span = 2 / -k
+            let a = hyperbolicBowl / span
+            let ox = origin.x - center.x
+            let oz = origin.z - center.z
+            let qa = a * (direction.x * direction.x + direction.z * direction.z)
+            let qb = 2 * a * (ox * direction.x + oz * direction.z) - direction.y
+            let qc = a * (ox * ox + oz * oz) - origin.y
+            var t: Float
+            if abs(qa) < 1e-9 {
+                guard abs(qb) > 1e-9 else { return nil }
+                t = -qc / qb
+            } else {
+                let discriminant = qb * qb - 4 * qa * qc
+                guard discriminant >= 0 else { return nil }
+                let root = discriminant.squareRoot()
+                let near = (-qb - root) / (2 * qa)
+                let far = (-qb + root) / (2 * qa)
+                t = near > 0 ? near : far
+            }
+            guard t > 0 else { return nil }
+            let drawn = RenderVec3(x: origin.x + direction.x * t, y: 0, z: origin.z + direction.z * t)
             let dx = drawn.x - center.x
             let dz = drawn.z - center.z
             let compressed = (dx * dx + dz * dz).squareRoot()
@@ -269,9 +294,10 @@ public enum RenderWorldCurvature {
         let halfX = (maximum.x - minimum.x) * 0.5
         let halfZ = (maximum.z - minimum.z) * 0.5
         let reach = (halfX * halfX + halfZ * halfZ).squareRoot()
+        let span = 2 / -k
         return RenderBounds3(
             minimum: RenderVec3(x: middle.x - reach, y: min(0, minimum.y), z: middle.z - reach),
-            maximum: RenderVec3(x: middle.x + reach, y: max(0, maximum.y), z: middle.z + reach)
+            maximum: RenderVec3(x: middle.x + reach, y: max(0, maximum.y) + hyperbolicBowl * span, z: middle.z + reach)
         )
     }
 }
