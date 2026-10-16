@@ -609,21 +609,86 @@ static void btbh_gpu_cost_emit_models(void) {
     SDL_zeroa(btbh_gpu_cost_models);
 }
 
+/* The per-pass split (see `BTBHGPUCostGroup`): the device is set while the current frame is split. */
+static const char *const btbh_gpu_cost_group_names[BTBH_GPU_COST_GROUP_COUNT] = {
+    "upload", "shadow", "main", "rc_src", "rc_field", "rc_screen", "ssao", "transparent", "post", "ui"
+};
+static SDL_GPUDevice *btbh_gpu_cost_split_device;
+static uint64_t btbh_gpu_cost_frame_serial;
+static double btbh_gpu_cost_group_milliseconds[BTBH_GPU_COST_GROUP_COUNT];
+/* The radiance-cascade emitters (gameplay lights) the frame drew into the source field and the direct light. */
+static uint32_t btbh_gpu_cost_rc_emitters;
+
+void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
+    btbh_gpu_cost_split_device = NULL;
+    if (!btbh_gpu_cost_log_enabled()) {
+        return;
+    }
+    SDL_zeroa(btbh_gpu_cost_group_milliseconds);
+    btbh_gpu_cost_frame_serial += 1u;
+    /* About every other frame, but in the golden-ratio sequence ({n / phi} >= 0.5), which has no period: work
+       that alternates frame by frame (the shadow maps update every second frame, staggered; the cascades'
+       temporal phase) then falls on split and whole frames alike. */
+    if ((btbh_gpu_cost_frame_serial * UINT64_C(0x9E3779B97F4A7C15)) >> 63 != 0u) {
+        btbh_gpu_cost_split_device = device;
+    }
+}
+
+bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group) {
+    SDL_GPUDevice *device = btbh_gpu_cost_split_device;
+    if (device == NULL) {
+        return true;
+    }
+    const uint64_t submit_started_ticks = SDL_GetTicksNS();
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(*command);
+    *command = NULL;
+    if (fence == NULL) {
+        return false;
+    }
+    (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
+    btbh_gpu_cost_group_milliseconds[finished_group] +=
+        (double)(SDL_GetTicksNS() - submit_started_ticks) / 1000000.0;
+    SDL_ReleaseGPUFence(device, fence);
+    *command = SDL_AcquireGPUCommandBuffer(device);
+    return *command != NULL;
+}
+
 void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
     btbh_gpu_cost_model_frames += 1u;
     if (btbh_gpu_cost_model_frames == BTBH_GPU_COST_MODEL_FRAMES) {
         btbh_gpu_cost_model_frames = 0u;
         btbh_gpu_cost_emit_models();
     }
+    /* A split frame's last piece is the canvas's; its gpu_ms is the sum of the pieces. */
+    char groups[320] = "split=0";
+    if (btbh_gpu_cost_split_device != NULL) {
+        btbh_gpu_cost_group_milliseconds[BTBH_GPU_COST_GROUP_UI] += gpu_milliseconds;
+        gpu_milliseconds = 0.0;
+        int length = snprintf(groups, sizeof(groups), "split=1");
+        for (uint32_t group = 0u; group < BTBH_GPU_COST_GROUP_COUNT; ++group) {
+            gpu_milliseconds += btbh_gpu_cost_group_milliseconds[group];
+            if (length > 0 && (size_t)length < sizeof(groups)) {
+                length += snprintf(
+                    groups + length,
+                    sizeof(groups) - (size_t)length,
+                    " %s_ms=%.4f",
+                    btbh_gpu_cost_group_names[group],
+                    btbh_gpu_cost_group_milliseconds[group]
+                );
+            }
+        }
+        btbh_gpu_cost_split_device = NULL;
+    }
     (void)fprintf(
         stdout,
-        "BTBH_GPU_COST gpu_ms=%.4f "
+        "BTBH_GPU_COST gpu_ms=%.4f %s "
         "main_city_tris=%llu main_other_tris=%llu "
         "shadow_city_tris=%llu shadow_other_tris=%llu "
         "rc_city_tris=%llu rc_other_tris=%llu "
         "main_city_draws=%llu main_other_draws=%llu "
-        "shadow_city_draws=%llu shadow_other_draws=%llu\n",
+        "shadow_city_draws=%llu shadow_other_draws=%llu rc_emitters=%u\n",
         gpu_milliseconds,
+        groups,
         (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_MAIN][1],
         (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_MAIN][0],
         (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_SHADOW][1],
@@ -633,11 +698,13 @@ void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
         (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_MAIN][1],
         (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_MAIN][0],
         (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_SHADOW][1],
-        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_SHADOW][0]
+        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_SHADOW][0],
+        btbh_gpu_cost_rc_emitters
     );
     (void)fflush(stdout);
     SDL_zeroa(btbh_gpu_cost_triangles);
     SDL_zeroa(btbh_gpu_cost_draws);
+    btbh_gpu_cost_rc_emitters = 0u;
 }
 
 static uint32_t btbh_gpu_scene_shadow_update_period(
@@ -680,6 +747,7 @@ static void btbh_gpu_scene_cancel_submission(
     if (command != NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
     }
+    btbh_gpu_cost_split_device = NULL;
     btbh_gpu_window_scene_submission_finished(window, false);
 }
 
@@ -695,6 +763,22 @@ static void btbh_gpu_scene_error(
         "%s",
         message != NULL ? message : ""
     );
+}
+
+/* `btbh_gpu_cost_split` for the scene: false, with the frame cancelled and the error set, when it failed. */
+static bool btbh_gpu_scene_cost_split(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer **command,
+    BTBHGPUCostGroup finished_group,
+    BTBHGPUSceneReport *report
+) {
+    if (btbh_gpu_cost_split(command, finished_group)) {
+        return true;
+    }
+    btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+    btbh_gpu_scene_cancel_submission(window, *command);
+    *command = NULL;
+    return false;
 }
 
 static bool btbh_gpu_scene_invert_matrix4(
@@ -5941,6 +6025,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    btbh_gpu_cost_begin_frame(device);
     if (transfer_bytes > 0u) {
         SDL_InsertGPUDebugLabel(command, "BTBH Scene Upload");
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
@@ -5983,6 +6068,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     report->cpu_upload_milliseconds =
         (double)(SDL_GetTicksNS() - upload_started_ticks) /
         1000000.0;
+    if (!btbh_gpu_scene_cost_split(
+            window,
+            &command,
+            BTBH_GPU_COST_GROUP_UPLOAD,
+            report
+        )) {
+        free(bone_offsets);
+        return report->result;
+    }
 
     const float *shadow_matrices[3] = {
         lighting->directional_shadow_view_projection,
@@ -6130,6 +6224,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         report->cpu_shadow_encode_milliseconds =
             (double)(SDL_GetTicksNS() - shadow_started_ticks) /
             1000000.0;
+    }
+    if (!btbh_gpu_scene_cost_split(
+            window,
+            &command,
+            BTBH_GPU_COST_GROUP_SHADOW,
+            report
+        )) {
+        free(bone_offsets);
+        return report->result;
     }
 
     int drawable_width_value = 0;
@@ -6502,6 +6605,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 return report->result;
             }
             radiance_cascades_post_input = runtime->ssao_resolved_texture;
+            if (!btbh_gpu_scene_cost_split(
+                    window,
+                    &command,
+                    BTBH_GPU_COST_GROUP_SSAO,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
         }
         if (transparent_phase && scene_distance_ready) {
             BTBHGPUSceneDistanceUniforms distance_uniforms;
@@ -7231,6 +7343,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_EndGPURenderPass(pass);
         geometry_encode_nanoseconds +=
             SDL_GetTicksNS() - geometry_phase_started_ticks;
+        if (!btbh_gpu_scene_cost_split(
+                window,
+                &command,
+                transparent_phase
+                    ? BTBH_GPU_COST_GROUP_TRANSPARENT
+                    : BTBH_GPU_COST_GROUP_MAIN,
+                report
+            )) {
+            free(bone_offsets);
+            return report->result;
+        }
 
         if (!transparent_phase &&
             (radiance_cascades_active ||
@@ -7259,10 +7382,21 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         transient_instance_buffer,
                         bone_buffer
                     );
+                btbh_gpu_cost_rc_emitters =
+                    runtime->radiance_cascades.emitter_count;
+                if (!btbh_gpu_scene_cost_split(
+                        window,
+                        &command,
+                        BTBH_GPU_COST_GROUP_RC_SOURCE,
+                        report
+                    )) {
+                    free(bone_offsets);
+                    return report->result;
+                }
                 radiance_cascades_encoded =
                     source_field_encoded &&
                     btbh_gpu_radiance_cascades_runtime_encode(
-                    command,
+                    &command,
                     &runtime->radiance_cascades,
                     &post->radiance_cascades,
                     lighting,
@@ -7290,6 +7424,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &composed_texture
                     );
             }
+            if (command == NULL) {
+                /* The cost log's split inside the cascades failed. */
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
+                );
+                btbh_gpu_scene_cancel_submission(window, NULL);
+                free(bone_offsets);
+                return report->result;
+            }
             if (radiance_cascades_encoded) {
                 radiance_cascades_post_input = composed_texture;
             } else if (radiance_cascades_active) {
@@ -7313,6 +7458,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 (double)(
                     SDL_GetTicksNS() - radiance_cascades_started_ticks
                 ) / 1000000.0;
+            if (!btbh_gpu_scene_cost_split(
+                    window,
+                    &command,
+                    BTBH_GPU_COST_GROUP_RC_SCREEN,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
         }
     }
     report->cpu_geometry_encode_milliseconds =
@@ -7893,6 +8047,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             BTBH_GPU_DEVICE_FAILURE,
             SDL_GetError()
         );
+        return report->result;
+    }
+    if (!btbh_gpu_scene_cost_split(
+            window,
+            &command,
+            BTBH_GPU_COST_GROUP_POST,
+            report
+        )) {
+        free(bone_offsets);
         return report->result;
     }
 
