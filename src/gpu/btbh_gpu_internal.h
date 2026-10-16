@@ -108,6 +108,8 @@ struct BTBHGPUModel {
     uint32_t material_count;
     float minimum[3];
     float maximum[3];
+    /* The source file's last two path components, for `BTBH_GPU_COST_LOG`'s per-model lines. */
+    char debug_name[96];
 };
 
 struct BTBHGPUInstanceBuffer {
@@ -195,6 +197,28 @@ void btbh_gpu_window_scene_record_frame_completion(
     BTBHGPUWindow *window,
     double completion_milliseconds
 );
+/* `BTBH_GPU_COST_LOG=1`, a measurement tool (2026-10-16): each submitted frame waits for the GPU and prints
+   one `BTBH_GPU_COST` line with the GPU's milliseconds for it and the triangles and draws each pass sent, split
+   into the static city (draws from a persistent instance buffer, which only the city keeps) and the rest.
+   The wait serializes the CPU and the GPU, so the frame rate of such a run means nothing. */
+typedef enum BTBHGPUCostPass {
+    BTBH_GPU_COST_PASS_MAIN = 0,
+    BTBH_GPU_COST_PASS_SHADOW = 1,
+    BTBH_GPU_COST_PASS_RC_SOURCE = 2,
+    BTBH_GPU_COST_PASS_COUNT = 3
+} BTBHGPUCostPass;
+bool btbh_gpu_cost_log_enabled(void);
+void btbh_gpu_cost_record_draw(
+    BTBHGPUCostPass pass,
+    uint32_t element_count,
+    uint32_t instance_count,
+    bool static_city,
+    const BTBHGPUModel *model,
+    const BTBHGPUCustomMesh *custom_mesh
+);
+void btbh_gpu_model_set_debug_name(BTBHGPUModel *model, const char *path);
+bool btbh_gpu_cost_skips_model(const BTBHGPUModel *model);
+void btbh_gpu_cost_emit_frame(double gpu_milliseconds);
 void btbh_gpu_window_release_frame_telemetry(
     BTBHGPUWindow *window
 );

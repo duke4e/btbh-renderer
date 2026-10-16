@@ -460,6 +460,186 @@ void btbh_gpu_window_scene_record_frame_completion(
     );
 }
 
+static int btbh_gpu_cost_log_state = -1;
+/* [pass][0 the rest, 1 the static city] */
+static uint64_t btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_COUNT][2];
+static uint64_t btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_COUNT][2];
+
+bool btbh_gpu_cost_log_enabled(void) {
+    if (btbh_gpu_cost_log_state < 0) {
+        const char *value = SDL_getenv("BTBH_GPU_COST_LOG");
+        btbh_gpu_cost_log_state =
+            value != NULL && strcmp(value, "1") == 0 ? 1 : 0;
+    }
+    return btbh_gpu_cost_log_state == 1;
+}
+
+/* `BTBH_GPU_COST_SKIP_MODEL=<text>` (measurement, with the cost log): models whose file name contains the
+   text are not drawn in any pass, which measures what a cheaper version of them could save at most. */
+static int btbh_gpu_cost_skip_state = -1;
+static char btbh_gpu_cost_skip_text[96];
+
+bool btbh_gpu_cost_skips_model(const BTBHGPUModel *model) {
+    if (btbh_gpu_cost_skip_state < 0) {
+        const char *value = SDL_getenv("BTBH_GPU_COST_SKIP_MODEL");
+        btbh_gpu_cost_skip_state = value != NULL && value[0] != '\0' ? 1 : 0;
+        if (btbh_gpu_cost_skip_state == 1) {
+            (void)snprintf(btbh_gpu_cost_skip_text, sizeof(btbh_gpu_cost_skip_text), "%s", value);
+        }
+    }
+    return btbh_gpu_cost_skip_state == 1 &&
+        model != NULL &&
+        strstr(model->debug_name, btbh_gpu_cost_skip_text) != NULL;
+}
+
+/* Per model (or custom mesh) over `BTBH_GPU_COST_MODEL_FRAMES` frames: the triangles each pass drew of it. */
+#define BTBH_GPU_COST_MODEL_CAPACITY 4096u
+#define BTBH_GPU_COST_MODEL_FRAMES 600u
+#define BTBH_GPU_COST_MODEL_TOP 30u
+typedef struct BTBHGPUCostModelEntry {
+    const void *key;
+    char name[96];
+    uint64_t triangles[BTBH_GPU_COST_PASS_COUNT];
+    uint64_t main_instances;
+    uint32_t triangles_per_instance;
+    bool static_city;
+} BTBHGPUCostModelEntry;
+static BTBHGPUCostModelEntry btbh_gpu_cost_models[BTBH_GPU_COST_MODEL_CAPACITY];
+static uint32_t btbh_gpu_cost_model_frames;
+
+static BTBHGPUCostModelEntry *btbh_gpu_cost_model_entry(
+    const BTBHGPUModel *model,
+    const BTBHGPUCustomMesh *custom_mesh,
+    bool static_city
+) {
+    const void *key = model != NULL ? (const void *)model : (const void *)custom_mesh;
+    if (key == NULL) {
+        return NULL;
+    }
+    uint32_t slot = (uint32_t)(((uintptr_t)key >> 4) * 2654435761u) % BTBH_GPU_COST_MODEL_CAPACITY;
+    for (uint32_t probe = 0u; probe < BTBH_GPU_COST_MODEL_CAPACITY; ++probe) {
+        BTBHGPUCostModelEntry *entry = &btbh_gpu_cost_models[slot];
+        if (entry->key == key) {
+            return entry;
+        }
+        if (entry->key == NULL) {
+            entry->key = key;
+            entry->static_city = static_city;
+            uint64_t triangles = 0u;
+            if (model != NULL) {
+                for (uint32_t index = 0u; index < model->primitive_count; ++index) {
+                    triangles += model->primitives[index].index_count > 0u
+                        ? model->primitives[index].index_count / 3u
+                        : model->primitives[index].vertex_count / 3u;
+                }
+                (void)snprintf(entry->name, sizeof(entry->name), "%s", model->debug_name);
+            } else {
+                triangles = custom_mesh->index_count > 0u
+                    ? custom_mesh->index_count / 3u
+                    : custom_mesh->vertex_count / 3u;
+                (void)snprintf(entry->name, sizeof(entry->name), "custom-mesh-%uv", custom_mesh->vertex_count);
+            }
+            entry->triangles_per_instance = (uint32_t)triangles;
+            return entry;
+        }
+        slot = (slot + 1u) % BTBH_GPU_COST_MODEL_CAPACITY;
+    }
+    return NULL;
+}
+
+void btbh_gpu_cost_record_draw(
+    BTBHGPUCostPass pass,
+    uint32_t element_count,
+    uint32_t instance_count,
+    bool static_city,
+    const BTBHGPUModel *model,
+    const BTBHGPUCustomMesh *custom_mesh
+) {
+    if (!btbh_gpu_cost_log_enabled() || btbh_gpu_cost_skips_model(model)) {
+        return;
+    }
+    const uint64_t triangles = (uint64_t)(element_count / 3u) * (uint64_t)instance_count;
+    btbh_gpu_cost_triangles[pass][static_city ? 1 : 0] += triangles;
+    btbh_gpu_cost_draws[pass][static_city ? 1 : 0] += 1u;
+    BTBHGPUCostModelEntry *entry = btbh_gpu_cost_model_entry(model, custom_mesh, static_city);
+    if (entry != NULL) {
+        entry->triangles[pass] += triangles;
+        if (pass == BTBH_GPU_COST_PASS_MAIN) {
+            entry->main_instances += instance_count;
+        }
+    }
+}
+
+static int btbh_gpu_cost_model_compare(const void *left, const void *right) {
+    const BTBHGPUCostModelEntry *a = left;
+    const BTBHGPUCostModelEntry *b = right;
+    const uint64_t total_a = a->triangles[0] + a->triangles[1] + a->triangles[2];
+    const uint64_t total_b = b->triangles[0] + b->triangles[1] + b->triangles[2];
+    return total_a < total_b ? 1 : (total_a > total_b ? -1 : 0);
+}
+
+/* Prints the models that drew the most triangles, per frame, and starts a new window. Draws of one model
+   with several primitives count each primitive's draw as instances, so main_instances is draws x instances. */
+static void btbh_gpu_cost_emit_models(void) {
+    static BTBHGPUCostModelEntry sorted[BTBH_GPU_COST_MODEL_CAPACITY];
+    uint32_t count = 0u;
+    for (uint32_t index = 0u; index < BTBH_GPU_COST_MODEL_CAPACITY; ++index) {
+        if (btbh_gpu_cost_models[index].key != NULL) {
+            sorted[count++] = btbh_gpu_cost_models[index];
+        }
+    }
+    qsort(sorted, count, sizeof(sorted[0]), btbh_gpu_cost_model_compare);
+    const double frames = (double)BTBH_GPU_COST_MODEL_FRAMES;
+    for (uint32_t index = 0u; index < count && index < BTBH_GPU_COST_MODEL_TOP; ++index) {
+        const BTBHGPUCostModelEntry *entry = &sorted[index];
+        (void)fprintf(
+            stdout,
+            "BTBH_GPU_COST_MODEL rank=%u city=%d tris_per_instance=%u main_instance_draws=%.1f "
+            "main_ktris=%.1f shadow_ktris=%.1f rc_ktris=%.1f name=%s\n",
+            index + 1u,
+            entry->static_city ? 1 : 0,
+            entry->triangles_per_instance,
+            (double)entry->main_instances / frames,
+            (double)entry->triangles[BTBH_GPU_COST_PASS_MAIN] / frames / 1000.0,
+            (double)entry->triangles[BTBH_GPU_COST_PASS_SHADOW] / frames / 1000.0,
+            (double)entry->triangles[BTBH_GPU_COST_PASS_RC_SOURCE] / frames / 1000.0,
+            entry->name
+        );
+    }
+    SDL_zeroa(btbh_gpu_cost_models);
+}
+
+void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
+    btbh_gpu_cost_model_frames += 1u;
+    if (btbh_gpu_cost_model_frames == BTBH_GPU_COST_MODEL_FRAMES) {
+        btbh_gpu_cost_model_frames = 0u;
+        btbh_gpu_cost_emit_models();
+    }
+    (void)fprintf(
+        stdout,
+        "BTBH_GPU_COST gpu_ms=%.4f "
+        "main_city_tris=%llu main_other_tris=%llu "
+        "shadow_city_tris=%llu shadow_other_tris=%llu "
+        "rc_city_tris=%llu rc_other_tris=%llu "
+        "main_city_draws=%llu main_other_draws=%llu "
+        "shadow_city_draws=%llu shadow_other_draws=%llu\n",
+        gpu_milliseconds,
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_MAIN][1],
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_MAIN][0],
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_SHADOW][1],
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_SHADOW][0],
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_RC_SOURCE][1],
+        (unsigned long long)btbh_gpu_cost_triangles[BTBH_GPU_COST_PASS_RC_SOURCE][0],
+        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_MAIN][1],
+        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_MAIN][0],
+        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_SHADOW][1],
+        (unsigned long long)btbh_gpu_cost_draws[BTBH_GPU_COST_PASS_SHADOW][0]
+    );
+    (void)fflush(stdout);
+    SDL_zeroa(btbh_gpu_cost_triangles);
+    SDL_zeroa(btbh_gpu_cost_draws);
+}
+
 static uint32_t btbh_gpu_scene_shadow_update_period(
     const BTBHGPUWindow *window,
     uint32_t shadow_index
@@ -4666,7 +4846,13 @@ static bool btbh_gpu_scene_render_directional_shadow(
             );
             const uint32_t draw_first_instance =
                 uses_fast_shadow ? 0u : batch->first_instance;
-            if (index_buffer != NULL && index_count > 0u) {
+            if (btbh_gpu_cost_skips_model(
+                    batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                        ? batch->model
+                        : NULL
+                )) {
+                /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
+            } else if (index_buffer != NULL && index_count > 0u) {
                 SDL_GPUBufferBinding index_binding;
                 SDL_zero(index_binding);
                 index_binding.buffer = index_buffer;
@@ -4692,6 +4878,20 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     draw_first_instance
                 );
             }
+            btbh_gpu_cost_record_draw(
+                BTBH_GPU_COST_PASS_SHADOW,
+                index_buffer != NULL && index_count > 0u
+                    ? index_count
+                    : vertex_count,
+                batch->instance_count,
+                batch->instance_buffer != NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? batch->model
+                    : NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? NULL
+                    : batch->custom_mesh
+            );
         }
     }
     SDL_EndGPURenderPass(pass);
@@ -4980,7 +5180,13 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             SDL_zero(vertex_binding);
             vertex_binding.buffer = vertex_buffer;
             SDL_BindGPUVertexBuffers(pass, 0u, &vertex_binding, 1u);
-            if (index_buffer != NULL && index_count > 0u) {
+            if (btbh_gpu_cost_skips_model(
+                    batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                        ? batch->model
+                        : NULL
+                )) {
+                /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
+            } else if (index_buffer != NULL && index_count > 0u) {
                 SDL_GPUBufferBinding index_binding;
                 SDL_zero(index_binding);
                 index_binding.buffer = index_buffer;
@@ -5006,6 +5212,20 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     batch->first_instance
                 );
             }
+            btbh_gpu_cost_record_draw(
+                BTBH_GPU_COST_PASS_RC_SOURCE,
+                index_buffer != NULL && index_count > 0u
+                    ? index_count
+                    : vertex_count,
+                batch->instance_count,
+                batch->instance_buffer != NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? batch->model
+                    : NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? NULL
+                    : batch->custom_mesh
+            );
         }
     }
     SDL_EndGPURenderPass(pass);
@@ -6948,7 +7168,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &vertex_binding,
                 1u
             );
-            if (index_buffer != NULL && index_count > 0u) {
+            if (btbh_gpu_cost_skips_model(
+                    batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                        ? batch->model
+                        : NULL
+                )) {
+                /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
+            } else if (index_buffer != NULL && index_count > 0u) {
                 SDL_GPUBufferBinding index_binding;
                 SDL_zero(index_binding);
                 index_binding.buffer = index_buffer;
@@ -6974,6 +7200,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     batch->first_instance
                 );
             }
+            btbh_gpu_cost_record_draw(
+                BTBH_GPU_COST_PASS_MAIN,
+                index_buffer != NULL && index_count > 0u
+                    ? index_count
+                    : vertex_count,
+                batch->instance_count,
+                batch->instance_buffer != NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? batch->model
+                    : NULL,
+                batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                    ? NULL
+                    : batch->custom_mesh
+            );
             primitive_draw_count += 1u;
         }
         }

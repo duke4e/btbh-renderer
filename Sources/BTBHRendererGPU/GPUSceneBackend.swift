@@ -264,6 +264,16 @@ final class GPUSceneBackend: SceneBackend {
         }
         return value
     }()
+    /// A measurement of the impostor idea's ceiling (2026-10-16), off by default: with `BTBH_LOD_SKIP_PIXELS=<n>`,
+    /// persistent ranges with an LOD that span fewer than n pixels are not drawn at all, nor are the off-screen
+    /// ranges with an LOD that would only cast sun shadow, as if a free impostor drew them.
+    static let lodSkipPixelDiameter: Float = {
+        guard let value = ProcessInfo.processInfo.environment["BTBH_LOD_SKIP_PIXELS"]
+            .flatMap(Float.init), value.isFinite, value > 0 else {
+            return 0
+        }
+        return value
+    }()
     /// The projection's planes (`viewProjection(camera:viewport:)`).
     static let cameraNearPlane: Float = 0.01
     static let cameraFarPlane: Float = 1_000_000
@@ -517,7 +527,8 @@ final class GPUSceneBackend: SceneBackend {
                         )
                     }
                     guard intersectsFrustum(range.bounds) else {
-                        if castsIntoSunShadow(range.bounds) {
+                        if castsIntoSunShadow(range.bounds),
+                           Self.lodSkipPixelDiameter == 0 || lodGeometry == nil {
                             shadowOnlyPersistentRanges.append(range)
                         }
                         continue
@@ -525,6 +536,10 @@ final class GPUSceneBackend: SceneBackend {
                     logicalInstanceCount += range.count
                     if let lod = draw.lod, lodGeometry != nil,
                        usesLOD(range: range, maximumPixelDiameter: lod.maximumPixelDiameter) {
+                        if Self.lodSkipPixelDiameter > 0,
+                           usesLOD(range: range, maximumPixelDiameter: Self.lodSkipPixelDiameter) {
+                            continue
+                        }
                         visibleLODPersistentRanges.append(range)
                     } else {
                         visiblePersistentRanges.append(range)

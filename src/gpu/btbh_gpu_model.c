@@ -1936,6 +1936,24 @@ static bool btbh_gpu_model_decode_assimp_indices(
     return true;
 }
 
+void btbh_gpu_model_set_debug_name(BTBHGPUModel *model, const char *path) {
+    if (model == NULL || path == NULL) {
+        return;
+    }
+    const char *start = path;
+    int separators = 0;
+    for (const char *cursor = path + strlen(path); cursor > path; --cursor) {
+        if (cursor[-1] == '/' || cursor[-1] == '\\') {
+            separators += 1;
+            if (separators == 2) {
+                start = cursor;
+                break;
+            }
+        }
+    }
+    (void)snprintf(model->debug_name, sizeof(model->debug_name), "%s", start);
+}
+
 static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
     BTBHGPUWindow *window,
     const char *path,
@@ -1975,6 +1993,7 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
         btbh_gpu_model_error(report, "Could not allocate GPU model resource");
         return NULL;
     }
+    btbh_gpu_model_set_debug_name(model, path);
     model->primitives = calloc(
         primitive_count,
         sizeof(*model->primitives)
@@ -2159,6 +2178,7 @@ BTBHGPUModel *btbh_gpu_window_model_load_ex(
         btbh_gpu_model_error(report, "Could not allocate GPU model resource");
         return NULL;
     }
+    btbh_gpu_model_set_debug_name(model, path);
     model->primitives = calloc(
         primitive_count,
         sizeof(*model->primitives)
