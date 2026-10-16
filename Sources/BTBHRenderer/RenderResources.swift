@@ -1074,6 +1074,9 @@ public struct EnvironmentDescriptor: Sendable {
     public let saturation: Float
     public let radianceCascades: RadianceCascadesDescriptor
     public let fog: FogDescriptor
+    /// 0 dry ... 1 soaked: the ground and paving surface details turn glossy and a shade darker, in puddles
+    /// more than between them.
+    public let surfaceWetness: Float
 
     public init(
         backgroundColor: RenderColor,
@@ -1089,7 +1092,8 @@ public struct EnvironmentDescriptor: Sendable {
         contrast: Float = 1,
         saturation: Float = 1,
         radianceCascades: RadianceCascadesDescriptor = .off,
-        fog: FogDescriptor = .disabled
+        fog: FogDescriptor = .disabled,
+        surfaceWetness: Float = 0
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1105,6 +1109,7 @@ public struct EnvironmentDescriptor: Sendable {
         self.saturation = saturation
         self.radianceCascades = radianceCascades
         self.fog = fog
+        self.surfaceWetness = surfaceWetness.isFinite ? min(max(surfaceWetness, 0), 1) : 0
     }
 
     public static let `default` = Self(

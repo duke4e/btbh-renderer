@@ -72,6 +72,8 @@ cbuffer MaterialPBR : register(b0, space3)
     // x albedo variation, y bump height (render units), z noise cells per render unit,
     // w pattern (0 none, 1 ground, 2 grass, 3 facade)
     float4 detail_parameters;
+    // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); yzw reserved
+    float4 surface_wetness;
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
@@ -1259,6 +1261,36 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     return (ddx(bump) * r1 + ddy(bump) * r2) / face_area;
 }
 
+// Wet ground (surface_wetness.x, the game's city at night): the ground and paving details turn glossy and a
+// shade darker, in soft puddles a few render units across more than between them, so lights glint on the
+// street. Only level faces get wet: the face normal from the position's derivatives, as the surface detail
+// takes it (the interpolated normal does not say which way the ground faces). Returns the wet roughness.
+float apply_surface_wetness(
+    FragmentInput input,
+    inout float4 albedo,
+    float roughness
+)
+{
+    const float wetness = saturate(surface_wetness.x);
+    const uint pattern = (uint)(detail_parameters.w + 0.5f);
+    if (wetness <= 0.0f || (pattern != 1u && pattern != 4u))
+    {
+        return roughness;
+    }
+    const float3 face = cross(ddx(input.world_position), ddy(input.world_position));
+    const float face_area = length(face);
+    const float level = face_area > 0.0f ? abs(face.y) / face_area : 0.0f;
+    const float up = saturate((level - 0.6f) * 2.5f);
+    const float puddle = smoothstep(
+        0.42f,
+        0.68f,
+        btbh_detail_noise(input.world_position.xz * 0.35f + 3.1f)
+    );
+    const float wet = wetness * up * lerp(0.6f, 1.0f, puddle);
+    albedo.rgb *= lerp(1.0f, 0.7f, wet);
+    return lerp(roughness, lerp(0.22f, 0.06f, puddle), wet);
+}
+
 FragmentOutput shade_fragment(FragmentInput input)
 {
     const float lod_bias = procedural_controls.w;
@@ -1325,7 +1357,11 @@ FragmentOutput shade_fragment(FragmentInput input)
         flip_normal ? -geometric_normal : geometric_normal;
     const float occlusion =
         saturate(orm.r * material_factors.y);
-    const float roughness = saturate(orm.g * material_factors.z);
+    const float roughness = apply_surface_wetness(
+        input,
+        albedo_sample,
+        saturate(orm.g * material_factors.z)
+    );
     const float metalness = saturate(orm.b * material_factors.w);
     if (unlit_enabled != 0u)
     {

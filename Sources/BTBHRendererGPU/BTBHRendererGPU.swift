@@ -920,6 +920,8 @@ struct GPUSceneLightingProbe {
     /// The share of the sun, fill and sky light the spot's near occluder takes, and how near.
     let spotOccluderShadowStrength: Float
     let spotOccluderShadowReach: Float
+    /// `EnvironmentDescriptor.surfaceWetness`.
+    let surfaceWetness: Float
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
@@ -948,8 +950,10 @@ struct GPUSceneLightingProbe {
         directionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         spotShadow: GPUSceneDirectionalShadowProbe = .disabled,
-        heroOmniShadow: GPUSceneOmniShadowProbe = .disabled
+        heroOmniShadow: GPUSceneOmniShadowProbe = .disabled,
+        surfaceWetness: Float = 0
     ) {
+        self.surfaceWetness = surfaceWetness
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
         self.environment = environment
@@ -2147,6 +2151,7 @@ public final class GPUWindowProbe {
         nativeLighting.ambient_blue =
             GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.b)
         nativeLighting.ambient_energy = lighting.ambientEnergy
+        nativeLighting.surface_wetness = lighting.surfaceWetness
         nativeLighting.directional_x = lighting.directionalDirection.x
         nativeLighting.directional_y = lighting.directionalDirection.y
         nativeLighting.directional_z = lighting.directionalDirection.z

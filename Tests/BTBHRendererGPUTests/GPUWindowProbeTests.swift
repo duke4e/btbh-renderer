@@ -3202,8 +3202,9 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 4.0f"))
 
-        // The fragment uniform block carries the detail right after the procedural sky controls, in the
-        // shader and in the native struct alike (both stop before the shadow block when shadows are off).
+        // The fragment uniform block carries the detail right after the procedural sky controls and the surface
+        // wetness right after the detail, in the shader and in the native struct alike (both stop before the
+        // shadow block when shadows are off).
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent("shaders/gpu/production_model.frag.hlsl"),
             encoding: .utf8
@@ -3213,12 +3214,31 @@ final class GPUWindowProbeTests: XCTestCase {
             encoding: .utf8
         ).replacingOccurrences(of: "\r\n", with: "\n")
         XCTAssertTrue(shader.contains("float4 procedural_controls;\n"))
-        XCTAssertTrue(shader.contains("    float4 detail_parameters;\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        XCTAssertTrue(shader.contains("    float4 detail_parameters;\n"))
+        XCTAssertTrue(shader.contains("    float4 surface_wetness;\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        XCTAssertLessThan(try XCTUnwrap(shader.range(of: "float4 detail_parameters;")).lowerBound,
+                          try XCTUnwrap(shader.range(of: "float4 surface_wetness;")).lowerBound)
         XCTAssertTrue(scene.contains(
             "    float procedural_controls[4];\n    float detail_parameters[4];\n"
-                + "    float directional_shadow_view_projection[16];"
+        ))
+        XCTAssertTrue(scene.contains(
+            "    float surface_wetness[4];\n    float directional_shadow_view_projection[16];"
         ))
         XCTAssertTrue(shader.contains("const float3 detail_gradient = apply_surface_detail(input, albedo_sample);"))
+        // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
+        XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
+        XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 4u)"))
+        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
+        func environment(wetness: Float) -> EnvironmentDescriptor {
+            EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+                                  ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
+                                  tonemapWhite: 1, surfaceWetness: wetness)
+        }
+        XCTAssertEqual(environment(wetness: 0.4).surfaceWetness, 0.4)
+        XCTAssertEqual(environment(wetness: 3).surfaceWetness, 1)
+        XCTAssertEqual(environment(wetness: -1).surfaceWetness, 0)
+        XCTAssertEqual(environment(wetness: .nan).surfaceWetness, 0)
+        XCTAssertEqual(EnvironmentDescriptor.default.surfaceWetness, 0)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

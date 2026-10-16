@@ -106,6 +106,8 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float sun_direction_size[4];
     float procedural_controls[4];
     float detail_parameters[4];
+    /* x the surface wetness (BTBHGPUSceneLighting), yzw reserved. */
+    float surface_wetness[4];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
@@ -6700,6 +6702,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->detail_parameters,
                 sizeof(fragment_uniforms.detail_parameters)
             );
+            fragment_uniforms.surface_wetness[0] =
+                isfinite(lighting->surface_wetness)
+                    ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
+                    : 0.0f;
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

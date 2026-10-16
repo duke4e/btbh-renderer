@@ -741,7 +741,10 @@ typedef struct BTBHGPUSceneLighting {
     float sun_direction_z;
     float sun_size_radians;
     float sun_curve;
-    float ibl_reserved[3];
+    /* 0 dry ... 1 soaked: the ground and paving surface details (patterns 1 and 4) turn glossy and a
+       shade darker, in puddles more than between them (the game's city at night). */
+    float surface_wetness;
+    float ibl_reserved[2];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
