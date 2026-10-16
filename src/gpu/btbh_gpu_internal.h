@@ -241,6 +241,12 @@ void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device);
 /* In a split frame: submits `*command` (the passes of `finished_group`), waits for it and acquires the next
    command buffer into `*command`. False, with `*command` NULL, when the GPU failed either. Otherwise a no-op. */
 bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group);
+/* With the cost log, after each measured frame: keeps the GPU busy (`BTBH_GPU_COST_WARM_MS`, default 12) so the
+   driver does not lower its clocks while the CPU prepares the next frame; `btbh_gpu_cost_wait_warm` waits for it
+   before measured work is submitted. */
+void btbh_gpu_cost_warm(SDL_GPUDevice *device);
+void btbh_gpu_cost_wait_warm(void);
+void btbh_gpu_cost_release_warm(void);
 void btbh_gpu_window_release_frame_telemetry(
     BTBHGPUWindow *window
 );

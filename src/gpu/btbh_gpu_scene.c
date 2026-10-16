@@ -619,11 +619,137 @@ static double btbh_gpu_cost_group_milliseconds[BTBH_GPU_COST_GROUP_COUNT];
 /* The radiance-cascade emitters (gameplay lights) the frame drew into the source field and the direct light. */
 static uint32_t btbh_gpu_cost_rc_emitters;
 
+/* Warm clocks (2026-10-17). Waiting for every frame leaves the GPU idle while the CPU prepares the next one
+   (about 60 % of a fight's frame on the RTX 3070 Ti), and the driver lowers its clocks at that load: a boss run
+   measured 1605 MHz, the same run without enemies 1065 MHz with the memory at half its speed, so a cheaper frame
+   looked hardly cheaper. After each measured frame the log therefore keeps the GPU busy for about
+   `BTBH_GPU_COST_WARM_MS` (default 12, 0 = off) with blits between two scratch textures, and the next frame waits
+   for the GPU to go idle before it submits anything, so they never overlap the measured work. */
+#define BTBH_GPU_COST_WARM_SIZE 2048u
+#define BTBH_GPU_COST_WARM_CALIBRATION_BLITS 64u
+static double btbh_gpu_cost_warm_target_milliseconds = -1.0;
+static SDL_GPUDevice *btbh_gpu_cost_warm_device;
+static SDL_GPUTexture *btbh_gpu_cost_warm_textures[2];
+static SDL_GPUFence *btbh_gpu_cost_warm_fence;
+static double btbh_gpu_cost_warm_blit_milliseconds;
+static uint32_t btbh_gpu_cost_warm_frames;
+
+static double btbh_gpu_cost_warm_milliseconds(void) {
+    if (btbh_gpu_cost_warm_target_milliseconds < 0.0) {
+        const char *value = SDL_getenv("BTBH_GPU_COST_WARM_MS");
+        const double parsed = value != NULL && value[0] != '\0' ? SDL_strtod(value, NULL) : 12.0;
+        btbh_gpu_cost_warm_target_milliseconds = parsed >= 0.0 && parsed <= 100.0 ? parsed : 12.0;
+    }
+    return btbh_gpu_cost_warm_target_milliseconds;
+}
+
+static SDL_GPUFence *btbh_gpu_cost_submit_warm_blits(SDL_GPUDevice *device, uint32_t count) {
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    if (command == NULL) {
+        return NULL;
+    }
+    SDL_GPUBlitInfo blit;
+    SDL_zero(blit);
+    blit.source.w = BTBH_GPU_COST_WARM_SIZE;
+    blit.source.h = BTBH_GPU_COST_WARM_SIZE;
+    blit.destination.w = BTBH_GPU_COST_WARM_SIZE;
+    blit.destination.h = BTBH_GPU_COST_WARM_SIZE;
+    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blit.filter = SDL_GPU_FILTER_LINEAR;
+    for (uint32_t index = 0u; index < count; ++index) {
+        blit.source.texture = btbh_gpu_cost_warm_textures[index & 1u];
+        blit.destination.texture = btbh_gpu_cost_warm_textures[(index + 1u) & 1u];
+        SDL_BlitGPUTexture(command, &blit);
+    }
+    return SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+}
+
+void btbh_gpu_cost_wait_warm(void) {
+    if (btbh_gpu_cost_warm_fence == NULL) {
+        return;
+    }
+    (void)SDL_WaitForGPUFences(btbh_gpu_cost_warm_device, true, &btbh_gpu_cost_warm_fence, 1u);
+    SDL_ReleaseGPUFence(btbh_gpu_cost_warm_device, btbh_gpu_cost_warm_fence);
+    btbh_gpu_cost_warm_fence = NULL;
+}
+
+void btbh_gpu_cost_warm(SDL_GPUDevice *device) {
+    if (device == NULL || btbh_gpu_cost_warm_milliseconds() <= 0.0) {
+        return;
+    }
+    btbh_gpu_cost_wait_warm();
+    if (btbh_gpu_cost_warm_textures[0] == NULL) {
+        SDL_GPUTextureCreateInfo info;
+        SDL_zero(info);
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        info.width = BTBH_GPU_COST_WARM_SIZE;
+        info.height = BTBH_GPU_COST_WARM_SIZE;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        btbh_gpu_cost_warm_device = device;
+        btbh_gpu_cost_warm_textures[0] = SDL_CreateGPUTexture(device, &info);
+        btbh_gpu_cost_warm_textures[1] = SDL_CreateGPUTexture(device, &info);
+        if (btbh_gpu_cost_warm_textures[0] == NULL || btbh_gpu_cost_warm_textures[1] == NULL) {
+            btbh_gpu_cost_release_warm();
+            btbh_gpu_cost_warm_target_milliseconds = 0.0;
+            return;
+        }
+    }
+    /* The blits' cost, measured now and every 600 frames: at first the GPU may still run at idle clocks. */
+    if (btbh_gpu_cost_warm_frames % BTBH_GPU_COST_MODEL_FRAMES == 0u) {
+        const uint64_t started_ticks = SDL_GetTicksNS();
+        btbh_gpu_cost_warm_fence =
+            btbh_gpu_cost_submit_warm_blits(device, BTBH_GPU_COST_WARM_CALIBRATION_BLITS);
+        if (btbh_gpu_cost_warm_fence == NULL) {
+            btbh_gpu_cost_release_warm();
+            btbh_gpu_cost_warm_target_milliseconds = 0.0;
+            return;
+        }
+        btbh_gpu_cost_wait_warm();
+        btbh_gpu_cost_warm_blit_milliseconds = SDL_max(
+            (double)(SDL_GetTicksNS() - started_ticks) / 1000000.0 /
+                (double)BTBH_GPU_COST_WARM_CALIBRATION_BLITS,
+            0.001
+        );
+        (void)fprintf(
+            stdout,
+            "BTBH_GPU_COST_WARM blit_ms=%.4f target_ms=%.1f\n",
+            btbh_gpu_cost_warm_blit_milliseconds,
+            btbh_gpu_cost_warm_milliseconds()
+        );
+    }
+    btbh_gpu_cost_warm_frames += 1u;
+    const double blits = btbh_gpu_cost_warm_milliseconds() / btbh_gpu_cost_warm_blit_milliseconds;
+    btbh_gpu_cost_warm_fence = btbh_gpu_cost_submit_warm_blits(
+        device,
+        (uint32_t)SDL_clamp(blits, 1.0, 20000.0)
+    );
+}
+
+void btbh_gpu_cost_release_warm(void) {
+    if (btbh_gpu_cost_warm_device == NULL) {
+        return;
+    }
+    btbh_gpu_cost_wait_warm();
+    for (uint32_t index = 0u; index < 2u; ++index) {
+        if (btbh_gpu_cost_warm_textures[index] != NULL) {
+            SDL_ReleaseGPUTexture(btbh_gpu_cost_warm_device, btbh_gpu_cost_warm_textures[index]);
+            btbh_gpu_cost_warm_textures[index] = NULL;
+        }
+    }
+    btbh_gpu_cost_warm_device = NULL;
+}
+
 void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
     btbh_gpu_cost_split_device = NULL;
     if (!btbh_gpu_cost_log_enabled()) {
         return;
     }
+    /* The warming blits and any upload submitted since end before the frame's first measured submit. */
+    btbh_gpu_cost_wait_warm();
+    (void)SDL_WaitForGPUIdle(device);
     SDL_zeroa(btbh_gpu_cost_group_milliseconds);
     btbh_gpu_cost_frame_serial += 1u;
     /* About every other frame, but in the golden-ratio sequence ({n / phi} >= 0.5), which has no period: work
@@ -8529,6 +8655,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             ? window->device->gpu
             : NULL;
     if (device != NULL) {
+        btbh_gpu_cost_release_warm();
         btbh_gpu_radiance_cascades_runtime_release(
             device,
             &window->scene_runtime->radiance_cascades

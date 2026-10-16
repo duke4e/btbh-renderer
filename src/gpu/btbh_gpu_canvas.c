@@ -472,6 +472,7 @@ bool btbh_gpu_window_finish_pending_frame(
     }
     bool result;
     if (must_submit && btbh_gpu_cost_log_enabled()) {
+        btbh_gpu_cost_wait_warm();
         const uint64_t submit_started_ticks = SDL_GetTicksNS();
         SDL_GPUFence *fence =
             SDL_SubmitGPUCommandBufferAndAcquireFence(command);
@@ -488,6 +489,7 @@ bool btbh_gpu_window_finish_pending_frame(
                 1000000.0
             );
             SDL_ReleaseGPUFence(window->device->gpu, fence);
+            btbh_gpu_cost_warm(window->device->gpu);
         }
     } else if (submit &&
         (window->frame_telemetry_enabled ||
