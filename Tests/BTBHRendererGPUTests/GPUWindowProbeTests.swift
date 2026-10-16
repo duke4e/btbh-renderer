@@ -3227,7 +3227,8 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("const float3 detail_gradient = apply_surface_detail(input, albedo_sample);"))
         // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
-        XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 4u)"))
+        XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u)"))
+        XCTAssertTrue(shader.contains("1.0f + 2.5f * saturate(surface_wetness.x)"))
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
         func environment(wetness: Float) -> EnvironmentDescriptor {
             EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,

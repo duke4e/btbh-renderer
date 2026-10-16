@@ -1250,7 +1250,10 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     }
     albedo.rgb *= max(tint, float3(0.0f, 0.0f, 0.0f));
 
-    const float bump = height * detail_parameters.y;
+    // Wet streets and walls (surface_wetness.x) show their grain up to 3.5 times as strongly, so the
+    // light catches it; lawns keep theirs.
+    const float wet_bump = pattern == 2u ? 1.0f : 1.0f + 2.5f * saturate(surface_wetness.x);
+    const float bump = height * detail_parameters.y * wet_bump;
     // With the face normal the determinant is the pixel footprint area itself.
     const float3 r1 = cross(position_dy, face_normal);
     const float3 r2 = cross(face_normal, position_dx);
@@ -1273,13 +1276,20 @@ float apply_surface_wetness(
 {
     const float wetness = saturate(surface_wetness.x);
     const uint pattern = (uint)(detail_parameters.w + 0.5f);
-    if (wetness <= 0.0f || (pattern != 1u && pattern != 4u))
+    if (wetness <= 0.0f || (pattern != 1u && pattern != 3u && pattern != 4u))
     {
         return roughness;
     }
     const float3 face = cross(ddx(input.world_position), ddy(input.world_position));
     const float face_area = length(face);
     const float level = face_area > 0.0f ? abs(face.y) / face_area : 0.0f;
+    if (pattern == 3u)
+    {
+        // Walls darken a little and turn semi-gloss, the steep faces most.
+        const float wall_wet = wetness * 0.5f * (1.0f - level);
+        albedo.rgb *= lerp(1.0f, 0.85f, wall_wet);
+        return lerp(roughness, 0.3f, wall_wet);
+    }
     const float up = saturate((level - 0.6f) * 2.5f);
     const float puddle = smoothstep(
         0.42f,

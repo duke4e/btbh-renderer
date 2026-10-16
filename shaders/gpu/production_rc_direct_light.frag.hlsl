@@ -71,7 +71,10 @@ float source_visibility(
 
 float4 main(FragmentInput input) : SV_Target0
 {
-    clip(float(input.is_spot) - 0.5f);
+    // A spot lights its forward cone. An omni source with a direct share (a street lamp) lights a round pool,
+    // brightest under the source; sources without direct light draw nothing.
+    clip(max(input.radiance.r, max(input.radiance.g, input.radiance.b)) - 0.000001f);
+    const bool spot = input.is_spot != 0u;
     const float2 source_to_receiver_cells =
         (input.field_uv - input.source_uv) * input.field_size_cell.xy;
     const float distance_cells = length(source_to_receiver_cells);
@@ -80,11 +83,13 @@ float4 main(FragmentInput input) : SV_Target0
     const float2 source_to_receiver = distance_cells > 0.0001f
         ? source_to_receiver_cells / distance_cells
         : input.forward;
-    const float angular = smoothstep(
-        input.cone_parameters.y,
-        input.cone_parameters.x,
-        dot(input.forward, source_to_receiver)
-    );
+    const float angular = spot
+        ? smoothstep(
+            input.cone_parameters.y,
+            input.cone_parameters.x,
+            dot(input.forward, source_to_receiver)
+        )
+        : 1.0f;
     const float normalized_distance = saturate(
         distance_cells / range_cells
     );
@@ -93,8 +98,9 @@ float4 main(FragmentInput input) : SV_Target0
     // Start the visible footprint ahead of the physical source. This keeps
     // sub-cell source capture from reading as a symmetric disk around the
     // carrier while retaining a feathered forward cone.
-    const float near_field = smoothstep(0.75f, 3.0f, distance_cells);
-    const float attenuation = angular * radial * near_field;
+    // An omni pool keeps its centre and falls off faster, so it reads as a pool of light, not a wash.
+    const float near_field = spot ? smoothstep(0.75f, 3.0f, distance_cells) : 1.0f;
+    const float attenuation = angular * (spot ? radial : radial * radial) * near_field;
     clip(attenuation - 0.0001f);
     const float visibility = source_visibility(
         input.field_uv,

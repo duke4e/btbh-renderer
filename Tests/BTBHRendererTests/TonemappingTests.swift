@@ -70,6 +70,8 @@ final class TonemappingTests: XCTestCase {
         XCTAssertTrue(shared.contains("btbh_pbr_neutral_tone_map"))
         XCTAssertTrue(shared.contains("btbh_aces_tone_map"))
         XCTAssertTrue(shared.contains("btbh_apply_color_adjustment"))
+        XCTAssertTrue(shared.contains("color = 0.18f * pow(max(color, 0.0f) / 0.18f, contrast);"),
+                      "contrast keeps black at black (a linear 0.5 pivot crushed dark scenes)")
         XCTAssertTrue(shared.contains("const float start_compression = 0.8f - 0.04f;"))
         XCTAssertTrue(shared.contains("return lerp(color, new_peak.xxx, desaturation_amount);"))
         XCTAssertTrue(shared.contains("lut_enabled != 0u"))

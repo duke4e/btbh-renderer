@@ -183,6 +183,33 @@ float3 evaluate_brdf(
     return (diffuse + specular) * normal_dot_light;
 }
 
+// The specular half of evaluate_brdf, times the cosine.
+float3 evaluate_specular(
+    float roughness,
+    float3 f0,
+    float3 normal,
+    float3 view,
+    float3 light
+)
+{
+    const float normal_dot_light = saturate(dot(normal, light));
+    const float normal_dot_view = max(saturate(dot(normal, view)), 0.0001f);
+    if (normal_dot_light <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float3 half_direction = normalize(view + light);
+    const float normal_dot_half = saturate(dot(normal, half_direction));
+    const float view_dot_half = saturate(dot(view, half_direction));
+    const float3 fresnel = fresnel_schlick(view_dot_half, f0);
+    const float distribution = distribution_ggx(normal_dot_half, roughness);
+    const float geometry =
+        geometry_schlick_ggx(normal_dot_view, roughness) *
+        geometry_schlick_ggx(normal_dot_light, roughness);
+    return distribution * geometry * fresnel /
+        max(4.0f * normal_dot_view * normal_dot_light, 0.0001f) * normal_dot_light;
+}
+
 [numthreads(8, 8, 1)]
 void main(uint3 dispatch_id : SV_DispatchThreadID)
 {
@@ -265,6 +292,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         return;
     }
     const float3 view = normalize(world_position(uv, 0.0f) - position);
+    // Glossy (wet) faces glint under the direct field's lights: street-lamp pools, the kaiju's lamp. The field
+    // keeps no source direction, so the light comes from overhead; dry, rough faces take none of it.
+    const float direct_gloss = saturate((0.45f - roughness) * 3.0f);
+    const float3 direct_specular = direct_gloss > 0.0f
+        ? direct_radiance * direct_gloss *
+            evaluate_specular(roughness, f0, normal, view, float3(0.0f, 1.0f, 0.0f))
+        : 0.0f;
     float3 reflected_radiance = 0.0f;
     float visibility_sum = 0.0f;
     [unroll]
@@ -325,6 +359,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
     indirect_output[dispatch_id.xy] = float4(
         emission +
             direct_diffuse * occlusion +
+            direct_specular * occlusion +
             reflected_radiance * occlusion * indirect_strength *
                 hero_omni_visibility +
             environment_diffuse * occlusion +

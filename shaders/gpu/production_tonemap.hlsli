@@ -61,7 +61,9 @@ float3 btbh_apply_color_adjustment(
     float saturation
 )
 {
-    color = (color - 0.5f) * contrast + 0.5f;
+    // Contrast scales around linear mid grey (0.18) in log space: black stays black and the darks spread
+    // instead of clipping (the old 0.5 pivot on linear values crushed a dark night at 1.22 to black).
+    color = 0.18f * pow(max(color, 0.0f) / 0.18f, contrast);
     const float luminance = dot(
         color,
         float3(0.2126f, 0.7152f, 0.0722f)

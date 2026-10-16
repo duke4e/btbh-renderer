@@ -391,6 +391,9 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(directLightFragment.contains("occlusion_texture"))
         XCTAssertTrue(directLightFragment.contains("smoothstep"))
         XCTAssertTrue(directLightFragment.contains("near_field"))
+        // An omni source with a direct share lights a round pool; only sources without direct light draw nothing.
+        XCTAssertFalse(directLightFragment.contains("clip(float(input.is_spot) - 0.5f)"))
+        XCTAssertTrue(directLightFragment.contains("spot ? radial : radial * radial"))
         XCTAssertTrue(directLightFragment.contains("field.x <= cell_size"))
         XCTAssertTrue(directLightFragment.contains("subcell_visibility"))
         XCTAssertTrue(directLightFragment.contains(
@@ -517,6 +520,7 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(holographicResolve.contains("direct_light_texture"))
         XCTAssertTrue(holographicResolve.contains("direct_peak * 0.25f"))
         XCTAssertTrue(holographicResolve.contains("direct_diffuse * occlusion"))
+        XCTAssertTrue(holographicResolve.contains("direct_specular * occlusion"))
         XCTAssertFalse(holographicResolve.contains(
             "direct_diffuse * occlusion * indirect_strength"
         ))
