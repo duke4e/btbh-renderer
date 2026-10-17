@@ -883,10 +883,12 @@ struct GPUSceneMaterialProbe: Equatable {
 
 enum GPUSceneSurfaceDetailParameters {
     /// (albedo variation, bump height, cells per render unit, pattern); disabled detail is all zero
-    /// but for a frequency of one, so the shader's pattern test skips it.
+    /// but for a frequency of one, so the shader's pattern test skips it. Glass takes no bump: its second
+    /// value is the share of panes lit at night.
     static func native(_ detail: SurfaceDetail) -> (Float, Float, Float, Float) {
         guard detail.isEnabled else { return (0, 0, 1, 0) }
-        return (detail.albedoVariation, detail.bumpHeight, detail.frequency, Float(detail.pattern.rawValue))
+        let second = detail.pattern == .glass ? min(max(detail.litShare, 0), 1) : detail.bumpHeight
+        return (detail.albedoVariation, second, detail.frequency, Float(detail.pattern.rawValue))
     }
 }
 
@@ -925,6 +927,8 @@ struct GPUSceneLightingProbe {
     /// `EnvironmentDescriptor.lamps` and `lampCoreRadius`.
     let lamps: [LampLightDescriptor]
     let lampCoreRadius: Float
+    /// `EnvironmentDescriptor.windowGlow`.
+    let windowGlow: Float
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
@@ -956,11 +960,13 @@ struct GPUSceneLightingProbe {
         heroOmniShadow: GPUSceneOmniShadowProbe = .disabled,
         surfaceWetness: Float = 0,
         lamps: [LampLightDescriptor] = [],
-        lampCoreRadius: Float = 0.3
+        lampCoreRadius: Float = 0.3,
+        windowGlow: Float = 0
     ) {
         self.surfaceWetness = surfaceWetness
         self.lamps = lamps
         self.lampCoreRadius = lampCoreRadius
+        self.windowGlow = windowGlow
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
         self.environment = environment
@@ -2159,6 +2165,7 @@ public final class GPUWindowProbe {
             GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.b)
         nativeLighting.ambient_energy = lighting.ambientEnergy
         nativeLighting.surface_wetness = lighting.surfaceWetness
+        nativeLighting.window_glow = lighting.windowGlow
         let lampCount = min(lighting.lamps.count, Int(BTBH_GPU_SCENE_MAX_LAMPS))
         nativeLighting.lamp_count = UInt32(lampCount)
         nativeLighting.lamp_core_radius = lighting.lampCoreRadius

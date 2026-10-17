@@ -237,6 +237,10 @@ public struct SurfaceDetail: Hashable, Sendable {
         /// World-aligned slabs in running bond, each a shade lighter or darker, with recessed
         /// joints (footpaths, sidewalks, plazas). A slab is one cell wide and two long.
         case paving
+        /// Flat glass (windows, curtain walls): a stronger, sharper sky reflection, the glass's own colour
+        /// half as strong, and on walls a pane per cell, each a shade apart within thin frames, with
+        /// `litShare` of them lit from inside at night (`EnvironmentDescriptor.windowGlow`). No bump.
+        case glass
     }
 
     public var pattern: Pattern
@@ -246,20 +250,24 @@ public struct SurfaceDetail: Hashable, Sendable {
     public var bumpHeight: Float
     /// Noise cells per render unit.
     public var frequency: Float
+    /// Glass only: the share of panes lit from inside at night (0...1).
+    public var litShare: Float
 
-    public init(pattern: Pattern, albedoVariation: Float, bumpHeight: Float, frequency: Float) {
+    public init(pattern: Pattern, albedoVariation: Float, bumpHeight: Float, frequency: Float, litShare: Float = 0) {
         self.pattern = pattern
         self.albedoVariation = albedoVariation
         self.bumpHeight = bumpHeight
         self.frequency = frequency
+        self.litShare = litShare
     }
 
     public static let none = Self(pattern: .none, albedoVariation: 0, bumpHeight: 0, frequency: 1)
 
+    /// Glass changes the surface's reflection even without variation or lit panes.
     public var isEnabled: Bool {
         pattern != .none && frequency > 0 && frequency.isFinite
-            && albedoVariation.isFinite && bumpHeight.isFinite
-            && (albedoVariation != 0 || bumpHeight != 0)
+            && albedoVariation.isFinite && bumpHeight.isFinite && litShare.isFinite
+            && (albedoVariation != 0 || bumpHeight != 0 || pattern == .glass)
     }
 }
 
@@ -1100,6 +1108,8 @@ public struct EnvironmentDescriptor: Sendable {
     /// lamp's light stays near full (render units).
     public let lamps: [LampLightDescriptor]
     public let lampCoreRadius: Float
+    /// The energy of the light in the glass surface detail's lit panes (`SurfaceDetail.Pattern.glass`): 0 by day.
+    public let windowGlow: Float
 
     public init(
         backgroundColor: RenderColor,
@@ -1118,7 +1128,8 @@ public struct EnvironmentDescriptor: Sendable {
         fog: FogDescriptor = .disabled,
         surfaceWetness: Float = 0,
         lamps: [LampLightDescriptor] = [],
-        lampCoreRadius: Float = 0.3
+        lampCoreRadius: Float = 0.3,
+        windowGlow: Float = 0
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1138,6 +1149,7 @@ public struct EnvironmentDescriptor: Sendable {
         self.lamps = lamps.count > LampLightDescriptor.maximumCount
             ? Array(lamps.prefix(LampLightDescriptor.maximumCount)) : lamps
         self.lampCoreRadius = lampCoreRadius.isFinite ? max(lampCoreRadius, 0) : 0
+        self.windowGlow = windowGlow.isFinite ? max(windowGlow, 0) : 0
     }
 
     public static let `default` = Self(

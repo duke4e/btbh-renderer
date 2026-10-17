@@ -980,6 +980,17 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(resolveShader.contains(
             "rc_contact_ao_strength"
         ))
+        // The contact AO is the ambient light's shadow: the scene shader writes its light's directness to the
+        // emission target's alpha (below the HRC resolve's unlit test), and direct light keeps a small share of
+        // the AO only.
+        XCTAssertTrue(resolveShader.contains(
+            "rc_contact_ao_strength * lerp(1.0f, rc_contact_ao_direct_share, directness)"
+        ))
+        XCTAssertTrue(resolveShader.contains("static const float rc_directness_scale = 0.45f;"))
+        XCTAssertTrue(modelShader.contains("static const float btbh_rc_directness_scale = 0.45f;"))
+        XCTAssertTrue(modelShader.contains(
+            "unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale"
+        ))
         XCTAssertTrue(nativeScene.contains(
             "SDL_GPUColorTargetDescription color_targets[6];"
         ))
@@ -3191,16 +3202,31 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(off.1, 0)
         XCTAssertEqual(off.2, 1)
         XCTAssertEqual(off.3, 0)
-        // The native batch check bounds the pattern: paving (4) is the last one it accepts.
+        // The native batch check bounds the pattern: glass (5) is the last one it accepts.
         let paving = GPUSceneSurfaceDetailParameters.native(
             SurfaceDetail(pattern: .paving, albedoVariation: 0.1, bumpHeight: 0.003, frequency: 10)
         )
         XCTAssertEqual(paving.3, 4)
+        // Glass takes no bump: its second value is the share of panes lit at night, clamped to 0...1, and it
+        // changes the reflection even without variation or lit panes.
+        let glass = GPUSceneSurfaceDetailParameters.native(
+            SurfaceDetail(pattern: .glass, albedoVariation: 0.1, bumpHeight: 0.5, frequency: 1.6, litShare: 0.3)
+        )
+        XCTAssertEqual(glass.0, 0.1)
+        XCTAssertEqual(glass.1, 0.3)
+        XCTAssertEqual(glass.2, 1.6)
+        XCTAssertEqual(glass.3, 5)
+        XCTAssertEqual(GPUSceneSurfaceDetailParameters.native(
+            SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2, litShare: 4)
+        ).1, 1)
+        XCTAssertTrue(SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2).isEnabled)
+        XCTAssertFalse(SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2,
+                                     litShare: .nan).isEnabled)
         let nativeScene = try String(
             contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
             encoding: .utf8
         )
-        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 4.0f"))
+        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 5.0f"))
 
         // The fragment uniform block carries the detail right after the procedural sky controls, the surface
         // wetness right after the detail and the street lamps after the wetness, in the shader and in the native
@@ -3235,12 +3261,19 @@ final class GPUWindowProbeTests: XCTestCase {
         // With the cascades on, the lamps add to their light (the emission target) instead of losing to it.
         XCTAssertTrue(shader.contains("emission + lamp_lighting,"))
         XCTAssertTrue(scene.contains("fragment_uniforms.lamp_controls[0] = (float)lamp_count;"))
-        XCTAssertTrue(shader.contains("const float3 detail_gradient = apply_surface_detail(input, albedo_sample);"))
+        XCTAssertTrue(shader.contains(
+            "const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission);"
+        ))
         // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
         XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u)"))
         XCTAssertTrue(shader.contains("1.0f + 2.5f * saturate(surface_wetness.x)"))
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
+        // The lit windows' energy rides the wetness's second component; glass panes add their light to the
+        // emission and reflect like coated glass.
+        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[1] ="))
+        XCTAssertTrue(shader.contains("emission += btbh_window_light(cell) * inside;"))
+        XCTAssertTrue(shader.contains("? btbh_glass_reflectance : 0.0f"))
         func environment(wetness: Float) -> EnvironmentDescriptor {
             EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
                                   ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
@@ -3262,6 +3295,16 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(lit.lamps.count, LampLightDescriptor.maximumCount)
         XCTAssertEqual(lit.lampCoreRadius, 0)
         XCTAssertTrue(EnvironmentDescriptor.default.lamps.isEmpty)
+        // The window glow is never negative.
+        func glowing(_ glow: Float) -> EnvironmentDescriptor {
+            EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+                                  ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
+                                  tonemapWhite: 1, windowGlow: glow)
+        }
+        XCTAssertEqual(glowing(0.8).windowGlow, 0.8)
+        XCTAssertEqual(glowing(-1).windowGlow, 0)
+        XCTAssertEqual(glowing(.nan).windowGlow, 0)
+        XCTAssertEqual(EnvironmentDescriptor.default.windowGlow, 0)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

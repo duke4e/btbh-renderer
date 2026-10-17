@@ -106,7 +106,7 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float sun_direction_size[4];
     float procedural_controls[4];
     float detail_parameters[4];
-    /* x the surface wetness (BTBHGPUSceneLighting), yzw reserved. */
+    /* x the surface wetness, y the window glow (BTBHGPUSceneLighting), zw reserved. */
     float surface_wetness[4];
     /* x the street lamps in use, y their core radius (BTBHGPUSceneLighting), zw reserved. */
     float lamp_controls[4];
@@ -3705,7 +3705,7 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->detail_parameters[3]) &&
             /* SurfaceDetail.Pattern: none, ground, grass, facade, paving. */
             batch->detail_parameters[3] >= 0.0f &&
-            batch->detail_parameters[3] <= 4.0f &&
+            batch->detail_parameters[3] <= 5.0f &&
             (batch->detail_parameters[3] < 0.5f ||
              batch->detail_parameters[2] > 0.0f) &&
             (batch->albedo_texture == NULL ||
@@ -4264,7 +4264,9 @@ bool btbh_gpu_scene_lighting_valid(
           lighting->spot_shadow_near >= lighting->spot_range)) ||
         lighting->lamp_count > BTBH_GPU_SCENE_MAX_LAMPS ||
         !isfinite(lighting->lamp_core_radius) ||
-        lighting->lamp_core_radius < 0.0f) {
+        lighting->lamp_core_radius < 0.0f ||
+        !isfinite(lighting->window_glow) ||
+        lighting->window_glow < 0.0f) {
         return false;
     }
     for (uint32_t lamp = 0u; lamp < lighting->lamp_count; lamp += 1u) {
@@ -6724,6 +6726,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             fragment_uniforms.surface_wetness[0] =
                 isfinite(lighting->surface_wetness)
                     ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
+                    : 0.0f;
+            fragment_uniforms.surface_wetness[1] =
+                isfinite(lighting->window_glow)
+                    ? fmaxf(lighting->window_glow, 0.0f)
                     : 0.0f;
             {
                 const uint32_t lamp_count =

@@ -73,9 +73,11 @@ cbuffer MaterialPBR : register(b0, space3)
     // upscaler runs, so textures and the surface detail keep the output size's detail; 0 otherwise)
     float4 procedural_controls;
     // x albedo variation, y bump height (render units), z noise cells per render unit,
-    // w pattern (0 none, 1 ground, 2 grass, 3 facade)
+    // w pattern (0 none, 1 ground, 2 grass, 3 facade, 4 paving, 5 glass: y is the share of panes lit at
+    // night instead and z panes per render unit)
     float4 detail_parameters;
-    // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); yzw reserved
+    // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); y the lit windows' energy (the glass
+    // detail's panes, 0 by day); zw reserved
     float4 surface_wetness;
     // x the street lamps in use (evaluate_lamps), y their core radius (render units); zw reserved
     float4 lamp_controls;
@@ -1176,6 +1178,12 @@ FragmentOutput fragment_output(
 }
 
 #if BTBH_RC_MATERIAL_OUTPUT
+/* The emission target's alpha marks unlit materials (1). A lit one's alpha is its light's directness (the share
+   of it the sun and the spot cast) times this, below the HRC resolve's unlit test (0.5): the SSAO resolve's
+   contact AO leaves direct light alone (rc_directness_scale there). */
+static const float btbh_rc_directness_scale = 0.45f;
+static const float3 btbh_rc_luma = float3(0.2126f, 0.7152f, 0.0722f);
+
 FragmentOutput rc_material_output(
     float4 lit_color,
     float4 albedo,
@@ -1184,6 +1192,8 @@ FragmentOutput rc_material_output(
     float occlusion,
     float roughness,
     float metalness,
+    float3 f0,
+    float directness,
     bool unlit
 )
 {
@@ -1200,12 +1210,12 @@ FragmentOutput rc_material_output(
         unlit ? 1.0f : occlusion
     );
     output.ambient_specular = float4(
-        lerp(float3(0.04f, 0.04f, 0.04f), albedo.rgb, metalness),
+        f0,
         roughness
     );
     output.emission = float4(
         source_emission,
-        unlit ? 1.0f : 0.0f
+        unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale
     );
     output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
@@ -1229,13 +1239,80 @@ float btbh_paving_slab(float2 value, float footprint, out float shade)
     return smoothstep(joint, joint + 0.1f + footprint, edge);
 }
 
+// Glass (detail pattern 5) reflects like coated glass, and its own colour shows half as strongly: what lies
+// behind a window is darker than the wall around it.
+static const float btbh_glass_reflectance = 0.12f;
+static const float btbh_glass_diffuse = 0.5f;
+
+// A glass wall's pane: a world-space grid of detail_parameters.z panes per render unit, across the wall and up
+// it (a storey and a bay each). Returns false on level glass (roofs, skylights), which has no panes. `inside` is
+// 1 within a pane and 0 on its frame; frames widen with the pixel footprint (panes per pixel), then fade into
+// the glass, so far growth stages do not shimmer.
+bool btbh_glass_pane(
+    float3 world_position,
+    float3 face_normal,
+    float footprint,
+    out float2 cell,
+    out float inside
+)
+{
+    cell = float2(0.0f, 0.0f);
+    inside = 1.0f;
+    if (length(face_normal.xz) < 0.5f)
+    {
+        return false;
+    }
+    // The wall's heading snaps to one of 16: the face normal from the position derivatives wobbles by a fraction
+    // of a degree from pixel to pixel, which a few hundred render units from the origin moved the pane edges by
+    // whole panes (ragged lit windows). A heading up to 11 degrees off stretches the panes by 2 % at most.
+    const float heading = round(atan2(face_normal.z, face_normal.x) * (8.0f / 3.14159265f))
+        * (3.14159265f / 8.0f);
+    const float2 across = float2(-sin(heading), cos(heading));
+    const float2 pane = float2(
+        dot(world_position.xz, across),
+        world_position.y
+    ) * detail_parameters.z;
+    cell = floor(pane);
+    const float2 local = frac(pane);
+    const float edge = min(min(local.x, 1.0f - local.x), min(local.y, 1.0f - local.y));
+    const float frame = 0.03f + footprint * 0.5f;
+    inside = lerp(
+        1.0f,
+        smoothstep(frame, frame + 0.04f + footprint, edge),
+        saturate((0.3f - footprint) * 5.0f)
+    );
+    return true;
+}
+
+// A pane's light at night (surface_wetness.y is its energy): about detail_parameters.y of the panes are lit,
+// some storeys of a block more than others, each a warm, neutral or cool white at its own brightness.
+float3 btbh_window_light(float2 cell)
+{
+    const float energy = surface_wetness.y;
+    const float share = detail_parameters.y;
+    if (energy <= 0.0f || share <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float storey = btbh_detail_hash(float2(floor(cell.x * 0.2f), cell.y) + float2(41.0f, 13.0f));
+    if (btbh_detail_hash(cell + float2(7.0f, 29.0f)) >= share * (0.3f + 1.4f * storey))
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float tone = btbh_detail_hash(cell + float2(53.0f, 3.0f));
+    const float3 color = tone < 0.55f
+        ? float3(1.0f, 0.62f, 0.32f)
+        : (tone < 0.85f ? float3(1.0f, 0.8f, 0.58f) : float3(0.72f, 0.84f, 1.0f));
+    return color * energy * (0.5f + 0.5f * btbh_detail_hash(cell + float2(11.0f, 61.0f)));
+}
+
 // Procedural surface detail (SurfaceDetail): albedo grain, broad stains and a bump, all from world-space
 // noise. Returns the bump as a surface gradient (Mikkelsen) built from screen-space derivatives, so it
 // needs no tangent frame. The frame and the triplanar weights use the face normal of the position
 // derivatives, not the interpolated vertex normal, which some imported production map instances
 // carry nearly in the surface plane. detail_parameters is per draw, so every branch here is uniform
-// and the derivatives stay valid; it runs before any discard.
-float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
+// and the derivatives stay valid; it runs before any discard. Glass adds its lit panes to `emission`.
+float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout float3 emission)
 {
     const uint pattern = (uint)(detail_parameters.w + 0.5f);
     if (pattern == 0u)
@@ -1252,6 +1329,24 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo)
     const float3 face = cross(position_dx, position_dy);
     const float face_area = length(face);
     const float3 face_normal = face_area > 0.0f ? face / face_area : float3(0.0f, 1.0f, 0.0f);
+    if (pattern == 5u)
+    {
+        // Flat panes take no bump: each a shade apart (blinds, curtains, what lies behind it) within darker
+        // frames, and at night some lit from inside.
+        albedo.rgb *= btbh_glass_diffuse;
+        float2 cell;
+        float inside;
+        if (btbh_glass_pane(input.world_position, face_normal, footprint, cell, inside))
+        {
+            const float shade = btbh_detail_hash(cell + float2(17.0f, 5.0f)) - 0.5f;
+            albedo.rgb *= max(
+                (1.0f + detail_parameters.x * 2.0f * shade) * lerp(0.6f, 1.0f, inside),
+                0.0f
+            );
+            emission += btbh_window_light(cell) * inside;
+        }
+        return float3(0.0f, 0.0f, 0.0f);
+    }
     float height;
     float slab_shade = 0.0f;
     float joint = 0.0f;
@@ -1389,7 +1484,7 @@ FragmentOutput shade_fragment(FragmentInput input)
         mapped_normal,
         orm
     );
-    const float3 detail_gradient = apply_surface_detail(input, albedo_sample);
+    const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission);
     if (albedo_sample.a < alpha_cutoff)
     {
         discard;
@@ -1427,6 +1522,11 @@ FragmentOutput shade_fragment(FragmentInput input)
         saturate(orm.g * material_factors.z)
     );
     const float metalness = saturate(orm.b * material_factors.w);
+    // Glass (detail pattern 5) reflects like coated glass.
+    const float3 f0 = max(
+        lerp(float3(0.04f, 0.04f, 0.04f), albedo_sample.rgb, metalness),
+        (uint)(detail_parameters.w + 0.5f) == 5u ? btbh_glass_reflectance : 0.0f
+    );
     if (unlit_enabled != 0u)
     {
 #if BTBH_RC_MATERIAL_OUTPUT
@@ -1438,6 +1538,8 @@ FragmentOutput shade_fragment(FragmentInput input)
             1.0f,
             1.0f,
             metalness,
+            f0,
+            0.0f,
             true
         );
 #else
@@ -1455,11 +1557,6 @@ FragmentOutput shade_fragment(FragmentInput input)
     const float3 view = stable_normalize(
         camera_position.xyz - input.world_position,
         -normal
-    );
-    const float3 f0 = lerp(
-        float3(0.04f, 0.04f, 0.04f),
-        albedo_sample.rgb,
-        metalness
     );
 
     const float total_energy =
@@ -1479,6 +1576,8 @@ FragmentOutput shade_fragment(FragmentInput input)
             occlusion,
             roughness,
             metalness,
+            f0,
+            0.0f,
             false
         );
 #else
@@ -1552,7 +1651,7 @@ FragmentOutput shade_fragment(FragmentInput input)
     float3 lighting =
         ambient_diffuse_lighting +
         ambient_specular_lighting;
-    lighting += evaluate_directional_light(
+    const float3 sun_lighting = evaluate_directional_light(
         directional_direction_energy.xyz,
         directional_direction_energy.w,
         directional_color.rgb,
@@ -1571,6 +1670,7 @@ FragmentOutput shade_fragment(FragmentInput input)
         1.0f
 #endif
     );
+    lighting += sun_lighting;
     lighting += evaluate_directional_light(
         secondary_directional_direction_energy.xyz,
         secondary_directional_direction_energy.w,
@@ -1593,7 +1693,7 @@ FragmentOutput shade_fragment(FragmentInput input)
     /* The sun, fill and sky dim where the spot's own occluder shadows them (see
        spot_occluder_share); the spot then adds its own light, shadowed as before. */
     lighting *= 1.0f - spot_occluder;
-    lighting += evaluate_spot_light(
+    const float3 spot_lighting = evaluate_spot_light(
         input.world_position,
         albedo_sample.rgb,
         normal,
@@ -1603,6 +1703,7 @@ FragmentOutput shade_fragment(FragmentInput input)
         f0,
         spot_shadow_visibility
     );
+    lighting += spot_lighting;
     const float3 lamp_lighting = evaluate_lamps(
         input.world_position,
         albedo_sample.rgb,
@@ -1618,6 +1719,14 @@ FragmentOutput shade_fragment(FragmentInput input)
        it too, or the resolve's max() fills the shadow back in. */
     /* The street lamps ride the emission target, which the resolve adds to the cascades' light: through the
        compose's max() a lamp on dark asphalt never outshone the cascades' wash. */
+    /* The contact AO is the ambient light's shadow: it leaves the share of the rest of this light that the sun
+       and the spot cast (its directness) alone, so sunlit walls keep their sun. */
+    const float occludable_luma = dot(lighting - lamp_lighting, btbh_rc_luma);
+    const float directness = occludable_luma > 0.000001f
+        ? saturate(
+            dot(sun_lighting * (1.0f - spot_occluder) + spot_lighting, btbh_rc_luma) / occludable_luma
+        )
+        : 0.0f;
     return rc_material_output(
         float4(lighting + emission, albedo_sample.a),
         albedo_sample,
@@ -1626,6 +1735,8 @@ FragmentOutput shade_fragment(FragmentInput input)
         occlusion * (1.0f - spot_occluder),
         roughness,
         metalness,
+        f0,
+        directness,
         false
     );
 #else

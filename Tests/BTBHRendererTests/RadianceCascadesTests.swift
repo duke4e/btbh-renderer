@@ -621,9 +621,12 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(resolve.contains("float4(emission, 1.0f)"))
         XCTAssertFalse(resolve.contains("emission * occlusion"))
         XCTAssertFalse(resolve.contains("emission * indirect_strength"))
+        // A lit material's alpha is its light's directness (the contact AO's), scaled under the unlit test.
         XCTAssertTrue(material.contains(
-            "unlit ? 1.0f : 0.0f"
+            "unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale"
         ))
+        XCTAssertTrue(material.contains("static const float btbh_rc_directness_scale = 0.45f;"))
+        XCTAssertTrue(resolve.contains("emission_material.a > 0.5f"))
         XCTAssertTrue(contactAO.contains(
             "preserved_emission + occludable_lighting * contact_visibility"
         ))

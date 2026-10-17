@@ -271,10 +271,17 @@ float4 main(FragmentInput input) : SV_Target0
     if (ssao_enabled == 2u)
     {
         static const float rc_contact_ao_strength = 0.75f;
-        const float3 emission = emission_texture.Sample(
+        /* The contact AO is the ambient light's shadow: direct light (the sun's, the spot's) keeps only this
+           share of it. The scene shader writes its light's directness to the emission target's alpha, times
+           rc_directness_scale (btbh_rc_directness_scale there; unlit materials write 1). */
+        static const float rc_contact_ao_direct_share = 0.2f;
+        static const float rc_directness_scale = 0.45f;
+        const float4 emission_material = emission_texture.Sample(
             emission_sampler,
             uv
-        ).rgb;
+        );
+        const float3 emission = emission_material.rgb;
+        const float directness = saturate(emission_material.a / rc_directness_scale);
         const float3 preserved_emission = min(emission, scene);
         const float3 occludable_lighting = max(
             scene - emission,
@@ -283,7 +290,7 @@ float4 main(FragmentInput input) : SV_Target0
         const float contact_visibility = lerp(
             1.0f,
             ambient_occlusion,
-            rc_contact_ao_strength
+            rc_contact_ao_strength * lerp(1.0f, rc_contact_ao_direct_share, directness)
         );
         return float4(
             preserved_emission + occludable_lighting * contact_visibility,

@@ -1382,7 +1382,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             heroOmniShadow: heroOmniShadow,
             surfaceWetness: environment.surfaceWetness,
             lamps: environment.lamps,
-            lampCoreRadius: environment.lampCoreRadius
+            lampCoreRadius: environment.lampCoreRadius,
+            windowGlow: environment.windowGlow
         )
     }
 
