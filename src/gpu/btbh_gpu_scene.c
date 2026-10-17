@@ -4870,6 +4870,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
 
     uint32_t geometry_cursor = 0u;
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
+    SDL_GPUBuffer *bound_index_buffer = NULL;
     bool shadow_uniform_bound = false;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
@@ -5063,14 +5064,20 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 )) {
                 /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
             } else if (index_buffer != NULL && index_count > 0u) {
-                SDL_GPUBufferBinding index_binding;
-                SDL_zero(index_binding);
-                index_binding.buffer = index_buffer;
-                SDL_BindGPUIndexBuffer(
-                    pass,
-                    &index_binding,
-                    SDL_GPU_INDEXELEMENTSIZE_32BIT
-                );
+                /* SDL tracks every index bind with a scan of the buffers the command buffer used so far, and the
+                   binding outlives pipeline changes within a pass: consecutive draws of one geometry (a model's
+                   instance ranges, an enemy's batches) bind it once (2026-10-17). */
+                if (index_buffer != bound_index_buffer) {
+                    SDL_GPUBufferBinding index_binding;
+                    SDL_zero(index_binding);
+                    index_binding.buffer = index_buffer;
+                    SDL_BindGPUIndexBuffer(
+                        pass,
+                        &index_binding,
+                        SDL_GPU_INDEXELEMENTSIZE_32BIT
+                    );
+                    bound_index_buffer = index_buffer;
+                }
                 SDL_DrawGPUIndexedPrimitives(
                     pass,
                     index_count,
@@ -5218,6 +5225,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
 
     uint32_t geometry_cursor = 0u;
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
+    SDL_GPUBuffer *bound_index_buffer = NULL;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
          ++batch_index) {
@@ -5397,14 +5405,20 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 )) {
                 /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
             } else if (index_buffer != NULL && index_count > 0u) {
-                SDL_GPUBufferBinding index_binding;
-                SDL_zero(index_binding);
-                index_binding.buffer = index_buffer;
-                SDL_BindGPUIndexBuffer(
-                    pass,
-                    &index_binding,
-                    SDL_GPU_INDEXELEMENTSIZE_32BIT
-                );
+                /* SDL tracks every index bind with a scan of the buffers the command buffer used so far, and the
+                   binding outlives pipeline changes within a pass: consecutive draws of one geometry (a model's
+                   instance ranges, an enemy's batches) bind it once (2026-10-17). */
+                if (index_buffer != bound_index_buffer) {
+                    SDL_GPUBufferBinding index_binding;
+                    SDL_zero(index_binding);
+                    index_binding.buffer = index_buffer;
+                    SDL_BindGPUIndexBuffer(
+                        pass,
+                        &index_binding,
+                        SDL_GPU_INDEXELEMENTSIZE_32BIT
+                    );
+                    bound_index_buffer = index_buffer;
+                }
                 SDL_DrawGPUIndexedPrimitives(
                     pass,
                     index_count,
@@ -6807,6 +6821,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             return report->result;
         }
         SDL_GPUGraphicsPipeline *bound_model_pipeline = NULL;
+        SDL_GPUBuffer *bound_index_buffer = NULL;
         SDL_InsertGPUDebugLabel(
             command,
             !transparent_phase
@@ -7413,14 +7428,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 )) {
                 /* BTBH_GPU_COST_SKIP_MODEL: not drawn (measurement). */
             } else if (index_buffer != NULL && index_count > 0u) {
-                SDL_GPUBufferBinding index_binding;
-                SDL_zero(index_binding);
-                index_binding.buffer = index_buffer;
-                SDL_BindGPUIndexBuffer(
-                    pass,
-                    &index_binding,
-                    SDL_GPU_INDEXELEMENTSIZE_32BIT
-                );
+                /* SDL tracks every index bind with a scan of the buffers the command buffer used so far, and the
+                   binding outlives pipeline changes within a pass: consecutive draws of one geometry (a model's
+                   instance ranges, an enemy's batches) bind it once (2026-10-17). */
+                if (index_buffer != bound_index_buffer) {
+                    SDL_GPUBufferBinding index_binding;
+                    SDL_zero(index_binding);
+                    index_binding.buffer = index_buffer;
+                    SDL_BindGPUIndexBuffer(
+                        pass,
+                        &index_binding,
+                        SDL_GPU_INDEXELEMENTSIZE_32BIT
+                    );
+                    bound_index_buffer = index_buffer;
+                }
                 SDL_DrawGPUIndexedPrimitives(
                     pass,
                     index_count,

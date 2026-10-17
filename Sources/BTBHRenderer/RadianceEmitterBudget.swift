@@ -62,36 +62,56 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
             return emitters
         }
 
-        let entries = emitters.enumerated().map { index, emitter in
-            BudgetEntry(
+        // A fight passes about 4 000 sources every frame (2026-10-17: this function was 5 % of the main thread):
+        // the sort moves small keys, not whole emitters, and cells live in `BudgetCellTable`, not in SipHash
+        // dictionaries. Every sum is added in the same order as before, so the result is bit for bit the same.
+        var entries: [BudgetEntry] = []
+        entries.reserveCapacity(emitters.count)
+        for (index, emitter) in emitters.enumerated() {
+            entries.append(BudgetEntry(
                 originalIndex: index,
-                emitter: emitter,
-                cell: cell(
-                    for: emitter.position,
-                    lightClass: emitter.lightClass
-                )
-            )
-        }.sorted(by: BudgetEntry.precedes)
+                cell: cell(for: emitter.position, lightClass: emitter.lightClass),
+                stableID: emitter.stableID,
+                positionXBits: emitter.position.x.bitPattern,
+                positionZBits: emitter.position.z.bitPattern,
+                energyBits: emitter.energy.bitPattern
+            ))
+        }
+        entries.sort(by: BudgetEntry.precedes)
 
-        var cellEnergy: [BudgetCell: Float] = [:]
-        cellEnergy.reserveCapacity(entries.count)
-        for entry in entries {
-            let energy = entry.emitter.energy
-            guard energy.isFinite, energy > 0 else { continue }
-            let budget = budget(for: entry.emitter.lightClass)
-            guard budget.isUsable else { continue }
-            cellEnergy[entry.cell, default: 0] += min(
-                energy,
-                budget.maximumEmitterEnergy
-            )
+        // The sort puts each cell's sources next to each other (the cell leads the order), so a cell's energy is
+        // added up in a local, in the same order as before, and stored once.
+        var cellRanges: [(cell: BudgetCell, range: Range<Int>)] = []
+        var cellEnergy = BudgetCellTable(minimumCapacity: entries.count)
+        var start = 0
+        while start < entries.count {
+            let cell = entries[start].cell
+            var end = start + 1
+            while end < entries.count, entries[end].cell == cell { end += 1 }
+            cellRanges.append((cell, start..<end))
+            let budget = budget(for: cell.lightClass)
+            if budget.isUsable {
+                var total: Float = 0
+                var counted = false
+                for entry in entries[start..<end] {
+                    let energy = emitters[entry.originalIndex].energy
+                    guard energy.isFinite, energy > 0 else { continue }
+                    total += min(energy, budget.maximumEmitterEnergy)
+                    counted = true
+                }
+                if counted { cellEnergy.set(cell, total) }
+            }
+            start = end
         }
 
         // A 3x3 window cannot exceed its budget unless at least one cell's
         // energy, added nine times, exceeds it. Use repeated Float additions
         // to keep this bound conservative at rounding and saturated-coordinate
         // boundaries. Authored city windows are mostly below this bound.
-        var candidateWindows: Set<BudgetCell> = []
-        for (occupiedCell, energy) in cellEnergy {
+        var candidateWindows = BudgetCellTable(minimumCapacity: 64)
+        for occupiedIndex in 0..<cellEnergy.count {
+            let occupiedCell = cellEnergy.cells[occupiedIndex]
+            let energy = cellEnergy.values[occupiedIndex]
             var upperBound: Float = 0
             for _ in 0..<9 { upperBound += energy }
             guard upperBound > budget(for: occupiedCell.lightClass)
@@ -109,19 +129,21 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
             if candidateWindows.count > cellEnergy.count { break }
         }
 
-        var windowEnergy: [BudgetCell: Float] = [:]
+        var windowEnergy = BudgetCellTable(minimumCapacity: 64)
         if candidateWindows.count <= cellEnergy.count {
-            windowEnergy.reserveCapacity(candidateWindows.count)
-            for center in candidateWindows {
+            for center in candidateWindows.cells {
                 let total = Self.windowEnergy(at: center, from: cellEnergy)
                 if total > budget(for: center.lightClass).maximumNeighborhoodEnergy {
-                    windowEnergy[center] = total
+                    windowEnergy.set(center, total)
                 }
             }
         } else {
-            windowEnergy.reserveCapacity(cellEnergy.count * 4)
-            for occupiedCell in cellEnergy.keys.sorted(by: BudgetCell.precedes) {
-                let energy = cellEnergy[occupiedCell, default: 0]
+            let order = (0..<cellEnergy.count).sorted {
+                BudgetCell.precedes(cellEnergy.cells[$0], cellEnergy.cells[$1])
+            }
+            for occupiedIndex in order {
+                let occupiedCell = cellEnergy.cells[occupiedIndex]
+                let energy = cellEnergy.values[occupiedIndex]
                 for centerZOffset in Int64(-1)...Int64(1) {
                     for centerXOffset in Int64(-1)...Int64(1) {
                         let center = BudgetCell(
@@ -129,33 +151,30 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
                             x: Self.offset(occupiedCell.x, by: centerXOffset),
                             z: Self.offset(occupiedCell.z, by: centerZOffset)
                         )
-                        windowEnergy[center, default: 0] += energy
+                        windowEnergy.add(energy, to: center)
                     }
                 }
             }
         }
 
         var result = emitters
-        for entry in entries {
-            let emitter = entry.emitter
-            let energy = emitter.energy
-            let budget = budget(for: emitter.lightClass)
-            guard energy.isFinite, energy > 0, budget.isUsable else { continue }
-
-            let emitterScale = min(1, budget.maximumEmitterEnergy / energy)
+        for (cell, range) in cellRanges {
+            let budget = budget(for: cell.lightClass)
+            guard budget.isUsable else { continue }
             var neighborhoodScale: Float = 1
-            // Every 3x3 window containing this source contributes a bound.
+            // Every 3x3 window containing this cell's sources contributes a bound.
             // Taking the strictest one makes every occupied neighborhood obey
-            // the ceiling, including sources sitting on cell boundaries.
+            // the ceiling, including sources sitting on cell boundaries. The
+            // windows are the cell's, so every source in it shares the bound.
             if !windowEnergy.isEmpty {
                 for centerZOffset in Int64(-1)...Int64(1) {
                     for centerXOffset in Int64(-1)...Int64(1) {
                         let center = BudgetCell(
-                            lightClass: entry.cell.lightClass,
-                            x: Self.offset(entry.cell.x, by: centerXOffset),
-                            z: Self.offset(entry.cell.z, by: centerZOffset)
+                            lightClass: cell.lightClass,
+                            x: Self.offset(cell.x, by: centerXOffset),
+                            z: Self.offset(cell.z, by: centerZOffset)
                         )
-                        let total = windowEnergy[center, default: 0]
+                        let total = windowEnergy.value(for: center) ?? 0
                         if total > budget.maximumNeighborhoodEnergy {
                             neighborhoodScale = min(
                                 neighborhoodScale,
@@ -166,9 +185,15 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
                 }
             }
 
-            let scale = emitterScale * neighborhoodScale
-            guard scale < 1 else { continue }
-            result[entry.originalIndex] = emitter.scaledEnergy(by: scale)
+            for entry in entries[range] {
+                let emitter = emitters[entry.originalIndex]
+                let energy = emitter.energy
+                guard energy.isFinite, energy > 0 else { continue }
+                let emitterScale = min(1, budget.maximumEmitterEnergy / energy)
+                let scale = emitterScale * neighborhoodScale
+                guard scale < 1 else { continue }
+                result[entry.originalIndex] = emitter.scaledEnergy(by: scale)
+            }
         }
         return result
     }
@@ -186,14 +211,14 @@ public struct RadianceEmitterBudgetPolicy: Sendable, Equatable {
 
     private static func windowEnergy(
         at center: BudgetCell,
-        from cellEnergy: [BudgetCell: Float]
+        from cellEnergy: BudgetCellTable
     ) -> Float {
         var total: Float = 0
         // Match the scatter pass's sorted source-cell accumulation exactly.
         for x in offset(center.x, by: -1)...offset(center.x, by: 1) {
             for z in offset(center.z, by: -1)...offset(center.z, by: 1) {
                 let cell = BudgetCell(lightClass: center.lightClass, x: x, z: z)
-                guard let energy = cellEnergy[cell] else { continue }
+                guard let energy = cellEnergy.value(for: cell) else { continue }
                 // At Int64 limits, two source offsets collapse onto one center.
                 let xCopies = x == center.x && (x == .min || x == .max) ? 2 : 1
                 let zCopies = z == center.z && (z == .min || z == .max) ? 2 : 1
@@ -245,30 +270,119 @@ private struct BudgetCell: Hashable {
 
 private struct BudgetEntry {
     let originalIndex: Int
-    let emitter: RadianceEmitter
     let cell: BudgetCell
+    let stableID: UInt64
+    let positionXBits: UInt32
+    let positionZBits: UInt32
+    let energyBits: UInt32
 
     static func precedes(_ lhs: Self, _ rhs: Self) -> Bool {
-        let leftClass = lhs.emitter.lightClass.rawValue
-        let rightClass = rhs.emitter.lightClass.rawValue
+        let leftClass = lhs.cell.lightClass.rawValue
+        let rightClass = rhs.cell.lightClass.rawValue
         if leftClass != rightClass { return leftClass < rightClass }
         if lhs.cell.x != rhs.cell.x { return lhs.cell.x < rhs.cell.x }
         if lhs.cell.z != rhs.cell.z { return lhs.cell.z < rhs.cell.z }
-        if lhs.emitter.stableID != rhs.emitter.stableID {
-            return lhs.emitter.stableID < rhs.emitter.stableID
-        }
-        let leftPosition = lhs.emitter.position
-        let rightPosition = rhs.emitter.position
-        if leftPosition.x.bitPattern != rightPosition.x.bitPattern {
-            return leftPosition.x.bitPattern < rightPosition.x.bitPattern
-        }
-        if leftPosition.z.bitPattern != rightPosition.z.bitPattern {
-            return leftPosition.z.bitPattern < rightPosition.z.bitPattern
-        }
-        if lhs.emitter.energy.bitPattern != rhs.emitter.energy.bitPattern {
-            return lhs.emitter.energy.bitPattern < rhs.emitter.energy.bitPattern
-        }
+        if lhs.stableID != rhs.stableID { return lhs.stableID < rhs.stableID }
+        if lhs.positionXBits != rhs.positionXBits { return lhs.positionXBits < rhs.positionXBits }
+        if lhs.positionZBits != rhs.positionZBits { return lhs.positionZBits < rhs.positionZBits }
+        if lhs.energyBits != rhs.energyBits { return lhs.energyBits < rhs.energyBits }
         return lhs.originalIndex < rhs.originalIndex
+    }
+}
+
+/// Cells to values, open addressing with a cheap integer mix instead of a `Dictionary`'s SipHash. Iterates in
+/// insertion order (`cells`, `values`); nothing in the policy depends on that order but the dense/sparse switch.
+private struct BudgetCellTable {
+    private(set) var cells: [BudgetCell] = []
+    private(set) var values: [Float] = []
+    private var slots: [Int32]
+    private var mask: Int
+
+    init(minimumCapacity: Int) {
+        var capacity = 16
+        while capacity < minimumCapacity * 2 { capacity <<= 1 }
+        slots = Array(repeating: -1, count: capacity)
+        mask = capacity - 1
+        cells.reserveCapacity(minimumCapacity)
+        values.reserveCapacity(minimumCapacity)
+    }
+
+    var count: Int { cells.count }
+    var isEmpty: Bool { cells.isEmpty }
+
+    func value(for cell: BudgetCell) -> Float? {
+        var slot = Self.hash(cell) & mask
+        while true {
+            let stored = Int(slots[slot])
+            if stored < 0 { return nil }
+            if cells[stored] == cell { return values[stored] }
+            slot = (slot + 1) & mask
+        }
+    }
+
+    mutating func set(_ cell: BudgetCell, _ value: Float) {
+        let slot = findSlot(cell)
+        let stored = Int(slots[slot])
+        if stored >= 0 {
+            values[stored] = value
+        } else {
+            append(cell, value, at: slot)
+        }
+    }
+
+    /// `value += energy`, starting from 0 as `Dictionary`'s `[cell, default: 0] += energy` does.
+    mutating func add(_ energy: Float, to cell: BudgetCell) {
+        let slot = findSlot(cell)
+        let stored = Int(slots[slot])
+        if stored >= 0 {
+            values[stored] += energy
+        } else {
+            var value: Float = 0
+            value += energy
+            append(cell, value, at: slot)
+        }
+    }
+
+    mutating func insert(_ cell: BudgetCell) {
+        let slot = findSlot(cell)
+        if slots[slot] < 0 { append(cell, 0, at: slot) }
+    }
+
+    private func findSlot(_ cell: BudgetCell) -> Int {
+        var slot = Self.hash(cell) & mask
+        while true {
+            let stored = Int(slots[slot])
+            if stored < 0 || cells[stored] == cell { return slot }
+            slot = (slot + 1) & mask
+        }
+    }
+
+    private mutating func append(_ cell: BudgetCell, _ value: Float, at slot: Int) {
+        slots[slot] = Int32(cells.count)
+        cells.append(cell)
+        values.append(value)
+        if cells.count * 2 > slots.count { grow() }
+    }
+
+    private mutating func grow() {
+        let capacity = slots.count * 2
+        slots = Array(repeating: -1, count: capacity)
+        mask = capacity - 1
+        for (index, cell) in cells.enumerated() {
+            var slot = Self.hash(cell) & mask
+            while slots[slot] >= 0 { slot = (slot + 1) & mask }
+            slots[slot] = Int32(index)
+        }
+    }
+
+    private static func hash(_ cell: BudgetCell) -> Int {
+        var value = UInt64(bitPattern: cell.x) &* 0x9E37_79B9_7F4A_7C15
+        value ^= (UInt64(bitPattern: cell.z) &+ UInt64(cell.lightClass.rawValue) &* 0x632B_E59B_D9B4_E019)
+            &* 0xD6E8_FEB8_6659_FD93
+        value ^= value >> 32
+        value &*= 0x9E37_79B9_7F4A_7C15
+        value ^= value >> 29
+        return Int(truncatingIfNeeded: value)
     }
 }
 
