@@ -108,6 +108,10 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float detail_parameters[4];
     /* x the surface wetness (BTBHGPUSceneLighting), yzw reserved. */
     float surface_wetness[4];
+    /* x the street lamps in use, y their core radius (BTBHGPUSceneLighting), zw reserved. */
+    float lamp_controls[4];
+    float lamp_position_reach[BTBH_GPU_SCENE_MAX_LAMPS][4];
+    float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
@@ -4257,8 +4261,23 @@ bool btbh_gpu_scene_lighting_valid(
         (lighting->spot_shadow_is_omni != 0u &&
          (!isfinite(lighting->spot_shadow_near) ||
           lighting->spot_shadow_near <= 0.0f ||
-          lighting->spot_shadow_near >= lighting->spot_range))) {
+          lighting->spot_shadow_near >= lighting->spot_range)) ||
+        lighting->lamp_count > BTBH_GPU_SCENE_MAX_LAMPS ||
+        !isfinite(lighting->lamp_core_radius) ||
+        lighting->lamp_core_radius < 0.0f) {
         return false;
+    }
+    for (uint32_t lamp = 0u; lamp < lighting->lamp_count; lamp += 1u) {
+        for (size_t component = 0u; component < 4u; component += 1u) {
+            if (!isfinite(lighting->lamp_position_reach[lamp][component]) ||
+                !isfinite(lighting->lamp_color_energy[lamp][component])) {
+                return false;
+            }
+        }
+        if (lighting->lamp_position_reach[lamp][3] < 0.0f ||
+            lighting->lamp_color_energy[lamp][3] < 0.0f) {
+            return false;
+        }
     }
     for (size_t index = 0u; index < 16u; index += 1u) {
         if (!isfinite(
@@ -6706,6 +6725,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 isfinite(lighting->surface_wetness)
                     ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
                     : 0.0f;
+            {
+                const uint32_t lamp_count =
+                    lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS
+                        ? lighting->lamp_count
+                        : BTBH_GPU_SCENE_MAX_LAMPS;
+                fragment_uniforms.lamp_controls[0] = (float)lamp_count;
+                fragment_uniforms.lamp_controls[1] =
+                    lighting->lamp_core_radius;
+                if (lamp_count > 0u) {
+                    (void)memcpy(
+                        fragment_uniforms.lamp_position_reach,
+                        lighting->lamp_position_reach,
+                        sizeof(float) * 4u * lamp_count
+                    );
+                    (void)memcpy(
+                        fragment_uniforms.lamp_color_energy,
+                        lighting->lamp_color_energy,
+                        sizeof(float) * 4u * lamp_count
+                    );
+                }
+            }
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

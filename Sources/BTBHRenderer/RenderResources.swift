@@ -1059,6 +1059,25 @@ public struct FogDescriptor: Sendable, Equatable {
     public static let disabled = Self(color: .black, density: 0, startDistance: 0, maximumOpacity: 0)
 }
 
+/// A street lamp the scene lights every lit pixel with (`EnvironmentDescriptor.lamps`): a small warm point light whose
+/// light ends at `reach` (render units).
+public struct LampLightDescriptor: Hashable, Sendable {
+    public let position: RenderVec3
+    public let reach: Float
+    public let color: RenderColor
+    public let energy: Float
+
+    public init(position: RenderVec3, reach: Float, color: RenderColor, energy: Float) {
+        self.position = position
+        self.reach = reach.isFinite ? max(reach, 0) : 0
+        self.color = color
+        self.energy = energy.isFinite ? max(energy, 0) : 0
+    }
+
+    /// The most lamps a frame lights with; more are dropped (pass the nearest first).
+    public static let maximumCount = 32
+}
+
 public struct EnvironmentDescriptor: Sendable {
     public let backgroundColor: RenderColor
     public let backgroundEnergy: Float
@@ -1077,6 +1096,10 @@ public struct EnvironmentDescriptor: Sendable {
     /// 0 dry ... 1 soaked: the ground and paving surface details turn glossy and a shade darker, in puddles
     /// more than between them.
     public let surfaceWetness: Float
+    /// Street lamps, nearest first (`LampLightDescriptor.maximumCount` at most), and the radius within which each
+    /// lamp's light stays near full (render units).
+    public let lamps: [LampLightDescriptor]
+    public let lampCoreRadius: Float
 
     public init(
         backgroundColor: RenderColor,
@@ -1093,7 +1116,9 @@ public struct EnvironmentDescriptor: Sendable {
         saturation: Float = 1,
         radianceCascades: RadianceCascadesDescriptor = .off,
         fog: FogDescriptor = .disabled,
-        surfaceWetness: Float = 0
+        surfaceWetness: Float = 0,
+        lamps: [LampLightDescriptor] = [],
+        lampCoreRadius: Float = 0.3
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1110,6 +1135,9 @@ public struct EnvironmentDescriptor: Sendable {
         self.radianceCascades = radianceCascades
         self.fog = fog
         self.surfaceWetness = surfaceWetness.isFinite ? min(max(surfaceWetness, 0), 1) : 0
+        self.lamps = lamps.count > LampLightDescriptor.maximumCount
+            ? Array(lamps.prefix(LampLightDescriptor.maximumCount)) : lamps
+        self.lampCoreRadius = lampCoreRadius.isFinite ? max(lampCoreRadius, 0) : 0
     }
 
     public static let `default` = Self(

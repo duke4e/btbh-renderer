@@ -1380,7 +1380,9 @@ final class GPUResourceBackend: RenderResourceBackend {
             secondaryDirectionalShadow: secondaryDirectionalShadow,
             spotShadow: spotShadow,
             heroOmniShadow: heroOmniShadow,
-            surfaceWetness: environment.surfaceWetness
+            surfaceWetness: environment.surfaceWetness,
+            lamps: environment.lamps,
+            lampCoreRadius: environment.lampCoreRadius
         )
     }
 

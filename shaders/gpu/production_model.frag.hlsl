@@ -10,6 +10,9 @@
 #define BTBH_RC_MATERIAL_OUTPUT 0
 #endif
 
+// BTBH_GPU_SCENE_MAX_LAMPS
+#define BTBH_MAX_LAMPS 32
+
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
 
@@ -74,6 +77,12 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 detail_parameters;
     // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); yzw reserved
     float4 surface_wetness;
+    // x the street lamps in use (evaluate_lamps), y their core radius (render units); zw reserved
+    float4 lamp_controls;
+    // xyz a lamp, w the distance its light ends at
+    float4 lamp_position_reach[BTBH_MAX_LAMPS];
+    // linear rgb, w the energy
+    float4 lamp_color_energy[BTBH_MAX_LAMPS];
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
@@ -531,6 +540,51 @@ float3 evaluate_spot_light(
         f0,
         visibility
     );
+}
+
+// Street lamps: point lights through the sun's BRDF, so the surface's own normal (its bump) and roughness (its
+// wetness) shape them: soft pools on dry ground, glints and streaks on wet ground. A lamp's light stays near full
+// within its core radius and falls off with distance, smoothly to nothing at its reach.
+float3 evaluate_lamps(
+    float3 world_position,
+    float3 albedo,
+    float3 normal,
+    float3 view,
+    float roughness,
+    float metalness,
+    float3 f0
+)
+{
+    const uint count = min((uint)(lamp_controls.x + 0.5f), (uint)BTBH_MAX_LAMPS);
+    const float core_squared = max(lamp_controls.y * lamp_controls.y, 0.0001f);
+    float3 lighting = 0.0f;
+    [loop]
+    for (uint index = 0u; index < count; ++index)
+    {
+        const float4 lamp = lamp_position_reach[index];
+        const float3 delta = lamp.xyz - world_position;
+        const float distance_squared = dot(delta, delta);
+        const float reach_squared = lamp.w * lamp.w;
+        if (distance_squared >= reach_squared)
+        {
+            continue;
+        }
+        const float fade = 1.0f - distance_squared / reach_squared;
+        const float falloff = fade * fade * core_squared / (distance_squared + core_squared);
+        lighting += evaluate_directional_light(
+            -delta * rsqrt(max(distance_squared, 0.000001f)),
+            lamp_color_energy[index].w,
+            lamp_color_energy[index].rgb,
+            albedo,
+            normal,
+            view,
+            roughness,
+            metalness,
+            f0,
+            falloff
+        );
+    }
+    return lighting;
 }
 
 #if BTBH_DIRECTIONAL_SHADOWS
@@ -1412,7 +1466,8 @@ FragmentOutput shade_fragment(FragmentInput input)
         ambient_color_energy.w +
         directional_direction_energy.w +
         secondary_directional_direction_energy.w +
-        spot_direction_energy.w;
+        spot_direction_energy.w +
+        lamp_controls.x;
     if (total_energy <= 0.0f)
     {
 #if BTBH_RC_MATERIAL_OUTPUT
@@ -1548,13 +1603,25 @@ FragmentOutput shade_fragment(FragmentInput input)
         f0,
         spot_shadow_visibility
     );
+    const float3 lamp_lighting = evaluate_lamps(
+        input.world_position,
+        albedo_sample.rgb,
+        normal,
+        view,
+        roughness,
+        metalness,
+        f0
+    );
+    lighting += lamp_lighting;
 #if BTBH_RC_MATERIAL_OUTPUT
     /* The cascades' light is scaled by this occlusion: the occluder's shadow keeps its share out of
        it too, or the resolve's max() fills the shadow back in. */
+    /* The street lamps ride the emission target, which the resolve adds to the cascades' light: through the
+       compose's max() a lamp on dark asphalt never outshone the cascades' wash. */
     return rc_material_output(
         float4(lighting + emission, albedo_sample.a),
         albedo_sample,
-        emission,
+        emission + lamp_lighting,
         normal,
         occlusion * (1.0f - spot_occluder),
         roughness,

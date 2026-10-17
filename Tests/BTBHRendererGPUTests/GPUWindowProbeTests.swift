@@ -3202,9 +3202,9 @@ final class GPUWindowProbeTests: XCTestCase {
         )
         XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 4.0f"))
 
-        // The fragment uniform block carries the detail right after the procedural sky controls and the surface
-        // wetness right after the detail, in the shader and in the native struct alike (both stop before the
-        // shadow block when shadows are off).
+        // The fragment uniform block carries the detail right after the procedural sky controls, the surface
+        // wetness right after the detail and the street lamps after the wetness, in the shader and in the native
+        // struct alike (both stop before the shadow block when shadows are off).
         let shader = try String(
             contentsOf: packageRoot.appendingPathComponent("shaders/gpu/production_model.frag.hlsl"),
             encoding: .utf8
@@ -3215,15 +3215,26 @@ final class GPUWindowProbeTests: XCTestCase {
         ).replacingOccurrences(of: "\r\n", with: "\n")
         XCTAssertTrue(shader.contains("float4 procedural_controls;\n"))
         XCTAssertTrue(shader.contains("    float4 detail_parameters;\n"))
-        XCTAssertTrue(shader.contains("    float4 surface_wetness;\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        XCTAssertTrue(shader.contains("    float4 surface_wetness;\n"))
+        XCTAssertTrue(shader.contains("    float4 lamp_color_energy[BTBH_MAX_LAMPS];\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        XCTAssertTrue(shader.contains("#define BTBH_MAX_LAMPS 32"))
         XCTAssertLessThan(try XCTUnwrap(shader.range(of: "float4 detail_parameters;")).lowerBound,
                           try XCTUnwrap(shader.range(of: "float4 surface_wetness;")).lowerBound)
         XCTAssertTrue(scene.contains(
             "    float procedural_controls[4];\n    float detail_parameters[4];\n"
         ))
         XCTAssertTrue(scene.contains(
-            "    float surface_wetness[4];\n    float directional_shadow_view_projection[16];"
+            "    float surface_wetness[4];\n"
         ))
+        XCTAssertTrue(scene.contains(
+            "    float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];\n    float directional_shadow_view_projection[16];"
+        ))
+        XCTAssertEqual(Int(BTBH_GPU_SCENE_MAX_LAMPS), LampLightDescriptor.maximumCount)
+        // Street lamps light every lit pixel through the sun's BRDF, after the spot.
+        XCTAssertTrue(shader.contains("const float3 lamp_lighting = evaluate_lamps("))
+        // With the cascades on, the lamps add to their light (the emission target) instead of losing to it.
+        XCTAssertTrue(shader.contains("emission + lamp_lighting,"))
+        XCTAssertTrue(scene.contains("fragment_uniforms.lamp_controls[0] = (float)lamp_count;"))
         XCTAssertTrue(shader.contains("const float3 detail_gradient = apply_surface_detail(input, albedo_sample);"))
         // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
@@ -3240,6 +3251,17 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(environment(wetness: -1).surfaceWetness, 0)
         XCTAssertEqual(environment(wetness: .nan).surfaceWetness, 0)
         XCTAssertEqual(EnvironmentDescriptor.default.surfaceWetness, 0)
+        // Lamps: the first `maximumCount`, reach and energy never negative.
+        let lamp = LampLightDescriptor(position: .zero, reach: -1, color: .white, energy: .nan)
+        XCTAssertEqual(lamp.reach, 0)
+        XCTAssertEqual(lamp.energy, 0)
+        let many = Array(repeating: LampLightDescriptor(position: .zero, reach: 2, color: .white, energy: 1), count: 40)
+        let lit = EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white,
+                                        ambientEnergy: 0, ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false,
+                                        tonemap: .reinhard, tonemapWhite: 1, lamps: many, lampCoreRadius: -2)
+        XCTAssertEqual(lit.lamps.count, LampLightDescriptor.maximumCount)
+        XCTAssertEqual(lit.lampCoreRadius, 0)
+        XCTAssertTrue(EnvironmentDescriptor.default.lamps.isEmpty)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

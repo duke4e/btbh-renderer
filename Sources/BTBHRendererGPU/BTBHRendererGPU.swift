@@ -922,6 +922,9 @@ struct GPUSceneLightingProbe {
     let spotOccluderShadowReach: Float
     /// `EnvironmentDescriptor.surfaceWetness`.
     let surfaceWetness: Float
+    /// `EnvironmentDescriptor.lamps` and `lampCoreRadius`.
+    let lamps: [LampLightDescriptor]
+    let lampCoreRadius: Float
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
@@ -951,9 +954,13 @@ struct GPUSceneLightingProbe {
         secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe = .disabled,
         spotShadow: GPUSceneDirectionalShadowProbe = .disabled,
         heroOmniShadow: GPUSceneOmniShadowProbe = .disabled,
-        surfaceWetness: Float = 0
+        surfaceWetness: Float = 0,
+        lamps: [LampLightDescriptor] = [],
+        lampCoreRadius: Float = 0.3
     ) {
         self.surfaceWetness = surfaceWetness
+        self.lamps = lamps
+        self.lampCoreRadius = lampCoreRadius
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
         self.environment = environment
@@ -2152,6 +2159,31 @@ public final class GPUWindowProbe {
             GPUColorSpace.legacyAmbientComponent(lighting.ambientColor.b)
         nativeLighting.ambient_energy = lighting.ambientEnergy
         nativeLighting.surface_wetness = lighting.surfaceWetness
+        let lampCount = min(lighting.lamps.count, Int(BTBH_GPU_SCENE_MAX_LAMPS))
+        nativeLighting.lamp_count = UInt32(lampCount)
+        nativeLighting.lamp_core_radius = lighting.lampCoreRadius
+        if lampCount > 0 {
+            withUnsafeMutableBytes(of: &nativeLighting.lamp_position_reach) { raw in
+                let values = raw.bindMemory(to: Float.self)
+                for index in 0..<lampCount {
+                    let lamp = lighting.lamps[index]
+                    values[index * 4] = lamp.position.x
+                    values[index * 4 + 1] = lamp.position.y
+                    values[index * 4 + 2] = lamp.position.z
+                    values[index * 4 + 3] = lamp.reach
+                }
+            }
+            withUnsafeMutableBytes(of: &nativeLighting.lamp_color_energy) { raw in
+                let values = raw.bindMemory(to: Float.self)
+                for index in 0..<lampCount {
+                    let lamp = lighting.lamps[index]
+                    values[index * 4] = GPUColorSpace.linearComponent(lamp.color.r)
+                    values[index * 4 + 1] = GPUColorSpace.linearComponent(lamp.color.g)
+                    values[index * 4 + 2] = GPUColorSpace.linearComponent(lamp.color.b)
+                    values[index * 4 + 3] = lamp.energy
+                }
+            }
+        }
         nativeLighting.directional_x = lighting.directionalDirection.x
         nativeLighting.directional_y = lighting.directionalDirection.y
         nativeLighting.directional_z = lighting.directionalDirection.z

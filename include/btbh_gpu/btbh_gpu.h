@@ -8,6 +8,8 @@ extern "C" {
 #endif
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
+/* Street lamps a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */
+#define BTBH_GPU_SCENE_MAX_LAMPS 32u
 
 typedef enum BTBHGPUBackendRequest {
     BTBH_GPU_BACKEND_INVALID = 0,
@@ -757,6 +759,14 @@ typedef struct BTBHGPUSceneLighting {
     float spot_shadow_softness;
     uint32_t spot_shadow_is_omni;
     float spot_shadow_near;
+    /* Street lamps: up to BTBH_GPU_SCENE_MAX_LAMPS small point lights every lit pixel weighs through the scene's
+       BRDF with its own normal, so wet, bumpy ground glints under them (the game's city at night).
+       lamp_position_reach: xyz the lamp, w the distance its light ends at (render units); lamp_color_energy:
+       linear rgb and the energy; within lamp_core_radius a lamp's light stays near full. */
+    uint32_t lamp_count;
+    float lamp_core_radius;
+    float lamp_position_reach[BTBH_GPU_SCENE_MAX_LAMPS][4];
+    float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
