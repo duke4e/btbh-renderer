@@ -929,6 +929,8 @@ struct GPUSceneLightingProbe {
     let lampCoreRadius: Float
     /// `EnvironmentDescriptor.windowGlow`.
     let windowGlow: Float
+    /// `EnvironmentDescriptor.cloudShadows`.
+    let cloudShadows: CloudShadowDescriptor
     let directionalShadow: GPUSceneDirectionalShadowProbe
     let secondaryDirectionalShadow: GPUSceneDirectionalShadowProbe
     let spotShadow: GPUSceneDirectionalShadowProbe
@@ -961,12 +963,14 @@ struct GPUSceneLightingProbe {
         surfaceWetness: Float = 0,
         lamps: [LampLightDescriptor] = [],
         lampCoreRadius: Float = 0.3,
-        windowGlow: Float = 0
+        windowGlow: Float = 0,
+        cloudShadows: CloudShadowDescriptor = .off
     ) {
         self.surfaceWetness = surfaceWetness
         self.lamps = lamps
         self.lampCoreRadius = lampCoreRadius
         self.windowGlow = windowGlow
+        self.cloudShadows = cloudShadows
         self.ambientColor = ambientColor
         self.ambientEnergy = ambientEnergy
         self.environment = environment
@@ -2166,6 +2170,15 @@ public final class GPUWindowProbe {
         nativeLighting.ambient_energy = lighting.ambientEnergy
         nativeLighting.surface_wetness = lighting.surfaceWetness
         nativeLighting.window_glow = lighting.windowGlow
+        let clouds = lighting.cloudShadows
+        if clouds.isEnabled {
+            nativeLighting.cloud_strength = clouds.strength
+            nativeLighting.cloud_coverage = clouds.coverage
+            nativeLighting.cloud_softness = clouds.softness
+            nativeLighting.cloud_frequency = 1 / clouds.size
+            nativeLighting.cloud_height = clouds.height
+            nativeLighting.cloud_offset = (clouds.offset.x, clouds.offset.y)
+        }
         let lampCount = min(lighting.lamps.count, Int(BTBH_GPU_SCENE_MAX_LAMPS))
         nativeLighting.lamp_count = UInt32(lampCount)
         nativeLighting.lamp_core_radius = lighting.lampCoreRadius

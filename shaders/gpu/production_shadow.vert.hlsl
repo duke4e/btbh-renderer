@@ -62,6 +62,14 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
             instance.model,
             float4(surface.position, 1.0f)
         );
+        // The trees' shadows sway with them.
+        world_position.xyz += btbh_surface_wind_offset(
+            world_position.xyz,
+            mul(instance.model, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz,
+            surface_variant,
+            surface_time,
+            surface_parameters1
+        );
     }
     else
     {

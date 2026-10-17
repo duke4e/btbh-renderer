@@ -108,6 +108,11 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float detail_parameters[4];
     /* x the surface wetness, y the window glow (BTBHGPUSceneLighting), zw reserved. */
     float surface_wetness[4];
+    /* Cloud shadows (BTBHGPUSceneLighting): xy the layer's drift, z noise cells per render unit, w the share of
+       the sun they take; cloud_shape x the sky's share under clouds, y their edges' width, z the layer's
+       height, w reserved. */
+    float cloud_controls[4];
+    float cloud_shape[4];
     /* x the street lamps in use, y their core radius (BTBHGPUSceneLighting), zw reserved. */
     float lamp_controls[4];
     float lamp_position_reach[BTBH_GPU_SCENE_MAX_LAMPS][4];
@@ -4266,7 +4271,20 @@ bool btbh_gpu_scene_lighting_valid(
         !isfinite(lighting->lamp_core_radius) ||
         lighting->lamp_core_radius < 0.0f ||
         !isfinite(lighting->window_glow) ||
-        lighting->window_glow < 0.0f) {
+        lighting->window_glow < 0.0f ||
+        !isfinite(lighting->cloud_strength) ||
+        lighting->cloud_strength < 0.0f ||
+        lighting->cloud_strength > 1.0f ||
+        !isfinite(lighting->cloud_coverage) ||
+        lighting->cloud_coverage < 0.0f ||
+        lighting->cloud_coverage > 1.0f ||
+        !isfinite(lighting->cloud_softness) ||
+        lighting->cloud_softness < 0.0f ||
+        !isfinite(lighting->cloud_frequency) ||
+        lighting->cloud_frequency < 0.0f ||
+        !isfinite(lighting->cloud_height) ||
+        !isfinite(lighting->cloud_offset[0]) ||
+        !isfinite(lighting->cloud_offset[1])) {
         return false;
     }
     for (uint32_t lamp = 0u; lamp < lighting->lamp_count; lamp += 1u) {
@@ -6731,6 +6749,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 isfinite(lighting->window_glow)
                     ? fmaxf(lighting->window_glow, 0.0f)
                     : 0.0f;
+            fragment_uniforms.cloud_controls[0] = lighting->cloud_offset[0];
+            fragment_uniforms.cloud_controls[1] = lighting->cloud_offset[1];
+            fragment_uniforms.cloud_controls[2] = lighting->cloud_frequency;
+            fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;
+            fragment_uniforms.cloud_shape[0] = lighting->cloud_coverage;
+            fragment_uniforms.cloud_shape[1] = lighting->cloud_softness;
+            fragment_uniforms.cloud_shape[2] = lighting->cloud_height;
             {
                 const uint32_t lamp_count =
                     lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS

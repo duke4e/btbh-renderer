@@ -118,6 +118,13 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
             instance.model,
             float4(surface.position, 1.0f)
         );
+        world_position.xyz += btbh_surface_wind_offset(
+            world_position.xyz,
+            mul(instance.model, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz,
+            surface_variant,
+            surface_controls.x,
+            surface_parameters1
+        );
         raw_world_normal =
             transform_normal(instance_linear, surface.normal);
         raw_world_tangent =

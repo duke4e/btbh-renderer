@@ -305,6 +305,31 @@ BTBHSurfaceVertexResult btbh_apply_surface_vertex(
     return result;
 }
 
+// Wind (the collapse surface, variant 4, with surface_parameters1.y > 0: the city's trees): a world-space
+// offset along the wind's heading (surface_parameters1.zw), growing with the square of the height above the
+// tree's foot (its instance origin) times surface_parameters1.y, in gusts that roll across the city with the wind
+// and a flutter of each tree's own. The previous frame's sway is left out of the motion vectors: a few
+// centimetres a frame.
+float3 btbh_surface_wind_offset(
+    float3 world_position,
+    float3 origin,
+    uint surface_variant,
+    float time,
+    float4 surface_parameters1
+)
+{
+    if (surface_variant != 4u || surface_parameters1.y <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float2 wind = surface_parameters1.zw;
+    const float height = max(world_position.y - origin.y, 0.0f);
+    const float gust = 0.55f + 0.45f * sin(dot(origin.xz, wind) * 0.21f - time * 0.8f);
+    const float flutter = sin(time * 2.3f + origin.x * 1.37f + origin.z * 2.11f);
+    const float bend = surface_parameters1.y * height * height * (0.65f * gust + 0.35f * flutter);
+    return float3(wind.x, 0.0f, wind.y) * clamp(bend, -0.2f, 0.2f);
+}
+
 // The instance custom one frame earlier for the vertex-animated surfaces, whose animation time is in
 // the custom (dissolve x, shatter y) and advanced `seconds` since then; other surfaces keep it. Before
 // its start (time 0) a surface stands undeformed, as btbh_apply_surface_vertex draws it.

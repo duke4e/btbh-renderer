@@ -104,6 +104,13 @@ struct GPUSceneSurfaceProjection: Equatable {
                 parameters1: .init(x: 0, y: 0, z: 0, w: 0)
             )
         case "shatter":
+            // A sway (render units per square render unit of height) makes the collapsing surface a tree in the
+            // wind (`u_windX`, `u_windZ`, its heading; production_surface.hlsli btbh_surface_wind_offset).
+            let sway = max(0, float("u_sway", default: 0))
+            let windX = float("u_windX", default: 1)
+            let windZ = float("u_windZ", default: 0)
+            let windLength = (windX * windX + windZ * windZ).squareRoot()
+            let swaying = sway > 0 && sway.isFinite && windLength > 0.0001 && windLength.isFinite
             return .init(
                 variant: .shatter,
                 parameters0: .init(
@@ -114,9 +121,9 @@ struct GPUSceneSurfaceProjection: Equatable {
                 ),
                 parameters1: .init(
                     x: float("u_spinSpeed", default: 2),
-                    y: 0,
-                    z: 0,
-                    w: 0
+                    y: swaying ? sway : 0,
+                    z: swaying ? windX / windLength : 0,
+                    w: swaying ? windZ / windLength : 0
                 )
             )
         case "rim_light":
@@ -1383,7 +1390,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             surfaceWetness: environment.surfaceWetness,
             lamps: environment.lamps,
             lampCoreRadius: environment.lampCoreRadius,
-            windowGlow: environment.windowGlow
+            windowGlow: environment.windowGlow,
+            cloudShadows: environment.cloudShadows
         )
     }
 

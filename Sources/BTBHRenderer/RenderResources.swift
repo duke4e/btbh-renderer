@@ -271,6 +271,42 @@ public struct SurfaceDetail: Hashable, Sendable {
     }
 }
 
+/// Cloud shadows: a layer of soft clouds `height` render units up, drifted `offset` render units by the wind so
+/// far, takes up to `strength` (0...1) of the sun's light where its shadow falls. `coverage` is the sky's share
+/// under clouds (0...1), `softness` their edges' width, `size` a cloud's width (render units).
+public struct CloudShadowDescriptor: Hashable, Sendable {
+    public var strength: Float
+    public var coverage: Float
+    public var softness: Float
+    public var size: Float
+    public var height: Float
+    public var offset: RenderVec2
+
+    public init(strength: Float, coverage: Float, softness: Float, size: Float, height: Float, offset: RenderVec2) {
+        self.strength = strength
+        self.coverage = coverage
+        self.softness = softness
+        self.size = size
+        self.height = height
+        self.offset = offset
+    }
+
+    public static let off = Self(strength: 0, coverage: 0, softness: 0, size: 1, height: 0, offset: .zero)
+
+    /// Off unless every value is finite, the strength and size positive.
+    public var isEnabled: Bool {
+        strength > 0 && size > 0 && strength.isFinite && size.isFinite && coverage.isFinite && softness.isFinite
+            && height.isFinite && offset.x.isFinite && offset.y.isFinite
+    }
+
+    /// Strength and coverage clamped to 0...1, the softness never negative; off when not enabled.
+    var sanitized: Self {
+        guard isEnabled else { return .off }
+        return Self(strength: min(strength, 1), coverage: min(max(coverage, 0), 1), softness: max(softness, 0),
+                    size: size, height: height, offset: offset)
+    }
+}
+
 public struct MaterialDescriptor: Hashable, Sendable {
     public var albedoTexture: TextureHandle
     public var albedoColor: RenderColor
@@ -1110,6 +1146,8 @@ public struct EnvironmentDescriptor: Sendable {
     public let lampCoreRadius: Float
     /// The energy of the light in the glass surface detail's lit panes (`SurfaceDetail.Pattern.glass`): 0 by day.
     public let windowGlow: Float
+    /// Clouds drifting between the sun and the ground.
+    public let cloudShadows: CloudShadowDescriptor
 
     public init(
         backgroundColor: RenderColor,
@@ -1129,7 +1167,8 @@ public struct EnvironmentDescriptor: Sendable {
         surfaceWetness: Float = 0,
         lamps: [LampLightDescriptor] = [],
         lampCoreRadius: Float = 0.3,
-        windowGlow: Float = 0
+        windowGlow: Float = 0,
+        cloudShadows: CloudShadowDescriptor = .off
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1150,6 +1189,7 @@ public struct EnvironmentDescriptor: Sendable {
             ? Array(lamps.prefix(LampLightDescriptor.maximumCount)) : lamps
         self.lampCoreRadius = lampCoreRadius.isFinite ? max(lampCoreRadius, 0) : 0
         self.windowGlow = windowGlow.isFinite ? max(windowGlow, 0) : 0
+        self.cloudShadows = cloudShadows.sanitized
     }
 
     public static let `default` = Self(

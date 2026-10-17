@@ -79,6 +79,11 @@ cbuffer MaterialPBR : register(b0, space3)
     // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); y the lit windows' energy (the glass
     // detail's panes, 0 by day); zw reserved
     float4 surface_wetness;
+    // Cloud shadows (btbh_cloud_light): xy the cloud layer's drift (render units), z its noise cells per render
+    // unit, w the share of the sun a cloud's shadow takes (0 none); cloud_shape x the sky's share under clouds,
+    // y their edges' width, z the layer's height (render units), w reserved
+    float4 cloud_controls;
+    float4 cloud_shape;
     // x the street lamps in use (evaluate_lamps), y their core radius (render units); zw reserved
     float4 lamp_controls;
     // xyz a lamp, w the distance its light ends at
@@ -542,6 +547,30 @@ float3 evaluate_spot_light(
         f0,
         visibility
     );
+}
+
+// Cloud shadows: a layer of soft clouds cloud_shape.z render units up, drifting with the wind, shades what the
+// sun's ray from `world_position` reaches through a cloud. Three octaves of world-space noise around 0.5; the
+// sky's share under clouds (cloud_shape.x) sets the threshold, cloud_shape.y the edges' width. Returns the share
+// of the sun's light left (1 in the clear, 1 - cloud_controls.w under a cloud).
+float btbh_cloud_light(float3 world_position)
+{
+    const float strength = cloud_controls.w;
+    const float3 to_sun = -directional_direction_energy.xyz;
+    if (strength <= 0.0f || to_sun.y <= 0.05f)
+    {
+        return 1.0f;
+    }
+    const float rise = max(cloud_shape.z - world_position.y, 0.0f);
+    const float2 layer =
+        (world_position.xz + to_sun.xz * (rise / to_sun.y) + cloud_controls.xy) * cloud_controls.z;
+    const float density =
+        0.5f * btbh_detail_noise(layer) +
+        0.3f * btbh_detail_noise(layer * 2.13f + float2(17.3f, 5.9f)) +
+        0.2f * btbh_detail_noise(layer * 4.37f + float2(3.1f, 23.7f));
+    const float threshold = 1.0f - cloud_shape.x;
+    const float cover = smoothstep(threshold - cloud_shape.y, threshold + cloud_shape.y, density);
+    return 1.0f - strength * cover;
 }
 
 // Street lamps: point lights through the sun's BRDF, so the surface's own normal (its bump) and roughness (its
@@ -1665,9 +1694,9 @@ FragmentOutput shade_fragment(FragmentInput input)
         primary_directional_visibility(
             input.world_position,
             shadow_normal
-        )
+        ) * btbh_cloud_light(input.world_position)
 #else
-        1.0f
+        btbh_cloud_light(input.world_position)
 #endif
     );
     lighting += sun_lighting;

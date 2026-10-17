@@ -3220,6 +3220,29 @@ final class GPUWindowProbeTests: XCTestCase {
             SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2, litShare: 4)
         ).1, 1)
         XCTAssertTrue(SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2).isEnabled)
+        // The collapse surface with a sway is a tree in the wind: its sway and the wind's unit heading ride its
+        // second parameters; without one it stands still. The scene and the shadow pass both sway it.
+        let swaying = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "Assets/Shaders/shatter.glsl",
+            parameters: ["u_sway": .float(0.02), "u_windX": .float(3), "u_windZ": .float(4)]
+        )
+        XCTAssertEqual(swaying.variant, .shatter)
+        XCTAssertEqual(swaying.parameters1.y, 0.02)
+        XCTAssertEqual(swaying.parameters1.z, 0.6, accuracy: 0.000_001)
+        XCTAssertEqual(swaying.parameters1.w, 0.8, accuracy: 0.000_001)
+        XCTAssertEqual(try GPUSceneSurfaceProjection.classify(fragmentPath: "shatter.glsl", parameters: [:])
+            .parameters1.y, 0)
+        XCTAssertEqual(try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "shatter.glsl",
+            parameters: ["u_sway": .float(0.02), "u_windX": .float(0), "u_windZ": .float(0)]
+        ).parameters1.y, 0, "no heading, no sway")
+        for vertexShader in ["production_model.vert.hlsl", "production_shadow.vert.hlsl"] {
+            let source = try String(
+                contentsOf: packageRoot.appendingPathComponent("shaders/gpu/" + vertexShader),
+                encoding: .utf8
+            )
+            XCTAssertTrue(source.contains("world_position.xyz += btbh_surface_wind_offset("), vertexShader)
+        }
         XCTAssertFalse(SurfaceDetail(pattern: .glass, albedoVariation: 0, bumpHeight: 0, frequency: 2,
                                      litShare: .nan).isEnabled)
         let nativeScene = try String(
@@ -3269,6 +3292,12 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u)"))
         XCTAssertTrue(shader.contains("1.0f + 2.5f * saturate(surface_wetness.x)"))
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
+        // The clouds sit right after the wetness and shade the sun in both shadow variants.
+        XCTAssertTrue(shader.contains("    float4 cloud_controls;\n    float4 cloud_shape;\n"))
+        XCTAssertTrue(scene.contains("    float cloud_controls[4];\n    float cloud_shape[4];\n"))
+        XCTAssertTrue(shader.contains(") * btbh_cloud_light(input.world_position)"))
+        XCTAssertTrue(shader.contains("#else\n        btbh_cloud_light(input.world_position)\n#endif"))
+        XCTAssertTrue(scene.contains("fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;"))
         // The lit windows' energy rides the wetness's second component; glass panes add their light to the
         // emission and reflect like coated glass.
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[1] ="))
@@ -3305,6 +3334,26 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(glowing(-1).windowGlow, 0)
         XCTAssertEqual(glowing(.nan).windowGlow, 0)
         XCTAssertEqual(EnvironmentDescriptor.default.windowGlow, 0)
+        // Clouds: strength and coverage 0...1, the softness never negative; off unless the strength and size are
+        // positive and every value finite.
+        func clouded(_ clouds: CloudShadowDescriptor) -> EnvironmentDescriptor {
+            EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+                                  ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
+                                  tonemapWhite: 1, cloudShadows: clouds)
+        }
+        let clamped = clouded(CloudShadowDescriptor(strength: 3, coverage: -1, softness: -0.2, size: 50, height: 20,
+                                                    offset: RenderVec2(x: 1, y: 2))).cloudShadows
+        XCTAssertEqual(clamped.strength, 1)
+        XCTAssertEqual(clamped.coverage, 0)
+        XCTAssertEqual(clamped.softness, 0)
+        XCTAssertEqual(clamped.offset, RenderVec2(x: 1, y: 2))
+        XCTAssertEqual(clouded(CloudShadowDescriptor(strength: 0.5, coverage: 0.5, softness: 0.1, size: .nan,
+                                                     height: 20, offset: .zero)).cloudShadows, .off)
+        XCTAssertEqual(clouded(CloudShadowDescriptor(strength: 0.5, coverage: 0.5, softness: 0.1, size: 50,
+                                                     height: 20, offset: RenderVec2(x: .infinity, y: 0))).cloudShadows,
+                       .off)
+        XCTAssertEqual(EnvironmentDescriptor.default.cloudShadows, .off)
+        XCTAssertFalse(CloudShadowDescriptor.off.isEnabled)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

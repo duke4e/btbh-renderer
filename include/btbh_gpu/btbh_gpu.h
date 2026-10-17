@@ -769,6 +769,16 @@ typedef struct BTBHGPUSceneLighting {
     float lamp_core_radius;
     float lamp_position_reach[BTBH_GPU_SCENE_MAX_LAMPS][4];
     float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];
+    /* Cloud shadows on the sun (production_model.frag.hlsl btbh_cloud_light): the share of the sun a cloud's
+       shadow takes (0 none), the sky's share under clouds, their edges' width, noise cells per render unit, the
+       layer's height (render units) and its drift so far (x, z render units). */
+    float cloud_strength;
+    float cloud_coverage;
+    float cloud_softness;
+    float cloud_frequency;
+    float cloud_height;
+    float cloud_offset[2];
+    float cloud_reserved;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
