@@ -3234,7 +3234,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(off.1, 0)
         XCTAssertEqual(off.2, 1)
         XCTAssertEqual(off.3, 0)
-        // The native batch check bounds the pattern: glass (5) is the last one it accepts.
+        // The native batch check bounds the pattern (glass is 5).
         let paving = GPUSceneSurfaceDetailParameters.native(
             SurfaceDetail(pattern: .paving, albedoVariation: 0.1, bumpHeight: 0.003, frequency: 10)
         )
@@ -3293,7 +3293,10 @@ final class GPUWindowProbeTests: XCTestCase {
             contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
             encoding: .utf8
         )
-        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 5.0f"))
+        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 6.0f"))
+        // A lamp's lens (6, the last pattern) needs nothing but its pattern and shines its colour at night.
+        XCTAssertTrue(SurfaceDetail.lampLens.isEnabled)
+        XCTAssertEqual(GPUSceneSurfaceDetailParameters.native(.lampLens).3, 6)
 
         // The fragment uniform block carries the detail right after the procedural sky controls, the surface
         // wetness right after the detail and the street lamps after the wetness, in the shader and in the native
@@ -3310,7 +3313,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("    float4 detail_parameters;\n"))
         XCTAssertTrue(shader.contains("    float4 surface_wetness;\n"))
         XCTAssertTrue(shader.contains("    float4 lamp_color_energy[BTBH_MAX_LAMPS];\n#if BTBH_DIRECTIONAL_SHADOWS"))
-        XCTAssertTrue(shader.contains("#define BTBH_MAX_LAMPS 32"))
+        XCTAssertTrue(shader.contains("#define BTBH_MAX_LAMPS 40"))
         XCTAssertLessThan(try XCTUnwrap(shader.range(of: "float4 detail_parameters;")).lowerBound,
                           try XCTUnwrap(shader.range(of: "float4 surface_wetness;")).lowerBound)
         XCTAssertTrue(scene.contains(

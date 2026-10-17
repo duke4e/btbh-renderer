@@ -3718,7 +3718,7 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->detail_parameters[3]) &&
             /* SurfaceDetail.Pattern: none, ground, grass, facade, paving. */
             batch->detail_parameters[3] >= 0.0f &&
-            batch->detail_parameters[3] <= 5.0f &&
+            batch->detail_parameters[3] <= 6.0f &&
             (batch->detail_parameters[3] < 0.5f ||
              batch->detail_parameters[2] > 0.0f) &&
             (batch->albedo_texture == NULL ||

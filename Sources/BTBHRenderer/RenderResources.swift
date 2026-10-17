@@ -241,6 +241,9 @@ public struct SurfaceDetail: Hashable, Sendable {
         /// half as strong, and on walls a pane per cell, each a shade apart within thin frames, with
         /// `litShare` of them lit from inside at night (`EnvironmentDescriptor.windowGlow`). No bump.
         case glass
+        /// A lamp's lens (car head and tail lights, beacons): its own colour shines at night, as strongly as the
+        /// windows' light (`EnvironmentDescriptor.windowGlow`) rises. Nothing else.
+        case lamp
     }
 
     public var pattern: Pattern
@@ -263,12 +266,15 @@ public struct SurfaceDetail: Hashable, Sendable {
 
     public static let none = Self(pattern: .none, albedoVariation: 0, bumpHeight: 0, frequency: 1)
 
-    /// Glass changes the surface's reflection even without variation or lit panes.
+    /// Glass changes the surface's reflection even without variation or lit panes, and a lens shines at night.
     public var isEnabled: Bool {
         pattern != .none && frequency > 0 && frequency.isFinite
             && albedoVariation.isFinite && bumpHeight.isFinite && litShare.isFinite
-            && (albedoVariation != 0 || bumpHeight != 0 || pattern == .glass)
+            && (albedoVariation != 0 || bumpHeight != 0 || pattern == .glass || pattern == .lamp)
     }
+
+    /// A lamp's lens (`Pattern.lamp`).
+    public static let lampLens = Self(pattern: .lamp, albedoVariation: 0, bumpHeight: 0, frequency: 1)
 }
 
 /// Cloud shadows: a layer of soft clouds `height` render units up, drifted `offset` render units by the wind so
@@ -1183,7 +1189,7 @@ public struct LampLightDescriptor: Hashable, Sendable {
     }
 
     /// The most lamps a frame lights with; more are dropped (pass the nearest first).
-    public static let maximumCount = 32
+    public static let maximumCount = 40
 }
 
 public struct EnvironmentDescriptor: Sendable {

@@ -8,8 +8,8 @@ extern "C" {
 #endif
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
-/* Street lamps a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */
-#define BTBH_GPU_SCENE_MAX_LAMPS 32u
+/* Lamps (street lamps, car headlights) a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */
+#define BTBH_GPU_SCENE_MAX_LAMPS 40u
 
 typedef enum BTBHGPUBackendRequest {
     BTBH_GPU_BACKEND_INVALID = 0,

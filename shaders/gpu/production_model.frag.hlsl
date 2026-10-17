@@ -11,7 +11,7 @@
 #endif
 
 // BTBH_GPU_SCENE_MAX_LAMPS
-#define BTBH_MAX_LAMPS 32
+#define BTBH_MAX_LAMPS 40
 
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
@@ -74,7 +74,7 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 procedural_controls;
     // x albedo variation, y bump height (render units), z noise cells per render unit,
     // w pattern (0 none, 1 ground, 2 grass, 3 facade, 4 paving, 5 glass: y is the share of panes lit at
-    // night instead and z panes per render unit)
+    // night instead and z panes per render unit, 6 a lamp's lens)
     float4 detail_parameters;
     // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); y the lit windows' energy (the glass
     // detail's panes, 0 by day); zw reserved
@@ -1268,6 +1268,10 @@ float btbh_paving_slab(float2 value, float footprint, out float shade)
     return smoothstep(joint, joint + 0.1f + footprint, edge);
 }
 
+// A lamp's lens (detail pattern 6: car head and tail lights, beacons) shines its own colour this many times over
+// at night, as the windows' light (surface_wetness.y) rises: bright enough to bloom.
+static const float btbh_lamp_lens_gain = 8.0f;
+
 // Glass (detail pattern 5) reflects like coated glass, and its own colour shows half as strongly: what lies
 // behind a window is darker than the wall around it.
 static const float btbh_glass_reflectance = 0.12f;
@@ -1346,6 +1350,11 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     const uint pattern = (uint)(detail_parameters.w + 0.5f);
     if (pattern == 0u)
     {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    if (pattern == 6u)
+    {
+        emission += albedo.rgb * surface_wetness.y * btbh_lamp_lens_gain;
         return float3(0.0f, 0.0f, 0.0f);
     }
     const float3 position = input.world_position * detail_parameters.z;
