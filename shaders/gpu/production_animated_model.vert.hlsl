@@ -72,10 +72,13 @@ struct VertexOutput
     float2 motion_clip_w : TEXCOORD10;
 };
 
+// Only a zero vector takes the fallback: a normal through the cofactor of an instance at the city's 0.002 scale
+// is about 4e-6 long, and the old 1e-4 cutoff gave every Megapolis surface the fallback (0, 0, 1) (until
+// 2026-10-17 the whole city was lit, occluded and reflected as if it faced +z).
 float3 stable_normalize(float3 value, float3 fallback)
 {
     const float length_squared = dot(value, value);
-    return length_squared > 0.00000001f
+    return length_squared > 1.0e-30f
         ? value * rsqrt(length_squared)
         : fallback;
 }

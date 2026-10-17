@@ -857,6 +857,21 @@ typedef struct BTBHGPUScenePost {
      * hyperbolic plane, 0 draws the world flat), y and z the world x and z it bends around. Gameplay,
      * lighting and shadows stay flat; only where the scene's vertices are drawn moves. */
     float world_curvature[4];
+    /* Screen-space reflections, added in the SSAO resolve (production_ssao_resolve.frag.hlsl, which then runs
+     * without ambient occlusion too): their intensity (0 off; it multiplies the Fresnel reflectance), the
+     * roughest surface that reflects, how far a reflected ray looks and the thickness a hit may lie behind a
+     * surface (render units). */
+    float ssr_intensity;
+    float ssr_max_roughness;
+    float ssr_max_distance;
+    float ssr_thickness;
+    /* Ambient occlusion (ssao_enabled): the radius occluders count within (render units, > 0), its strength,
+     * and with the cascades the share of the indirect light it occludes and the share of that the direct light
+     * keeps (both 0...1). */
+    float ao_radius;
+    float ao_intensity;
+    float ao_contact_strength;
+    float ao_direct_share;
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

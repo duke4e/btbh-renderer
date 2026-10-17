@@ -25,6 +25,12 @@ cbuffer PostUniforms : register(b0, space3)
     float4x4 inverse_view_projection;
     float projection_scale_y;
     float saturation;
+    // The resolve's reflection controls (production_ssao_resolve.frag.hlsl), then x the radius occluders count
+    // within (render units), y the occlusion's strength; zw the resolve's
+    float2 ssr_options;
+    float4x4 view_projection;
+    float4 ssr_controls;
+    float4 ao_controls;
 };
 
 struct FragmentInput
@@ -157,9 +163,9 @@ float main(FragmentInput input) : SV_Target0
     );
     const float linear_depth =
         view_depth(center_uv, center_depth);
-    const float world_radius = 1.0f;
+    const float world_radius = ao_controls.x > 0.0f ? ao_controls.x : 1.0f;
     const float world_bias = 0.03f;
-    const float legacy_intensity = 0.4f;
+    const float legacy_intensity = ao_controls.y;
     const float radius_squared = world_radius * world_radius;
     const float raw_screen_radius =
         projection_scale_y *

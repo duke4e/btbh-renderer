@@ -1546,7 +1546,7 @@ final class GPUResourceBackend: RenderResourceBackend {
             allowAutoTransition: radianceCascades.allowAutoTransition,
             invalidate: radianceCascades.invalidate
         )
-        return .init(
+        var post = GPUScenePostProbe(
             lutTexture: lutTexture,
             tonemapMode: environment.tonemap,
             tonemapWhite: environment.tonemapWhite,
@@ -1574,6 +1574,9 @@ final class GPUResourceBackend: RenderResourceBackend {
             bloom: chain.bloom,
             vignette: chain.vignette
         )
+        post.reflections = environment.reflections
+        post.ambientOcclusion = environment.ambientOcclusion
+        return post
     }
 
     private static func directionalShadow(

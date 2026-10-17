@@ -987,6 +987,24 @@ final class GPUWindowProbeTests: XCTestCase {
             "rc_contact_ao_strength * lerp(1.0f, rc_contact_ao_direct_share, directness)"
         ))
         XCTAssertTrue(resolveShader.contains("static const float rc_directness_scale = 0.45f;"))
+        // Reflections ride the resolve on top of the AO in every mode, and run it without the AO passes too.
+        XCTAssertTrue(resolveShader.contains(
+            "screen_space_reflection(uv, center_depth, center_position, normal, flat_normal, view);"
+        ))
+        XCTAssertTrue(resolveShader.contains(
+            "preserved_emission + occludable_lighting * contact_visibility + reflection"
+        ))
+        XCTAssertTrue(resolveShader.contains("return float4(resolved + reflection, 1.0f);"))
+        XCTAssertTrue(resolveShader.contains("return float4(scene + reflection, 1.0f);"))
+        XCTAssertTrue(resolveShader.contains("    float2 ssr_options;"))
+        XCTAssertTrue(resolveShader.contains("    float4x4 view_projection;"))
+        XCTAssertTrue(nativeScene.contains(
+            "    float ssr_options[2];\n    float view_projection[16];\n    float ssr_controls[4];\n"
+        ))
+        XCTAssertTrue(nativeScene.contains("ambient_occlusion_active || ssr_active;"))
+        XCTAssertTrue(nativeScene.contains("ssao_ok = !ambient_occlusion_active || btbh_gpu_scene_render_fullscreen("))
+        XCTAssertTrue(nativeScene.contains("if (ssao_ok && ambient_occlusion_active) {"))
+        XCTAssertTrue(nativeScene.contains("post_uniforms.ssr_controls[0] = post->ssr_intensity;"))
         XCTAssertTrue(modelShader.contains("static const float btbh_rc_directness_scale = 0.45f;"))
         XCTAssertTrue(modelShader.contains(
             "unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale"
@@ -1452,14 +1470,28 @@ final class GPUWindowProbeTests: XCTestCase {
             "float4x4 inverse_view_projection;"
         ))
         XCTAssertTrue(ssaoShader.contains(
-            "const float world_radius = 1.0f;"
+            "const float world_radius = ao_controls.x > 0.0f ? ao_controls.x : 1.0f;"
         ))
         XCTAssertTrue(ssaoShader.contains(
             "const float world_bias = 0.03f;"
         ))
         XCTAssertTrue(ssaoShader.contains(
-            "const float legacy_intensity = 0.4f;"
+            "const float legacy_intensity = ao_controls.y;"
         ))
+        // The occlusion's radius, strength, contact strength and direct share are the environment's; the standard
+        // keeps the renderer's old values, and values out of range fall back to it or clamp.
+        XCTAssertTrue(nativeScene.contains("post_uniforms.ao_controls[0] = post->ao_radius;"))
+        XCTAssertEqual(AmbientOcclusionDescriptor.standard,
+                       AmbientOcclusionDescriptor(radius: 1, intensity: 0.4, contactStrength: 0.75, directShare: 0.2))
+        let occlusion = EnvironmentDescriptor(
+            backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+            ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: true, tonemap: .reinhard, tonemapWhite: 1,
+            ambientOcclusion: AmbientOcclusionDescriptor(radius: -1, intensity: .nan, contactStrength: 2,
+                                                         directShare: -1)
+        ).ambientOcclusion
+        XCTAssertEqual(occlusion, AmbientOcclusionDescriptor(radius: 1, intensity: 0.4, contactStrength: 1,
+                                                             directShare: 0))
+        XCTAssertEqual(EnvironmentDescriptor.default.ambientOcclusion, .standard)
         XCTAssertTrue(ssaoShader.contains(
             "const float radius_falloff = max(radius_squared - vv, 0.0f);"
         ))
@@ -3236,6 +3268,18 @@ final class GPUWindowProbeTests: XCTestCase {
             fragmentPath: "shatter.glsl",
             parameters: ["u_sway": .float(0.02), "u_windX": .float(0), "u_windZ": .float(0)]
         ).parameters1.y, 0, "no heading, no sway")
+        // Normals through the cofactor of an instance at the city's 0.002 scale are about 4e-6 long: only a zero
+        // vector may take the fallback (the old cutoff lit the whole city as if it faced +z), and the camera's
+        // near plane keeps the depth precise enough that floor layers do not z-fight.
+        for vertexShader in ["production_model.vert.hlsl", "production_animated_model.vert.hlsl"] {
+            let source = try String(
+                contentsOf: packageRoot.appendingPathComponent("shaders/gpu/" + vertexShader),
+                encoding: .utf8
+            )
+            XCTAssertTrue(source.contains("return length_squared > 1.0e-30f"), vertexShader)
+        }
+        XCTAssertGreaterThanOrEqual(GPUSceneBackend.cameraNearPlane, 0.1)
+        XCTAssertGreaterThan(GPUSceneBackend.cameraFarPlane, 10_000)
         for vertexShader in ["production_model.vert.hlsl", "production_shadow.vert.hlsl"] {
             let source = try String(
                 contentsOf: packageRoot.appendingPathComponent("shaders/gpu/" + vertexShader),
@@ -3354,6 +3398,20 @@ final class GPUWindowProbeTests: XCTestCase {
                        .off)
         XCTAssertEqual(EnvironmentDescriptor.default.cloudShadows, .off)
         XCTAssertFalse(CloudShadowDescriptor.off.isEnabled)
+        // Reflections: the roughness at most 1, the thickness never negative; off unless the intensity,
+        // roughness and reach are positive and finite.
+        func reflecting(_ reflections: ScreenSpaceReflectionDescriptor) -> EnvironmentDescriptor {
+            EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+                                  ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
+                                  tonemapWhite: 1, reflections: reflections)
+        }
+        let reflections = reflecting(ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 3, maxDistance: 20,
+                                                                     thickness: -1)).reflections
+        XCTAssertEqual(reflections, ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 1, maxDistance: 20,
+                                                                    thickness: 0))
+        XCTAssertEqual(reflecting(ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 0.3, maxDistance: .nan,
+                                                                  thickness: 1)).reflections, .off)
+        XCTAssertEqual(EnvironmentDescriptor.default.reflections, .off)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

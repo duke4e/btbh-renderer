@@ -264,9 +264,13 @@ final class GPUSceneBackend: SceneBackend {
         }
         return value
     }()
-    /// The projection's planes (`viewProjection(camera:viewport:)`).
-    static let cameraNearPlane: Float = 0.01
-    static let cameraFarPlane: Float = 1_000_000
+    /// The projection's planes (`viewProjection(camera:viewport:)`). The depth's precision falls with the
+    /// square of the distance over the near plane: at 0.01 a surface 150 render units out had 13 cm of it, and
+    /// the city's floor layers (roads, paving, verges a few centimetres apart) z-fought, reflections and
+    /// positions rebuilt from the depth jittered (2026-10-17). No camera comes nearer than 4 units to what it
+    /// draws.
+    static let cameraNearPlane: Float = 0.25
+    static let cameraFarPlane: Float = 100_000
     private(set) var lastPresentationReport:
         GPUScenePresentationProbeReport?
     var pendingModelDrawCountForTesting: Int {

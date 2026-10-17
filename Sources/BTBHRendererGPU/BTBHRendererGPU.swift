@@ -1058,6 +1058,10 @@ struct GPUScenePostProbe {
     var worldCurvature: Float = 0
     var worldCurvatureCenterX: Float = 0
     var worldCurvatureCenterZ: Float = 0
+    /// `EnvironmentDescriptor.reflections`.
+    var reflections = ScreenSpaceReflectionDescriptor.off
+    /// `EnvironmentDescriptor.ambientOcclusion`.
+    var ambientOcclusion = AmbientOcclusionDescriptor.standard
 
     func withRadianceCascades(
         _ radianceCascades: RadianceCascadesDescriptor
@@ -2375,6 +2379,16 @@ public final class GPUWindowProbe {
         nativePost.tilt_shift_enabled =
             post.tiltShiftEnabled ? 1 : 0
         nativePost.ssao_enabled = post.ssaoEnabled ? 1 : 0
+        nativePost.ao_radius = post.ambientOcclusion.radius
+        nativePost.ao_intensity = post.ambientOcclusion.intensity
+        nativePost.ao_contact_strength = post.ambientOcclusion.contactStrength
+        nativePost.ao_direct_share = post.ambientOcclusion.directShare
+        if post.reflections.isEnabled {
+            nativePost.ssr_intensity = post.reflections.intensity
+            nativePost.ssr_max_roughness = post.reflections.maxRoughness
+            nativePost.ssr_max_distance = post.reflections.maxDistance
+            nativePost.ssr_thickness = post.reflections.thickness
+        }
         nativePost.anti_aliasing =
             GPUAntiAliasingProjection.native(post.antiAliasing)
         nativePost.upscale_mode =

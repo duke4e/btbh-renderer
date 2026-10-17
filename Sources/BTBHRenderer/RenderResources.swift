@@ -307,6 +307,70 @@ public struct CloudShadowDescriptor: Hashable, Sendable {
     }
 }
 
+/// Screen-space reflections: glossy surfaces (no rougher than `maxRoughness`) reflect the opaque scene their
+/// reflected ray meets within `maxDistance` render units, passing behind a surface by less than `thickness`.
+/// `intensity` multiplies their Fresnel reflectance (0 off).
+public struct ScreenSpaceReflectionDescriptor: Hashable, Sendable {
+    public var intensity: Float
+    public var maxRoughness: Float
+    public var maxDistance: Float
+    public var thickness: Float
+
+    public init(intensity: Float, maxRoughness: Float, maxDistance: Float, thickness: Float) {
+        self.intensity = intensity
+        self.maxRoughness = maxRoughness
+        self.maxDistance = maxDistance
+        self.thickness = thickness
+    }
+
+    public static let off = Self(intensity: 0, maxRoughness: 0, maxDistance: 0, thickness: 0)
+
+    /// Off unless the intensity, roughness and reach are positive and every value finite.
+    public var isEnabled: Bool {
+        intensity > 0 && maxRoughness > 0 && maxDistance > 0 && intensity.isFinite && maxRoughness.isFinite
+            && maxDistance.isFinite && thickness.isFinite
+    }
+
+    /// The roughness clamped to 1 and the thickness never negative; off when not enabled.
+    var sanitized: Self {
+        guard isEnabled else { return .off }
+        return Self(intensity: intensity, maxRoughness: min(maxRoughness, 1), maxDistance: maxDistance,
+                    thickness: max(thickness, 0))
+    }
+}
+
+/// Ambient occlusion (`EnvironmentDescriptor.ssaoEnabled`): occluders within `radius` render units darken a
+/// surface by up to `intensity`; with the radiance cascades the occlusion takes `contactStrength` (0...1) of the
+/// indirect light, and direct light (the sun's, the spot's) keeps `directShare` (0...1) of that.
+public struct AmbientOcclusionDescriptor: Hashable, Sendable {
+    public var radius: Float
+    public var intensity: Float
+    public var contactStrength: Float
+    public var directShare: Float
+
+    public init(radius: Float, intensity: Float, contactStrength: Float, directShare: Float) {
+        self.radius = radius
+        self.intensity = intensity
+        self.contactStrength = contactStrength
+        self.directShare = directShare
+    }
+
+    /// The renderer's occlusion until 2026-10-17: a one-unit radius at 0.4.
+    public static let standard = Self(radius: 1, intensity: 0.4, contactStrength: 0.75, directShare: 0.2)
+
+    /// Every value finite and in its range; the standard occlusion's value stands in for one that is not.
+    var sanitized: Self {
+        let standard = Self.standard
+        func unit(_ value: Float, _ fallback: Float) -> Float { value.isFinite ? min(max(value, 0), 1) : fallback }
+        return Self(
+            radius: radius.isFinite && radius > 0 ? radius : standard.radius,
+            intensity: intensity.isFinite ? max(intensity, 0) : standard.intensity,
+            contactStrength: unit(contactStrength, standard.contactStrength),
+            directShare: unit(directShare, standard.directShare)
+        )
+    }
+}
+
 public struct MaterialDescriptor: Hashable, Sendable {
     public var albedoTexture: TextureHandle
     public var albedoColor: RenderColor
@@ -1148,6 +1212,10 @@ public struct EnvironmentDescriptor: Sendable {
     public let windowGlow: Float
     /// Clouds drifting between the sun and the ground.
     public let cloudShadows: CloudShadowDescriptor
+    /// Screen-space reflections on glossy surfaces.
+    public let reflections: ScreenSpaceReflectionDescriptor
+    /// How strongly and how far the ambient occlusion (`ssaoEnabled`) darkens.
+    public let ambientOcclusion: AmbientOcclusionDescriptor
 
     public init(
         backgroundColor: RenderColor,
@@ -1168,7 +1236,9 @@ public struct EnvironmentDescriptor: Sendable {
         lamps: [LampLightDescriptor] = [],
         lampCoreRadius: Float = 0.3,
         windowGlow: Float = 0,
-        cloudShadows: CloudShadowDescriptor = .off
+        cloudShadows: CloudShadowDescriptor = .off,
+        reflections: ScreenSpaceReflectionDescriptor = .off,
+        ambientOcclusion: AmbientOcclusionDescriptor = .standard
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1190,6 +1260,8 @@ public struct EnvironmentDescriptor: Sendable {
         self.lampCoreRadius = lampCoreRadius.isFinite ? max(lampCoreRadius, 0) : 0
         self.windowGlow = windowGlow.isFinite ? max(windowGlow, 0) : 0
         self.cloudShadows = cloudShadows.sanitized
+        self.reflections = reflections.sanitized
+        self.ambientOcclusion = ambientOcclusion.sanitized
     }
 
     public static let `default` = Self(

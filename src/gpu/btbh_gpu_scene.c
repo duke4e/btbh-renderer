@@ -159,6 +159,14 @@ typedef struct BTBHGPUPostUniforms {
     float inverse_view_projection[16];
     float projection_scale_y;
     float saturation;
+    /* Screen-space reflections (production_ssao_resolve.frag.hlsl): x 1 when the specular target carries the
+       surface's F0 (the cascades' material targets), y reserved; the view-projection the rays project with;
+       the intensity, roughest reflecting surface, ray reach and hit thickness (BTBHGPUScenePost). */
+    float ssr_options[2];
+    float view_projection[16];
+    float ssr_controls[4];
+    /* The AO's radius and strength, its contact strength and direct share (BTBHGPUScenePost). */
+    float ao_controls[4];
 } BTBHGPUPostUniforms;
 
 typedef struct BTBHGPUSceneSMAAUniforms {
@@ -4398,6 +4406,16 @@ static bool btbh_gpu_scene_post_valid(
         post->cas_enabled <= 1u &&
         post->tilt_shift_enabled <= 1u &&
         post->ssao_enabled <= 1u &&
+        isfinite(post->ssr_intensity) && post->ssr_intensity >= 0.0f &&
+        isfinite(post->ssr_max_roughness) && post->ssr_max_roughness >= 0.0f &&
+        isfinite(post->ssr_max_distance) && post->ssr_max_distance >= 0.0f &&
+        isfinite(post->ssr_thickness) && post->ssr_thickness >= 0.0f &&
+        isfinite(post->ao_radius) && post->ao_radius > 0.0f &&
+        isfinite(post->ao_intensity) && post->ao_intensity >= 0.0f &&
+        isfinite(post->ao_contact_strength) && post->ao_contact_strength >= 0.0f &&
+        post->ao_contact_strength <= 1.0f &&
+        isfinite(post->ao_direct_share) && post->ao_direct_share >= 0.0f &&
+        post->ao_direct_share <= 1.0f &&
         post->tonemap_mode < BTBH_GPU_SCENE_TONEMAP_COUNT &&
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
@@ -5418,9 +5436,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             return report->result;
         }
     }
-    const bool ssao_resolve_active =
+    const bool ambient_occlusion_active =
         post->ssao_enabled != 0u &&
         !radiance_cascades_debug_output;
+    /* Reflections ride the SSAO resolve, which then runs without the occlusion passes too. */
+    const bool ssr_active =
+        post->ssr_intensity > 0.0f &&
+        post->ssr_max_roughness > 0.0f &&
+        post->ssr_max_distance > 0.0f &&
+        !radiance_cascades_debug_output;
+    const bool ssao_resolve_active =
+        ambient_occlusion_active || ssr_active;
     /* RC debug views show raw buffers, so they skip the HDR composite. */
     const bool bloom_active =
         post->bloom_enabled != 0u &&
@@ -6205,11 +6231,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_uniforms.tilt_shift_enabled = post->tilt_shift_enabled != 0u
         ? (temporal_active ? 2u : 1u)
         : 0u;
-    post_uniforms.ssao_enabled = ssao_resolve_active
+    post_uniforms.ssao_enabled = ambient_occlusion_active
         ? (radiance_cascades_active
             ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
             : 1u)
         : 0u;
+    post_uniforms.ssr_options[0] = radiance_cascades_active ? 1.0f : 0.0f;
+    (void)memcpy(
+        post_uniforms.view_projection,
+        view_projection,
+        sizeof(post_uniforms.view_projection)
+    );
+    post_uniforms.ao_controls[0] = post->ao_radius;
+    post_uniforms.ao_controls[1] = post->ao_intensity;
+    post_uniforms.ao_controls[2] = post->ao_contact_strength;
+    post_uniforms.ao_controls[3] = post->ao_direct_share;
+    if (ssr_active) {
+        post_uniforms.ssr_controls[0] = post->ssr_intensity;
+        post_uniforms.ssr_controls[1] = post->ssr_max_roughness;
+        post_uniforms.ssr_controls[2] = post->ssr_max_distance;
+        post_uniforms.ssr_controls[3] = post->ssr_thickness;
+    }
     post_uniforms.tonemap_mode = post->tonemap_mode;
     post_uniforms.exposure = post->exposure;
     post_uniforms.contrast = post->contrast;
@@ -6239,7 +6281,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ssao_samplers[1].texture = runtime->normal_texture;
             ssao_samplers[1].sampler =
                 runtime->scene_color_sampler;
-            ssao_ok = btbh_gpu_scene_render_fullscreen(
+            /* Reflections alone skip the occlusion passes: the resolve then reads no occlusion. */
+            ssao_ok = !ambient_occlusion_active || btbh_gpu_scene_render_fullscreen(
                 command,
                 "BTBH SSAO",
                 runtime->ssao_pipeline,
@@ -6260,7 +6303,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             denoise_samplers[2].texture = runtime->ssao_texture;
             denoise_samplers[2].sampler =
                 runtime->scene_color_sampler;
-            if (ssao_ok) {
+            if (ssao_ok && ambient_occlusion_active) {
                 ssao_ok = btbh_gpu_scene_render_fullscreen(
                     command,
                     "BTBH SSAO Denoise",
