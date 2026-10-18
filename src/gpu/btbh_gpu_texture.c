@@ -78,6 +78,21 @@ static uint32_t btbh_gpu_texture_mip_count(
     return count;
 }
 
+/* generate_mipmaps: 0 none, 1 the full chain, n > 1 at most n levels (for atlases whose cells
+ * would bleed into each other further down). */
+static uint32_t btbh_gpu_texture_levels(
+    uint8_t generate_mipmaps,
+    uint32_t full
+) {
+    if (generate_mipmaps == 0u) {
+        return 1u;
+    }
+    if (generate_mipmaps == 1u || generate_mipmaps > full) {
+        return full;
+    }
+    return generate_mipmaps;
+}
+
 static bool btbh_gpu_read_file(
     const char *path,
     uint8_t **bytes,
@@ -301,9 +316,10 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     window->texture_head = resource;
     resource->width = width;
     resource->height = height;
-    resource->mip_count = generate_mipmaps != 0
-        ? btbh_gpu_texture_mip_count(width, height)
-        : 1u;
+    resource->mip_count = btbh_gpu_texture_levels(
+        generate_mipmaps,
+        btbh_gpu_texture_mip_count(width, height)
+    );
     resource->format = format;
 
     SDL_GPUTextureCreateInfo texture_info = {0};
@@ -751,9 +767,10 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
     window->texture_head = resource;
     resource->width = (uint32_t) width;
     resource->height = (uint32_t) height;
-    resource->mip_count = generate_mipmaps != 0
-        ? btbh_gpu_texture_mip_count(resource->width, resource->height)
-        : 1u;
+    resource->mip_count = btbh_gpu_texture_levels(
+        generate_mipmaps,
+        btbh_gpu_texture_mip_count(resource->width, resource->height)
+    );
     resource->format = format;
 
     SDL_GPUTextureCreateInfo texture_info = {0};

@@ -1187,7 +1187,8 @@ void btbh_gpu_animation_library_destroy(
 );
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
 
-/* Raw-pixel textures. Pixels are tightly packed RGBA8, row 0 at the top. */
+/* Raw-pixel textures. Pixels are tightly packed RGBA8, row 0 at the top.
+ * generate_mipmaps: 0 none, 1 the full chain, n > 1 at most n levels. */
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
     BTBHGPUWindow *window,
     const uint8_t *pixels,
