@@ -471,7 +471,27 @@ bool btbh_gpu_window_finish_pending_frame(
         btbh_gpu_window_release_frame_telemetry(window);
     }
     bool result;
-    if (submit &&
+    if (must_submit && btbh_gpu_cost_log_enabled()) {
+        btbh_gpu_cost_wait_warm();
+        const uint64_t submit_started_ticks = SDL_GetTicksNS();
+        SDL_GPUFence *fence =
+            SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+        result = fence != NULL;
+        if (fence != NULL) {
+            (void)SDL_WaitForGPUFences(
+                window->device->gpu,
+                true,
+                &fence,
+                1u
+            );
+            btbh_gpu_cost_emit_frame(
+                (double)(SDL_GetTicksNS() - submit_started_ticks) /
+                1000000.0
+            );
+            SDL_ReleaseGPUFence(window->device->gpu, fence);
+            btbh_gpu_cost_warm(window->device->gpu);
+        }
+    } else if (submit &&
         (window->frame_telemetry_enabled ||
          window->radiance_cascades_telemetry_enabled)) {
         const uint64_t submit_started_ticks = SDL_GetTicksNS();

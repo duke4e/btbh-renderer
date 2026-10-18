@@ -1,5 +1,6 @@
 #include "btbh_gpu_radiance_cascades.h"
 #include "btbh_gpu_radiance_cascades_runtime.h"
+#include "btbh_gpu_internal.h"
 
 #include <float.h>
 #include <math.h>
@@ -3029,7 +3030,7 @@ static bool btbh_gpu_hrc_temporal_history_offset(
 }
 
 static bool btbh_gpu_radiance_cascades_encode_hrc(
-    SDL_GPUCommandBuffer *command,
+    SDL_GPUCommandBuffer **command_slot,
     BTBHGPUSceneRadianceCascadesRuntime *runtime,
     const BTBHGPUSceneRadianceCascades *config,
     const BTBHGPUSceneLighting *lighting,
@@ -3049,6 +3050,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     float field_cell_size,
     SDL_GPUTexture **composed_texture
 ) {
+    SDL_GPUCommandBuffer *command = *command_slot;
     const BTBHGPUHolographicRadianceCascadesLayout *layout =
         &runtime->hrc_layout;
     const uint32_t linear_scale = layout->input_width > 0u &&
@@ -3512,6 +3514,15 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     for (uint32_t index = 0u; index < 8u; ++index) {
         resolve_samplers[index].sampler = runtime->sampler;
     }
+    /* BTBH_GPU_COST_LOG's per-pass split: the passes above work in probe space, the ones below per pixel. */
+    const bool field_split = btbh_gpu_cost_split(
+        &command,
+        BTBH_GPU_COST_GROUP_RC_FIELD
+    );
+    *command_slot = command;
+    if (!field_split) {
+        return false;
+    }
     SDL_InsertGPUDebugLabel(command, "BTBH HRC Four-quadrant Resolve");
     if (!btbh_gpu_hrc_profiled_dispatch(
             command,
@@ -3695,7 +3706,7 @@ bool btbh_gpu_radiance_cascades_runtime_encode_fallback_debug(
 }
 
 bool btbh_gpu_radiance_cascades_runtime_encode(
-    SDL_GPUCommandBuffer *command,
+    SDL_GPUCommandBuffer **command,
     BTBHGPUSceneRadianceCascadesRuntime *runtime,
     const BTBHGPUSceneRadianceCascades *config,
     const BTBHGPUSceneLighting *lighting,
@@ -3712,7 +3723,8 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     float hero_omni_shadow_softness,
     SDL_GPUTexture **composed_texture
 ) {
-    if (command == NULL || runtime == NULL || config == NULL ||
+    if (command == NULL || *command == NULL ||
+        runtime == NULL || config == NULL ||
         lighting == NULL ||
         inverse_view_projection == NULL ||
         hero_omni_shadow_position_range == NULL ||

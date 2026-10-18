@@ -1439,6 +1439,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     btbh_gpu_window_release_custom_meshes(window);
     btbh_gpu_window_release_instance_buffers(window);
     btbh_gpu_window_release_models(window);
+    btbh_gpu_window_release_geometry_arenas(window);
     btbh_gpu_window_release_fonts(window);
     btbh_gpu_window_release_textures(window);
     if (

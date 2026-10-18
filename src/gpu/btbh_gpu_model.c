@@ -875,6 +875,221 @@ static bool btbh_gpu_model_load_gltf_materials(
     return true;
 }
 
+#define BTBH_GPU_GEOMETRY_VERTEX_BLOCK_BYTES (64u * 1024u * 1024u)
+#define BTBH_GPU_GEOMETRY_INDEX_BLOCK_BYTES (32u * 1024u * 1024u)
+
+static bool btbh_gpu_geometry_copy(
+    SDL_GPUDevice *device,
+    SDL_GPUBuffer *buffer,
+    uint32_t offset,
+    const void *bytes,
+    uint32_t size
+) {
+    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transfer_info.size = size;
+    SDL_GPUTransferBuffer *transfer =
+        SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    if (transfer == NULL) {
+        return false;
+    }
+    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    if (mapped == NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+    memcpy(mapped, bytes, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass *copy =
+        command != NULL ? SDL_BeginGPUCopyPass(command) : NULL;
+    if (copy == NULL) {
+        if (command != NULL) {
+            (void) SDL_CancelGPUCommandBuffer(command);
+        }
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return false;
+    }
+    SDL_GPUTransferBufferLocation source = {0};
+    source.transfer_buffer = transfer;
+    SDL_GPUBufferRegion destination = {0};
+    destination.buffer = buffer;
+    destination.offset = offset;
+    destination.size = size;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    SDL_EndGPUCopyPass(copy);
+    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return submitted;
+}
+
+/* Copies `size` bytes into the arena's open block (a new one when they do not fit), at an offset that is a multiple
+   of `alignment`, and returns the block, or NULL. */
+static BTBHGPUGeometryBlock *btbh_gpu_geometry_arena_upload(
+    SDL_GPUDevice *device,
+    BTBHGPUGeometryArena *arena,
+    SDL_GPUBufferUsageFlags usage,
+    uint32_t block_bytes,
+    uint32_t alignment,
+    const void *bytes,
+    uint32_t size,
+    uint32_t *offset
+) {
+    if (device == NULL || arena == NULL || bytes == NULL || size == 0u || alignment == 0u) {
+        return NULL;
+    }
+    BTBHGPUGeometryBlock *block = NULL;
+    uint32_t start = 0u;
+    if (arena->block_count > 0u) {
+        BTBHGPUGeometryBlock *open = arena->blocks[arena->block_count - 1u];
+        const uint64_t aligned =
+            ((uint64_t) open->used + alignment - 1u) / alignment * alignment;
+        if (open->buffer != NULL && aligned + size <= open->capacity) {
+            block = open;
+            start = (uint32_t) aligned;
+        }
+    }
+    bool created = false;
+    if (block == NULL) {
+        if (arena->block_count == arena->block_capacity) {
+            const uint32_t capacity =
+                arena->block_capacity == 0u ? 8u : arena->block_capacity * 2u;
+            BTBHGPUGeometryBlock **blocks = realloc(
+                arena->blocks,
+                capacity * sizeof(*blocks)
+            );
+            if (blocks == NULL) {
+                return NULL;
+            }
+            arena->blocks = blocks;
+            arena->block_capacity = capacity;
+        }
+        block = calloc(1, sizeof(*block));
+        if (block == NULL) {
+            return NULL;
+        }
+        SDL_GPUBufferCreateInfo buffer_info = {0};
+        buffer_info.usage = usage;
+        buffer_info.size = size > block_bytes ? size : block_bytes;
+        block->buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+        if (block->buffer == NULL) {
+            free(block);
+            return NULL;
+        }
+        block->capacity = buffer_info.size;
+        arena->blocks[arena->block_count] = block;
+        arena->block_count += 1u;
+        created = true;
+    }
+    if (!btbh_gpu_geometry_copy(device, block->buffer, start, bytes, size)) {
+        if (created && block->live == 0u) {
+            SDL_ReleaseGPUBuffer(device, block->buffer);
+            block->buffer = NULL;
+        }
+        return NULL;
+    }
+    block->used = start + size;
+    block->live += 1u;
+    *offset = start;
+    return block;
+}
+
+static void btbh_gpu_geometry_block_release(
+    BTBHGPUGeometryBlock *block,
+    SDL_GPUDevice *device
+) {
+    if (block == NULL || block->live == 0u) {
+        return;
+    }
+    block->live -= 1u;
+    if (block->live == 0u && block->buffer != NULL) {
+        if (device != NULL) {
+            SDL_ReleaseGPUBuffer(device, block->buffer);
+        }
+        block->buffer = NULL;
+    }
+}
+
+static bool btbh_gpu_model_upload_vertices(
+    BTBHGPUModel *model,
+    BTBHGPUModelPrimitive *destination,
+    const void *vertices,
+    uint32_t vertex_size
+) {
+    uint32_t offset = 0u;
+    destination->vertex_block = btbh_gpu_geometry_arena_upload(
+        model->owner->device->gpu,
+        &model->owner->vertex_arena,
+        SDL_GPU_BUFFERUSAGE_VERTEX,
+        BTBH_GPU_GEOMETRY_VERTEX_BLOCK_BYTES,
+        (uint32_t) sizeof(BTBHGPUModelVertex),
+        vertices,
+        vertex_size,
+        &offset
+    );
+    if (destination->vertex_block == NULL) {
+        return false;
+    }
+    destination->vertex_buffer = destination->vertex_block->buffer;
+    destination->vertex_base =
+        (int32_t) (offset / (uint32_t) sizeof(BTBHGPUModelVertex));
+    return true;
+}
+
+static bool btbh_gpu_model_upload_indices(
+    BTBHGPUModel *model,
+    BTBHGPUModelPrimitive *destination,
+    const uint32_t *indices,
+    uint32_t index_size
+) {
+    uint32_t offset = 0u;
+    destination->index_block = btbh_gpu_geometry_arena_upload(
+        model->owner->device->gpu,
+        &model->owner->index_arena,
+        SDL_GPU_BUFFERUSAGE_INDEX,
+        BTBH_GPU_GEOMETRY_INDEX_BLOCK_BYTES,
+        (uint32_t) sizeof(uint32_t),
+        indices,
+        index_size,
+        &offset
+    );
+    if (destination->index_block == NULL) {
+        return false;
+    }
+    destination->index_buffer = destination->index_block->buffer;
+    destination->first_index = offset / (uint32_t) sizeof(uint32_t);
+    return true;
+}
+
+static void btbh_gpu_geometry_arena_free(
+    BTBHGPUGeometryArena *arena,
+    SDL_GPUDevice *device
+) {
+    for (uint32_t index = 0u; index < arena->block_count; index += 1u) {
+        BTBHGPUGeometryBlock *block = arena->blocks[index];
+        if (block->buffer != NULL && device != NULL) {
+            SDL_ReleaseGPUBuffer(device, block->buffer);
+        }
+        free(block);
+    }
+    free(arena->blocks);
+    arena->blocks = NULL;
+    arena->block_count = 0u;
+    arena->block_capacity = 0u;
+}
+
+void btbh_gpu_window_release_geometry_arenas(BTBHGPUWindow *window) {
+    if (window == NULL) {
+        return;
+    }
+    SDL_GPUDevice *device =
+        window->device != NULL && !window->device->shutdown
+            ? window->device->gpu
+            : NULL;
+    btbh_gpu_geometry_arena_free(&window->vertex_arena, device);
+    btbh_gpu_geometry_arena_free(&window->index_arena, device);
+}
+
 static void btbh_gpu_model_unlink(BTBHGPUModel *model) {
     BTBHGPUWindow *owner = model->owner;
     if (owner == NULL) {
@@ -928,14 +1143,10 @@ static void btbh_gpu_model_release_handles(
     }
     for (uint32_t index = 0; index < model->primitive_count; index += 1u) {
         BTBHGPUModelPrimitive *primitive = &model->primitives[index];
-        if (device != NULL) {
-            if (primitive->index_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, primitive->index_buffer);
-            }
-            if (primitive->vertex_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, primitive->vertex_buffer);
-            }
-        }
+        btbh_gpu_geometry_block_release(primitive->index_block, device);
+        btbh_gpu_geometry_block_release(primitive->vertex_block, device);
+        primitive->index_block = NULL;
+        primitive->vertex_block = NULL;
         primitive->index_buffer = NULL;
         primitive->vertex_buffer = NULL;
         free(primitive->positions);
@@ -943,69 +1154,6 @@ static void btbh_gpu_model_release_handles(
         primitive->positions = NULL;
         primitive->indices = NULL;
     }
-}
-
-static SDL_GPUBuffer *btbh_gpu_model_upload_buffer(
-    SDL_GPUDevice *device,
-    SDL_GPUBufferUsageFlags usage,
-    const void *bytes,
-    uint32_t size
-) {
-    SDL_GPUBufferCreateInfo buffer_info = {0};
-    buffer_info.usage = usage;
-    buffer_info.size = size;
-    SDL_GPUBuffer *buffer = SDL_CreateGPUBuffer(device, &buffer_info);
-
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = size;
-    SDL_GPUTransferBuffer *transfer =
-        SDL_CreateGPUTransferBuffer(device, &transfer_info);
-    if (buffer == NULL || transfer == NULL) {
-        if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
-        }
-        if (buffer != NULL) {
-            SDL_ReleaseGPUBuffer(device, buffer);
-        }
-        return NULL;
-    }
-
-    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
-    if (mapped == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, buffer);
-        return NULL;
-    }
-    memcpy(mapped, bytes, size);
-    SDL_UnmapGPUTransferBuffer(device, transfer);
-
-    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
-    SDL_GPUCopyPass *copy =
-        command != NULL ? SDL_BeginGPUCopyPass(command) : NULL;
-    if (copy == NULL) {
-        if (command != NULL) {
-            (void) SDL_CancelGPUCommandBuffer(command);
-        }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
-        SDL_ReleaseGPUBuffer(device, buffer);
-        return NULL;
-    }
-
-    SDL_GPUTransferBufferLocation source = {0};
-    source.transfer_buffer = transfer;
-    SDL_GPUBufferRegion destination = {0};
-    destination.buffer = buffer;
-    destination.size = size;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy);
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
-    if (!submitted) {
-        SDL_ReleaseGPUBuffer(device, buffer);
-        return NULL;
-    }
-    return buffer;
 }
 
 static const cgltf_accessor *btbh_gpu_model_attribute(
@@ -1381,13 +1529,12 @@ static bool btbh_gpu_model_decode_vertices(
         btbh_gpu_model_release_attribute(&attributes[index]);
     }
 
-    destination->vertex_buffer = btbh_gpu_model_upload_buffer(
-        model->owner->device->gpu,
-        SDL_GPU_BUFFERUSAGE_VERTEX,
-        vertices,
-        vertex_size
-    );
-    if (destination->vertex_buffer == NULL) {
+    if (!btbh_gpu_model_upload_vertices(
+            model,
+            destination,
+            vertices,
+            vertex_size
+        )) {
         free(vertices);
         return false;
     }
@@ -1500,13 +1647,12 @@ static bool btbh_gpu_model_decode_indices(
         valid = indices[index] < destination->vertex_count;
     }
     if (valid) {
-        destination->index_buffer = btbh_gpu_model_upload_buffer(
-            model->owner->device->gpu,
-            SDL_GPU_BUFFERUSAGE_INDEX,
+        valid = btbh_gpu_model_upload_indices(
+            model,
+            destination,
             indices,
             index_size
         );
-        valid = destination->index_buffer != NULL;
     }
     if (!valid) {
         free(indices);
@@ -1844,13 +1990,12 @@ static bool btbh_gpu_model_decode_assimp_vertices(
         );
     }
 
-    destination->vertex_buffer = btbh_gpu_model_upload_buffer(
-        model->owner->device->gpu,
-        SDL_GPU_BUFFERUSAGE_VERTEX,
-        vertices,
-        vertex_size
-    );
-    if (destination->vertex_buffer == NULL) {
+    if (!btbh_gpu_model_upload_vertices(
+            model,
+            destination,
+            vertices,
+            vertex_size
+        )) {
         free(vertices);
         return false;
     }
@@ -1919,13 +2064,12 @@ static bool btbh_gpu_model_decode_assimp_indices(
         }
     }
     if (valid) {
-        destination->index_buffer = btbh_gpu_model_upload_buffer(
-            model->owner->device->gpu,
-            SDL_GPU_BUFFERUSAGE_INDEX,
+        valid = btbh_gpu_model_upload_indices(
+            model,
+            destination,
             indices,
             index_size
         );
-        valid = destination->index_buffer != NULL;
     }
     if (!valid) {
         free(indices);
@@ -1934,6 +2078,24 @@ static bool btbh_gpu_model_decode_assimp_indices(
     destination->indices = indices;
     destination->index_count = index_count;
     return true;
+}
+
+void btbh_gpu_model_set_debug_name(BTBHGPUModel *model, const char *path) {
+    if (model == NULL || path == NULL) {
+        return;
+    }
+    const char *start = path;
+    int separators = 0;
+    for (const char *cursor = path + strlen(path); cursor > path; --cursor) {
+        if (cursor[-1] == '/' || cursor[-1] == '\\') {
+            separators += 1;
+            if (separators == 2) {
+                start = cursor;
+                break;
+            }
+        }
+    }
+    (void)snprintf(model->debug_name, sizeof(model->debug_name), "%s", start);
 }
 
 static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
@@ -1975,6 +2137,7 @@ static BTBHGPUModel *btbh_gpu_window_model_load_assimp(
         btbh_gpu_model_error(report, "Could not allocate GPU model resource");
         return NULL;
     }
+    btbh_gpu_model_set_debug_name(model, path);
     model->primitives = calloc(
         primitive_count,
         sizeof(*model->primitives)
@@ -2159,6 +2322,7 @@ BTBHGPUModel *btbh_gpu_window_model_load_ex(
         btbh_gpu_model_error(report, "Could not allocate GPU model resource");
         return NULL;
     }
+    btbh_gpu_model_set_debug_name(model, path);
     model->primitives = calloc(
         primitive_count,
         sizeof(*model->primitives)

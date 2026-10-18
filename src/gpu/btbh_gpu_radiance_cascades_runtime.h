@@ -106,8 +106,10 @@ bool btbh_gpu_radiance_cascades_runtime_prepare(
     size_t message_capacity
 );
 
+/* `*command` may be replaced: the cost log's per-pass split submits it between the probe-space and the per-pixel
+   passes (`btbh_gpu_cost_split`), and it is NULL after a failed split. */
 bool btbh_gpu_radiance_cascades_runtime_encode(
-    SDL_GPUCommandBuffer *command,
+    SDL_GPUCommandBuffer **command,
     BTBHGPUSceneRadianceCascadesRuntime *runtime,
     const BTBHGPUSceneRadianceCascades *config,
     const BTBHGPUSceneLighting *lighting,
