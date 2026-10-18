@@ -209,6 +209,9 @@ public protocol GamePlatform: AnyObject {
     func isGamepadButtonDown(_ button: GamepadButton) -> Bool
     func wasGamepadButtonPressed(_ button: GamepadButton) -> Bool
     func wasGamepadTriggerPressed(left: Bool, threshold: Float) -> Bool
+    /// Rumbles the gamepad's low- and high-frequency motors (0...1) for `durationSeconds`; a later call replaces
+    /// the effect and zero stops it. Platforms without a gamepad ignore it.
+    func rumbleGamepad(lowFrequency: Float, highFrequency: Float, durationSeconds: Float)
     func wasNavigationPressed(_ direction: NavigationDirection) -> Bool
     func setCursorVisible(_ visible: Bool)
     var isCursorVisible: Bool { get }
@@ -222,4 +225,5 @@ public protocol GamePlatform: AnyObject {
 public extension GamePlatform {
     var isWindowMinimized: Bool { false }
     var closedByFailure: Bool { false }
+    func rumbleGamepad(lowFrequency: Float, highFrequency: Float, durationSeconds: Float) {}
 }

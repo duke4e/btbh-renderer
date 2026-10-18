@@ -955,6 +955,15 @@ BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
     const BTBHGPUWindow *window,
     BTBHGPUGamepadSnapshot *snapshot
 );
+/* Rumbles the open gamepad's low- and high-frequency motors (0..65535) for
+ * duration_ms; a later call replaces the effect and zero stops it. Without a
+ * pad, or on one without motors, it does nothing and still succeeds. */
+BTBHGPUResult btbh_gpu_window_gamepad_rumble(
+    BTBHGPUWindow *window,
+    uint16_t low_frequency,
+    uint16_t high_frequency,
+    uint32_t duration_ms
+);
 BTBHGPUResult btbh_gpu_window_begin_frame(
     BTBHGPUWindow *window,
     BTBHGPUWindowReport *report,
