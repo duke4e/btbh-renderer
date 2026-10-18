@@ -3347,7 +3347,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("emission + lamp_lighting,"))
         XCTAssertTrue(scene.contains("fragment_uniforms.lamp_controls[0] = (float)lamp_count;"))
         XCTAssertTrue(shader.contains(
-            "const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission);"
+            "const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)\n"
         ))
         // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
