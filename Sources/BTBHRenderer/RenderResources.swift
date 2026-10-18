@@ -1222,6 +1222,8 @@ public struct EnvironmentDescriptor: Sendable {
     public let reflections: ScreenSpaceReflectionDescriptor
     /// How strongly and how far the ambient occlusion (`ssaoEnabled`) darkens.
     public let ambientOcclusion: AmbientOcclusionDescriptor
+    /// 0 dry ... 1 a downpour: rings where drops land on wet level ground (the ground and paving details).
+    public let rain: Float
 
     public init(
         backgroundColor: RenderColor,
@@ -1244,7 +1246,8 @@ public struct EnvironmentDescriptor: Sendable {
         windowGlow: Float = 0,
         cloudShadows: CloudShadowDescriptor = .off,
         reflections: ScreenSpaceReflectionDescriptor = .off,
-        ambientOcclusion: AmbientOcclusionDescriptor = .standard
+        ambientOcclusion: AmbientOcclusionDescriptor = .standard,
+        rain: Float = 0
     ) {
         self.backgroundColor = backgroundColor
         self.backgroundEnergy = backgroundEnergy
@@ -1268,6 +1271,7 @@ public struct EnvironmentDescriptor: Sendable {
         self.cloudShadows = cloudShadows.sanitized
         self.reflections = reflections.sanitized
         self.ambientOcclusion = ambientOcclusion.sanitized
+        self.rain = rain.isFinite ? min(max(rain, 0), 1) : 0
     }
 
     public static let `default` = Self(

@@ -778,7 +778,9 @@ typedef struct BTBHGPUSceneLighting {
     float cloud_frequency;
     float cloud_height;
     float cloud_offset[2];
-    float cloud_reserved;
+    /* 0 dry ... 1 a downpour: rings where drops land on wet level ground (production_model.frag.hlsl
+       btbh_rain_ripples). */
+    float rain;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {

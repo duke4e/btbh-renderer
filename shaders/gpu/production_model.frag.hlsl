@@ -77,7 +77,7 @@ cbuffer MaterialPBR : register(b0, space3)
     // night instead and z panes per render unit, 6 a lamp's lens)
     float4 detail_parameters;
     // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); y the lit windows' energy (the glass
-    // detail's panes, 0 by day); zw reserved
+    // detail's panes, 0 by day); z the rain, 0 dry ... 1 a downpour (btbh_rain_ripples); w reserved
     float4 surface_wetness;
     // Cloud shadows (btbh_cloud_light): xy the cloud layer's drift (render units), z its noise cells per render
     // unit, w the share of the sun a cloud's shadow takes (0 none); cloud_shape x the sky's share under clouds,
@@ -1451,6 +1451,69 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     return (ddx(bump) * r1 + ddy(bump) * r2) / face_area;
 }
 
+// Rain (surface_wetness.z, 0 dry ... 1 a downpour) on wet level ground (the ground and paving details): in each
+// cell of two offset world grids a drop lands at its own spot and moment, then again elsewhere in the cell, and
+// sends out a ring that widens and fades. Puddles ripple fully, the wet street between them at a third, so lamps
+// and reflections waver in them. Returns the rings' surface gradient, as the detail's; rings thinner than about a
+// pixel fade out, so far streets do not shimmer. surface_time drives it (it runs on while the game pauses, as the
+// water does).
+static const float btbh_rain_cells = 3.0f;
+static const float btbh_rain_rate = 0.9f;
+static const float btbh_rain_ring_radius = 0.45f;
+static const float btbh_rain_ring_width = 0.12f;
+static const float btbh_rain_tilt = 0.09f;
+
+float3 btbh_rain_ripples(FragmentInput input)
+{
+    const float rain = saturate(surface_wetness.z) * saturate(surface_wetness.x * 2.0f);
+    const uint pattern = (uint)(detail_parameters.w + 0.5f);
+    if (rain <= 0.0f || (pattern != 1u && pattern != 4u))
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float3 position_dx = ddx(input.world_position);
+    const float3 position_dy = ddy(input.world_position);
+    const float3 face = cross(position_dx, position_dy);
+    const float face_area = length(face);
+    const float level = face_area > 0.0f ? abs(face.y) / face_area : 0.0f;
+    const float footprint = max(length(position_dx.xz), length(position_dy.xz)) * btbh_rain_cells;
+    const float visible = saturate((0.25f - footprint) * 8.0f) * saturate((level - 0.8f) * 10.0f);
+    if (visible <= 0.0f)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    const float puddle = smoothstep(
+        0.42f,
+        0.68f,
+        btbh_detail_noise(input.world_position.xz * 0.35f + 3.1f)
+    );
+    float2 slope = float2(0.0f, 0.0f);
+    [unroll]
+    for (int layer = 0; layer < 2; ++layer)
+    {
+        const float2 grid = input.world_position.xz * btbh_rain_cells + float2(0.5f, 0.37f) * (float)layer;
+        const float2 cell = floor(grid);
+        const float cycle_time = surface_time * btbh_rain_rate
+            + btbh_detail_hash(cell + float2(41.0f, 17.0f + 5.0f * (float)layer));
+        const float cycle = floor(cycle_time);
+        const float t = cycle_time - cycle;
+        const float2 drop_cell = cell + float2(cycle * 17.0f, cycle * 31.0f);
+        const float2 spot = float2(
+            btbh_detail_hash(drop_cell + float2(13.0f + 7.0f * (float)layer, 3.0f)),
+            btbh_detail_hash(drop_cell + float2(5.0f, 29.0f + 11.0f * (float)layer))
+        ) * 0.6f + 0.2f;
+        const float2 offset = grid - cell - spot;
+        const float distance = length(offset);
+        const float x = (distance - t * btbh_rain_ring_radius) / btbh_rain_ring_width;
+        const float fade = (1.0f - t) * (1.0f - t);
+        // The ring's height falls off as a Gaussian around its radius; this is its slope across it.
+        const float across = -2.0f * x * exp(-x * x) * fade;
+        slope += distance > 0.0001f ? offset / distance * across : float2(0.0f, 0.0f);
+    }
+    const float strength = rain * lerp(0.35f, 1.0f, puddle) * visible * btbh_rain_tilt / btbh_rain_ring_width;
+    return float3(slope.x, 0.0f, slope.y) * strength;
+}
+
 // Wet ground (surface_wetness.x, the game's city at night): the ground and paving details turn glossy and a
 // shade darker, in soft puddles a few render units across more than between them, so lights glint on the
 // street. Only level faces get wet: the face normal from the position's derivatives, as the surface detail
@@ -1522,7 +1585,8 @@ FragmentOutput shade_fragment(FragmentInput input)
         mapped_normal,
         orm
     );
-    const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission);
+    const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)
+        + btbh_rain_ripples(input);
     if (albedo_sample.a < alpha_cutoff)
     {
         discard;

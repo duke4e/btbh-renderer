@@ -106,7 +106,7 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float sun_direction_size[4];
     float procedural_controls[4];
     float detail_parameters[4];
-    /* x the surface wetness, y the window glow (BTBHGPUSceneLighting), zw reserved. */
+    /* x the surface wetness, y the window glow, z the rain (BTBHGPUSceneLighting), w reserved. */
     float surface_wetness[4];
     /* Cloud shadows (BTBHGPUSceneLighting): xy the layer's drift, z noise cells per render unit, w the share of
        the sun they take; cloud_shape x the sky's share under clouds, y their edges' width, z the layer's
@@ -4292,7 +4292,10 @@ bool btbh_gpu_scene_lighting_valid(
         lighting->cloud_frequency < 0.0f ||
         !isfinite(lighting->cloud_height) ||
         !isfinite(lighting->cloud_offset[0]) ||
-        !isfinite(lighting->cloud_offset[1])) {
+        !isfinite(lighting->cloud_offset[1]) ||
+        !isfinite(lighting->rain) ||
+        lighting->rain < 0.0f ||
+        lighting->rain > 1.0f) {
         return false;
     }
     for (uint32_t lamp = 0u; lamp < lighting->lamp_count; lamp += 1u) {
@@ -6791,6 +6794,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             fragment_uniforms.surface_wetness[1] =
                 isfinite(lighting->window_glow)
                     ? fmaxf(lighting->window_glow, 0.0f)
+                    : 0.0f;
+            fragment_uniforms.surface_wetness[2] =
+                isfinite(lighting->rain)
+                    ? fminf(fmaxf(lighting->rain, 0.0f), 1.0f)
                     : 0.0f;
             fragment_uniforms.cloud_controls[0] = lighting->cloud_offset[0];
             fragment_uniforms.cloud_controls[1] = lighting->cloud_offset[1];

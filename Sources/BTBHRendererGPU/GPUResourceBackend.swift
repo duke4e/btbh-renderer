@@ -1391,7 +1391,8 @@ final class GPUResourceBackend: RenderResourceBackend {
             lamps: environment.lamps,
             lampCoreRadius: environment.lampCoreRadius,
             windowGlow: environment.windowGlow,
-            cloudShadows: environment.cloudShadows
+            cloudShadows: environment.cloudShadows,
+            rain: environment.rain
         )
     }
 

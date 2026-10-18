@@ -3345,6 +3345,9 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains(") * btbh_cloud_light(input.world_position)"))
         XCTAssertTrue(shader.contains("#else\n        btbh_cloud_light(input.world_position)\n#endif"))
         XCTAssertTrue(scene.contains("fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;"))
+        // The rain rides the wetness's third component and bends the ground's normal with the detail's.
+        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[2] ="))
+        XCTAssertTrue(shader.contains("+ btbh_rain_ripples(input);"))
         // The lit windows' energy rides the wetness's second component; glass panes add their light to the
         // emission and reflect like coated glass.
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[1] ="))
@@ -3401,6 +3404,17 @@ final class GPUWindowProbeTests: XCTestCase {
                        .off)
         XCTAssertEqual(EnvironmentDescriptor.default.cloudShadows, .off)
         XCTAssertFalse(CloudShadowDescriptor.off.isEnabled)
+        // Rain: 0...1, nothing that is not finite.
+        func raining(_ rain: Float) -> EnvironmentDescriptor {
+            EnvironmentDescriptor(backgroundColor: .black, backgroundEnergy: 0, ambientColor: .white, ambientEnergy: 0,
+                                  ambientMap: .invalid, skyCubemap: .invalid, ssaoEnabled: false, tonemap: .reinhard,
+                                  tonemapWhite: 1, rain: rain)
+        }
+        XCTAssertEqual(raining(0.6).rain, 0.6)
+        XCTAssertEqual(raining(4).rain, 1)
+        XCTAssertEqual(raining(-1).rain, 0)
+        XCTAssertEqual(raining(.nan).rain, 0)
+        XCTAssertEqual(EnvironmentDescriptor.default.rain, 0)
         // Reflections: the roughness at most 1, the thickness never negative; off unless the intensity,
         // roughness and reach are positive and finite.
         func reflecting(_ reflections: ScreenSpaceReflectionDescriptor) -> EnvironmentDescriptor {
