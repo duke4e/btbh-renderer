@@ -7,9 +7,30 @@
 
 #include <stdbool.h>
 
+/* One buffer of a window's geometry arena: model primitives take ranges of it instead of buffers of their own,
+   so a frame binds a handful of buffers, not one or two per primitive (SDL tracks every bound buffer with a scan
+   of the buffers its command buffer used, 2026-10-18). Released when its last primitive goes. */
+typedef struct BTBHGPUGeometryBlock {
+    SDL_GPUBuffer *buffer;
+    uint32_t capacity;
+    uint32_t used;
+    uint32_t live;
+} BTBHGPUGeometryBlock;
+
+typedef struct BTBHGPUGeometryArena {
+    BTBHGPUGeometryBlock **blocks;
+    uint32_t block_count;
+    uint32_t block_capacity;
+} BTBHGPUGeometryArena;
+
 typedef struct BTBHGPUModelPrimitive {
+    /* The arena blocks' buffers; the primitive's vertices start at vertex_base and its indices at first_index. */
     SDL_GPUBuffer *vertex_buffer;
     SDL_GPUBuffer *index_buffer;
+    BTBHGPUGeometryBlock *vertex_block;
+    BTBHGPUGeometryBlock *index_block;
+    int32_t vertex_base;
+    uint32_t first_index;
     float *positions;
     uint32_t *indices;
     uint32_t vertex_count;
@@ -61,6 +82,8 @@ struct BTBHGPUWindow {
     BTBHGPUTexture *texture_head;
     BTBHGPUFont *font_head;
     BTBHGPUModel *model_head;
+    BTBHGPUGeometryArena vertex_arena;
+    BTBHGPUGeometryArena index_arena;
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
@@ -193,6 +216,7 @@ void btbh_gpu_window_scene_submission_finished(
     BTBHGPUWindow *window,
     bool submitted
 );
+void btbh_gpu_window_release_geometry_arenas(BTBHGPUWindow *window);
 void btbh_gpu_window_scene_record_frame_completion(
     BTBHGPUWindow *window,
     double completion_milliseconds

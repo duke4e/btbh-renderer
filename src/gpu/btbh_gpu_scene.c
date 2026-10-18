@@ -5022,6 +5022,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
             SDL_GPUBuffer *index_buffer = NULL;
             uint32_t vertex_count = 0u;
             uint32_t index_count = 0u;
+            uint32_t first_index = 0u;
+            int32_t vertex_base = 0;
             if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
                 const BTBHGPUModelPrimitive *primitive =
                     &batch->model->primitives[geometry_index];
@@ -5029,6 +5031,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 index_buffer = primitive->index_buffer;
                 vertex_count = primitive->vertex_count;
                 index_count = primitive->index_count;
+                first_index = primitive->first_index;
+                vertex_base = primitive->vertex_base;
             } else {
                 vertex_buffer = batch->custom_mesh->vertex_buffer;
                 index_buffer = batch->custom_mesh->index_buffer;
@@ -5082,8 +5086,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     pass,
                     index_count,
                     batch->instance_count,
-                    0u,
-                    0,
+                    first_index,
+                    vertex_base,
                     draw_first_instance
                 );
             } else {
@@ -5091,7 +5095,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     pass,
                     vertex_count,
                     batch->instance_count,
-                    0u,
+                    (uint32_t) vertex_base,
                     draw_first_instance
                 );
             }
@@ -5381,6 +5385,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             SDL_GPUBuffer *index_buffer = NULL;
             uint32_t vertex_count = 0u;
             uint32_t index_count = 0u;
+            uint32_t first_index = 0u;
+            int32_t vertex_base = 0;
             if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
                 const BTBHGPUModelPrimitive *primitive =
                     &batch->model->primitives[geometry_index];
@@ -5388,6 +5394,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 index_buffer = primitive->index_buffer;
                 vertex_count = primitive->vertex_count;
                 index_count = primitive->index_count;
+                first_index = primitive->first_index;
+                vertex_base = primitive->vertex_base;
             } else {
                 vertex_buffer = batch->custom_mesh->vertex_buffer;
                 index_buffer = batch->custom_mesh->index_buffer;
@@ -5423,8 +5431,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     pass,
                     index_count,
                     batch->instance_count,
-                    0u,
-                    0,
+                    first_index,
+                    vertex_base,
                     batch->first_instance
                 );
             } else {
@@ -5432,7 +5440,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     pass,
                     vertex_count,
                     batch->instance_count,
-                    0u,
+                    (uint32_t) vertex_base,
                     batch->first_instance
                 );
             }
@@ -7399,6 +7407,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             SDL_GPUBuffer *index_buffer = NULL;
             uint32_t vertex_count = 0u;
             uint32_t index_count = 0u;
+            uint32_t first_index = 0u;
+            int32_t vertex_base = 0;
             if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
                 const BTBHGPUModelPrimitive *primitive =
                     &batch->model->primitives[geometry_index];
@@ -7406,6 +7416,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 index_buffer = primitive->index_buffer;
                 vertex_count = primitive->vertex_count;
                 index_count = primitive->index_count;
+                first_index = primitive->first_index;
+                vertex_base = primitive->vertex_base;
             } else {
                 vertex_buffer = batch->custom_mesh->vertex_buffer;
                 index_buffer = batch->custom_mesh->index_buffer;
@@ -7446,8 +7458,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     pass,
                     index_count,
                     batch->instance_count,
-                    0u,
-                    0,
+                    first_index,
+                    vertex_base,
                     batch->first_instance
                 );
             } else {
@@ -7455,7 +7467,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     pass,
                     vertex_count,
                     batch->instance_count,
-                    0u,
+                    (uint32_t) vertex_base,
                     batch->first_instance
                 );
             }
