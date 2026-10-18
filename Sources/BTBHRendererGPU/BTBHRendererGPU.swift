@@ -10,8 +10,15 @@ enum GPUColorSpace {
             : pow((clamped + 0.055) / 1.055, 2.4)
     }
 
+    /// Every 8-bit value's linear component, worked out once by `linearComponent(_: Float)`: instance and
+    /// material colours ask for it per draw, and `pow` cost about 2 % of a big fight's main thread (2026-10-17).
+    private static let linearComponents: [Float] = (0...255).map { linearComponent(Float($0) / 255) }
+    private static let linearizedChannels: [UInt8] = (0...255).map {
+        UInt8(clamping: Int((linearComponents[$0] * 255).rounded()))
+    }
+
     static func linearComponent(_ srgb: UInt8) -> Float {
-        linearComponent(Float(srgb) / 255)
+        linearComponents[Int(srgb)]
     }
 
     static func legacyAmbientComponent(_ authored: UInt8) -> Float {
@@ -19,15 +26,10 @@ enum GPUColorSpace {
     }
 
     static func linearized(_ color: RenderColor) -> RenderColor {
-        func channel(_ value: UInt8) -> UInt8 {
-            UInt8(clamping: Int(
-                (linearComponent(value) * 255).rounded()
-            ))
-        }
-        return .init(
-            r: channel(color.r),
-            g: channel(color.g),
-            b: channel(color.b),
+        .init(
+            r: linearizedChannels[Int(color.r)],
+            g: linearizedChannels[Int(color.g)],
+            b: linearizedChannels[Int(color.b)],
             a: color.a
         )
     }
@@ -412,7 +414,46 @@ struct GPUSceneGeometryProbeBatch {
 }
 
 enum GPUSceneBatchOrdering {
+    /// The render list first (opaque legacy, opaque, transparent legacy, transparent), then submission order,
+    /// except that transparent legacy draws sort by their material key before it. The lists fill in submission
+    /// order and only the transparent legacy one is sorted: sorting every (large) batch moved each about log n
+    /// times, 3 % of a big fight's main thread (2026-10-17). Material keys order totally (every field, then the
+    /// index), so the result is the full sort's; a batch without a key falls back to the full sort.
     static func opaqueThenLegacyMaterialOrder(
+        _ batches: [GPUSceneGeometryProbeBatch]
+    ) -> [GPUSceneGeometryProbeBatch] {
+        var lists: [[Int]] = [[], [], [], []]
+        for index in batches.indices {
+            let list = renderList(batches[index])
+            if list == 2, batches[index].material?.legacySortKey == nil {
+                return fullOrder(batches)
+            }
+            lists[list].append(index)
+        }
+        lists[2].sort { left, right in
+            let leftKey = batches[left].material!.legacySortKey!
+            let rightKey = batches[right].material!.legacySortKey!
+            if leftKey != rightKey { return leftKey.isOrderedBefore(rightKey) }
+            return left < right
+        }
+        var ordered: [GPUSceneGeometryProbeBatch] = []
+        ordered.reserveCapacity(batches.count)
+        for list in lists {
+            for index in list { ordered.append(batches[index]) }
+        }
+        return ordered
+    }
+
+    private static func renderList(_ batch: GPUSceneGeometryProbeBatch) -> Int {
+        let transparent = batch.material.map {
+            $0.transparency == .alpha || $0.blendMode != .mix
+        } ?? false
+        return transparent
+            ? (batch.legacyInstanced ? 2 : 3)
+            : (batch.legacyInstanced ? 0 : 1)
+    }
+
+    private static func fullOrder(
         _ batches: [GPUSceneGeometryProbeBatch]
     ) -> [GPUSceneGeometryProbeBatch] {
         let keyed = batches.enumerated().map { index, batch in

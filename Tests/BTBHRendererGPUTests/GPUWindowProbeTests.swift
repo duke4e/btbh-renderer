@@ -464,6 +464,21 @@ final class GPUWindowProbeTests: XCTestCase {
         )
     }
 
+    func testEightBitColorTablesMatchTheConversion() {
+        for value in 0...255 {
+            let component = UInt8(value)
+            XCTAssertEqual(
+                GPUColorSpace.linearComponent(component).bitPattern,
+                GPUColorSpace.linearComponent(Float(value) / 255).bitPattern
+            )
+            let expected = UInt8(clamping: Int((GPUColorSpace.linearComponent(Float(value) / 255) * 255).rounded()))
+            XCTAssertEqual(
+                GPUColorSpace.linearized(.init(r: component, g: component, b: component, a: 7)),
+                .init(r: expected, g: expected, b: expected, a: 7)
+            )
+        }
+    }
+
     func testProductionGPUColorInputsUseSRGBToLinearConversion() {
         XCTAssertEqual(
             GPUColorSpace.linearComponent(0.5),
