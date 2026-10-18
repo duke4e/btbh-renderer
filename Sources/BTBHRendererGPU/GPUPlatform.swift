@@ -388,6 +388,12 @@ public final class GPUPlatform: GamePlatform {
         gamepadState.triggerPressed(left: left, threshold: threshold)
     }
 
+    public func rumbleGamepad(lowFrequency: Float, highFrequency: Float, durationSeconds: Float) {
+        func motor(_ value: Float) -> UInt16 { UInt16(max(0, min(1, value)) * 65_535) }
+        window?.rumbleGamepad(low: motor(lowFrequency), high: motor(highFrequency),
+                              durationMilliseconds: UInt32(max(0, min(10, durationSeconds)) * 1_000))
+    }
+
     public func wasNavigationPressed(
         _ direction: NavigationDirection
     ) -> Bool {

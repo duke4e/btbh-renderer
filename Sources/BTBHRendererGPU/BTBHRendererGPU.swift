@@ -1617,6 +1617,11 @@ public final class GPUWindowProbe {
         return snapshot
     }
 
+    func rumbleGamepad(low: UInt16, high: UInt16, durationMilliseconds: UInt32) {
+        guard let window, !isShutdown else { return }
+        _ = btbh_gpu_window_gamepad_rumble(window, low, high, durationMilliseconds)
+    }
+
     func isKeyDown(_ key: InputKey) -> Bool {
         guard let window, !isShutdown else { return false }
         return btbh_gpu_window_key_down(window, key.rawValue) != 0

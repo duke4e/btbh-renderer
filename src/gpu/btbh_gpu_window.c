@@ -994,6 +994,20 @@ BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
     return BTBH_GPU_OK;
 }
 
+BTBHGPUResult btbh_gpu_window_gamepad_rumble(
+    BTBHGPUWindow *window,
+    uint16_t low_frequency,
+    uint16_t high_frequency,
+    uint32_t duration_ms
+) {
+    if (window == NULL) { return BTBH_GPU_INVALID_ARGUMENT; }
+    /* SDL reports a pad without motors as an error: that is no failure here. */
+    if (window->gamepad != NULL) {
+        (void)SDL_RumbleGamepad(window->gamepad, low_frequency, high_frequency, duration_ms);
+    }
+    return BTBH_GPU_OK;
+}
+
 BTBHGPUResult btbh_gpu_window_begin_frame(
     BTBHGPUWindow *window,
     BTBHGPUWindowReport *report,
