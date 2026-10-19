@@ -16,6 +16,14 @@ final class GPUPlatformTests: XCTestCase {
         XCTAssertEqual(delay, 566_666)
     }
 
+    func testPresentedFramePNGIsOpaqueAndKeepsColour() {
+        // Two pixels a blend left translucent: the colour stays, the alpha turns opaque as the window shows it.
+        let pixels = GPUPresentedFramePNG.opaqueRGBA8([10, 20, 30, 0, 200, 150, 100, 160])
+
+        XCTAssertEqual(pixels, [10, 20, 30, 255, 200, 150, 100, 255])
+        XCTAssertEqual(GPUPresentedFramePNG.opaqueRGBA8([]), [])
+    }
+
     func testFramePacingDoesNotDelayFirstLateOrUncappedFrames() {
         XCTAssertNil(GPUFramePacing.delayNanoseconds(
             targetFramesPerSecond: 240,

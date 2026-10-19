@@ -51,6 +51,21 @@ struct GPUFramePacing {
     }
 }
 
+enum GPUPresentedFramePNG {
+    /// The presented frame as the window shows it: opaque. The swapchain's alpha is whatever blending left there
+    /// (the scene's edges, a canvas overlay's own alpha), and image viewers draw a PNG's alpha over white, so the
+    /// game's captures showed white outlines that the screen never had.
+    static func opaqueRGBA8(_ rgba8: [UInt8]) -> [UInt8] {
+        var pixels = rgba8
+        var alpha = 3
+        while alpha < pixels.count {
+            pixels[alpha] = 255
+            alpha += 4
+        }
+        return pixels
+    }
+}
+
 struct GPUSceneShaderPaths {
     let vertexShaderPath: String
     let animatedVertexShaderPath: String
@@ -751,8 +766,9 @@ public final class GPUPlatform: GamePlatform {
 
     func writePresentedFramePNG(to path: String) throws {
         let frame = try readbackPresentedFrame()
+        let pixels = GPUPresentedFramePNG.opaqueRGBA8(frame.rgba8)
         let result = path.withCString { pathPointer in
-            frame.rgba8.withUnsafeBufferPointer { bytes in
+            pixels.withUnsafeBufferPointer { bytes in
                 btbh_gpu_write_png_rgba8(
                     pathPointer,
                     UInt32(frame.size.width),
