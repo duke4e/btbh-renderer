@@ -225,12 +225,15 @@ void apply_surface(
             fine_time
         ) - fine;
         const float shade = swell * 0.6f + fine * 0.4f;
-        const float crest = smoothstep(0.58f, 0.90f, shade);
+        // Foam only on the highest crests, broken into the fine ripples' streaks: a whole crest washed pale
+        // read as white blots on the dark water (2026-10-22).
+        const float crest =
+            smoothstep(0.72f, 0.95f, shade) * smoothstep(0.45f, 0.85f, fine);
         albedo.rgb *= lerp(0.80f, 1.12f, shade);
         albedo.rgb = lerp(
             albedo.rgb,
             float3(0.860f, 0.950f, 0.970f),
-            crest * 0.30f
+            crest * 0.22f
         );
         albedo.a = 1.0f;
         // Tangent space, as the sampled normal map is after its decode.
