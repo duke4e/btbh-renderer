@@ -127,6 +127,28 @@ void add_wave(float2 position, float2 direction, float amplitude, float waveleng
     gradient += direction * (amplitude * k * cos(phase));
 }
 
+// The pixel water's mask (the ORM texture's blue channel, a texel a game pixel) smooth: interpolated
+// between its texels (wrapping, as the ring textures do) and cut at a half with an edge about a screen
+// pixel soft, so a shore runs smoothly across the pixels rather than in their steps.
+float smooth_water_mask(float2 texture_coordinate)
+{
+    uint width, height;
+    orm_texture.GetDimensions(width, height);
+    const int2 size = int2(width, height);
+    const float2 texel = texture_coordinate * float2(size) - 0.5f;
+    const float2 base = floor(texel);
+    const float2 f = texel - base;
+    const int2 i0 = ((int2(base) % size) + size) % size;
+    const int2 i1 = (i0 + 1) % size;
+    const float m00 = orm_texture.Load(int3(i0.x, i0.y, 0)).b;
+    const float m10 = orm_texture.Load(int3(i1.x, i0.y, 0)).b;
+    const float m01 = orm_texture.Load(int3(i0.x, i1.y, 0)).b;
+    const float m11 = orm_texture.Load(int3(i1.x, i1.y, 0)).b;
+    const float m = lerp(lerp(m00, m10, f.x), lerp(m01, m11, f.x), f.y);
+    const float edge = max(fwidth(m), 1e-4f);
+    return saturate((m - 0.5f) / edge + 0.5f);
+}
+
 void apply_surface(
     FragmentInput input,
     inout float4 albedo,
@@ -328,7 +350,7 @@ void apply_surface(
         // deeper in the troughs and lighter on the slopes, the sky in them, the primary light's
         // highlights (y: their strength, z: sharpness) and foam on the crests. surface_parameters1.w
         // is how much of the texture shows through (its detail).
-        const float mask = orm.b;
+        const float mask = smooth_water_mask(input.texture_coordinate);
         if (mask > 0.0f)
         {
             const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 1.0f;
