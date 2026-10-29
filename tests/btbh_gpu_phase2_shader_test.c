@@ -269,7 +269,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
+            "\"samplers\": 10"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
@@ -277,7 +277,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 8"
+            "\"samplers\": 9"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
@@ -289,11 +289,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
+            "\"samplers\": 10"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 8"
+            "\"samplers\": 9"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,

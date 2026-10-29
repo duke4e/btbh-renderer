@@ -258,8 +258,12 @@ struct BTBHGPUSceneRuntime {
     uint32_t bloom_source_height;
     uint32_t bloom_level_count;
     SDL_GPUTexture *directional_shadow_textures[3];
+    uint32_t directional_shadow_width;
+    uint32_t directional_shadow_height;
     SDL_GPUTexture *omni_shadow_texture;
     SDL_GPUSampler *directional_shadow_sampler;
+    /* The shadow maps' comparison sampler (2x2 percentage-closer filtering by the hardware). */
+    SDL_GPUSampler *directional_shadow_compare_sampler;
     SDL_GPUSampler *scene_color_sampler;
     SDL_GPUBuffer *instance_buffer;
     SDL_GPUBuffer *instance_vertex_buffer;
@@ -300,7 +304,8 @@ static bool btbh_gpu_scene_shadow_resources_ready(
         runtime->directional_shadow_textures[0] == NULL ||
         runtime->directional_shadow_textures[1] == NULL ||
         runtime->directional_shadow_textures[2] == NULL ||
-        runtime->directional_shadow_sampler == NULL) {
+        runtime->directional_shadow_sampler == NULL ||
+        runtime->directional_shadow_compare_sampler == NULL) {
         return false;
     }
     for (uint32_t cull_index = 0u;
@@ -347,6 +352,21 @@ uint8_t btbh_gpu_window_scene_set_shadow_update_periods(
     window->scene_shadow_update_period_frames[1] =
         secondary_directional_frames;
     window->scene_shadow_update_period_frames[2] = spot_frames;
+    return 1u;
+}
+
+uint8_t btbh_gpu_window_scene_set_directional_shadow_size(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height
+) {
+    if (window == NULL ||
+        width < 256u || width > 8192u ||
+        height < 256u || height > 8192u) {
+        return 0u;
+    }
+    window->scene_directional_shadow_size[0] = width;
+    window->scene_directional_shadow_size[1] = height;
     return 1u;
 }
 
@@ -2223,7 +2243,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         fast_unlit
             ? 2u
             : (shadows_active
-                ? (omni_shadows_active ? 9u : 8u)
+                ? (omni_shadows_active ? 10u : 9u)
                 : 5u),
         auxiliary_geometry_outputs,
         batch,
@@ -2611,10 +2631,32 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    // The primary directional map's size: as set (btbh_gpu_window_scene_set_directional_shadow_size), made
+    // anew when that changes.
+    const uint32_t primary_width =
+        window->scene_directional_shadow_size[0] != 0u
+            ? window->scene_directional_shadow_size[0]
+            : BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE;
+    const uint32_t primary_height =
+        window->scene_directional_shadow_size[1] != 0u
+            ? window->scene_directional_shadow_size[1]
+            : BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE;
+    if (runtime->directional_shadow_textures[0] != NULL &&
+        (runtime->directional_shadow_width != primary_width ||
+         runtime->directional_shadow_height != primary_height)) {
+        SDL_ReleaseGPUTexture(
+            device,
+            runtime->directional_shadow_textures[0]
+        );
+        runtime->directional_shadow_textures[0] = NULL;
+        runtime->retained_shadow_ready[0] = 0u;
+    }
     if (btbh_gpu_scene_shadow_resources_ready(runtime)) {
         return true;
     }
-    if (!btbh_gpu_scene_create_shadow_pipelines(
+    if (runtime->shadow_pipelines[0] == NULL &&
+        !btbh_gpu_scene_create_shadow_pipelines(
             window,
             fast_shadow_vertex_shader_path,
             fast_shadow_fragment_shader_path,
@@ -2628,7 +2670,6 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
         return false;
     }
 
-    SDL_GPUDevice *device = window->device->gpu;
     SDL_GPUTextureCreateInfo shadow_info;
     SDL_zero(shadow_info);
     shadow_info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -2639,14 +2680,22 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
     shadow_info.layer_count_or_depth = 1u;
     shadow_info.num_levels = 1u;
     shadow_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    const uint32_t shadow_map_sizes[3] = {
+    const uint32_t shadow_map_widths[3] = {
+        primary_width,
         BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE,
+        BTBH_GPU_SPOT_SHADOW_MAP_SIZE
+    };
+    const uint32_t shadow_map_heights[3] = {
+        primary_height,
         BTBH_GPU_DIRECTIONAL_SHADOW_MAP_SIZE,
         BTBH_GPU_SPOT_SHADOW_MAP_SIZE
     };
     for (uint32_t index = 0u; index < 3u; ++index) {
-        shadow_info.width = shadow_map_sizes[index];
-        shadow_info.height = shadow_map_sizes[index];
+        if (runtime->directional_shadow_textures[index] != NULL) {
+            continue;
+        }
+        shadow_info.width = shadow_map_widths[index];
+        shadow_info.height = shadow_map_heights[index];
         runtime->directional_shadow_textures[index] =
             SDL_CreateGPUTexture(device, &shadow_info);
         if (runtime->directional_shadow_textures[index] == NULL) {
@@ -2659,6 +2708,8 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
             return false;
         }
     }
+    runtime->directional_shadow_width = primary_width;
+    runtime->directional_shadow_height = primary_height;
     SDL_GPUSamplerCreateInfo sampler_info;
     SDL_zero(sampler_info);
     sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
@@ -2671,9 +2722,20 @@ static bool btbh_gpu_scene_ensure_shadow_resources(
         SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     sampler_info.address_mode_w =
         SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    runtime->directional_shadow_sampler =
-        SDL_CreateGPUSampler(device, &sampler_info);
     if (runtime->directional_shadow_sampler == NULL) {
+        runtime->directional_shadow_sampler =
+            SDL_CreateGPUSampler(device, &sampler_info);
+    }
+    // The same with a comparison: a tap passes where its depth is at most the stored one (lit), the four
+    // texels round it compared and filtered.
+    sampler_info.enable_compare = true;
+    sampler_info.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+    if (runtime->directional_shadow_compare_sampler == NULL) {
+        runtime->directional_shadow_compare_sampler =
+            SDL_CreateGPUSampler(device, &sampler_info);
+    }
+    if (runtime->directional_shadow_sampler == NULL ||
+        runtime->directional_shadow_compare_sampler == NULL) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
@@ -3377,7 +3439,7 @@ static bool btbh_gpu_scene_validate_batches(
             batch->stencil_pass <
                 BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT &&
             batch->transparency_enabled <= 1u &&
-            batch->unlit_enabled <= 2u &&
+            batch->unlit_enabled <= 3u &&
             (scene_visibility == NULL ||
              scene_visibility[index] <= 1u) &&
             (directional_shadow_visibility == NULL ||
@@ -5898,7 +5960,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->orm_texture != NULL
                     ? batch->orm_texture
                     : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[9];
+            SDL_GPUTextureSamplerBinding samplers[10];
             SDL_zeroa(samplers);
             samplers[0].texture = texture->texture;
             samplers[0].sampler = texture->sampler;
@@ -5910,22 +5972,28 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             samplers[3].sampler = orm_texture->sampler;
             samplers[4].texture = runtime->brdf_lut_texture;
             samplers[4].sampler = runtime->brdf_lut_sampler;
+            // The shadow maps through the comparison sampler; the primary one again (8) to read its
+            // depths.
             samplers[5].texture =
                 runtime->directional_shadow_textures[0];
             samplers[5].sampler =
-                runtime->directional_shadow_sampler;
+                runtime->directional_shadow_compare_sampler;
             samplers[6].texture =
                 runtime->directional_shadow_textures[1];
             samplers[6].sampler =
-                runtime->directional_shadow_sampler;
+                runtime->directional_shadow_compare_sampler;
             samplers[7].texture =
                 runtime->directional_shadow_textures[2];
             samplers[7].sampler =
+                runtime->directional_shadow_compare_sampler;
+            samplers[8].texture =
+                runtime->directional_shadow_textures[0];
+            samplers[8].sampler =
                 runtime->directional_shadow_sampler;
             if (omni_shadows_active) {
-                samplers[8].texture = runtime->omni_shadow_texture;
-                samplers[8].sampler =
-                    runtime->directional_shadow_sampler;
+                samplers[9].texture = runtime->omni_shadow_texture;
+                samplers[9].sampler =
+                    runtime->directional_shadow_compare_sampler;
             }
             SDL_BindGPUFragmentSamplers(
                 pass,
@@ -5935,7 +6003,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                  btbh_gpu_scene_uses_fast_unlit_pipeline(batch))
                     ? 2u
                     : (shadows_active
-                        ? (omni_shadows_active ? 9u : 8u)
+                        ? (omni_shadows_active ? 10u : 9u)
                         : 5u)
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
@@ -6972,6 +7040,15 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUSampler(
                 device,
                 window->scene_runtime->directional_shadow_sampler
+            );
+        }
+        if (
+            window->scene_runtime->directional_shadow_compare_sampler !=
+                NULL
+        ) {
+            SDL_ReleaseGPUSampler(
+                device,
+                window->scene_runtime->directional_shadow_compare_sampler
             );
         }
         for (uint32_t index = 0u; index < 3u; ++index) {

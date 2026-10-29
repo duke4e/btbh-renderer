@@ -65,6 +65,7 @@ struct BTBHGPUWindow {
     BTBHGPUSceneRuntime *scene_runtime;
     BTBHGPUSceneTelemetryReport scene_telemetry;
     uint32_t scene_shadow_update_period_frames[3];
+    uint32_t scene_directional_shadow_size[2];  /* the primary directional shadow map's; 0: the default */
     BTBHGPUCanvasRuntime *canvas_runtime;
     BTBHGPUTexture *presented_frame;
     bool presented_frame_readback_requested;

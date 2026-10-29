@@ -659,7 +659,8 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t stencil_reference;
     uint8_t stencil_mask;
     uint8_t transparency_enabled;
-    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow
+    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow; 3: as 2, through
+                            // four plain comparison taps (no soft penumbra: see-through layers drawn many times)
     uint8_t spot_shadow_visible;
     /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
      * source of it (unlit surfaces are, unless this is set). */
@@ -1160,6 +1161,13 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     uint8_t clear_blue,
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
+);
+// The primary directional shadow map's size in texels (256-8192 each way; by default 2048 x 2048), for
+// a light-space region that isn't square. Taken at the next scene presented (the map is made anew).
+uint8_t btbh_gpu_window_scene_set_directional_shadow_size(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height
 );
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
