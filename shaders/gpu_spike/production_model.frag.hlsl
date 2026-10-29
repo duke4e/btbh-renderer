@@ -154,6 +154,9 @@ float smooth_water_mask(float2 texture_coordinate)
     return saturate((m - 0.5f) / edge + 0.5f);
 }
 
+// Where the surface is pixel water (apply_surface): it takes no ambient occlusion there (ssao_normal_scale).
+static float ssao_water = 0.0f;
+
 void apply_surface(
     FragmentInput input,
     inout float4 albedo,
@@ -356,6 +359,7 @@ void apply_surface(
         // highlights (y: their strength, z: sharpness) and foam on the crests. surface_parameters1.w
         // is how much of the texture shows through (its detail).
         const float mask = smooth_water_mask(input.texture_coordinate);
+        ssao_water = mask;
         if (mask > 0.0f)
         {
             const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 1.0f;
@@ -1274,6 +1278,20 @@ void evaluate_ambient_multiscattering(
         radiance * single_scattering;
 }
 
+// How the surface takes part in the screen-space ambient occlusion (BTBHGPUSceneSSAOMode, unlit_enabled bits
+// 3-4), told to its passes by the length of the normal written (production_ssao.frag.hlsl; every other reader
+// normalizes it): 1 takes it and casts it, 0.5 takes it only, 0.75 casts it only, 0.25 neither. Pixel water
+// casts it only.
+float ssao_normal_scale()
+{
+    uint mode = (unlit_enabled >> 3u) & 3u;
+    if (ssao_water > 0.5f)
+    {
+        mode = mode == 0u || mode == 2u ? 2u : 3u;
+    }
+    return mode == 0u ? 1.0f : mode == 1u ? 0.5f : mode == 2u ? 0.75f : 0.25f;
+}
+
 FragmentOutput fragment_output(
     float4 color,
     float3 emission,
@@ -1289,7 +1307,7 @@ FragmentOutput fragment_output(
     output.emission = float4(emission, 1.0f);
     output.ambient = float4(ambient_diffuse, 1.0f);
     output.normal = float4(
-        normal * 0.5f + 0.5f,
+        normal * (0.5f * ssao_normal_scale()) + 0.5f,
         occlusion
     );
     output.ambient_specular = float4(
@@ -1323,7 +1341,7 @@ FragmentOutput rc_material_output(
         ? float4(0.0f, 0.0f, 0.0f, 0.0f)
         : float4(albedo.rgb, unlit ? 0.0f : metalness);
     output.normal = float4(
-        normal * 0.5f + 0.5f,
+        normal * (0.5f * ssao_normal_scale()) + 0.5f,
         unlit ? 1.0f : occlusion
     );
     output.ambient_specular = float4(
@@ -1411,7 +1429,8 @@ FragmentOutput main(FragmentInput input)
         saturate(orm.r * material_factors.y);
     const float roughness = saturate(orm.g * material_factors.z);
     const float metalness = saturate(orm.b * material_factors.w);
-    // unlit_enabled: 1, 2 or 3 (bits 0-1), and bit 2 (4): takes the radiance cascades' light.
+    // unlit_enabled: 1, 2 or 3 (bits 0-1), bit 2 (4): takes the radiance cascades' light, bits 3-4: how it takes
+    // part in the ambient occlusion (ssao_normal_scale).
     if ((unlit_enabled & 3u) != 0u)
     {
 #if BTBH_DIRECTIONAL_SHADOWS

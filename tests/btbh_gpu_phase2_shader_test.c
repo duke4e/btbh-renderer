@@ -305,11 +305,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH,
-            "\"samplers\": 3, \"storage_textures\": 0"
+            "\"samplers\": 1, \"storage_textures\": 0"
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH,
-            "\"samplers\": 7, \"storage_textures\": 0"
+            "\"samplers\": 6, \"storage_textures\": 0"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH,

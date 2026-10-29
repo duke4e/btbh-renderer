@@ -34,6 +34,7 @@
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 #define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 #define BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE 2u
+#define BTBH_GPU_SCENE_SSAO_CONTACT_MODE 3u
 #define BTBH_GPU_SCENE_BLOOM_LEVELS 6u
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -134,6 +135,11 @@ typedef struct BTBHGPUPostUniforms {
     float inverse_view_projection[16];
     float projection_scale_y;
     float saturation;
+    float ssao_radius;
+    float ssao_intensity;
+    float ssao_power;
+    float ssao_bias;
+    uint32_t ssao_flags;
 } BTBHGPUPostUniforms;
 
 typedef struct BTBHGPUSceneSMAAUniforms {
@@ -241,7 +247,6 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUTexture *emission_texture;
     SDL_GPUTexture *ssao_texture;
     SDL_GPUTexture *ssao_denoised_texture;
-    SDL_GPUTexture *ssao_resolved_texture;
     SDL_GPUTexture *post_ping_texture;
     SDL_GPUTexture *post_pong_texture;
     SDL_GPUTexture *final_color_texture;
@@ -1054,13 +1059,15 @@ static bool btbh_gpu_scene_sibling_path(
     return true;
 }
 
-static bool btbh_gpu_scene_create_fullscreen_pipeline(
+/* blend: how the pass's output is blended into its target (NULL: it replaces it). */
+static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     SDL_GPUTextureFormat target_format,
     uint32_t fragment_sampler_count,
+    const SDL_GPUColorTargetBlendState *blend,
     SDL_GPUGraphicsPipeline **pipeline,
     BTBHGPUSceneReport *report
 ) {
@@ -1105,7 +1112,11 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline(
     SDL_zero(color_target);
     SDL_zero(info);
     color_target.format = target_format;
-    color_target.blend_state.color_write_mask = 0x0fu;
+    if (blend != NULL) {
+        color_target.blend_state = *blend;
+    } else {
+        color_target.blend_state.color_write_mask = 0x0fu;
+    }
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
@@ -1128,6 +1139,29 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline(
         return false;
     }
     return true;
+}
+
+static bool btbh_gpu_scene_create_fullscreen_pipeline(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat target_format,
+    uint32_t fragment_sampler_count,
+    SDL_GPUGraphicsPipeline **pipeline,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_create_fullscreen_pipeline_blended(
+        window,
+        vertex_shader_path,
+        fragment_shader_path,
+        project_format,
+        target_format,
+        fragment_sampler_count,
+        NULL,
+        pipeline,
+        report
+    );
 }
 
 typedef struct BTBHGPUSceneBloomUniforms {
@@ -1610,7 +1644,7 @@ static bool btbh_gpu_scene_ensure_ssao_resolve_pipeline(
             post_vertex_shader_path,
             path,
             shader_format,
-            SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+            SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT,
             2u,
             &runtime->ssao_pipeline,
             report
@@ -1633,8 +1667,8 @@ static bool btbh_gpu_scene_ensure_ssao_resolve_pipeline(
             post_vertex_shader_path,
             path,
             shader_format,
-            SDL_GPU_TEXTUREFORMAT_R8_UNORM,
-            3u,
+            SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT,
+            1u,
             &runtime->ssao_denoise_pipeline,
             report
         )) {
@@ -1651,18 +1685,34 @@ static bool btbh_gpu_scene_ensure_ssao_resolve_pipeline(
         "production_ssao_resolve.frag.%s",
         extension
     );
+    // Laid over the opaque scene: target = src.rgb + target * src.a (its alpha kept).
+    SDL_GPUColorTargetBlendState over;
+    SDL_zero(over);
+    over.enable_blend = true;
+    over.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    over.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+    over.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.color_write_mask =
+        SDL_GPU_COLORCOMPONENT_R |
+        SDL_GPU_COLORCOMPONENT_G |
+        SDL_GPU_COLORCOMPONENT_B;
+    over.enable_color_write_mask = true;
     if (!btbh_gpu_scene_sibling_path(
             post_fragment_shader_path,
             filename,
             path
         ) ||
-        !btbh_gpu_scene_create_fullscreen_pipeline(
+        !btbh_gpu_scene_create_fullscreen_pipeline_blended(
             window,
             post_vertex_shader_path,
             path,
             shader_format,
             runtime->scene_color_format,
-            7u,
+            6u,
+            &over,
             &runtime->ssao_resolve_pipeline,
             report
     )) {
@@ -2846,6 +2896,34 @@ static bool btbh_gpu_scene_ensure_depth(
     return true;
 }
 
+static void btbh_gpu_scene_release_color(
+    BTBHGPUSceneRuntime *runtime,
+    SDL_GPUDevice *device
+) {
+    SDL_GPUTexture **textures[] = {
+        &runtime->scene_color_texture,
+        &runtime->ambient_texture,
+        &runtime->ambient_specular_texture,
+        &runtime->normal_texture,
+        &runtime->emission_texture,
+        &runtime->ssao_texture,
+        &runtime->ssao_denoised_texture
+    };
+    for (size_t index = 0u;
+         index < sizeof(textures) / sizeof(textures[0]);
+         ++index) {
+        if (*textures[index] != NULL) {
+            SDL_ReleaseGPUTexture(device, *textures[index]);
+            *textures[index] = NULL;
+        }
+    }
+    runtime->scene_color_width = 0u;
+    runtime->scene_color_height = 0u;
+}
+
+/* The scene's colour and its auxiliary targets (ambient, normal, ambient specular, emission), and the
+ * ambient occlusion's two at half the resolution (visibility and view depth, before and after its denoise
+ * pass). */
 static bool btbh_gpu_scene_ensure_color(
     BTBHGPUWindow *window,
     uint32_t width,
@@ -2861,52 +2939,11 @@ static bool btbh_gpu_scene_ensure_color(
         runtime->emission_texture != NULL &&
         runtime->ssao_texture != NULL &&
         runtime->ssao_denoised_texture != NULL &&
-        runtime->ssao_resolved_texture != NULL &&
         runtime->scene_color_width == width &&
         runtime->scene_color_height == height) {
         return true;
     }
-    if (runtime->scene_color_texture != NULL) {
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->scene_color_texture
-        );
-        runtime->scene_color_texture = NULL;
-    }
-    if (runtime->ambient_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        runtime->ambient_texture = NULL;
-    }
-    if (runtime->ambient_specular_texture != NULL) {
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ambient_specular_texture
-        );
-        runtime->ambient_specular_texture = NULL;
-    }
-    if (runtime->normal_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->normal_texture);
-        runtime->normal_texture = NULL;
-    }
-    if (runtime->emission_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->emission_texture);
-        runtime->emission_texture = NULL;
-    }
-    if (runtime->ssao_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ssao_texture);
-        runtime->ssao_texture = NULL;
-    }
-    if (runtime->ssao_denoised_texture != NULL) {
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ssao_denoised_texture
-        );
-        runtime->ssao_denoised_texture = NULL;
-    }
-    if (runtime->ssao_resolved_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ssao_resolved_texture);
-        runtime->ssao_resolved_texture = NULL;
-    }
+    btbh_gpu_scene_release_color(runtime, device);
     SDL_GPUTextureCreateInfo info;
     SDL_zero(info);
     info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -2919,171 +2956,30 @@ static bool btbh_gpu_scene_ensure_color(
     info.layer_count_or_depth = 1u;
     info.num_levels = 1u;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    runtime->scene_color_texture =
-        SDL_CreateGPUTexture(device, &info);
-    if (runtime->scene_color_texture == NULL) {
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
+    runtime->scene_color_texture = SDL_CreateGPUTexture(device, &info);
     runtime->ambient_texture = SDL_CreateGPUTexture(device, &info);
-    if (runtime->ambient_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
-    runtime->ambient_specular_texture =
-        SDL_CreateGPUTexture(device, &info);
-    if (runtime->ambient_specular_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
-    runtime->ssao_resolved_texture =
-        SDL_CreateGPUTexture(device, &info);
-    if (runtime->ssao_resolved_texture == NULL) {
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ambient_specular_texture
-        );
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->ambient_specular_texture = NULL;
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
+    runtime->ambient_specular_texture = SDL_CreateGPUTexture(device, &info);
+    runtime->emission_texture = SDL_CreateGPUTexture(device, &info);
     info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     runtime->normal_texture = SDL_CreateGPUTexture(device, &info);
-    if (runtime->normal_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ssao_resolved_texture);
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ambient_specular_texture
-        );
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->ssao_resolved_texture = NULL;
-        runtime->ambient_specular_texture = NULL;
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
-    info.format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
     info.width = (width + 1u) / 2u;
     info.height = (height + 1u) / 2u;
     runtime->ssao_texture = SDL_CreateGPUTexture(device, &info);
-    if (runtime->ssao_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->normal_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ssao_resolved_texture);
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ambient_specular_texture
-        );
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->normal_texture = NULL;
-        runtime->ssao_resolved_texture = NULL;
-        runtime->ambient_specular_texture = NULL;
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
+    runtime->ssao_denoised_texture = SDL_CreateGPUTexture(device, &info);
+    if (runtime->scene_color_texture == NULL ||
+        runtime->ambient_texture == NULL ||
+        runtime->ambient_specular_texture == NULL ||
+        runtime->emission_texture == NULL ||
+        runtime->normal_texture == NULL ||
+        runtime->ssao_texture == NULL ||
+        runtime->ssao_denoised_texture == NULL) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
             SDL_GetError()
         );
-        return false;
-    }
-    runtime->ssao_denoised_texture =
-        SDL_CreateGPUTexture(device, &info);
-    if (runtime->ssao_denoised_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ssao_texture);
-        SDL_ReleaseGPUTexture(device, runtime->normal_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ssao_resolved_texture);
-        SDL_ReleaseGPUTexture(
-            device,
-            runtime->ambient_specular_texture
-        );
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->ssao_texture = NULL;
-        runtime->normal_texture = NULL;
-        runtime->ssao_resolved_texture = NULL;
-        runtime->ambient_specular_texture = NULL;
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return false;
-    }
-    info.format = runtime->scene_color_format;
-    info.width = width;
-    info.height = height;
-    runtime->emission_texture = SDL_CreateGPUTexture(device, &info);
-    if (runtime->emission_texture == NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->ssao_denoised_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ssao_texture);
-        SDL_ReleaseGPUTexture(device, runtime->normal_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ssao_resolved_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ambient_specular_texture);
-        SDL_ReleaseGPUTexture(device, runtime->ambient_texture);
-        SDL_ReleaseGPUTexture(device, runtime->scene_color_texture);
-        runtime->ssao_denoised_texture = NULL;
-        runtime->ssao_texture = NULL;
-        runtime->normal_texture = NULL;
-        runtime->ssao_resolved_texture = NULL;
-        runtime->ambient_specular_texture = NULL;
-        runtime->ambient_texture = NULL;
-        runtime->scene_color_texture = NULL;
-        runtime->scene_color_width = 0u;
-        runtime->scene_color_height = 0u;
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
+        btbh_gpu_scene_release_color(runtime, device);
         return false;
     }
     runtime->scene_color_width = width;
@@ -3470,6 +3366,7 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->surface_parameters1[1]) &&
             isfinite(batch->surface_parameters1[2]) &&
             isfinite(batch->surface_parameters1[3]) &&
+            batch->ssao_mode < BTBH_GPU_SCENE_SSAO_MODE_COUNT &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&
@@ -3992,6 +3889,17 @@ static bool btbh_gpu_scene_post_valid(
         post->cas_enabled <= 1u &&
         post->tilt_shift_enabled <= 1u &&
         post->ssao_enabled <= 1u &&
+        (post->ssao_enabled == 0u ||
+         (isfinite(post->ssao_radius) &&
+          post->ssao_radius >= 0.0f &&
+          isfinite(post->ssao_intensity) &&
+          post->ssao_intensity >= 0.0f &&
+          isfinite(post->ssao_power) &&
+          post->ssao_power >= 0.0f &&
+          isfinite(post->ssao_bias) &&
+          post->ssao_bias >= 0.0f &&
+          post->ssao_contact <= 1u &&
+          post->ssao_debug_view <= 1u)) &&
         post->tonemap_mode < BTBH_GPU_SCENE_TONEMAP_COUNT &&
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
@@ -4334,6 +4242,121 @@ static bool btbh_gpu_scene_render_fullscreen(
     SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
     SDL_EndGPURenderPass(pass);
     return true;
+}
+
+/* As btbh_gpu_scene_render_fullscreen, drawn over what target holds (a blended pipeline). */
+static bool btbh_gpu_scene_render_fullscreen_over(
+    SDL_GPUCommandBuffer *command,
+    const char *debug_label,
+    SDL_GPUGraphicsPipeline *pipeline,
+    SDL_GPUTexture *target,
+    const void *uniforms,
+    uint32_t uniform_size,
+    SDL_GPUTextureSamplerBinding *samplers,
+    uint32_t sampler_count
+) {
+    SDL_InsertGPUDebugLabel(command, debug_label);
+    SDL_GPUColorTargetInfo color_target;
+    SDL_zero(color_target);
+    color_target.texture = target;
+    color_target.load_op = SDL_GPU_LOADOP_LOAD;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
+        command,
+        &color_target,
+        1u,
+        NULL
+    );
+    if (pass == NULL) {
+        return false;
+    }
+    if (uniforms != NULL && uniform_size > 0u) {
+        SDL_PushGPUFragmentUniformData(
+            command,
+            0u,
+            uniforms,
+            uniform_size
+        );
+    }
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    if (samplers != NULL && sampler_count > 0u) {
+        SDL_BindGPUFragmentSamplers(
+            pass,
+            0u,
+            samplers,
+            sampler_count
+        );
+    }
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+/* The ambient occlusion (BTBHGPUScenePost.ssao_enabled): worked out at half the resolution from the opaque
+ * surfaces' depth and normals (production_ssao.frag.hlsl), evened out (production_ssao_denoise.frag.hlsl) and
+ * blended over them in target (production_ssao_resolve.frag.hlsl), before the transparent surfaces are drawn on
+ * it, so that they (clouds, smoke, glows) aren't darkened by what lies under them. */
+static bool btbh_gpu_scene_encode_ssao(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUPostUniforms *uniforms,
+    SDL_GPUTexture *target
+) {
+    SDL_GPUTextureSamplerBinding ssao_samplers[2];
+    SDL_zeroa(ssao_samplers);
+    ssao_samplers[0].texture = runtime->depth_texture;
+    ssao_samplers[0].sampler = runtime->scene_color_sampler;
+    ssao_samplers[1].texture = runtime->normal_texture;
+    ssao_samplers[1].sampler = runtime->scene_color_sampler;
+    if (!btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH SSAO",
+            runtime->ssao_pipeline,
+            runtime->ssao_texture,
+            uniforms,
+            (uint32_t)sizeof(*uniforms),
+            ssao_samplers,
+            2u
+        )) {
+        return false;
+    }
+    SDL_GPUTextureSamplerBinding denoise_sampler;
+    SDL_zero(denoise_sampler);
+    denoise_sampler.texture = runtime->ssao_texture;
+    denoise_sampler.sampler = runtime->scene_color_sampler;
+    if (!btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH SSAO Denoise",
+            runtime->ssao_denoise_pipeline,
+            runtime->ssao_denoised_texture,
+            uniforms,
+            (uint32_t)sizeof(*uniforms),
+            &denoise_sampler,
+            1u
+        )) {
+        return false;
+    }
+    SDL_GPUTextureSamplerBinding resolve_samplers[6];
+    SDL_zeroa(resolve_samplers);
+    resolve_samplers[0].texture = runtime->depth_texture;
+    resolve_samplers[1].texture = runtime->ambient_texture;
+    resolve_samplers[2].texture = runtime->normal_texture;
+    resolve_samplers[3].texture = runtime->ambient_specular_texture;
+    resolve_samplers[4].texture = runtime->ssao_denoised_texture;
+    resolve_samplers[5].texture = runtime->emission_texture;
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        resolve_samplers[index].sampler = runtime->scene_color_sampler;
+    }
+    return btbh_gpu_scene_render_fullscreen_over(
+        command,
+        "BTBH SSAO Resolve",
+        runtime->ssao_resolve_pipeline,
+        target,
+        uniforms,
+        (uint32_t)sizeof(*uniforms),
+        resolve_samplers,
+        6u
+    );
 }
 
 static bool btbh_gpu_scene_encode_rc_material_sources(
@@ -5396,11 +5419,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     color_targets[0].clear_color.a = (float)clear_alpha / 255.0f;
     color_targets[0].load_op = SDL_GPU_LOADOP_CLEAR;
     color_targets[0].store_op = SDL_GPU_STOREOP_STORE;
+    // The ambient targets are read by the radiance cascades and the ambient occlusion's ambient mode only; for the
+    // contact mode alone they are left in tile memory (not stored).
+    const SDL_GPUStoreOp ambient_store_op =
+        radiance_cascades_active ||
+        (ssao_resolve_active && post->ssao_contact == 0u)
+            ? SDL_GPU_STOREOP_STORE
+            : SDL_GPU_STOREOP_DONT_CARE;
     color_targets[1].texture =
         window->scene_runtime->ambient_texture;
     color_targets[1].clear_color.a = 1.0f;
     color_targets[1].load_op = SDL_GPU_LOADOP_CLEAR;
-    color_targets[1].store_op = SDL_GPU_STOREOP_STORE;
+    color_targets[1].store_op = ambient_store_op;
     color_targets[2].texture =
         window->scene_runtime->normal_texture;
     color_targets[2].clear_color.r = 0.5f;
@@ -5413,7 +5443,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         window->scene_runtime->ambient_specular_texture;
     color_targets[3].clear_color.a = 1.0f;
     color_targets[3].load_op = SDL_GPU_LOADOP_CLEAR;
-    color_targets[3].store_op = SDL_GPU_STOREOP_STORE;
+    color_targets[3].store_op = ambient_store_op;
     color_targets[4].texture =
         window->scene_runtime->emission_texture;
     color_targets[4].load_op = SDL_GPU_LOADOP_CLEAR;
@@ -5428,6 +5458,53 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     depth_target.stencil_load_op = SDL_GPU_LOADOP_CLEAR;
     depth_target.stencil_store_op = SDL_GPU_STOREOP_STORE;
     depth_target.cycle = true;
+
+    BTBHGPUPostUniforms post_uniforms;
+    (void)memset(&post_uniforms, 0, sizeof(post_uniforms));
+    post_uniforms.inverse_resolution[0] =
+        1.0f / (float)render_width;
+    post_uniforms.inverse_resolution[1] =
+        1.0f / (float)render_height;
+    post_uniforms.tonemap_white = post->tonemap_white;
+    post_uniforms.cas_sharpness = post->cas_sharpness;
+    post_uniforms.focus_point[0] = post->focus_point_x;
+    post_uniforms.focus_point[1] = post->focus_point_y;
+    post_uniforms.focus_direction[0] = post->focus_direction_x;
+    post_uniforms.focus_direction[1] = post->focus_direction_y;
+    post_uniforms.focus_half_width = post->focus_half_width;
+    post_uniforms.maximum_radius_pixels =
+        post->maximum_radius_pixels;
+    post_uniforms.blur_curve = post->blur_curve;
+    post_uniforms.highlight_threshold =
+        post->highlight_threshold;
+    post_uniforms.highlight_gain = post->highlight_gain;
+    post_uniforms.lut_enabled = post->lut_enabled;
+    post_uniforms.cas_enabled = post->cas_enabled;
+    post_uniforms.tilt_shift_enabled =
+        post->tilt_shift_enabled;
+    post_uniforms.ssao_enabled = ssao_resolve_active
+        ? (post->ssao_contact != 0u
+            ? BTBH_GPU_SCENE_SSAO_CONTACT_MODE
+            : (radiance_cascades_active
+                ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
+                : 1u))
+        : 0u;
+    post_uniforms.tonemap_mode = post->tonemap_mode;
+    post_uniforms.exposure = post->exposure;
+    post_uniforms.contrast = post->contrast;
+    (void)memcpy(
+        post_uniforms.inverse_view_projection,
+        inverse_view_projection,
+        sizeof(post_uniforms.inverse_view_projection)
+    );
+    post_uniforms.projection_scale_y = projection_scale_y;
+    post_uniforms.saturation = post->saturation;
+    post_uniforms.ssao_radius = post->ssao_radius;
+    post_uniforms.ssao_intensity = post->ssao_intensity;
+    post_uniforms.ssao_power = post->ssao_power;
+    post_uniforms.ssao_bias = post->ssao_bias;
+    post_uniforms.ssao_flags = post->ssao_debug_view != 0u ? 1u : 0u;
+    bool ssao_ok = true;
 
     SDL_InsertGPUDebugLabel(command, "BTBH Scene Geometry");
     uint32_t primitive_draw_count = 0u;
@@ -5717,7 +5794,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
                 uniforms.unlit_enabled |
-                (batch->rc_receiver != 0u ? 4u : 0u);
+                (batch->rc_receiver != 0u ? 4u : 0u) |
+                ((uint32_t)batch->ssao_mode << 3u);
             fragment_uniforms.alpha_cutoff =
                 batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
@@ -6158,6 +6236,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     SDL_GetTicksNS() - radiance_cascades_started_ticks
                 ) / 1000000.0;
         }
+        if (!transparent_phase && ssao_resolve_active) {
+            ssao_ok = btbh_gpu_scene_encode_ssao(
+                command,
+                runtime,
+                &post_uniforms,
+                radiance_cascades_post_input
+            );
+        }
     }
     report->cpu_geometry_encode_milliseconds =
         (double)geometry_encode_nanoseconds / 1000000.0;
@@ -6172,127 +6258,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         runtime->radiance_cascades.pass_telemetry;
 
     const uint64_t post_started_ticks = SDL_GetTicksNS();
-    BTBHGPUPostUniforms post_uniforms;
-    (void)memset(&post_uniforms, 0, sizeof(post_uniforms));
-    post_uniforms.inverse_resolution[0] =
-        1.0f / (float)render_width;
-    post_uniforms.inverse_resolution[1] =
-        1.0f / (float)render_height;
-    post_uniforms.tonemap_white = post->tonemap_white;
-    post_uniforms.cas_sharpness = post->cas_sharpness;
-    post_uniforms.focus_point[0] = post->focus_point_x;
-    post_uniforms.focus_point[1] = post->focus_point_y;
-    post_uniforms.focus_direction[0] = post->focus_direction_x;
-    post_uniforms.focus_direction[1] = post->focus_direction_y;
-    post_uniforms.focus_half_width = post->focus_half_width;
-    post_uniforms.maximum_radius_pixels =
-        post->maximum_radius_pixels;
-    post_uniforms.blur_curve = post->blur_curve;
-    post_uniforms.highlight_threshold =
-        post->highlight_threshold;
-    post_uniforms.highlight_gain = post->highlight_gain;
-    post_uniforms.lut_enabled = post->lut_enabled;
-    post_uniforms.cas_enabled = post->cas_enabled;
-    post_uniforms.tilt_shift_enabled =
-        post->tilt_shift_enabled;
-    post_uniforms.ssao_enabled = ssao_resolve_active
-        ? (radiance_cascades_active
-            ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
-            : 1u)
-        : 0u;
-    post_uniforms.tonemap_mode = post->tonemap_mode;
-    post_uniforms.exposure = post->exposure;
-    post_uniforms.contrast = post->contrast;
-    (void)memcpy(
-        post_uniforms.inverse_view_projection,
-        inverse_view_projection,
-        sizeof(post_uniforms.inverse_view_projection)
-    );
-    post_uniforms.projection_scale_y = projection_scale_y;
-    post_uniforms.saturation = post->saturation;
     SDL_GPUTexture *post_input = radiance_cascades_post_input;
-    bool fullscreen_ok = true;
-    if (ssao_resolve_active) {
-        SDL_GPUTextureSamplerBinding ssao_samplers[2];
-        SDL_zeroa(ssao_samplers);
-        ssao_samplers[0].texture = runtime->depth_texture;
-        ssao_samplers[0].sampler =
-            runtime->scene_color_sampler;
-        ssao_samplers[1].texture = runtime->normal_texture;
-        ssao_samplers[1].sampler =
-            runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
-            command,
-            "BTBH SSAO",
-            runtime->ssao_pipeline,
-            runtime->ssao_texture,
-            &post_uniforms,
-            (uint32_t)sizeof(post_uniforms),
-            ssao_samplers,
-            2u
-        );
-        SDL_GPUTextureSamplerBinding denoise_samplers[3];
-        SDL_zeroa(denoise_samplers);
-        denoise_samplers[0].texture = runtime->depth_texture;
-        denoise_samplers[0].sampler =
-            runtime->scene_color_sampler;
-        denoise_samplers[1].texture = runtime->normal_texture;
-        denoise_samplers[1].sampler =
-            runtime->scene_color_sampler;
-        denoise_samplers[2].texture = runtime->ssao_texture;
-        denoise_samplers[2].sampler =
-            runtime->scene_color_sampler;
-        if (fullscreen_ok) {
-            fullscreen_ok = btbh_gpu_scene_render_fullscreen(
-                command,
-                "BTBH SSAO Denoise",
-                runtime->ssao_denoise_pipeline,
-                runtime->ssao_denoised_texture,
-                &post_uniforms,
-                (uint32_t)sizeof(post_uniforms),
-                denoise_samplers,
-                3u
-            );
-        }
-        SDL_GPUTextureSamplerBinding resolve_samplers[7];
-        SDL_zeroa(resolve_samplers);
-        resolve_samplers[0].texture = post_input;
-        resolve_samplers[0].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[1].texture = runtime->depth_texture;
-        resolve_samplers[1].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[2].texture = runtime->ambient_texture;
-        resolve_samplers[2].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[3].texture = runtime->normal_texture;
-        resolve_samplers[3].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[4].texture =
-            runtime->ambient_specular_texture;
-        resolve_samplers[4].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[5].texture =
-            runtime->ssao_denoised_texture;
-        resolve_samplers[5].sampler =
-            runtime->scene_color_sampler;
-        resolve_samplers[6].texture = runtime->emission_texture;
-        resolve_samplers[6].sampler =
-            runtime->scene_color_sampler;
-        if (fullscreen_ok) {
-            fullscreen_ok = btbh_gpu_scene_render_fullscreen(
-                command,
-                "BTBH SSAO Resolve",
-                runtime->ssao_resolve_pipeline,
-                runtime->ssao_resolved_texture,
-                &post_uniforms,
-                (uint32_t)sizeof(post_uniforms),
-                resolve_samplers,
-                7u
-            );
-        }
-        post_input = runtime->ssao_resolved_texture;
-    }
+    bool fullscreen_ok = ssao_ok;
     SDL_GPUTexture *post_stage_input = post_input;
     if (fullscreen_ok && post->bloom_intensity > 0.0f) {
         fullscreen_ok = btbh_gpu_scene_encode_bloom(
@@ -6978,12 +6945,6 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUTexture(
                 device,
                 window->scene_runtime->ssao_denoised_texture
-            );
-        }
-        if (window->scene_runtime->ssao_resolved_texture != NULL) {
-            SDL_ReleaseGPUTexture(
-                device,
-                window->scene_runtime->ssao_resolved_texture
             );
         }
         if (window->scene_runtime->post_ping_texture != NULL) {
