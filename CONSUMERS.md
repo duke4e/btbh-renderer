@@ -1,0 +1,50 @@
+# Consumers
+
+The games that build on btbh-renderer, how each one gets it and what it uses. The coordinator keeps
+this current; a game's session asks (an issue) when something here changes. Rules: [`COORDINATION.md`](COORDINATION.md).
+
+| | Be The Bullet Hell | CHIMERA | Tyrian3D |
+| --- | --- | --- | --- |
+| Language | Swift (SwiftPM) | Rust | C (OpenTyrian fork) |
+| Platforms | Windows, macOS 12+, Linux (Steam Deck) | Windows (Vulkan) | macOS (Metal) |
+| Repository | `Be-The-Bullet-Hell`, branch `main` | `RTS`, branch `v2` | `Tyrian3D`, branch `tyrian3d/m1-tools` |
+| Machine / session | Windows PC, BTBH session | Windows PC, CHIMERA session in `RTS/` | Mac, Tyrian3D session |
+| Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
+| Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
+| Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
+| Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag yet | none: live working copy `../btbh-renderer` (local `master`) | submodule at `8fef66d` (on `tyrian3d`); the Mac works on `origin/tyrian3d` `92b3b35` |
+| Target pin | `v0.1.0` | `v0.1.0` | `v0.1.0` (after the Mac verifies the merge) |
+
+## Features used
+
+**Be The Bullet Hell** (only through the Swift layer, `import BTBHRenderer` / `BTBHRendererGPU`; no direct
+`btbh_gpu_*` calls): window and fullscreen, gamepad (incl. rumble), canvas/2D and fonts, model loading
+with materials and patches, surface details, persistent instanced ranges with LOD, custom meshes,
+skinning and animation trees, lights (directional, spot, omni, street lamps), procedural sky, fog and
+fog edge, clouds, wetness/rain, shadows, radiance cascades with emitters, post chain (SSAO/SSR, bloom,
+vignette, tonemap, AA), upscaling (`fsr1`, `fsr3`), frame readback for render baselines, file dialog.
+The most demanding consumer: it defines most of the scene API.
+
+**CHIMERA** (`crates/chimera-platform/src/gpu.rs`, bindgen): device and window, mouse buttons (keyboard
+and audio via raw SDL), fonts (`window_font_load`, glyphs, atlas), textures (`window_texture_load_ex`:
+sRGB/linear, trilinear, repeat), models (`window_model_load_ex`, ignore material textures), animation
+library and poses, custom meshes (create, update), `window_scene_present_instances` (model and custom
+mesh batches, directional + spot shadows, ACES tonemap, alpha/additive blend, `RIM` and
+`SOFT_PARTICLE` surfaces, stencil replace), canvas, presented-frame readback and PNG. Forces Vulkan
+and loads 14 named `.spv` shaders. Not used yet: terrain, FSR, `_with_visibility`. Coming: a layered
+terrain shader (RFC 0001).
+
+**Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
+`window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
+mip caps), models (`window_model_load`, material info), custom meshes,
+`window_scene_present_instances_with_visibility` with lighting (directional shadow, point lights,
+dark scenes, unlit-with-shadow, `GLINTS` / `PIXEL_WATER` surfaces, radiance cascades additive and
+receivers) and post (bloom), canvas, frame readback and PNG. Its CMake still reads shaders from
+`shaders/gpu_spike/`, which is `shaders/gpu/` since the r3d removal; that path changes with the first
+bump (see `docs/handoff/tyrian3d-merge.md`).
+
+## Contacts
+
+There is no direct channel between the machines: open a GitHub issue on this repository and name the
+game in its title (`[BTBH]`, `[CHIMERA]`, `[Tyrian3D]`). The coordinator answers there and links the
+release that resolves it.
