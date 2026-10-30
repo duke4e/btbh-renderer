@@ -147,7 +147,7 @@ ground_batch.terrain = &terrain;      /* the ground mesh: one opaque batch inste
 
 - Windows/Vulkan: CHIMERA's map, before/after captures and `--profile`.
 - macOS/Metal: the native tests plus a new contract test that renders a 4-layer terrain into a readback
-  (also run on Windows in CI's build, without a GPU only the shader compile).
+  (also run on Windows by `tools/check.ps1`).
 - A native test: texture array creation (sizes, layer count, mismatched layers rejected), terrain batch
   validation (layer_count 1..8, control textures present for the counts used, finite tiling).
 
