@@ -894,9 +894,9 @@ typedef struct BTBHGPUScenePost {
     float ssr_max_roughness;
     float ssr_max_distance;
     float ssr_thickness;
-    /* Ambient occlusion (ssao_enabled): the radius occluders count within (render units, > 0), its strength,
+    /* Ambient occlusion (ssao_enabled): the radius occluders count within (render units), its strength,
      * and with the cascades the share of the indirect light it occludes and the share of that the direct light
-     * keeps (both 0...1). */
+     * keeps (both 0...1). A zero radius leaves all four at their defaults (1, 0.4, 0.75, 0.2). */
     float ao_radius;
     float ao_intensity;
     float ao_contact_strength;
