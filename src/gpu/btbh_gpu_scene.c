@@ -4803,7 +4803,7 @@ static bool btbh_gpu_scene_post_valid(
         isfinite(post->ssr_max_roughness) && post->ssr_max_roughness >= 0.0f &&
         isfinite(post->ssr_max_distance) && post->ssr_max_distance >= 0.0f &&
         isfinite(post->ssr_thickness) && post->ssr_thickness >= 0.0f &&
-        isfinite(post->ao_radius) && post->ao_radius > 0.0f &&
+        isfinite(post->ao_radius) && post->ao_radius >= 0.0f &&
         isfinite(post->ao_intensity) && post->ao_intensity >= 0.0f &&
         isfinite(post->ao_contact_strength) && post->ao_contact_strength >= 0.0f &&
         post->ao_contact_strength <= 1.0f &&
@@ -6716,10 +6716,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         view_projection,
         sizeof(post_uniforms.view_projection)
     );
-    post_uniforms.ao_controls[0] = post->ao_radius;
-    post_uniforms.ao_controls[1] = post->ao_intensity;
-    post_uniforms.ao_controls[2] = post->ao_contact_strength;
-    post_uniforms.ao_controls[3] = post->ao_direct_share;
+    if (post->ao_radius > 0.0f) {
+        post_uniforms.ao_controls[0] = post->ao_radius;
+        post_uniforms.ao_controls[1] = post->ao_intensity;
+        post_uniforms.ao_controls[2] = post->ao_contact_strength;
+        post_uniforms.ao_controls[3] = post->ao_direct_share;
+    } else {
+        /* A host that leaves the AO controls zeroed gets the fixed values they replaced. */
+        post_uniforms.ao_controls[0] = 1.0f;
+        post_uniforms.ao_controls[1] = 0.4f;
+        post_uniforms.ao_controls[2] = 0.75f;
+        post_uniforms.ao_controls[3] = 0.2f;
+    }
     if (ssr_active) {
         post_uniforms.ssr_controls[0] = post->ssr_intensity;
         post_uniforms.ssr_controls[1] = post->ssr_max_roughness;
