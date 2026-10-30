@@ -9,7 +9,7 @@ the shared board. These rules keep one renderer that every game can trust.
 - There is one long-lived branch: `master`. Feature work happens on short-lived branches that merge
   back into it.
 - One coordinator session (on the Windows PC) is the only one that changes the renderer: it reviews
-  requests, implements or merges them, runs CI and cuts releases. Game sessions do not commit to this
+  requests, implements or merges them, runs the release checks and cuts releases. Game sessions do not commit to this
   repository; they open issues (below).
 - The coordinator's main working copy (`btbh-renderer/` next to the games) stays on `master` and clean.
   Branch work happens in separate worktrees (`git worktree add ../btbh-renderer-wt-<name> -b <branch>`).
@@ -72,8 +72,8 @@ smoke scene matches its reference image.
 ## Smoke scenes and reference images
 
 Each game contributes one small scene that exercises the features it uses (its lighting, surfaces, post
-chain), with a reference PNG per platform it ships on (`Tests/Fixtures/consumers/<game>/`). CI renders
-them where a GPU is available; a release that changes a reference image says so in the CHANGELOG. Until
+chain), with a reference PNG per platform it ships on (`Tests/Fixtures/consumers/<game>/`). The release
+check renders them on each machine; a release that changes a reference image says so in the CHANGELOG. Until
 these exist, each game's session checks its own look before bumping.
 
 ## Emergency game branches
@@ -90,5 +90,15 @@ If a game cannot wait for a release (a demo, a crash), its session may ask the c
 ## Machines
 
 - Windows PC: coordinator, Be The Bullet Hell, CHIMERA. Builds and tests Windows (Vulkan).
-- Mac: Tyrian3D. The only place Metal is verified by hand; CI covers macOS builds and tests.
+- Mac: Tyrian3D. The only place Metal is verified.
+
+## Release checks (local, no hosted CI)
+
+Checks run on the machines, not on a hosted service. Before every tag the coordinator runs
+`tools/check.ps1` on the Windows PC (C core, all shaders to SPIR-V and MSL, native tests including the GPU smoke
+tests, the public headers on their own as C11 and C++17), compiles CHIMERA against the candidate
+(`BTBH_RENDERER_DIR` pointed at it, a separate `CARGO_TARGET_DIR`) and the Swift layer
+(`swift build --target BTBHRendererGPU`). When a release touches shaders or anything platform-specific, the
+Mac session runs `tools/check.sh` (adds metallib) on the candidate and reports on its issue before the tag.
+The tag's message records what ran where.
 - Handoffs between the machines are files in `docs/handoff/` plus a GitHub issue that links them.

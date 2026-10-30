@@ -63,7 +63,7 @@ overlapping regions are normalised; the remainder is the scene's own light and L
 ## Platforms and testing
 
 Validation test (count, finite bounds, edge >= 0); readback test with two regions and two LUTs; CHIMERA's zone
-borders before/after on Windows; Metal via CI build plus a hand check on the Mac when a game there adopts it.
+borders before/after on Windows; Metal via `tools/check.sh` on the Mac.
 
 ## Alternatives
 
