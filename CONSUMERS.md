@@ -31,8 +31,9 @@ sRGB/linear, trilinear, repeat), models (`window_model_load_ex`, ignore material
 library and poses, custom meshes (create, update), `window_scene_present_instances` (model and custom
 mesh batches, directional + spot shadows, ACES tonemap, alpha/additive blend, `RIM` and
 `SOFT_PARTICLE` surfaces, stencil replace), canvas, presented-frame readback and PNG. Forces Vulkan
-and loads 14 named `.spv` shaders. Not used yet: terrain, FSR, `_with_visibility`. Coming: a layered
-terrain shader (RFC 0001).
+and loads 14 named `.spv` shaders. Not used yet: terrain, FSR, `_with_visibility`. Requested (drafts in
+`docs/rfc/`): layered terrain (0001), height fog and water at RTS scale (0002), light regions (0003); its
+lamps should move to `lamp_*` (in v0.1.0).
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
