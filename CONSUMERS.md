@@ -12,8 +12,8 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag yet | none: live working copy `../btbh-renderer` (local `master`) | submodule at `8fef66d` (on `tyrian3d`); the Mac works on `origin/tyrian3d` `92b3b35` |
-| Target pin | `v0.1.0` | `v0.1.0` | `v0.1.0` (after the Mac verifies the merge) |
+| Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag yet | none: live working copy `../btbh-renderer` (local `master`) | submodule at `8fef66d` (on `tyrian3d`); the Mac works on `origin/tyrian3d` (`89266d2` on 2026-10-30) |
+| Target pin | `v0.1.0` | `v0.1.0` | `v0.2.0` (`v0.1.0` lacks its last four `tyrian3d` commits: PCSS, HBAO, point-light ceiling, water mask) |
 
 ## Features used
 

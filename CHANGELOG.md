@@ -80,6 +80,10 @@ anything it declares is covered by semver from here on; the Swift package (`BTBH
 - SwiftPM package (`Package.swift`, `Sources/`) and CMake; `BTBH_RENDERER_BUILD_ROOT` overrides the native build directory; native tests are opt-in (`BTBH_BUILD_GPU_NATIVE_TESTS`).
 
 ### From the tyrian3d branch (merged for v0.1.0)
+
+The branch up to `92b3b35`. Its later commits (`96486ab`, `f7c3773`, `beaf727`, `89266d2`: smooth pixel-water
+mask, PCSS sun shadows, HBAO SSAO, point-light ceiling) are planned for v0.2.0 as opt-in features.
+
 - Raw RGBA8 textures from memory, region updates for streaming, and access to the SDL window (`btbh_gpu_window_texture_create_rgba8_ex`, `btbh_gpu_texture_update_rgba8`, `btbh_gpu_window_sdl_window`).
 - Unlit surfaces that receive the primary directional shadow (`unlit_enabled = 2`); public per-batch shadow visibility (`btbh_gpu_window_scene_present_instances_with_visibility`).
 - Glints surface for water drawn in textures (`BTBH_GPU_SCENE_SURFACE_GLINTS`).
