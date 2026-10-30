@@ -59,11 +59,9 @@ git fetch origin
 git checkout merge/tyrian3d-into-master     # after the coordinator has pushed it
 git submodule update --init --recursive
 
-# 1. The renderer's own build and native tests (Clang, shadercross -> MSL -> metallib)
-cmake -S . -B build-merge -G Ninja -DCMAKE_BUILD_TYPE=Release -DR3D_ASSIMP_VENDORED=ON \
-      -DBTBH_BUILD_GPU_SPIKE=ON -DBTBH_BUILD_GPU_NATIVE_TESTS=ON -DBTBH_BUILD_GPU_PACKAGE_RUNTIME=ON
-cmake --build build-merge --parallel
-ctest --test-dir build-merge --output-on-failure            # includes the device and window smoke tests
+# 1. The renderer's release check: C core, shaders (SPIR-V, MSL, metallib), native tests
+#    including the device and window smoke tests, the headers on their own
+tools/check.sh
 
 # 2. Tyrian3D against it, with the changes above applied in Tyrian3D (not committed until it passes)
 ```
@@ -80,7 +78,7 @@ merge) at least:
 
 ## What to report (on the GitHub issue)
 
-- `ctest` summary (which passed, which failed, with output for failures).
+- `tools/check.sh` output (the ctest summary, and output for anything that failed).
 - Did Tyrian3D build with only the changes listed above? Anything else you had to change.
 - Before/after PNGs for the scenes above, and anything that looks different that you did not expect.
 - Frame time before/after on the same scene if you measure it (the scene shader grew: lamps, clouds,
