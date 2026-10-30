@@ -752,5 +752,14 @@ if(BTBH_BUILD_GPU_SPIKE)
                 SDL3::SDL3-static
         )
         add_test(NAME btbh_gpu_window_smoke COMMAND btbh_gpu_window_smoke)
+
+        # The tests check with assert(): keep it in optimised builds, where NDEBUG would
+        # compile every check away.
+        get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(_btbh_target IN LISTS _btbh_targets)
+            if(_btbh_target MATCHES "^btbh_gpu_.*(_test|_smoke)$")
+                target_compile_options(${_btbh_target} PRIVATE -UNDEBUG)
+            endif()
+        endforeach()
     endif()
 endif()
