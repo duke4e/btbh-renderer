@@ -1440,6 +1440,10 @@ uint8_t btbh_gpu_window_mouse_button_released(
     return button < 4 && window->mouse_released[button] ? 1u : 0u;
 }
 
+struct SDL_Window *btbh_gpu_window_sdl_window(BTBHGPUWindow *window) {
+    return window != NULL ? window->window : NULL;
+}
+
 void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;

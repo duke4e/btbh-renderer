@@ -78,6 +78,21 @@ static uint32_t btbh_gpu_texture_mip_count(
     return count;
 }
 
+/* generate_mipmaps: 0 none, 1 the full chain, n > 1 at most n levels (for atlases whose cells
+ * would bleed into each other further down). */
+static uint32_t btbh_gpu_texture_levels(
+    uint8_t generate_mipmaps,
+    uint32_t full
+) {
+    if (generate_mipmaps == 0u) {
+        return 1u;
+    }
+    if (generate_mipmaps == 1u || generate_mipmaps > full) {
+        return full;
+    }
+    return generate_mipmaps;
+}
+
 static bool btbh_gpu_read_file(
     const char *path,
     uint8_t **bytes,
@@ -301,9 +316,10 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     window->texture_head = resource;
     resource->width = width;
     resource->height = height;
-    resource->mip_count = generate_mipmaps != 0
-        ? btbh_gpu_texture_mip_count(width, height)
-        : 1u;
+    resource->mip_count = btbh_gpu_texture_levels(
+        generate_mipmaps,
+        btbh_gpu_texture_mip_count(width, height)
+    );
     resource->format = format;
 
     SDL_GPUTextureCreateInfo texture_info = {0};
@@ -434,6 +450,94 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
         SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
         report
     );
+}
+
+BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+) {
+    return btbh_gpu_window_texture_create_rgba8_format(
+        window,
+        pixels,
+        width,
+        height,
+        generate_mipmaps,
+        filter,
+        wrap,
+        color_space == BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB
+            ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB
+            : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+        report
+    );
+}
+
+BTBHGPUResult btbh_gpu_texture_update_rgba8(
+    BTBHGPUTexture *texture,
+    const uint8_t *pixels,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height
+) {
+    if (texture == NULL || texture->owner == NULL ||
+        texture->owner->device == NULL || texture->owner->device->shutdown ||
+        pixels == NULL || width == 0u || height == 0u ||
+        x > texture->width || width > texture->width - x ||
+        y > texture->height || height > texture->height - y) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+
+    SDL_GPUDevice *device = texture->owner->device->gpu;
+    const uint32_t byte_count = width * height * 4u;
+    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transfer_info.size = byte_count;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    if (transfer == NULL) {
+        return BTBH_GPU_DEVICE_FAILURE;
+    }
+    void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    if (mapped == NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return BTBH_GPU_DEVICE_FAILURE;
+    }
+    memcpy(mapped, pixels, byte_count);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    if (command == NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        return BTBH_GPU_DEVICE_FAILURE;
+    }
+    SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(command);
+    SDL_GPUTextureTransferInfo source = {0};
+    source.transfer_buffer = transfer;
+    source.pixels_per_row = width;
+    source.rows_per_layer = height;
+    SDL_GPUTextureRegion destination = {0};
+    destination.texture = texture->texture;
+    destination.x = x;
+    destination.y = y;
+    destination.w = width;
+    destination.h = height;
+    destination.d = 1;
+    const bool full_overwrite =
+        x == 0u && y == 0u && width == texture->width && height == texture->height;
+    SDL_UploadToGPUTexture(copy_pass, &source, &destination, full_overwrite);
+    SDL_EndGPUCopyPass(copy_pass);
+    if (texture->mip_count > 1u) {
+        SDL_GenerateMipmapsForGPUTexture(command, texture->texture);
+    }
+    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return submitted ? BTBH_GPU_OK : BTBH_GPU_DEVICE_FAILURE;
 }
 
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_mipmapped(
@@ -663,9 +767,10 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
     window->texture_head = resource;
     resource->width = (uint32_t) width;
     resource->height = (uint32_t) height;
-    resource->mip_count = generate_mipmaps != 0
-        ? btbh_gpu_texture_mip_count(resource->width, resource->height)
-        : 1u;
+    resource->mip_count = btbh_gpu_texture_levels(
+        generate_mipmaps,
+        btbh_gpu_texture_mip_count(resource->width, resource->height)
+    );
     resource->format = format;
 
     SDL_GPUTextureCreateInfo texture_info = {0};

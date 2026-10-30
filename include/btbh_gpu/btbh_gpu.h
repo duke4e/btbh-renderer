@@ -421,7 +421,16 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE = 6,
     /* A self-lit rim in a tint (parameters0: rgb tint, w rim strength; parameters1.x body glow). */
     BTBH_GPU_SCENE_SURFACE_RIM = 7,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 8
+    // The primary light's highlights on moving waves where the ORM texture's blue channel says,
+    // added to the surface's own colours (also unlit ones). surface_parameters0: wave scale,
+    // strength, sharpness, tilt.
+    BTBH_GPU_SCENE_SURFACE_GLINTS = 8,
+    // Procedural water where the ORM texture's blue channel says, instead of the texture (also
+    // unlit surfaces): surface_parameters0 x = wave scale, y = highlight strength, z = sharpness;
+    // surface_parameters1 rgb = the water's colour (linear), w = how much of the texture's detail
+    // shows in it.
+    BTBH_GPU_SCENE_SURFACE_PIXEL_WATER = 9,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 10
 } BTBHGPUSceneSurfaceVariant;
 
 typedef enum BTBHGPUSceneBillboardMode {
@@ -571,7 +580,11 @@ typedef struct BTBHGPUSceneRadianceCascades {
     uint32_t occlusion_cascade_count;
     uint8_t allow_auto_transition;
     uint8_t invalidate;
-    uint8_t reserved[2];
+    /* Only add light: no sky or sun at the field's edges, and every surface takes the bounce light
+     * of what glows on top of the scene's own lighting (rather than being lit again by the
+     * cascades). */
+    uint8_t additive;
+    uint8_t reserved[1];
     const BTBHGPUSceneRadianceEmitter *emitters;
     BTBHGPUSceneRadianceCascadesOcclusionCascade
         occlusion_cascades[BTBH_GPU_RC_MAX_OCCLUSION_CASCADES];
@@ -665,8 +678,11 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t stencil_reference;
     uint8_t stencil_mask;
     uint8_t transparency_enabled;
-    uint8_t unlit_enabled;
+    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow
     uint8_t spot_shadow_visible;
+    /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
+     * source of it (unlit surfaces are, unless this is set). */
+    uint8_t rc_receiver;
     BTBHGPUSceneSurfaceVariant surface_variant;
     float surface_time;
     float surface_parameters0[4];
@@ -676,6 +692,8 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * A zeroed batch has none. */
     float detail_parameters[4];
 } BTBHGPUSceneGeometryBatch;
+
+#define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
 typedef struct BTBHGPUSceneLighting {
     float ambient_red;
@@ -781,6 +799,15 @@ typedef struct BTBHGPUSceneLighting {
     /* 0 dry ... 1 a downpour: rings where drops land on wet level ground (production_model.frag.hlsl
        btbh_rain_ripples). */
     float rain;
+    // Small point lights without shadows (explosions' flashes): per light x, y, z, radius, red,
+    // green, blue, energy. They light lit surfaces (diffuse) and brighten unlit ones.
+    uint32_t point_light_count;
+    float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
+    /* A dark scene: unlit surfaces keep 1 - unlit_darkness of their colour (0: all of it, as
+     * usual), the spot light lights them (with its shadow), and their pixels brighter than
+     * unlit_glow_threshold (luminance 0-1) glow on regardless. */
+    float unlit_darkness;
+    float unlit_glow_threshold;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
@@ -1223,6 +1250,44 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 );
+// As btbh_gpu_window_scene_present_instances, with per-batch visibility: scene_visibility
+// (drawn in the scene) and directional_shadow_visibility (cast into the directional shadow
+// maps), one byte (0 or 1) per batch; NULL means every batch.
+BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+);
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report
@@ -1248,6 +1313,32 @@ void btbh_gpu_animation_library_destroy(
     BTBHGPUAnimationLibrary *library
 );
 void btbh_gpu_window_destroy(BTBHGPUWindow *window);
+
+/* Raw-pixel textures. Pixels are tightly packed RGBA8, row 0 at the top.
+ * generate_mipmaps: 0 none, 1 the full chain, n > 1 at most n levels. */
+BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+);
+/* Replaces a region of a raw-pixel texture. Submits its own upload, so call it
+ * before the scene or canvas present that samples the texture. */
+BTBHGPUResult btbh_gpu_texture_update_rgba8(
+    BTBHGPUTexture *texture,
+    const uint8_t *pixels,
+    uint32_t x,
+    uint32_t y,
+    uint32_t width,
+    uint32_t height
+);
+/* The SDL_Window behind a BTBH window, for hosts that drive SDL themselves. */
+struct SDL_Window *btbh_gpu_window_sdl_window(BTBHGPUWindow *window);
 
 #if defined(__cplusplus)
 }

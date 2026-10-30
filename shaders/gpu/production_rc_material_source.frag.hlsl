@@ -37,7 +37,8 @@ float4 main(FragmentInput input) : SV_Target0
         emission_sampler,
         input.texture_coordinate
     ).rgb * emission_color_energy.rgb * emission_color_energy.w;
-    if (unlit_enabled != 0u)
+    // Unlit surfaces are sources (their colour), unless they receive (bit 4, rc_receiver).
+    if ((unlit_enabled & 3u) != 0u && (unlit_enabled & 4u) == 0u)
     {
         radiance += albedo.rgb;
     }

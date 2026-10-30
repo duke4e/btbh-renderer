@@ -117,6 +117,8 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float lamp_controls[4];
     float lamp_position_reach[BTBH_GPU_SCENE_MAX_LAMPS][4];
     float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];
+    float point_light_count[4];
+    float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS * 2][4];
     float directional_shadow_view_projection[16];
     float secondary_directional_shadow_view_projection[16];
     float spot_shadow_view_projection[16];
@@ -4071,7 +4073,7 @@ static bool btbh_gpu_scene_validate_batches(
             batch->stencil_pass <
                 BTBH_GPU_SCENE_STENCIL_OPERATION_COUNT &&
             batch->transparency_enabled <= 1u &&
-            batch->unlit_enabled <= 1u &&
+            batch->unlit_enabled <= 2u &&
             (scene_visibility == NULL ||
              scene_visibility[index] <= 1u) &&
             (directional_shadow_visibility == NULL ||
@@ -5295,7 +5297,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
         const bool material_emits =
-            batch->unlit_enabled != 0u ||
+            (batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
             (batch->emission_energy > 0.0f &&
              (batch->emission_red != 0u ||
               batch->emission_green != 0u ||
@@ -5397,7 +5399,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             fragment_uniforms.emission_color_energy[3] =
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
-                (uint32_t)batch->unlit_enabled;
+                (uint32_t)batch->unlit_enabled |
+                (batch->rc_receiver != 0u ? 4u : 0u);
             fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
                 batch->surface_variant ==
@@ -7154,6 +7157,26 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->spot_occluder_shadow_strength;
             fragment_uniforms.spot_cutoffs[3] =
                 lighting->spot_occluder_shadow_reach;
+            {
+                const uint32_t point_count = SDL_min(
+                    lighting->point_light_count,
+                    (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
+                );
+                fragment_uniforms.point_light_count[0] =
+                    (float)point_count;
+                for (uint32_t light = 0u; light < point_count; ++light) {
+                    (void)memcpy(
+                        fragment_uniforms.point_lights[light * 2u],
+                        &lighting->point_lights[light][0],
+                        4u * sizeof(float)
+                    );
+                    (void)memcpy(
+                        fragment_uniforms.point_lights[light * 2u + 1u],
+                        &lighting->point_lights[light][4],
+                        4u * sizeof(float)
+                    );
+                }
+            }
             fragment_uniforms.material_factors[0] =
                 batch->normal_scale;
             fragment_uniforms.material_factors[1] =
@@ -7171,7 +7194,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             fragment_uniforms.emission_color_energy[3] =
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
-                uniforms.unlit_enabled;
+                uniforms.unlit_enabled |
+                (batch->rc_receiver != 0u ? 4u : 0u);
             fragment_uniforms.alpha_cutoff =
                 batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
@@ -7308,6 +7332,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     );
                 }
             }
+            /* The dark scene's controls ride in the point lights' header. */
+            fragment_uniforms.point_light_count[1] =
+                lighting->unlit_darkness;
+            fragment_uniforms.point_light_count[2] =
+                lighting->unlit_glow_threshold;
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

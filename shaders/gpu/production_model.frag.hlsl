@@ -1,3 +1,7 @@
+#ifndef BTBH_UNLIT_SHADOW_LIGHT
+// How much light unlit surfaces that receive shadows (unlit_enabled 2) keep in shadow.
+#define BTBH_UNLIT_SHADOW_LIGHT 0.45f
+#endif
 #ifndef BTBH_DIRECTIONAL_SHADOWS
 #define BTBH_DIRECTIONAL_SHADOWS 1
 #endif
@@ -90,6 +94,8 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 lamp_position_reach[BTBH_MAX_LAMPS];
     // linear rgb, w the energy
     float4 lamp_color_energy[BTBH_MAX_LAMPS];
+    float4 point_light_count;   // x: how many of point_lights are used, y unlit darkness, z unlit glow threshold
+    float4 point_lights[64];    // per light: position, radius; colour, energy
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
@@ -138,6 +144,16 @@ float3 stable_normalize(float3 value, float3 fallback)
     return length_squared > 0.00000001f
         ? value * rsqrt(length_squared)
         : fallback;
+}
+
+// A directional wave's height and slope (gradient) at a position: amplitude, wavenumber, speed.
+void add_wave(float2 position, float2 direction, float amplitude, float wavelength, float speed, float time,
+              inout float height, inout float2 gradient)
+{
+    const float k = 6.2831853f / wavelength;
+    const float phase = dot(direction, position) * k + time * speed;
+    height += amplitude * sin(phase);
+    gradient += direction * (amplitude * k * cos(phase));
 }
 
 void apply_surface(
@@ -383,6 +399,125 @@ void apply_surface(
             max(surface_parameters0.x, 0.001f)
         );
     }
+    else if (surface_variant == 9u)
+    {
+        // Pixel water: where the ORM texture's blue channel (the mask) says, the surface is
+        // procedural water instead of its texture: waves in several directions (x of
+        // surface_parameters0 scales them), the water's colour (surface_parameters1.rgb, linear)
+        // deeper in the troughs and lighter on the slopes, the sky in them, the primary light's
+        // highlights (y: their strength, z: sharpness) and foam on the crests. surface_parameters1.w
+        // is how much of the texture shows through (its detail).
+        const float mask = orm.b;
+        if (mask > 0.0f)
+        {
+            const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 1.0f;
+            const float2 position = input.world_position.xz / scale;
+            const float time = surface_time;
+            // Long swell and shorter chop; the chop alone makes the fine foam.
+            float swell = 0.0f, chop = 0.0f;
+            float2 gradient = float2(0.0f, 0.0f), chop_gradient = float2(0.0f, 0.0f);
+            add_wave(position, normalize(float2(0.62f, 0.78f)), 1.00f, 74.0f, 1.10f, time, swell, gradient);
+            add_wave(position, normalize(float2(-0.71f, 0.70f)), 0.60f, 47.0f, 1.45f, time, swell, gradient);
+            add_wave(position, normalize(float2(0.20f, -0.98f)), 0.40f, 29.0f, 1.90f, time, swell, gradient);
+            add_wave(position, normalize(float2(-0.94f, -0.33f)), 0.30f, 13.0f, 2.80f, time, chop, chop_gradient);
+            add_wave(position, normalize(float2(0.85f, -0.52f)), 0.22f, 8.5f, 3.60f, time, chop, chop_gradient);
+            add_wave(position, normalize(float2(0.10f, 0.99f)), 0.16f, 6.0f, 4.40f, time, chop, chop_gradient);
+            const float3 ripple = btbh_surface_wave_normal(position * 0.45f, 0.02f, 0.6f, time);
+            // Far away (more water per screen pixel) the fine detail would alias into stripes and
+            // a haze of sparkles: it fades out, and the highlights soften.
+            const float footprint = length(fwidth(position));
+            const float fine = saturate(1.6f - footprint * 0.9f);
+            const float2 slope = gradient * 0.16f + chop_gradient * (0.09f * fine);
+            const float3 normal = stable_normalize(
+                float3(-slope.x + ripple.x * 0.5f * fine, 1.0f, -slope.y + ripple.z * 0.5f * fine),
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            // The swell and chop alone (smooth), for the sun's glints.
+            const float3 glint_normal = stable_normalize(float3(-slope.x, 1.0f, -slope.y), float3(0.0f, 1.0f, 0.0f));
+            const float3 light = stable_normalize(-directional_direction_energy.xyz, float3(0.0f, 1.0f, 0.0f));
+            const float3 view = stable_normalize(camera_position.xyz - input.world_position, float3(0.0f, 1.0f, 0.0f));
+            const float3 half_vector = stable_normalize(light + view, float3(0.0f, 1.0f, 0.0f));
+
+            const float3 deep = surface_parameters1.rgb;
+            const float3 shallow = deep * 1.7f + float3(0.006f, 0.02f, 0.026f);
+            const float3 sky = float3(0.30f, 0.45f, 0.60f);
+            const float crest = saturate(swell * 0.3f + 0.5f);
+            float3 water = lerp(deep, shallow, crest * 0.7f);
+            // The waves' slopes facing the sun lighter, the others darker.
+            water *= 0.62f + 0.6f * saturate(dot(normal, light) * 1.6f - 0.55f);
+            const float fresnel = 0.03f + 0.97f * pow(1.0f - saturate(dot(normal, view)), 5.0f);
+            water = lerp(water, sky, min(0.18f, fresnel * 0.5f + (1.0f - normal.y) * 0.5f));
+            const float sharpness = surface_parameters0.z > 0.0f ? surface_parameters0.z : 220.0f;
+            const float strength = surface_parameters0.y > 0.0f ? surface_parameters0.y : 1.0f;
+            const float n_dot_h = saturate(dot(glint_normal, half_vector));
+            // The sun's reflection: glints on the waves. A sharp highlight aliases into stripes where the
+            // normal changes much from one screen pixel to the next, so the highlight widens (and
+            // dims) by how much it does there (Toksvig), and fades where a pixel covers many waves.
+            const float3 normal_change = fwidth(glint_normal);
+            const float variance = dot(normal_change, normal_change);
+            const float effective = sharpness / (1.0f + sharpness * variance * 6.0f);
+            const float near = saturate(1.3f - footprint * 2.5f);
+            water += directional_color.rgb *
+                     (pow(n_dot_h, effective) * 0.6f * (effective / sharpness) * near + pow(saturate(dot(normal, half_vector)), 30.0f) * 0.02f) * strength;
+            // Foam in irregular flecks (the renderer's wave noise) on the swell's crests.
+            const float flecks = btbh_surface_waves(position * 0.22f + float2(chop, -chop) * 0.6f, 6, time * 0.7f);
+            const float foam = smoothstep(0.62f, 0.8f, flecks) * smoothstep(0.6f, 0.95f, crest) * fine;
+            water = lerp(water, float3(0.62f, 0.72f, 0.78f), foam * 0.4f);
+
+            const float keep = saturate(surface_parameters1.w);
+            const float3 detail = albedo.rgb / max(dot(deep, float3(0.299f, 0.587f, 0.114f)) * 3.0f, 0.02f);
+            water = lerp(water, water * saturate(detail), keep);
+            // Under the bloom's threshold: the glints sparkle without a haze round them.
+            water = min(water, float3(0.92f, 0.92f, 0.92f));
+            albedo.rgb = lerp(albedo.rgb, water, mask);
+        }
+    }
+    else if (surface_variant == 8u)
+    {
+        // Glints: the primary light's highlights on moving waves, added to the colour where
+        // the ORM texture's blue channel (the mask) says so; the surface keeps its own colours
+        // (for pre-shaded, unlit surfaces such as water drawn in a texture).
+        // surface_parameters0: x = scale of the waves, y = strength, z = sharpness, w = how
+        // much the waves tilt the surface.
+        const float mask = orm.b;
+        if (mask > 0.0f)
+        {
+            const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 0.35f;
+            const float2 position = input.world_position.xz * scale;
+            const float3 wave = btbh_surface_wave_normal(
+                position,
+                0.02f,
+                0.6f,
+                surface_time
+            );
+            const float tilt = surface_parameters0.w > 0.0f ? surface_parameters0.w : 3.0f;
+            const float3 normal = stable_normalize(
+                float3(wave.x * tilt, 1.0f, wave.z * tilt),
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 light = stable_normalize(
+                -directional_direction_energy.xyz,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 view = stable_normalize(
+                camera_position.xyz - input.world_position,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float3 half_vector = stable_normalize(
+                light + view,
+                float3(0.0f, 1.0f, 0.0f)
+            );
+            const float sharpness =
+                surface_parameters0.z > 0.0f ? surface_parameters0.z : 90.0f;
+            const float highlight = pow(
+                saturate(dot(normal, half_vector)),
+                sharpness
+            );
+            albedo.rgb +=
+                directional_color.rgb *
+                (highlight * mask * surface_parameters0.y);
+        }
+    }
 }
 
 float schlick_fresnel(float value)
@@ -489,6 +624,31 @@ float3 evaluate_directional_light(
         light_color *
         light_energy *
         visibility;
+}
+
+// The small point lights' light at a point (diffuse, softened so that surfaces facing away from
+// a light keep some of it, as a flash lights up its surroundings).
+float3 evaluate_point_lights(float3 world_position, float3 normal)
+{
+    float3 light = float3(0.0f, 0.0f, 0.0f);
+    const uint count = min((uint)point_light_count.x, 32u);
+    for (uint i = 0u; i < count; ++i)
+    {
+        const float4 position_radius = point_lights[i * 2u];
+        const float4 color_energy = point_lights[i * 2u + 1u];
+        const float3 to_light = position_radius.xyz - world_position;
+        const float light_distance = length(to_light);
+        if (light_distance >= position_radius.w)
+        {
+            continue;
+        }
+        const float falloff = 1.0f - light_distance / position_radius.w;
+        const float facing = saturate(
+            dot(normal, to_light / max(light_distance, 0.0001f)) * 0.7f + 0.3f
+        );
+        light += color_energy.rgb * (color_energy.w * falloff * falloff * facing);
+    }
+    return light;
 }
 
 float3 evaluate_spot_light(
@@ -1230,13 +1390,16 @@ FragmentOutput rc_material_output(
 )
 {
     FragmentOutput output;
-    const float3 source_emission = unlit
+    // An unlit receiver (unlit_enabled bit 2) keeps its albedo for the bounce light it takes, and
+    // marks itself with 0.75 in the emission's alpha (unlit surfaces 1, lit ones 0).
+    const bool receiver = unlit && (unlit_enabled & 4u) != 0u;
+    const float3 source_emission = unlit && !receiver
         ? albedo.rgb + emission
         : emission;
     output.color = lit_color;
-    output.ambient = unlit
+    output.ambient = unlit && !receiver
         ? float4(0.0f, 0.0f, 0.0f, 0.0f)
-        : float4(albedo.rgb, metalness);
+        : float4(albedo.rgb, unlit ? 0.0f : metalness);
     output.normal = float4(
         normal * 0.5f + 0.5f,
         unlit ? 1.0f : occlusion
@@ -1247,7 +1410,7 @@ FragmentOutput rc_material_output(
     );
     output.emission = float4(
         source_emission,
-        unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale
+        receiver ? 0.75f : unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale
     );
     output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
     return output;
@@ -1598,7 +1761,9 @@ FragmentOutput shade_fragment(FragmentInput input)
         input.world_normal,
         float3(0.0f, 0.0f, 1.0f)
     );
-    mapped_normal.xy *= material_factors.x;
+    // A negative normal scale asks for relief from the albedo (unlit surfaces, below), not a
+    // normal map.
+    mapped_normal.xy *= max(material_factors.x, 0.0f);
     mapped_normal.z = sqrt(
         1.0f - saturate(dot(mapped_normal.xy, mapped_normal.xy))
     );
@@ -1632,8 +1797,86 @@ FragmentOutput shade_fragment(FragmentInput input)
         lerp(float3(0.04f, 0.04f, 0.04f), albedo_sample.rgb, metalness),
         (uint)(detail_parameters.w + 0.5f) == 5u ? btbh_glass_reflectance : 0.0f
     );
-    if (unlit_enabled != 0u)
+    // unlit_enabled: 1 or 2 (bits 0-1), and bit 2 (4): takes the radiance cascades' light.
+    if ((unlit_enabled & 3u) != 0u)
     {
+#if BTBH_DIRECTIONAL_SHADOWS
+        // unlit_enabled 2: unlit, but darkened in the primary directional light's shadow.
+        if ((unlit_enabled & 3u) == 2u)
+        {
+            const float shadow_visibility = primary_directional_visibility(
+                input.world_position,
+                normal
+            );
+            albedo_sample.rgb *= lerp(
+                BTBH_UNLIT_SHADOW_LIGHT,
+                1.0f,
+                shadow_visibility
+            );
+        }
+#endif
+        // Flashes light up unlit surfaces too (the ground under an explosion). A negative
+        // normal_scale asks for relief from the texture's brightness (pixel art seen from above:
+        // a horizontal surface with u along +X and v along +Z), which only the flashes show.
+        float3 lit_normal = normal;
+        if (material_factors.x < 0.0f)
+        {
+            float texture_width;
+            float texture_height;
+            albedo_texture.GetDimensions(texture_width, texture_height);
+            const float2 texel = float2(1.0f / texture_width, 1.0f / texture_height);
+            const float3 luma = float3(0.299f, 0.587f, 0.114f);
+            const float2 uv = input.texture_coordinate;
+            const float height_left = dot(albedo_texture.Sample(albedo_sampler, uv - float2(texel.x, 0.0f)).rgb, luma);
+            const float height_right = dot(albedo_texture.Sample(albedo_sampler, uv + float2(texel.x, 0.0f)).rgb, luma);
+            const float height_up = dot(albedo_texture.Sample(albedo_sampler, uv - float2(0.0f, texel.y)).rgb, luma);
+            const float height_down = dot(albedo_texture.Sample(albedo_sampler, uv + float2(0.0f, texel.y)).rgb, luma);
+            const float strength = -material_factors.x;
+            lit_normal = normalize(float3(
+                -(height_right - height_left) * strength,
+                1.0f,
+                -(height_down - height_up) * strength
+            ));
+        }
+        // A dark scene (point_light_count.y, how dark): unlit surfaces keep that much less of
+        // their colour; the spot light lights them (with its shadow, and the relief), and their
+        // pixels brighter than point_light_count.z glow on (lava, lamps).
+        if (point_light_count.y > 0.0f)
+        {
+            const float darkness = saturate(point_light_count.y);
+            float spot = 0.0f;
+            const float3 spot_delta = spot_position_range.xyz - input.world_position;
+            const float spot_distance = length(spot_delta);
+            if (spot_direction_energy.w > 0.0f && spot_position_range.w > 0.0f && spot_distance > 0.000001f)
+            {
+                const float3 to_spot = spot_delta / spot_distance;
+                const float range_attenuation = pow(
+                    1.0f - saturate(spot_distance / spot_position_range.w),
+                    spot_color_falloff.w
+                );
+                const float theta = dot(
+                    to_spot,
+                    -stable_normalize(spot_direction_energy.xyz, float3(0.0f, -1.0f, 0.0f))
+                );
+                const float angular = smoothstep(
+                    0.0f,
+                    1.0f,
+                    (theta - spot_cutoffs.y) / max(spot_cutoffs.x - spot_cutoffs.y, 0.0001f)
+                );
+#if BTBH_DIRECTIONAL_SHADOWS
+                const float spot_shadow = spot_visibility(input.world_position, normal);
+#else
+                const float spot_shadow = 1.0f;
+#endif
+                // (Less of the lamp than lit surfaces take: the pixel art holds its own light.)
+                spot = 0.6f * spot_direction_energy.w * range_attenuation * angular * spot_shadow *
+                    saturate(dot(lit_normal, to_spot) * 0.7f + 0.3f);
+            }
+            const float luminance = dot(albedo_sample.rgb, float3(0.299f, 0.587f, 0.114f));
+            const float glow = 0.7f * saturate((luminance - point_light_count.z) * 4.0f);
+            albedo_sample.rgb *= (1.0f - darkness) + darkness * glow + spot * spot_color_falloff.rgb;
+        }
+        albedo_sample.rgb += albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal);
 #if BTBH_RC_MATERIAL_OUTPUT
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
@@ -1819,6 +2062,8 @@ FragmentOutput shade_fragment(FragmentInput input)
         f0
     );
     lighting += lamp_lighting;
+    lighting += albedo_sample.rgb * (1.0f - metalness * 0.7f) *
+        evaluate_point_lights(input.world_position, normal);
 #if BTBH_RC_MATERIAL_OUTPUT
     /* The cascades' light is scaled by this occlusion: the occluder's shadow keeps its share out of
        it too, or the resolve's max() fills the shadow back in. */
