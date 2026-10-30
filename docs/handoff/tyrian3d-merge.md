@@ -7,11 +7,21 @@ until you have.
 ## What this is
 
 Branch `merge/tyrian3d-into-master` = GitHub `master` (`e95b392`, 2026-10-22) + `origin/tyrian3d`
-(`92b3b35`, its 12 commits), conflicts resolved, plus one compatibility fix. It becomes `v0.1.0`, the
-first tagged release; from then on Tyrian3D pins a tag instead of following a branch (see
-`COORDINATION.md`). The `tyrian3d` branch is retired after this: new requests go through issues.
+(`92b3b35`, its first 12 commits), conflicts resolved, plus one compatibility fix. It becomes `v0.1.0`,
+the first tagged release; from then on Tyrian3D pins a tag instead of following a branch (see
+`COORDINATION.md`).
 
-Everything the `tyrian3d` branch added is kept: raw RGBA textures and streaming
+**Please stop committing to `tyrian3d` now.** Four commits landed there after this merge was prepared
+(`96486ab` smooth pixel-water mask, `f7c3773` PCSS sun shadows, `beaf727` HBAO SSAO, `89266d2` point-light
+ceiling). They overlap master's own SSAO and shadow work, so they are **not** in `v0.1.0`: the coordinator
+ports them onto `master` for `v0.2.0` as opt-in features (HBAO as an SSAO mode, PCSS as a shadow-quality
+option, the point-light ceiling, the water mask), so Be The Bullet Hell's look stays as it is. Until
+`v0.2.0`, Tyrian3D keeps building on `tyrian3d` @ `89266d2`; verify `v0.1.0` anyway (below), since `v0.2.0`
+builds on it. After `v0.2.0` the `tyrian3d` branch is retired and new requests go through issues.
+Note for the port: `89266d2` sends the ceiling in `point_light_count.y`, which this merge already uses
+for `unlit_darkness`; `v0.2.0` will give the ceiling its own slot (internal only, the C field name stays).
+
+Everything the first 12 `tyrian3d` commits added is kept: raw RGBA textures and streaming
 (`btbh_gpu_window_texture_create_rgba8_ex`, `btbh_gpu_texture_update_rgba8`, mip caps),
 `btbh_gpu_window_sdl_window`, `btbh_gpu_window_scene_present_instances_with_visibility`, unlit surfaces
 that take the directional shadow (`unlit_enabled = 2`), `GLINTS` and `PIXEL_WATER` surfaces, 32 point
