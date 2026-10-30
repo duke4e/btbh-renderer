@@ -74,7 +74,7 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 sun_color_energy;
     float4 sun_direction_size;
     float4 procedural_controls;
-    float4 point_light_count;   // x: how many of point_lights are used
+    float4 point_light_count;   // x: how many of point_lights are used, y: their ceiling (0: none)
     float4 point_lights[64];    // per light: position, radius; colour, energy
 #if BTBH_DIRECTIONAL_SHADOWS
     float4x4 directional_shadow_view_projection;
@@ -601,6 +601,23 @@ float3 evaluate_point_lights(float3 world_position, float3 normal)
         light += color_energy.rgb * (color_energy.w * falloff * falloff * facing);
     }
     return light;
+}
+
+// The point lights' light added to a surface already this bright (base), eased out towards the
+// room it has left under the ceiling (point_light_count.y, luminance; at least a fifth of it):
+// dark ground still flashes bright, pale ground under many flashes only glows instead of
+// burning white. A ceiling of 0 leaves the light as it is.
+float3 ease_point_light(float3 base, float3 added)
+{
+    const float ceiling = point_light_count.y;
+    const float3 weights = float3(0.299f, 0.587f, 0.114f);
+    const float added_luminance = dot(added, weights);
+    if (ceiling <= 0.0f || added_luminance <= 0.0001f)
+    {
+        return added;
+    }
+    const float room = max(ceiling - dot(base, weights), ceiling * 0.2f);
+    return added * (room * (1.0f - exp(-added_luminance / room)) / added_luminance);
 }
 
 float3 evaluate_spot_light(
@@ -1511,7 +1528,10 @@ FragmentOutput main(FragmentInput input)
             const float glow = 0.7f * saturate((luminance - procedural_controls.w) * 4.0f);
             albedo_sample.rgb *= (1.0f - darkness) + darkness * glow + spot * spot_color_falloff.rgb;
         }
-        albedo_sample.rgb += albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal);
+        albedo_sample.rgb += ease_point_light(
+            albedo_sample.rgb,
+            albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal)
+        );
 #if BTBH_RC_MATERIAL_OUTPUT
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
@@ -1687,8 +1707,10 @@ FragmentOutput main(FragmentInput input)
         1.0f
 #endif
     );
-    lighting += albedo_sample.rgb * (1.0f - metalness * 0.7f) *
-        evaluate_point_lights(input.world_position, normal);
+    lighting += ease_point_light(
+        lighting,
+        albedo_sample.rgb * (1.0f - metalness * 0.7f) * evaluate_point_lights(input.world_position, normal)
+    );
 #if BTBH_RC_MATERIAL_OUTPUT
     return rc_material_output(
         float4(lighting + emission, albedo_sample.a),

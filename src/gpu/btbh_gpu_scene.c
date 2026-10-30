@@ -5763,6 +5763,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 );
                 fragment_uniforms.point_light_count[0] =
                     (float)point_count;
+                fragment_uniforms.point_light_count[1] =
+                    SDL_max(lighting->point_light_ceiling, 0.0f);
                 for (uint32_t light = 0u; light < point_count; ++light) {
                     (void)memcpy(
                         fragment_uniforms.point_lights[light * 2u],
