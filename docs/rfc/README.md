@@ -24,6 +24,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0001](0001-layered-terrain.md) | Layered terrain in one pass (texture arrays, splat control, height blend) | Draft | CHIMERA |
 | [0002](0002-height-fog-and-water-scale.md) | Height fog; water at RTS scale | Draft | CHIMERA |
 | [0003](0003-light-regions.md) | Light regions with their own key light and LUT | Draft | CHIMERA |
+| [0004](0004-small-text.md) | Readable small text (oversampled exact-size atlases, kerning, snapping) | Draft, for later | CHIMERA |
 
 CHIMERA's map-look note (`RTS/docs/v2/izgled-mapa.md` §9, branch `v2-izgled`) made six proposals. Three became
 the RFCs above. The other three need none:
