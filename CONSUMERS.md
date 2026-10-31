@@ -31,7 +31,8 @@ sRGB/linear, trilinear, repeat), models (`window_model_load_ex`, ignore material
 library and poses, custom meshes (create, update), `window_scene_present_instances` (model and custom
 mesh batches, directional + spot shadows, ACES tonemap, alpha/additive blend, `RIM` and
 `SOFT_PARTICLE` surfaces, stencil replace), canvas, presented-frame readback and PNG. Forces Vulkan
-and loads 14 named `.spv` shaders. Not used yet: terrain, FSR, `_with_visibility`. Requested (drafts in
+and loads 14 named `.spv` shaders. Uses `REFRACT` (screen-space refraction, RFC 0005) for its Optical Fluid,
+when `BTBH_GPU_SCENE_HAS_REFRACTION` is defined. Not used yet: terrain, FSR, `_with_visibility`. Requested (drafts in
 `docs/rfc/`): layered terrain (0001), height fog and water at RTS scale (0002), light regions (0003); its
 lamps should move to `lamp_*` (in v0.1.0).
 

@@ -53,6 +53,9 @@ anything it declares is covered by semver from here on; the Swift package (`BTBH
 - Procedural surface detail (`detail_parameters`): ground, grass, facade, paving, glass and lamp-lens patterns with albedo variation and bump.
 - Water with world-space waves; foam only on the highest crests.
 - Render-only world curvature (`world_curvature`): small-planet and hyperbolic looks.
+- Screen-space refraction (`BTBH_GPU_SCENE_SURFACE_REFRACT` = 10, `BTBH_GPU_SCENE_HAS_REFRACTION`): batches that show the scene
+  behind them through a flowing displacement with dispersion, chromatic lines and a normal push for shockwaves, in a pass
+  of their own after the transparent one; frames without one pay nothing (RFC 0005, requested by CHIMERA).
 
 ### Radiance cascades (global illumination)
 - Holographic radiance cascades (`BTBHGPUSceneRadianceCascades`) with low/high/auto tiers, typed emitters (disk, rectangle, segment) and debug views.

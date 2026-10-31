@@ -60,6 +60,11 @@ and `rc_receiver`, dark scenes (`unlit_darkness`, `unlit_glow_threshold`), linea
    `point_light_count.yz` inside the scene shader (master needs `procedural_controls.zw` for FSR 3).
    Internal only, but it is exactly the kind of change Metal can show differently: please look at a dark
    scene.
+7. **Also in `v0.1.0`: screen-space refraction** (`BTBH_GPU_SCENE_SURFACE_REFRACT` = 10, RFC 0005, added
+   for CHIMERA on 2026-10-31). Tyrian3D does not use it and needs no change. The model shader gains a
+   branch at the top of `main` and the scene a third pass that only runs on frames with a refracting
+   batch, so Tyrian3D's frames should look and cost exactly as without it. On the Mac it is checked only by
+   `tools/check.sh` (the model shader must still compile to metallib); CHIMERA tested it on Windows.
 
 ## How to test on macOS / Metal
 
@@ -92,7 +97,7 @@ merge) at least:
 - Did Tyrian3D build with only the changes listed above? Anything else you had to change.
 - Before/after PNGs for the scenes above, and anything that looks different that you did not expect.
 - Frame time before/after on the same scene if you measure it (the scene shader grew: lamps, clouds,
-  surface detail are compiled in even when off).
+  surface detail and refraction are compiled in even when off).
 - Your verdict: OK to merge into `master` and tag `v0.1.0`, or what must change first. Please do not
   commit to the renderer; describe the fix (a diff in the issue is welcome) and the coordinator applies it.
 
