@@ -435,8 +435,24 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     // surface_parameters1 rgb = the water's colour (linear), w = how much of the texture's detail
     // shows in it.
     BTBH_GPU_SCENE_SURFACE_PIXEL_WATER = 9,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 10
+    /* Screen-space refraction: drawn after every other batch, depth-tested without writing depth, it shows
+     * the scene as it was before the first refracting batch, seen through a flowing displacement. Needs
+     * transparency_enabled = 1 and BTBH_GPU_SCENE_BLEND_ALPHA; casts no shadow. The displacement scales with
+     * the colour's alpha (vertex x instance x material: 0 shows the scene undisplaced) and the refracted
+     * colour is multiplied by its rgb. surface_time animates the flow.
+     * surface_parameters0: x strength (largest displacement in pixels at a 1080-pixel-high render target,
+     *   scaled with the render height), y dispersion 0..1 (red and blue part along the bend), z flow scale
+     *   (noise cells per world unit), w flow speed (cells per second).
+     * surface_parameters1: x view coupling 0..1 (0 the pattern is fixed in the world; 1 it shifts with the
+     *   view direction, so it changes as the camera moves and holds still with it), y line strength (thin
+     *   chromatic lines where the bend is steepest), z normal push (the vertex normal's direction on screen
+     *   times this, in pixels at 1080: a ring with outward normals makes a shockwave), w reserved (0). */
+    BTBH_GPU_SCENE_SURFACE_REFRACT = 10,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 11
 } BTBHGPUSceneSurfaceVariant;
+
+/* Defined when the renderer draws BTBH_GPU_SCENE_SURFACE_REFRACT (every device that runs the scene). */
+#define BTBH_GPU_SCENE_HAS_REFRACTION 1
 
 typedef enum BTBHGPUSceneBillboardMode {
     BTBH_GPU_SCENE_BILLBOARD_DISABLED = 0,

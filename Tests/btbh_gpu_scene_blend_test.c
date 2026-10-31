@@ -69,6 +69,19 @@ int main(void) {
     batch.unlit_enabled = 0u;
     assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
 
+    BTBHGPUSceneGeometryBatch refracting = {0};
+    assert(btbh_gpu_scene_refraction_valid(&refracting));
+    refracting.surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
+    assert(!btbh_gpu_scene_refraction_valid(&refracting));
+    refracting.transparency_enabled = 1u;
+    assert(btbh_gpu_scene_refraction_valid(&refracting));
+    assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&refracting));
+    refracting.blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+    assert(!btbh_gpu_scene_refraction_valid(&refracting));
+    refracting.blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+    refracting.surface_parameters1[3] = 1.0f;
+    assert(!btbh_gpu_scene_refraction_valid(&refracting));
+
     assert(!btbh_gpu_scene_uses_transparent_pass(
         BTBH_GPU_SCENE_BLEND_ALPHA,
         false

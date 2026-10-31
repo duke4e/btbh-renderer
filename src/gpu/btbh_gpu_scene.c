@@ -305,6 +305,11 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUSampler *brdf_lut_sampler;
     SDL_GPUTexture *depth_texture;
     SDL_GPUTexture *scene_color_texture;
+    /* The scene as it was before the first refracting batch (BTBH_GPU_SCENE_SURFACE_REFRACT); made on the
+       first frame that draws one. */
+    SDL_GPUTexture *refraction_texture;
+    uint32_t refraction_width;
+    uint32_t refraction_height;
     SDL_GPUTexture *ambient_texture;
     SDL_GPUTexture *ambient_specular_texture;
     SDL_GPUTexture *normal_texture;
@@ -1078,6 +1083,16 @@ bool btbh_gpu_scene_uses_fast_unlit_pipeline(
             batch->blend_mode,
             batch->transparency_enabled != 0u
         );
+}
+
+bool btbh_gpu_scene_refraction_valid(
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+    return batch != NULL &&
+        (batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT ||
+         (batch->transparency_enabled == 1u &&
+          batch->blend_mode == BTBH_GPU_SCENE_BLEND_ALPHA &&
+          batch->surface_parameters1[3] == 0.0f));
 }
 
 void btbh_gpu_scene_resolve_blend_state(
@@ -2140,6 +2155,52 @@ static bool btbh_gpu_scene_ensure_scene_distance_target(
     return true;
 }
 
+/* The copy refracting batches sample: the HDR scene at the render size. */
+static bool btbh_gpu_scene_ensure_refraction_target(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (runtime->refraction_texture != NULL &&
+        runtime->refraction_width == width &&
+        runtime->refraction_height == height) {
+        return true;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    if (runtime->refraction_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->refraction_texture);
+        runtime->refraction_texture = NULL;
+    }
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    info.usage =
+        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+        SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    runtime->refraction_texture = SDL_CreateGPUTexture(device, &info);
+    if (runtime->refraction_texture == NULL) {
+        runtime->refraction_width = 0u;
+        runtime->refraction_height = 0u;
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return false;
+    }
+    runtime->refraction_width = width;
+    runtime->refraction_height = height;
+    return true;
+}
+
 /* Soft particles fade where they meet the scene behind them; the distance pass runs only on
    frames that draw one. */
 static bool btbh_gpu_scene_batches_have_soft_particles(
@@ -2153,6 +2214,22 @@ static bool btbh_gpu_scene_batches_have_soft_particles(
                 batches[index].blend_mode,
                 batches[index].transparency_enabled != 0u
             )) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Refracting batches draw in a pass of their own after the transparent one, over a copy of the scene. */
+static bool btbh_gpu_scene_batches_have_refraction(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const uint8_t *scene_visibility
+) {
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        if (batches[index].surface_variant ==
+                BTBH_GPU_SCENE_SURFACE_REFRACT &&
+            (scene_visibility == NULL || scene_visibility[index] != 0u)) {
             return true;
         }
     }
@@ -4083,6 +4160,7 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_SURFACE_NONE &&
             batch->surface_variant <
                 BTBH_GPU_SCENE_SURFACE_COUNT &&
+            btbh_gpu_scene_refraction_valid(batch) &&
             isfinite(batch->alpha_cutoff) &&
             batch->alpha_cutoff >= 0.0f &&
             batch->alpha_cutoff <= 1.0f &&
@@ -5297,11 +5375,12 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
         const bool material_emits =
-            (batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
-            (batch->emission_energy > 0.0f &&
-             (batch->emission_red != 0u ||
-              batch->emission_green != 0u ||
-              batch->emission_blue != 0u));
+            batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
+            ((batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
+             (batch->emission_energy > 0.0f &&
+              (batch->emission_red != 0u ||
+               batch->emission_green != 0u ||
+               batch->emission_blue != 0u)));
         SDL_GPUBuffer *batch_instance_buffer =
             batch->instance_buffer != NULL
                 ? batch->instance_buffer->buffer
@@ -5918,6 +5997,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         batch_count > 0u &&
         batches != NULL &&
         btbh_gpu_scene_batches_have_soft_particles(batches, batch_count);
+    const bool refraction_active =
+        batch_count > 0u &&
+        batches != NULL &&
+        btbh_gpu_scene_batches_have_refraction(
+            batches,
+            batch_count,
+            scene_visibility
+        );
     const bool auxiliary_geometry_outputs =
         ssao_resolve_active || radiance_cascades_active || temporal_active;
     uint32_t shadow_enabled[3] = {
@@ -6571,8 +6658,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
        the frame. */
     BTBHGPUSceneReport scene_distance_report;
     SDL_zero(scene_distance_report);
+    /* Refraction reads the distance too: a displaced sample nearer than the refracting surface (a unit in
+       front of it) falls back to the undisplaced one. */
     const bool scene_distance_ready =
-        soft_particles_active &&
+        (soft_particles_active || refraction_active) &&
         btbh_gpu_scene_ensure_scene_distance_pipeline(
             window,
             post_vertex_shader_path,
@@ -6747,14 +6836,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     );
     post_uniforms.projection_scale_y = projection_scale_y;
     post_uniforms.saturation = post->saturation;
+    /* Phases: opaque, transparent, and on frames that draw one, refraction (a transparent pass over a copy of
+       the scene so far). */
+    const uint32_t geometry_phase_count =
+        BTBH_GPU_SCENE_TRANSPARENCY_COUNT + (refraction_active ? 1u : 0u);
     for (uint32_t transparency_phase = 0u;
-         transparency_phase < BTBH_GPU_SCENE_TRANSPARENCY_COUNT;
+         transparency_phase < geometry_phase_count;
          ++transparency_phase) {
         const uint64_t geometry_phase_started_ticks = SDL_GetTicksNS();
         const bool transparent_phase = transparency_phase != 0u;
+        const bool refraction_phase =
+            transparency_phase == BTBH_GPU_SCENE_TRANSPARENCY_COUNT;
         const bool phase_auxiliary_geometry_outputs =
             !transparent_phase && auxiliary_geometry_outputs;
-        if (transparent_phase && ssao_resolve_active) {
+        if (transparency_phase == 1u && ssao_resolve_active) {
             /* Ambient occlusion darkens the opaque scene only: resolved before the
                transparent pass, an effect drawn over a dark corner keeps its light. */
             bool ssao_ok = true;
@@ -6859,7 +6954,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 return report->result;
             }
         }
-        if (transparent_phase && scene_distance_ready) {
+        if (transparency_phase == 1u && scene_distance_ready) {
             BTBHGPUSceneDistanceUniforms distance_uniforms;
             SDL_zero(distance_uniforms);
             (void)memcpy(
@@ -6894,13 +6989,40 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 return report->result;
             }
         }
+        if (refraction_phase) {
+            if (!btbh_gpu_scene_ensure_refraction_target(
+                    window,
+                    render_width,
+                    render_height,
+                    report
+                )) {
+                btbh_gpu_scene_cancel_submission(window, command);
+                free(bone_offsets);
+                return report->result;
+            }
+            /* The refracting batches see the scene as the transparent pass left it. */
+            SDL_GPUBlitInfo refraction_copy;
+            SDL_zero(refraction_copy);
+            refraction_copy.source.texture = radiance_cascades_post_input;
+            refraction_copy.source.w = render_width;
+            refraction_copy.source.h = render_height;
+            refraction_copy.destination.texture = runtime->refraction_texture;
+            refraction_copy.destination.w = render_width;
+            refraction_copy.destination.h = render_height;
+            refraction_copy.load_op = SDL_GPU_LOADOP_DONT_CARE;
+            refraction_copy.filter = SDL_GPU_FILTER_NEAREST;
+            SDL_BlitGPUTexture(command, &refraction_copy);
+        }
         SDL_GPUColorTargetInfo transparent_targets[2];
         SDL_zeroa(transparent_targets);
         transparent_targets[0].texture = radiance_cascades_post_input;
         transparent_targets[0].load_op = SDL_GPU_LOADOP_LOAD;
         transparent_targets[0].store_op = SDL_GPU_STOREOP_STORE;
         transparent_targets[1].texture = runtime->reactive_texture;
-        transparent_targets[1].load_op = SDL_GPU_LOADOP_CLEAR;
+        /* The refraction pass adds to the transparent pass's reactive mask. */
+        transparent_targets[1].load_op = refraction_phase
+            ? SDL_GPU_LOADOP_LOAD
+            : SDL_GPU_LOADOP_CLEAR;
         transparent_targets[1].store_op = SDL_GPU_STOREOP_STORE;
         SDL_GPUDepthStencilTargetInfo transparent_depth_target = depth_target;
         transparent_depth_target.load_op = SDL_GPU_LOADOP_LOAD;
@@ -6930,7 +7052,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             command,
             !transparent_phase
                 ? "BTBH Opaque Draws"
-                : "BTBH Forward Transparent Draws"
+                : (refraction_phase
+                    ? "BTBH Refraction Draws"
+                    : "BTBH Forward Transparent Draws")
         );
         uint32_t geometry_cursor = 0u;
         for (uint32_t batch_index = 0u;
@@ -6959,11 +7083,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             const uint32_t previous_bone_offset =
                 bone_offsets[prepared_geometry_count + geometry_cursor];
             geometry_cursor += 1u;
+            const bool batch_refracts =
+                batch->surface_variant == BTBH_GPU_SCENE_SURFACE_REFRACT;
             const uint32_t batch_transparency_phase =
-                btbh_gpu_scene_uses_transparent_pass(
-                    batch->blend_mode,
-                    batch->transparency_enabled != 0u
-                ) ? 1u : 0u;
+                batch_refracts
+                    ? BTBH_GPU_SCENE_TRANSPARENCY_COUNT
+                    : (btbh_gpu_scene_uses_transparent_pass(
+                          batch->blend_mode,
+                          batch->transparency_enabled != 0u
+                      ) ? 1u : 0u);
             if ((scene_visibility != NULL &&
                  scene_visibility[batch_index] == 0u) ||
                 batch_transparency_phase != transparency_phase) {
@@ -7224,6 +7352,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->surface_parameters1,
                 sizeof(fragment_uniforms.surface_parameters1)
             );
+            if (batch_refracts) {
+                /* Reserved for the host: 1 tells the shader the normal slot carries the scene's distance. */
+                fragment_uniforms.surface_parameters1[3] =
+                    scene_distance_ready ? 1.0f : 0.0f;
+            }
             for (size_t coefficient = 0u;
                  coefficient < 9u;
                  coefficient += 1u) {
@@ -7528,6 +7661,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 /* A soft particle has no normal map; the slot carries the scene's distance. */
                 samplers[2].texture = runtime->scene_distance_texture;
                 samplers[2].sampler = runtime->scene_color_sampler;
+            }
+            if (batch_refracts) {
+                /* Refraction samples no material: the albedo slot carries the scene copy, the normal
+                   slot the scene's distance. */
+                samplers[0].texture = runtime->refraction_texture;
+                samplers[0].sampler = runtime->scene_color_sampler;
+                if (scene_distance_ready) {
+                    samplers[2].texture = runtime->scene_distance_texture;
+                    samplers[2].sampler = runtime->scene_color_sampler;
+                }
             }
             samplers[3].texture = orm_texture->texture;
             samplers[3].sampler = orm_texture->sampler;
@@ -8972,6 +9115,12 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUTexture(
                 device,
                 window->scene_runtime->scene_distance_texture
+            );
+        }
+        if (window->scene_runtime->refraction_texture != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->refraction_texture
             );
         }
         if (window->scene_runtime->post_ping_texture != NULL) {

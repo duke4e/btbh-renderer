@@ -2102,9 +2102,151 @@ FragmentOutput shade_fragment(FragmentInput input)
 #endif
 }
 
+// Screen-space refraction (BTBH_GPU_SCENE_SURFACE_REFRACT), drawn in a pass of its own after the transparent
+// one. It samples no material: the albedo slot carries the scene as it was before the first refracting batch,
+// and the normal slot the opaque scene's distance from the camera when surface_parameters1.w is 1.
+static const uint btbh_surface_refract = 10u;
+// How far red and blue part from green at full dispersion, as a share of the displacement.
+static const float btbh_refract_dispersion_spread = 0.35f;
+
+float btbh_refract_noise(float2 position)
+{
+    const float2 cell = floor(position);
+    const float2 f = position - cell;
+    const float2 u = f * f * (3.0f - 2.0f * f);
+    return lerp(
+        lerp(btbh_detail_hash(cell), btbh_detail_hash(cell + float2(1.0f, 0.0f)), u.x),
+        lerp(btbh_detail_hash(cell + float2(0.0f, 1.0f)), btbh_detail_hash(cell + float2(1.0f, 1.0f)), u.x),
+        u.y
+    );
+}
+
+// The flow's height field in noise cells: a slow layer and a finer one drifting another way, both bent by a
+// slower warp, which makes the eddies.
+float btbh_refract_field(float2 position, float time)
+{
+    const float2 warp = float2(
+        btbh_refract_noise(position * 0.5f + float2(time * 0.13f, 3.7f)),
+        btbh_refract_noise(position * 0.5f + float2(5.2f, -time * 0.11f))
+    ) - 0.5f;
+    const float2 warped = position + warp * 1.6f;
+    return btbh_refract_noise(warped + float2(time * 0.35f, -time * 0.2f)) +
+        0.5f * btbh_refract_noise(warped * 2.3f + float2(-time * 0.6f, time * 0.45f));
+}
+
+// A world-space direction as a direction on screen (pixels: x right, y down), through the position's
+// screen-space derivatives; zero when it points along the view.
+float2 btbh_refract_screen_direction(float3 direction, float3 position_dx, float3 position_dy)
+{
+    const float2 projected = float2(
+        dot(direction, position_dx) / max(dot(position_dx, position_dx), 1.0e-12f),
+        dot(direction, position_dy) / max(dot(position_dy, position_dy), 1.0e-12f)
+    );
+    const float length_squared = dot(projected, projected);
+    return length_squared > 1.0e-12f ? projected * rsqrt(length_squared) : float2(0.0f, 0.0f);
+}
+
+FragmentOutput refract_fragment(FragmentInput input)
+{
+    float2 size;
+    albedo_texture.GetDimensions(size.x, size.y);
+    const float2 uv = input.pixel_position.xy / size;
+    const float pixel_scale = size.y / 1080.0f;
+    const float weight = saturate(input.color.a);
+    const float3 position_dx = ddx(input.world_position);
+    const float3 position_dy = ddy(input.world_position);
+
+    // The flow, fixed in the world or, with the view coupling, shifted along the view direction.
+    const float3 view = stable_normalize(
+        input.world_position - camera_position.xyz,
+        float3(0.0f, -1.0f, 0.0f)
+    );
+    const float flow_scale = max(surface_parameters0.z, 0.0f);
+    const float time = surface_time * surface_parameters0.w;
+    const float2 world = input.world_position.xz +
+        view.xz / max(abs(view.y), 0.25f) * saturate(surface_parameters1.x);
+    const float2 position = world * flow_scale;
+    const float delta = 0.35f;
+    const float2 gradient = float2(
+        btbh_refract_field(position + float2(delta, 0.0f), time) -
+            btbh_refract_field(position - float2(delta, 0.0f), time),
+        btbh_refract_field(position + float2(0.0f, delta), time) -
+            btbh_refract_field(position - float2(0.0f, delta), time)
+    ) * (0.25f / delta);
+    // Calm and unstable stretches: a slow, coarse mask scales the bend between a quarter and all of it.
+    const float unrest = 0.25f + 0.75f * smoothstep(
+        0.3f,
+        0.75f,
+        btbh_refract_noise(position * 0.17f + float2(time * 0.03f, -time * 0.02f))
+    );
+    const float gradient_length = length(gradient);
+    float2 offset = gradient_length > 0.0f
+        ? btbh_refract_screen_direction(float3(gradient.x, 0.0f, gradient.y), position_dx, position_dy) *
+            (gradient_length * unrest * surface_parameters0.x)
+        : float2(0.0f, 0.0f);
+    // The normal push: a ring whose normals lean outward pushes the scene radially (a shockwave).
+    offset += btbh_refract_screen_direction(
+        stable_normalize(input.world_normal, float3(0.0f, 1.0f, 0.0f)),
+        position_dx,
+        position_dy
+    ) * surface_parameters1.z;
+    offset *= pixel_scale * weight;
+
+    // Where the displaced sample lies nearer than this surface (a unit in front of it) the scene shows undisplaced.
+    if (surface_parameters1.w > 0.5f)
+    {
+        const float surface_distance = length(input.world_position - camera_position.xyz);
+        const float sample_distance =
+            normal_texture.SampleLevel(normal_sampler, uv + offset / size, 0.0f).r;
+        if (sample_distance < surface_distance * 0.995f)
+        {
+            offset = float2(0.0f, 0.0f);
+        }
+    }
+
+    const float dispersion = saturate(surface_parameters0.y) * btbh_refract_dispersion_spread;
+    const float2 offset_uv = offset / size;
+    float3 color = float3(
+        albedo_texture.SampleLevel(albedo_sampler, uv + offset_uv * (1.0f + dispersion), 0.0f).r,
+        albedo_texture.SampleLevel(albedo_sampler, uv + offset_uv, 0.0f).g,
+        albedo_texture.SampleLevel(albedo_sampler, uv + offset_uv * (1.0f - dispersion), 0.0f).b
+    );
+    // Thin chromatic lines where the bend changes fastest from one pixel to the next, tinted by its direction.
+    const float steepness = length(ddx(offset)) + length(ddy(offset));
+    const float line_amount = smoothstep(0.6f, 2.0f, steepness) * max(surface_parameters1.y, 0.0f);
+    if (line_amount > 0.0f)
+    {
+        const float turn = atan2(offset.y, offset.x) * 0.15915494f;
+        const float3 hue = 0.5f + 0.5f * cos(6.2831853f * (turn + float3(0.0f, 0.33f, 0.67f)));
+        const float luminance = dot(color, float3(0.2126f, 0.7152f, 0.0722f));
+        color += hue * line_amount * (luminance + 0.15f);
+    }
+    color *= input.color.rgb;
+
+    FragmentOutput output;
+    output.color = float4(color, 1.0f);
+    // The transparent pass's second target is the reactive mask: the more the scene moves here, the less
+    // the temporal upscaler should keep of its history (main scales it by the frame's reactive scale).
+    output.ambient = float4(saturate(length(offset) / 6.0f), 0.0f, 0.0f, 0.0f);
+    output.normal = float4(0.5f, 0.5f, 1.0f, 1.0f);
+    output.ambient_specular = float4(0.0f, 0.0f, 0.0f, 1.0f);
+    output.emission = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    return output;
+}
+
 FragmentOutput main(FragmentInput input)
 {
-    FragmentOutput output = shade_fragment(input);
+    const bool refracts = surface_variant == btbh_surface_refract;
+    FragmentOutput output;
+    if (refracts)
+    {
+        output = refract_fragment(input);
+    }
+    else
+    {
+        output = shade_fragment(input);
+    }
     output.velocity = float4(
         btbh_temporal_velocity(input.motion_clip_xy, input.motion_clip_w),
         0.0f,
@@ -2114,7 +2256,9 @@ FragmentOutput main(FragmentInput input)
     {
         // The transparent pass's second target is the reactive mask, not the ambient light.
         output.ambient = float4(
-            btbh_temporal_reactive(output.color, procedural_controls.z),
+            refracts
+                ? saturate(output.ambient.x * procedural_controls.z)
+                : btbh_temporal_reactive(output.color, procedural_controls.z),
             0.0f,
             0.0f,
             0.0f

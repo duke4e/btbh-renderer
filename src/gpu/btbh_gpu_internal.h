@@ -165,6 +165,11 @@ bool btbh_gpu_scene_uses_transparent_pass(
 bool btbh_gpu_scene_uses_fast_unlit_pipeline(
     const BTBHGPUSceneGeometryBatch *batch
 );
+/* A refracting batch (BTBH_GPU_SCENE_SURFACE_REFRACT) draws in the transparent pipeline with alpha blending
+   and keeps surface_parameters1.w for the renderer; any other batch passes. */
+bool btbh_gpu_scene_refraction_valid(
+    const BTBHGPUSceneGeometryBatch *batch
+);
 bool btbh_gpu_scene_lighting_valid(
     const BTBHGPUSceneLighting *lighting
 );
