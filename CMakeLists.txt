@@ -170,7 +170,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${CMAKE_CURRENT_BINARY_DIR}/external/SDL_shadercross"
         EXCLUDE_FROM_ALL
     )
-    if(APPLE)
+    # SDL_shadercross sets its own deployment target; pass the parent's only when one is set.
+    if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
         target_link_options(
             shadercross
             PRIVATE
@@ -409,7 +410,13 @@ if(BTBH_BUILD_GPU_SPIKE)
             "${_shader_reflection}"
         )
 
-        if(APPLE)
+        # These FSR 3 passes' MSL gives two resources one Metal index (SRVs read with Load are renumbered as
+        # storage textures), so they do not compile to metallib; btbh_gpu_fsr3 keeps FSR 1 on Metal.
+        set(_shader_metallib_supported TRUE)
+        if(_shader_name MATCHES "^production_fsr3_(accumulate|luma_instability|luma_pyramid|prepare_inputs|prepare_reactivity|shading_change_pyramid)\\.comp$")
+            set(_shader_metallib_supported FALSE)
+        endif()
+        if(APPLE AND _shader_metallib_supported)
             set(
                 _shader_air
                 "${BTBH_GPU_SHADER_OUTPUT_DIR}/${_shader_name}.air"

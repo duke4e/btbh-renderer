@@ -4942,12 +4942,14 @@ static bool btbh_gpu_scene_post_valid(
         isfinite(post->bloom_scatter) &&
         post->bloom_scatter >= 0.0f &&
         post->bloom_scatter <= 1.0f &&
-        isfinite(post->vignette_intensity) &&
-        post->vignette_intensity >= 0.0f &&
-        post->vignette_intensity <= 1.0f &&
-        isfinite(post->vignette_smoothness) &&
-        post->vignette_smoothness > 0.0f &&
-        post->vignette_smoothness <= 1.0f;
+        /* The vignette's fields only count when it is on, so a zeroed struct stays valid. */
+        (post->vignette_enabled == 0u ||
+         (isfinite(post->vignette_intensity) &&
+          post->vignette_intensity >= 0.0f &&
+          post->vignette_intensity <= 1.0f &&
+          isfinite(post->vignette_smoothness) &&
+          post->vignette_smoothness > 0.0f &&
+          post->vignette_smoothness <= 1.0f));
 }
 
 static bool btbh_gpu_scene_surface_requires_shadow_discard(

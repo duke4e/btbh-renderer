@@ -105,11 +105,19 @@ mask, PCSS sun shadows, HBAO SSAO, point-light ceiling) are planned for v0.2.0 a
 - Font atlases are now linear for all consumers.
 
 ### Fixed for zero-initialised hosts
+- `BTBHGPUScenePost`'s vignette fields are only validated when `vignette_enabled` is set; before, a zeroed struct
+  failed every scene present (`vignette_smoothness` had to be positive). Found by Tyrian3D on the Mac.
 - `BTBHGPUScenePost.ao_radius` no longer has to be positive: zero (a host that never set the AO controls) keeps
   the previous fixed AO values (radius 1, intensity 0.4, contact 0.75, direct share 0.2). Before, every scene
   present from a zeroed `BTBHGPUScenePost` failed validation.
 
 ### Notes for every consumer
+- `BTBH_GPU_PHASE2_REQUIRED_FEATURES` is now `BTBH_GPU_REQUIRED_FEATURES`; the old name stays as a deprecated alias.
+- FSR 3 is not available on Metal yet: six of its compute passes produce MSL whose bindings collide with SDL_GPU's
+  Metal convention, so they are not built as metallibs and `BTBH_GPU_SCENE_UPSCALE_FSR3` falls back to FSR 1 on macOS
+  (with a log line). Windows and Linux are unchanged. A proper binding fix is planned for v0.2.0.
+- macOS builds no longer need `CMAKE_OSX_DEPLOYMENT_TARGET` to link SDL_shadercross, and `tools/check.sh` uses Unix
+  Makefiles when Ninja is not installed.
 - Hosts that zero-initialise the scene structs get every feature added since their last update switched off.
 - The scene shader's uniform block grew (street lamps, clouds, point lights): rebuild the shaders together with
   the C core; mixing shader and C versions is not supported.

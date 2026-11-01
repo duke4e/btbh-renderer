@@ -5,7 +5,7 @@
 #
 #   tools/check.sh [build-dir]        SKIP_GPU_TESTS=1 skips the device and window smoke tests
 #
-# Needs CMake, Ninja and a C/C++ compiler (Xcode's command line tools on macOS). A cold build compiles DXC
+# Needs CMake and a C/C++ compiler (Xcode's command line tools on macOS); uses Ninja when it is installed. A cold build compiles DXC
 # and takes a while; later runs are incremental. Submodules must be initialised
 # (git submodule update --init --recursive).
 set -eu
@@ -13,11 +13,15 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 build=${1:-"${TMPDIR:-/tmp}/btbh-renderer-check"}
 
-echo "== configure and build ($build)"
-cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+generator="Unix Makefiles"
+if command -v ninja >/dev/null 2>&1; then generator=Ninja; fi
+jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+
+echo "== configure and build ($build, $generator)"
+cmake -S "$root" -B "$build" -G "$generator" -DCMAKE_BUILD_TYPE=Release \
     -DR3D_ASSIMP_VENDORED=ON -DBTBH_BUILD_GPU_SPIKE=ON -DBTBH_BUILD_GPU_NATIVE_TESTS=ON \
     -DBTBH_BUILD_GPU_PACKAGE_RUNTIME=ON
-cmake --build "$build" --parallel
+cmake --build "$build" --parallel "$jobs"
 
 echo "== shader artifacts"
 out="$build/generated/btbh_gpu/shaders"
@@ -30,7 +34,11 @@ for name in $names; do
         [ -f "$out/$name.$extension" ] || { echo "missing $name.$extension"; missing=1; }
     done
     if [ "$(uname)" = "Darwin" ]; then
-        [ -f "$out/$name.metallib" ] || { echo "missing $name.metallib"; missing=1; }
+        case "$name" in
+            # Not built for Metal yet (CMakeLists.txt); FSR 3 falls back to FSR 1 there.
+            production_fsr3_accumulate.comp|production_fsr3_luma_instability.comp|production_fsr3_luma_pyramid.comp|            production_fsr3_prepare_inputs.comp|production_fsr3_prepare_reactivity.comp|production_fsr3_shading_change_pyramid.comp) ;;
+            *) [ -f "$out/$name.metallib" ] || { echo "missing $name.metallib"; missing=1; } ;;
+        esac
     fi
 done
 [ "$missing" -eq 0 ] || exit 1

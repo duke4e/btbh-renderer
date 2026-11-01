@@ -530,6 +530,13 @@ bool btbh_gpu_fsr3_prepare(
         return false;
     }
     if (runtime->pipelines[0] == NULL) {
+        if (shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB) {
+            /* The MSL that SDL_shadercross makes for six of the passes collides with SDL_GPU's Metal compute
+               bindings, so they are not built as metallibs yet: Metal keeps FSR 1. */
+            runtime->unavailable = true;
+            btbh_gpu_fsr3_message(message, message_capacity, "FSR3 is not available on Metal yet", NULL);
+            return false;
+        }
         if (!btbh_gpu_fsr3_formats_supported(device)) {
             runtime->unavailable = true;
             btbh_gpu_fsr3_message(message, message_capacity, "FSR3 storage formats are unsupported on this device", NULL);

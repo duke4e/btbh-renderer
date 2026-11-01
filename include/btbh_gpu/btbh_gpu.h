@@ -74,6 +74,8 @@ typedef uint64_t BTBHGPUFeatureFlags;
     BTBH_GPU_FEATURE_COMPUTE | \
     BTBH_GPU_FEATURE_TEXTURE_READBACK \
 )
+/* Deprecated: the name before the GPU spike was removed. Kept for hosts that still use it. */
+#define BTBH_GPU_PHASE2_REQUIRED_FEATURES BTBH_GPU_REQUIRED_FEATURES
 
 typedef struct BTBHGPUCapabilitySnapshot {
     char driver_name[BTBH_GPU_DRIVER_NAME_CAPACITY];
