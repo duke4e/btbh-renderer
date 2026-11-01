@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.1.0 (first tagged release)
+## [Unreleased]
+
+## [0.1.0] — 2026-11-01 (first tagged release)
 
 The first version under semver. The public C header `include/btbh_gpu/btbh_gpu.h` is the contract:
 anything it declares is covered by semver from here on; the Swift package (`BTBHRenderer`,
@@ -112,6 +114,11 @@ mask, PCSS sun shadows, HBAO SSAO, point-light ceiling) are planned for v0.2.0 a
   present from a zeroed `BTBHGPUScenePost` failed validation.
 
 ### Notes for every consumer
+- **Changed look for hosts from before 2026-10-16** (added after the release): `contrast` scales in log space around
+  mid grey 0.18 since `0722f5f`, so black stays black and darks no longer clip. With `contrast` above 1, darks and
+  mid-tones come out lighter than with the old linear curve around 0.5 (CHIMERA's estuary at 1.12: shaded ground and
+  the abyss). CHIMERA kept the new look. A switch back (`contrast_mode`) exists on branch `fix/contrast-mode` and
+  ships only if a game asks for it.
 - `BTBH_GPU_PHASE2_REQUIRED_FEATURES` is now `BTBH_GPU_REQUIRED_FEATURES`; the old name stays as a deprecated alias.
 - FSR 3 is not available on Metal yet: six of its compute passes produce MSL whose bindings collide with SDL_GPU's
   Metal convention, so they are not built as metallibs and `BTBH_GPU_SCENE_UPSCALE_FSR3` falls back to FSR 1 on macOS
