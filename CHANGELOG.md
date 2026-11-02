@@ -6,6 +6,64 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — unreleased
+
+Tyrian3D's last four `tyrian3d` commits, ported to master as opt-in features: with every new field zeroed
+a scene looks as it did in 0.1.0. After this release the `tyrian3d` branch is retired and all three games
+build from tags on `master`.
+
+### Added
+- **Soft sun shadows** (from `f7c3773`): `BTBHGPUSceneLighting.directional_shadow_filter`
+  (`BTBHGPUSceneShadowFilter`). `BTBH_GPU_SCENE_SHADOW_FILTER_TENT` (0) is the filter as before;
+  `BTBH_GPU_SCENE_SHADOW_FILTER_SOFT` (1) is percentage-closer soft shadows: a blocker search, a penumbra
+  0.035 world units wide per unit of the blockers' height, times `directional_shadow_softness` (at least
+  0.75 texel), and 4 to 32 comparison taps against the receiver's own plane. With the soft filter,
+  `unlit_enabled` 3 is a plain four-tap lookup for see-through layers that are drawn many times. With the
+  tent filter, 3 behaves like 2.
+- `btbh_gpu_window_scene_set_directional_shadow_size`: sets the primary directional shadow map's size
+  (256–8192 each way; 2048 × 2048 by default), for a light-space region that isn't square.
+- **Horizon-based ambient occlusion** (from `beaf727`): `BTBHGPUScenePost.ssao_enabled` 2. It runs at half
+  resolution and uses 4 directions of 4 steps. A depth-aware denoise and a depth-aware upsample follow, and
+  the result is laid over the opaque scene before the transparent draws.
+  - New post fields: `ssao_radius`, `ssao_intensity`, `ssao_power` and `ssao_bias`. A field left at 0 takes
+    its default (1, 1, 1, 0.03).
+  - `ssao_contact` darkens all the light but the emission.
+  - `ssao_debug_view` shows the occlusion alone, in grey.
+  - Per-batch `ssao_mode` (`BTBHGPUSceneSSAOMode`: full, receive only, cast only, none).
+  - Procedural pixel water never takes it.
+  - The SSAO of `ssao_enabled` 1 (with `ao_*` and the SSR in its resolve) is unchanged. With HBAO on,
+    screen-space reflections still run through that resolve.
+- **Point-light ceiling** (from `89266d2`): `BTBHGPUSceneLighting.point_light_ceiling` (luminance; 0 means
+  none). The light that point lights add to a surface eases out towards the room the surface has left under
+  the ceiling. Dark ground still flashes bright, and pale ground under a stream of shots doesn't burn white.
+
+### Changed
+- `PIXEL_WATER`'s mask is smooth (from `96486ab`): it is interpolated between its texels and cut at a half,
+  with an edge about a screen pixel soft. Shores no longer run in the game's pixel steps. Only Tyrian3D uses
+  the surface.
+- The scene shader's samplers changed: the primary directional map is bound again at t8 through a
+  comparison sampler, and the omni map moved to t9. Rebuild the shaders together with the C core.
+- The tent filter reads the primary map's size from the texture, so it is unchanged at the default 2048.
+- New appended fields (`point_light_ceiling`, `directional_shadow_filter`, `ssao_mode`, the `ssao_*` post
+  fields) carry reserved padding. Zero-initialise the structs, as before.
+
+### Upgrading
+- **Be The Bullet Hell** (from `e95b392`):
+  - Bump the submodule to `v0.2.0` and rebuild the shaders.
+  - There is nothing to set. The look stays the same, because 0.1.0's fixes only change zeroed fields and the
+    log contrast is already in `e95b392`.
+  - Check the text: the font atlas now filters linearly by default.
+  - On macOS, FSR 3 falls back to FSR 1.
+- **CHIMERA** (from `v0.1.0`): point `renderer.pin` at a `v0.2.0` checkout and rebuild the shaders. There is
+  nothing to set.
+- **Tyrian3D** (from `tyrian3d` @ `89266d2`):
+  - Bump the submodule to `v0.2.0`.
+  - In its CMake, change `shaders/gpu_spike` to `shaders/gpu` (the source path and its `-I`).
+  - To keep its look, set:
+    - `lighting->directional_shadow_filter = BTBH_GPU_SCENE_SHADOW_FILTER_SOFT`;
+    - `post->ssao_enabled = 2` instead of 1, keeping its `ssao_*` values and the per-batch `ssao_mode`.
+  - `point_light_ceiling`, `set_directional_shadow_size` and `unlit_enabled` 3 keep their names.
+
 ## [0.1.0] — 2026-11-01 (first tagged release)
 
 The first version under semver. The public C header `include/btbh_gpu/btbh_gpu.h` is the contract:
