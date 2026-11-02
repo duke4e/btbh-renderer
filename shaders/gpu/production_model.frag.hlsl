@@ -39,9 +39,13 @@ SamplerState secondary_directional_shadow_sampler
     : register(s6, space2);
 Texture2D<float> spot_shadow_texture : register(t7, space2);
 SamplerState spot_shadow_sampler : register(s7, space2);
+// The primary directional map again, through a comparison sampler (each tap compares the 2x2 texels round
+// it and filters the results), for the soft sun shadow filter.
+Texture2D<float> directional_shadow_compare_texture : register(t8, space2);
+SamplerComparisonState directional_shadow_compare_sampler : register(s8, space2);
 #if BTBH_OMNI_SHADOWS
-TextureCube<float> omni_shadow_texture : register(t8, space2);
-SamplerState omni_shadow_sampler : register(s8, space2);
+TextureCube<float> omni_shadow_texture : register(t9, space2);
+SamplerState omni_shadow_sampler : register(s9, space2);
 #endif
 #endif
 
@@ -884,7 +888,7 @@ float tent_shadow_visibility_4x4(
     SamplerState shadow_sampler,
     float2 uv,
     float reference_depth,
-    float map_size,
+    float2 map_size,
     float radius_texels
 )
 {
@@ -912,20 +916,265 @@ float tent_shadow_visibility_4x4(
     return weight_sum > 0.0f ? lit / weight_sum : 1.0f;
 }
 
-// The sun's map (BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE).
-static const float primary_directional_shadow_map_size = 2048.0f;
+// The soft sun shadow filter (BTBH_GPU_SCENE_SHADOW_FILTER_SOFT, directional_shadow_controls.z), from
+// Tyrian3D: percentage-closer soft shadows through the primary map's comparison binding (t8).
+// Vogel discs (golden-angle spirals, radius 1: even in area, so no tap pattern repeats) of 8, 16 and 32 taps in one
+// table: x, y and the tap's weight (1 - 0.75 r^2: less towards the rim, the penumbra's ends smoother).
+static const float3 shadow_taps[56] = {
+    // 8
+    float3(0.2500f, 0.0000f, 0.9531f), float3(-0.3193f, 0.2925f, 0.8594f), float3(0.0489f, -0.5569f, 0.7656f), float3(0.4024f, 0.5249f, 0.6719f),
+    float3(-0.7385f, -0.1306f, 0.5781f), float3(0.6996f, -0.4450f, 0.4844f), float3(-0.2340f, 0.8705f, 0.3906f), float3(-0.4463f, -0.8593f, 0.2969f),
+    // 16
+    float3(0.1768f, 0.0000f, 0.9766f), float3(-0.2258f, 0.2068f, 0.9297f), float3(0.0346f, -0.3938f, 0.8828f), float3(0.2846f, 0.3712f, 0.8359f),
+    float3(-0.5222f, -0.0924f, 0.7891f), float3(0.4947f, -0.3147f, 0.7422f), float3(-0.1655f, 0.6155f, 0.6953f), float3(-0.3156f, -0.6076f, 0.6484f),
+    float3(0.6846f, 0.2500f, 0.6016f), float3(-0.7123f, 0.2940f, 0.5547f), float3(0.3434f, -0.7337f, 0.5078f), float3(0.2537f, 0.8089f, 0.4609f),
+    float3(-0.7647f, -0.4432f, 0.4141f), float3(0.8971f, -0.1972f, 0.3672f), float3(-0.5475f, 0.7788f, 0.3203f), float3(-0.1265f, -0.9761f, 0.2734f),
+    // 32
+    float3(0.1250f, 0.0000f, 0.9883f), float3(-0.1596f, 0.1462f, 0.9648f), float3(0.0244f, -0.2784f, 0.9414f), float3(0.2012f, 0.2625f, 0.9180f),
+    float3(-0.3693f, -0.0653f, 0.8945f), float3(0.3498f, -0.2225f, 0.8711f), float3(-0.1170f, 0.4352f, 0.8477f), float3(-0.2231f, -0.4296f, 0.8242f),
+    float3(0.4841f, 0.1768f, 0.8008f), float3(-0.5036f, 0.2079f, 0.7773f), float3(0.2428f, -0.5188f, 0.7539f), float3(0.1794f, 0.5720f, 0.7305f),
+    float3(-0.5408f, -0.3134f, 0.7070f), float3(0.6344f, -0.1395f, 0.6836f), float3(-0.3871f, 0.5507f, 0.6602f), float3(-0.0894f, -0.6902f, 0.6367f),
+    float3(0.5491f, 0.4628f, 0.6133f), float3(-0.7389f, 0.0306f, 0.5898f), float3(0.5390f, -0.5363f, 0.5664f), float3(-0.0361f, 0.7798f, 0.5430f),
+    float3(-0.5128f, -0.6145f, 0.5195f), float3(0.8124f, 0.1093f, 0.4961f), float3(-0.6883f, 0.4789f, 0.4727f), float3(0.1881f, -0.8361f, 0.4492f),
+    float3(0.4350f, 0.7592f, 0.4258f), float3(-0.8504f, -0.2713f, 0.4023f), float3(0.8261f, -0.3817f, 0.3789f), float3(-0.3579f, 0.8552f, 0.3555f),
+    float3(-0.3194f, -0.8880f, 0.3320f), float3(0.8499f, 0.4467f, 0.3086f), float3(-0.9440f, 0.2488f, 0.2852f), float3(0.5366f, -0.8345f, 0.2617f)
+};
+
+// The blocker search's four gathers round the point (radius 0.45, turned off the axes).
+static const float2 shadow_search[4] = {
+    float2(0.4365f, 0.1091f), float2(-0.1091f, 0.4365f), float2(-0.4365f, -0.1091f), float2(0.1091f, -0.4365f)
+};
+
+// The sun's apparent size: how much wider its penumbra grows per world unit between a blocker and the
+// surface it shadows (at softness 1; directional_shadow_controls.y scales it, 0 leaves the comparison
+// sampler's own 2x2 filtering).
+#ifndef BTBH_SUN_PENUMBRA
+#define BTBH_SUN_PENUMBRA 0.035f
+#endif
+// The greatest distance between blocker and receiver whose penumbra the blocker search covers (world units).
+#ifndef BTBH_SUN_SEARCH_GAP
+#define BTBH_SUN_SEARCH_GAP 110.0f
+#endif
+
+// A directional (orthographic) shadow map's receiver plane: how the depth it stores changes per UV step
+// along its u and v on the plane through the point with the given normal, so that every tap of a wide
+// filter compares against the surface's own depth there (no acne on slopes, no light leaking). Where the
+// light grazes the plane it is clamped (at 73 degrees).
+float2 shadow_receiver_gradient(float4x4 view_projection, float3 face_normal)
+{
+    const float scale_u = length(view_projection[0].xyz);
+    const float scale_v = length(view_projection[1].xyz);
+    const float scale_z = length(view_projection[2].xyz);
+    const float normal_u = dot(face_normal, view_projection[0].xyz) / scale_u;
+    const float normal_v = dot(face_normal, view_projection[1].xyz) / scale_v;
+    const float normal_z = min(dot(face_normal, view_projection[2].xyz) / scale_z, -0.3f);
+    // World depth per world step: -(normal_u, normal_v) / normal_z; a world step is 0.5 scale UV (v down).
+    return float2(-normal_u / (0.5f * scale_u), normal_v / (0.5f * scale_v)) * (scale_z / normal_z);
+}
+
+// The sun's shadow, soft: percentage-closer soft shadows. A blocker search (gathered depths round the point)
+// finds how far above the surface the blockers stand; the penumbra is as wide as that times the sun's size,
+// at least about a texel (contact shadows stay sharp and smooth), and filtered over a disc of 4 to 32 taps
+// through the comparison sampler, each against the receiver's plane. Where no blocker is found the surface
+// is lit at the cost of the search alone, where all it finds is nearer the light it is in the umbra.
+// plain: four comparison taps a texel round the point (a tent over 3x3 texels), no blocker search, for see-through
+// surfaces drawn over one another (clouds: unlit_enabled 3), whose fragments are many.
+float primary_directional_soft_visibility(
+    float3 world_position,
+    float3 face_normal,
+    bool plain
+)
+{
+    const float4 clip = mul(
+        directional_shadow_view_projection,
+        float4(world_position, 1.0f)
+    );
+    if (clip.w <= 0.0f)
+    {
+        return 1.0f;
+    }
+    const float3 projected = clip.xyz / clip.w;
+    if (
+        projected.x < -1.0f || projected.x > 1.0f ||
+        projected.y < -1.0f || projected.y > 1.0f ||
+        projected.z < 0.0f || projected.z > 1.0f
+    )
+    {
+        return 1.0f;
+    }
+    const float2 uv = float2(
+        projected.x * 0.5f + 0.5f,
+        -projected.y * 0.5f + 0.5f
+    );
+    uint width;
+    uint height;
+    directional_shadow_texture.GetDimensions(width, height);
+    const float2 texel = 1.0f / float2(width, height);
+    // UV per world unit along the map's axes, depth per world unit along the light, a texel in world units.
+    const float2 uv_per_world = 0.5f * float2(
+        length(directional_shadow_view_projection[0].xyz),
+        length(directional_shadow_view_projection[1].xyz)
+    );
+    const float depth_per_world = length(directional_shadow_view_projection[2].xyz);
+    const float texel_world = max(texel.x / uv_per_world.x, texel.y / uv_per_world.y);
+    const float2 gradient = shadow_receiver_gradient(directional_shadow_view_projection, face_normal);
+    // The plane's change over a texel (a tap compares texels up to one away), and a little more.
+    const float bias = dot(abs(gradient), texel) + 0.03f * depth_per_world;
+    [branch]
+    if (plain)
+    {
+        float plain_lit = 0.0f;
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+            const float2 tap = float2(i & 1 ? 0.5f : -0.5f, i & 2 ? 0.5f : -0.5f) * texel;
+            plain_lit += directional_shadow_compare_texture.SampleCmpLevelZero(
+                directional_shadow_compare_sampler,
+                uv + tap,
+                projected.z - bias + dot(gradient, tap)
+            );
+        }
+        return plain_lit * 0.25f;
+    }
+    const float penumbra_per_world =
+        BTBH_SUN_PENUMBRA * max(directional_shadow_controls.y, 0.0f);
+    const float least_radius = 0.75f * texel_world;
+    const float search_radius = max(least_radius, 0.5f * penumbra_per_world * BTBH_SUN_SEARCH_GAP);
+    const float2 search_uv = search_radius * uv_per_world;
+    // A depth found counts as a blocker only where its penumbra can reach this point: no further to the side
+    // than half its penumbra (its height over the receiver times the sun's size) and the least filter's reach,
+    // so the receiver's own bumps round it (terrain, grass) leave it lit at the search's cost alone. Where every
+    // depth found is nearer the light than the receiver's plane, it is in the umbra.
+    const float reach = least_radius + texel_world;
+    const float rise_per_side = penumbra_per_world > 0.0001f ? 2.0f / penumbra_per_world : 100000.0f;
+
+    float blocker_depths = 0.0f;
+    float blockers = 0.0f;
+    float nearer = 0.0f;
+    // Five gathers (20 depths): the point's own and four round it, at 0.45 of the widest penumbra's radius (each
+    // gather costs: the commonest case, a lit or narrow penumbra's point, pays for them alone).
+    [loop]
+    for (int i = 0; i <= 4; ++i)
+    {
+        const float2 disc = i < 4 ? shadow_search[i] : float2(0.0f, 0.0f);
+        const float2 offset = disc * search_uv;
+        const float4 depths = directional_shadow_texture.GatherRed(
+            directional_shadow_sampler,
+            uv + offset
+        );
+        const float plane = projected.z + dot(gradient, offset) - bias;
+        const float margin =
+            max(length(disc) * search_radius - reach, 0.0f) * rise_per_side * depth_per_world;
+        const float4 near_plane = step(depths, float4(plane, plane, plane, plane));
+        const float4 blocking = step(depths, float4(plane, plane, plane, plane) - margin);
+        nearer += dot(near_plane, float4(1.0f, 1.0f, 1.0f, 1.0f));
+        blockers += dot(blocking, float4(1.0f, 1.0f, 1.0f, 1.0f));
+        blocker_depths += dot(blocking, depths);
+    }
+    [branch]
+    if (nearer > 19.5f)
+    {
+        return 0.0f;
+    }
+    [branch]
+    if (blockers < 0.5f)
+    {
+        return 1.0f;
+    }
+    const float gap = max(projected.z - blocker_depths / blockers, 0.0f) / depth_per_world;
+    const float radius = clamp(0.5f * penumbra_per_world * gap, least_radius, search_radius);
+    const float2 radius_uv = radius * uv_per_world;
+    const float radius_texels = radius / texel_world;
+    const float2 tap_gradient = gradient * radius_uv;
+    const float reference = projected.z - bias;
+    // A disc of taps, more of them for wider penumbrae (4 in a square for the narrowest).
+    float lit = 0.0f;
+    float weights = 0.0f;
+    [branch]
+    if (radius_texels <= 1.5f)
+    {
+        [unroll]
+        for (int i = 0; i < 4; ++i)
+        {
+            const float2 tap = float2(i & 1 ? 0.5f : -0.5f, i & 2 ? 0.5f : -0.5f);
+            lit += directional_shadow_compare_texture.SampleCmpLevelZero(
+                directional_shadow_compare_sampler,
+                uv + tap * radius_uv,
+                reference + dot(tap_gradient, tap)
+            );
+        }
+        return lit * 0.25f;
+    }
+    else if (radius_texels <= 3.0f)
+    {
+        [unroll]
+        for (int i = 0; i < 8; ++i)
+        {
+            const float3 tap = shadow_taps[i];
+            lit += tap.z * directional_shadow_compare_texture.SampleCmpLevelZero(
+                directional_shadow_compare_sampler,
+                uv + tap.xy * radius_uv,
+                reference + dot(tap_gradient, tap.xy)
+            );
+            weights += tap.z;
+        }
+    }
+    else if (radius_texels <= 5.5f)
+    {
+        [unroll]
+        for (int i = 8; i < 24; ++i)
+        {
+            const float3 tap = shadow_taps[i];
+            lit += tap.z * directional_shadow_compare_texture.SampleCmpLevelZero(
+                directional_shadow_compare_sampler,
+                uv + tap.xy * radius_uv,
+                reference + dot(tap_gradient, tap.xy)
+            );
+            weights += tap.z;
+        }
+    }
+    else
+    {
+        [unroll]
+        for (int i = 24; i < 56; ++i)
+        {
+            const float3 tap = shadow_taps[i];
+            lit += tap.z * directional_shadow_compare_texture.SampleCmpLevelZero(
+                directional_shadow_compare_sampler,
+                uv + tap.xy * radius_uv,
+                reference + dot(tap_gradient, tap.xy)
+            );
+            weights += tap.z;
+        }
+    }
+    return lit / weights;
+}
+
 
 // `normal` is the interpolated surface normal without normal maps or the surface-detail bump,
-// which would speckle flat ground with acne.
+// which would speckle flat ground with acne. The soft filter (directional_shadow_controls.z) takes
+// the face's own normal instead, and plain (unlit_enabled 3) asks it for its four-tap lookup.
 float primary_directional_visibility(
     float3 world_position,
-    float3 normal
+    float3 normal,
+    float3 face_normal,
+    bool plain
 )
 {
     if (directional_shadow_controls.x < 0.5f)
     {
         return 1.0f;
     }
+    [branch]
+    if (directional_shadow_controls.z > 0.5f)
+    {
+        return primary_directional_soft_visibility(world_position, face_normal, plain);
+    }
+    // The sun's map (BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE unless the host set its size).
+    uint map_width;
+    uint map_height;
+    directional_shadow_texture.GetDimensions(map_width, map_height);
+    const float2 primary_directional_shadow_map_size = float2(map_width, map_height);
     const float3 light = stable_normalize(
         -directional_direction_energy.xyz,
         float3(0.0f, 1.0f, 0.0f)
@@ -937,7 +1186,7 @@ float primary_directional_visibility(
     // grazing faces and compares a texel per filter step nearer the light.
     const float texel_world =
         2.0f / (
-            primary_directional_shadow_map_size *
+            primary_directional_shadow_map_size.x *
             max(
                 length(directional_shadow_view_projection[0].xyz),
                 0.000001f
@@ -1758,6 +2007,18 @@ float apply_surface_wetness(
 
 FragmentOutput shade_fragment(FragmentInput input)
 {
+#if BTBH_DIRECTIONAL_SHADOWS
+    // The face's own normal, turned towards the camera (from the position's screen derivatives, taken
+    // before anything can be discarded): the soft sun shadow takes its receiver plane from it.
+    float3 shadow_face_normal = stable_normalize(
+        cross(ddx(input.world_position), ddy(input.world_position)),
+        stable_normalize(input.world_normal, float3(0.0f, 1.0f, 0.0f))
+    );
+    if (dot(shadow_face_normal, camera_position.xyz - input.world_position) < 0.0f)
+    {
+        shadow_face_normal = -shadow_face_normal;
+    }
+#endif
     const float lod_bias = procedural_controls.w;
     const float4 raw_albedo_sample = albedo_texture.SampleBias(
         albedo_sampler,
@@ -1836,16 +2097,19 @@ FragmentOutput shade_fragment(FragmentInput input)
         lerp(float3(0.04f, 0.04f, 0.04f), albedo_sample.rgb, metalness),
         (uint)(detail_parameters.w + 0.5f) == 5u ? btbh_glass_reflectance : 0.0f
     );
-    // unlit_enabled: 1 or 2 (bits 0-1), and bit 2 (4): takes the radiance cascades' light.
+    // unlit_enabled: 1, 2 or 3 (bits 0-1), and bit 2 (4): takes the radiance cascades' light.
     if ((unlit_enabled & 3u) != 0u)
     {
 #if BTBH_DIRECTIONAL_SHADOWS
-        // unlit_enabled 2: unlit, but darkened in the primary directional light's shadow.
-        if ((unlit_enabled & 3u) == 2u)
+        // unlit_enabled 2: unlit, but darkened in the primary directional light's shadow; 3: the same, through
+        // the soft filter's plain lookup.
+        if ((unlit_enabled & 3u) >= 2u)
         {
             const float shadow_visibility = primary_directional_visibility(
                 input.world_position,
-                normal
+                normal,
+                shadow_face_normal,
+                (unlit_enabled & 3u) == 3u
             );
             albedo_sample.rgb *= lerp(
                 BTBH_UNLIT_SHADOW_LIGHT,
@@ -2041,6 +2305,20 @@ FragmentOutput shade_fragment(FragmentInput input)
     float3 lighting =
         ambient_diffuse_lighting +
         ambient_specular_lighting;
+#if BTBH_DIRECTIONAL_SHADOWS
+    // (The soft filter is looked up only where the sun reaches the surface at all: elsewhere it adds nothing.)
+    float sun_visibility = 0.0f;
+    [branch]
+    if (directional_shadow_controls.z < 0.5f || dot(normal, directional_direction_energy.xyz) < 0.0f)
+    {
+        sun_visibility = primary_directional_visibility(
+            input.world_position,
+            shadow_normal,
+            shadow_face_normal,
+            false
+        );
+    }
+#endif
     const float3 sun_lighting = evaluate_directional_light(
         directional_direction_energy.xyz,
         directional_direction_energy.w,
@@ -2052,10 +2330,7 @@ FragmentOutput shade_fragment(FragmentInput input)
         metalness,
         f0,
 #if BTBH_DIRECTIONAL_SHADOWS
-        primary_directional_visibility(
-            input.world_position,
-            shadow_normal
-        ) * btbh_cloud_light(input.world_position)
+        sun_visibility * btbh_cloud_light(input.world_position)
 #else
         btbh_cloud_light(input.world_position)
 #endif

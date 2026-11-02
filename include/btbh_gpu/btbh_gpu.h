@@ -701,7 +701,9 @@ typedef struct BTBHGPUSceneGeometryBatch {
     uint8_t stencil_reference;
     uint8_t stencil_mask;
     uint8_t transparency_enabled;
-    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow
+    uint8_t unlit_enabled;  // 1: unlit; 2: unlit, darkened in the primary directional shadow; 3: as 2, and with
+                            // the soft sun shadow filter through four plain comparison taps (no soft penumbra:
+                            // see-through layers drawn many times)
     uint8_t spot_shadow_visible;
     /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
      * source of it (unlit surfaces are, unless this is set). */
@@ -717,6 +719,17 @@ typedef struct BTBHGPUSceneGeometryBatch {
 } BTBHGPUSceneGeometryBatch;
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
+
+/* How the primary directional (sun) shadow is filtered (BTBHGPUSceneLighting.directional_shadow_filter). */
+typedef enum BTBHGPUSceneShadowFilter {
+    /* A tent over the map's texels, one texel wider than directional_shadow_softness (up to three). */
+    BTBH_GPU_SCENE_SHADOW_FILTER_TENT = 0,
+    /* Percentage-closer soft shadows: a blocker search finds how far above a point its blockers stand,
+     * the penumbra widens by 0.035 world units per unit of that (times directional_shadow_softness, at
+     * least 0.75 texel) and is filtered with 4 to 32 comparison taps against the receiver's own plane. */
+    BTBH_GPU_SCENE_SHADOW_FILTER_SOFT = 1,
+    BTBH_GPU_SCENE_SHADOW_FILTER_COUNT = 2
+} BTBHGPUSceneShadowFilter;
 
 typedef struct BTBHGPUSceneLighting {
     float ambient_red;
@@ -835,6 +848,10 @@ typedef struct BTBHGPUSceneLighting {
      * eases out towards the room the surface has left under it (at least a fifth of it), so dark
      * ground still flashes bright while pale ground under many flashes doesn't burn white. */
     float point_light_ceiling;
+    /* How the primary directional (sun) shadow is filtered: BTBHGPUSceneShadowFilter (0: the tent
+     * as before). */
+    uint8_t directional_shadow_filter;
+    uint8_t directional_shadow_reserved[3];
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
@@ -1314,6 +1331,13 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     uint8_t clear_blue,
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
+);
+// The primary directional shadow map's size in texels (256-8192 each way; by default 2048 x 2048), for
+// a light-space region that isn't square. Taken at the next scene presented (the map is made anew).
+uint8_t btbh_gpu_window_scene_set_directional_shadow_size(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height
 );
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
