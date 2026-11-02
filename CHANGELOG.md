@@ -19,7 +19,8 @@ build from tags on `master`.
   0.035 world units wide per unit of the blockers' height, times `directional_shadow_softness` (at least
   0.75 texel), and 4 to 32 comparison taps against the receiver's own plane. With the soft filter,
   `unlit_enabled` 3 is a plain four-tap lookup for see-through layers that are drawn many times. With the
-  tent filter, 3 behaves like 2.
+  tent filter, 3 behaves like 2. As before, unlit batches in the transparent pass with no surface variant
+  take the fast unlit pipeline, which has no shadows.
 - `btbh_gpu_window_scene_set_directional_shadow_size`: sets the primary directional shadow map's size
   (256–8192 each way; 2048 × 2048 by default), for a light-space region that isn't square.
 - **Horizon-based ambient occlusion** (from `beaf727`): `BTBHGPUScenePost.ssao_enabled` 2. It runs at half
@@ -31,10 +32,12 @@ build from tags on `master`.
   - `ssao_debug_view` shows the occlusion alone, in grey.
   - Per-batch `ssao_mode` (`BTBHGPUSceneSSAOMode`: full, receive only, cast only, none).
   - Procedural pixel water never takes it.
+  - Its ambient mode subtracts light through the blend, so it needs the floating-point scene colour. On
+    devices that fall back to 8-bit colour, only the contact mode and the radiance-cascade mode darken.
   - The SSAO of `ssao_enabled` 1 (with `ao_*` and the SSR in its resolve) is unchanged. With HBAO on,
     screen-space reflections still run through that resolve.
-- **Point-light ceiling** (from `89266d2`): `BTBHGPUSceneLighting.point_light_ceiling` (luminance; 0 means
-  none). The light that point lights add to a surface eases out towards the room the surface has left under
+- **Point-light ceiling** (from `89266d2`): `BTBHGPUSceneLighting.point_light_ceiling` (luminance, finite;
+  0 means none). The light that point lights add to a surface eases out towards the room the surface has left under
   the ceiling. Dark ground still flashes bright, and pale ground under a stream of shots doesn't burn white.
 
 ### Changed

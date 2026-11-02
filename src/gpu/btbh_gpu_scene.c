@@ -5015,6 +5015,8 @@ bool btbh_gpu_scene_lighting_valid(
         lighting->directional_shadow_enabled > 1u ||
         lighting->directional_shadow_filter >=
             BTBH_GPU_SCENE_SHADOW_FILTER_COUNT ||
+        !isfinite(lighting->point_light_ceiling) ||
+        lighting->point_light_ceiling < 0.0f ||
         !isfinite(lighting->directional_shadow_softness) ||
         lighting->directional_shadow_softness < 0.0f ||
         lighting->secondary_directional_shadow_enabled > 1u ||

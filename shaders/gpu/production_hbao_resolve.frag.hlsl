@@ -132,7 +132,9 @@ float4 main(FragmentInput input) : SV_Target0
     }
     // The ambient light of lit surfaces (diffuse, and specular as its occlusion goes).
     const float3 normal = normalize(decoded_normal);
-    const float3 view = normalize(world_position(uv, depth) - world_position(uv, 0.9999f));
+    // (Towards the camera: the pixel's point on the near plane. A point at depth 0.9999 lay only a hundred units
+    // out with a 0.01 near plane, and past it the direction turned round; production_ssao_resolve.frag.hlsl.)
+    const float3 view = normalize(world_position(uv, 0.0f) - world_position(uv, depth));
     const float normal_dot_view = max(dot(normal, view), 0.0f);
     const float material_occlusion = saturate(encoded_normal.w);
     const float3 ambient_diffuse = ambient_texture.SampleLevel(ambient_sampler, uv, 0.0f).rgb;
