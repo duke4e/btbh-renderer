@@ -66,6 +66,12 @@ build from tags on `master`.
     - `lighting->directional_shadow_filter = BTBH_GPU_SCENE_SHADOW_FILTER_SOFT`;
     - `post->ssao_enabled = 2` instead of 1, keeping its `ssao_*` values and the per-batch `ssao_mode`.
   - `point_light_ceiling`, `set_directional_shadow_size` and `unlit_enabled` 3 keep their names.
+  - Two looks from 0.1.0 differ from `tyrian3d` and are retuned in the game rather than kept as options:
+    - Bloom: `bloom_knee` and `bloom_radius` are gone. Retune with master's `bloom_intensity`,
+      `bloom_threshold` (in exposed units, so the old threshold times the exposure), `bloom_soft_knee` and
+      `bloom_scatter`.
+    - Radiance cascades (`1917761`): a source is as opaque as it is bright against the light behind it, so
+      rays pass the soft edges of additive glows. The light around explosions is slightly brighter.
 
 ## [0.1.0] — 2026-11-01 (first tagged release)
 
