@@ -453,6 +453,17 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     BTBH_GPU_SCENE_SURFACE_COUNT = 11
 } BTBHGPUSceneSurfaceVariant;
 
+/* How a batch takes part in the horizon-based ambient occlusion (BTBHGPUScenePost.ssao_enabled 2; the
+ * occlusion of ssao_enabled 1 takes every batch fully). */
+typedef enum BTBHGPUSceneSSAOMode {
+    BTBH_GPU_SCENE_SSAO_FULL = 0,          /* darkened by what stands round it, and darkens what is round it */
+    BTBH_GPU_SCENE_SSAO_RECEIVE_ONLY = 1,  /* darkened, but darkens nothing: flat layers drawn over other surfaces,
+                                            * which would darken what lies round their edges */
+    BTBH_GPU_SCENE_SSAO_CAST_ONLY = 2,     /* darkens what is round it, but isn't darkened */
+    BTBH_GPU_SCENE_SSAO_NONE = 3,          /* neither: painted sprites, what lies far off */
+    BTBH_GPU_SCENE_SSAO_MODE_COUNT = 4
+} BTBHGPUSceneSSAOMode;
+
 /* Defined when the renderer draws BTBH_GPU_SCENE_SURFACE_REFRACT (every device that runs the scene). */
 #define BTBH_GPU_SCENE_HAS_REFRACTION 1
 
@@ -716,6 +727,10 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * noise cells per render unit, pattern (0 none, 1 ground, 2 grass, 3 facade).
      * A zeroed batch has none. */
     float detail_parameters[4];
+    /* How it takes part in the horizon-based ambient occlusion (ssao_enabled 2): BTBHGPUSceneSSAOMode (0:
+     * fully). Procedural pixel water is never darkened by it where it is water. */
+    uint8_t ssao_mode;
+    uint8_t ssao_reserved[3];
 } BTBHGPUSceneGeometryBatch;
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
@@ -938,13 +953,31 @@ typedef struct BTBHGPUScenePost {
     float ssr_max_roughness;
     float ssr_max_distance;
     float ssr_thickness;
-    /* Ambient occlusion (ssao_enabled): the radius occluders count within (render units), its strength,
+    /* Ambient occlusion (ssao_enabled 1): the radius occluders count within (render units), its strength,
      * and with the cascades the share of the indirect light it occludes and the share of that the direct light
      * keeps (both 0...1). A zero radius leaves all four at their defaults (1, 0.4, 0.75, 0.2). */
     float ao_radius;
     float ao_intensity;
     float ao_contact_strength;
     float ao_direct_share;
+    /* Horizon-based ambient occlusion (ssao_enabled 2, from Tyrian3D), worked out after the opaque surfaces are
+     * drawn and laid over them before the transparent ones, at half the render resolution (horizons in 4
+     * directions of 4 steps, turned by a 4x4 pattern that a depth-aware pass evens out; a depth-aware upsample).
+     * ssao_radius: how far round a point it looks for what hides it (world units; 0: 1, at most a tenth of the
+     * view's height on the screen); the visibility is exp(-ssao_intensity * occlusion) ^ ssao_power (0: 1 each);
+     * ssao_bias: how far over a surface's plane a point must stand to hide it (world units; 0: 0.03). Each
+     * batch's ssao_mode says how it takes part. */
+    float ssao_radius;
+    float ssao_intensity;
+    float ssao_power;
+    float ssao_bias;
+    /* 1: it darkens all the light of the opaque surfaces but their emission, lit or unlit (contact shading);
+     * 0: the ambient light of lit surfaces, or with the radiance cascades on, all their light but the emission,
+     * three quarters as much. */
+    uint8_t ssao_contact;
+    /* 1: the scene shows the occlusion alone, in grey (for tuning). */
+    uint8_t ssao_debug_view;
+    uint8_t ssao_reserved[2];
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {

@@ -171,6 +171,19 @@ typedef struct BTBHGPUPostUniforms {
     float ao_controls[4];
 } BTBHGPUPostUniforms;
 
+/* The horizon-based ambient occlusion's passes (BTBHGPUScenePost.ssao_enabled 2, production_hbao.hlsli). */
+typedef struct BTBHGPUSceneHBAOUniforms {
+    float inverse_view_projection[16];
+    /* ssao_radius, ssao_intensity, ssao_power, ssao_bias. */
+    float controls[4];
+    /* What it darkens (1 ambient, 2 with the radiance cascades, 3 contact), the debug view (bit 0). */
+    uint32_t options[4];
+    /* The projection's y scale. */
+    float view[4];
+} BTBHGPUSceneHBAOUniforms;
+
+#define BTBH_GPU_SCENE_HBAO_CONTACT_MODE 3u
+
 typedef struct BTBHGPUSceneSMAAUniforms {
     float metrics[4];
 } BTBHGPUSceneSMAAUniforms;
@@ -278,6 +291,9 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *ssao_pipeline;
     SDL_GPUGraphicsPipeline *ssao_denoise_pipeline;
     SDL_GPUGraphicsPipeline *ssao_resolve_pipeline;
+    SDL_GPUGraphicsPipeline *hbao_pipeline;
+    SDL_GPUGraphicsPipeline *hbao_denoise_pipeline;
+    SDL_GPUGraphicsPipeline *hbao_resolve_pipeline;
     SDL_GPUGraphicsPipeline *post_lut_pipeline;
     SDL_GPUGraphicsPipeline *post_cas_pipeline;
     SDL_GPUGraphicsPipeline *post_tilt_shift_pipeline;
@@ -317,6 +333,11 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUTexture *ssao_texture;
     SDL_GPUTexture *ssao_denoised_texture;
     SDL_GPUTexture *ssao_resolved_texture;
+    /* The horizon-based occlusion's half-resolution visibility and view depth, before and after its denoise. */
+    SDL_GPUTexture *hbao_texture;
+    SDL_GPUTexture *hbao_denoised_texture;
+    uint32_t hbao_width;
+    uint32_t hbao_height;
     SDL_GPUTexture *scene_distance_texture;
     uint32_t scene_distance_width;
     uint32_t scene_distance_height;
@@ -1587,13 +1608,15 @@ static bool btbh_gpu_scene_sibling_path(
     return true;
 }
 
-static bool btbh_gpu_scene_create_fullscreen_pipeline(
+/* blend: how the pass's output is blended into its target (NULL: it replaces it). */
+static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     SDL_GPUTextureFormat target_format,
     uint32_t fragment_sampler_count,
+    const SDL_GPUColorTargetBlendState *blend,
     SDL_GPUGraphicsPipeline **pipeline,
     BTBHGPUSceneReport *report
 ) {
@@ -1638,7 +1661,11 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline(
     SDL_zero(color_target);
     SDL_zero(info);
     color_target.format = target_format;
-    color_target.blend_state.color_write_mask = 0x0fu;
+    if (blend != NULL) {
+        color_target.blend_state = *blend;
+    } else {
+        color_target.blend_state.color_write_mask = 0x0fu;
+    }
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
@@ -1661,6 +1688,29 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline(
         return false;
     }
     return true;
+}
+
+static bool btbh_gpu_scene_create_fullscreen_pipeline(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat target_format,
+    uint32_t fragment_sampler_count,
+    SDL_GPUGraphicsPipeline **pipeline,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_create_fullscreen_pipeline_blended(
+        window,
+        vertex_shader_path,
+        fragment_shader_path,
+        project_format,
+        target_format,
+        fragment_sampler_count,
+        NULL,
+        pipeline,
+        report
+    );
 }
 
 static bool btbh_gpu_scene_ensure_post_stage_pipelines(
@@ -1962,6 +2012,173 @@ static bool btbh_gpu_scene_load_smaa_lookup(
         );
         return false;
     }
+    return true;
+}
+
+static void btbh_gpu_scene_release_hbao_pipelines(
+    BTBHGPUSceneRuntime *runtime,
+    SDL_GPUDevice *device
+) {
+    SDL_GPUGraphicsPipeline **pipelines[] = {
+        &runtime->hbao_pipeline,
+        &runtime->hbao_denoise_pipeline,
+        &runtime->hbao_resolve_pipeline
+    };
+    for (size_t index = 0u;
+         index < sizeof(pipelines) / sizeof(pipelines[0]);
+         ++index) {
+        if (*pipelines[index] != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, *pipelines[index]);
+            *pipelines[index] = NULL;
+        }
+    }
+}
+
+/* The horizon-based ambient occlusion's three passes (ssao_enabled 2): the occlusion and its denoise at half
+   the resolution, and the resolve laid over the opaque scene (target = src.rgb + target * src.a, its alpha
+   kept). */
+static bool btbh_gpu_scene_ensure_hbao_pipelines(
+    BTBHGPUWindow *window,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (runtime->hbao_pipeline != NULL &&
+        runtime->hbao_denoise_pipeline != NULL &&
+        runtime->hbao_resolve_pipeline != NULL) {
+        return true;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    btbh_gpu_scene_release_hbao_pipelines(runtime, device);
+    SDL_GPUColorTargetBlendState over;
+    SDL_zero(over);
+    over.enable_blend = true;
+    over.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    over.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+    over.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.color_write_mask =
+        SDL_GPU_COLORCOMPONENT_R |
+        SDL_GPU_COLORCOMPONENT_G |
+        SDL_GPU_COLORCOMPONENT_B;
+    over.enable_color_write_mask = true;
+    const char *const names[3] = {
+        "production_hbao.frag",
+        "production_hbao_denoise.frag",
+        "production_hbao_resolve.frag"
+    };
+    const SDL_GPUTextureFormat formats[3] = {
+        SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT,
+        SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT,
+        runtime->scene_color_format
+    };
+    const uint32_t sampler_counts[3] = { 2u, 1u, 6u };
+    SDL_GPUGraphicsPipeline **pipelines[3] = {
+        &runtime->hbao_pipeline,
+        &runtime->hbao_denoise_pipeline,
+        &runtime->hbao_resolve_pipeline
+    };
+    const char *extension =
+        shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+            ? "metallib"
+            : "spv";
+    for (uint32_t index = 0u; index < 3u; ++index) {
+        char path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        char filename[128];
+        (void)snprintf(
+            filename,
+            sizeof(filename),
+            "%s.%s",
+            names[index],
+            extension
+        );
+        if (!btbh_gpu_scene_sibling_path(
+                post_fragment_shader_path,
+                filename,
+                path
+            ) ||
+            !btbh_gpu_scene_create_fullscreen_pipeline_blended(
+                window,
+                post_vertex_shader_path,
+                path,
+                shader_format,
+                formats[index],
+                sampler_counts[index],
+                index == 2u ? &over : NULL,
+                pipelines[index],
+                report
+            )) {
+            btbh_gpu_scene_release_hbao_pipelines(runtime, device);
+            return false;
+        }
+    }
+    return true;
+}
+
+static void btbh_gpu_scene_release_hbao_targets(
+    BTBHGPUSceneRuntime *runtime,
+    SDL_GPUDevice *device
+) {
+    if (runtime->hbao_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->hbao_texture);
+        runtime->hbao_texture = NULL;
+    }
+    if (runtime->hbao_denoised_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->hbao_denoised_texture);
+        runtime->hbao_denoised_texture = NULL;
+    }
+    runtime->hbao_width = 0u;
+    runtime->hbao_height = 0u;
+}
+
+/* The horizon-based occlusion's two targets, at half the render resolution: the visibility and the view depth. */
+static bool btbh_gpu_scene_ensure_hbao_targets(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    const uint32_t half_width = (width + 1u) / 2u;
+    const uint32_t half_height = (height + 1u) / 2u;
+    if (runtime->hbao_texture != NULL &&
+        runtime->hbao_denoised_texture != NULL &&
+        runtime->hbao_width == half_width &&
+        runtime->hbao_height == half_height) {
+        return true;
+    }
+    btbh_gpu_scene_release_hbao_targets(runtime, device);
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+    info.usage =
+        SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+        SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = half_width;
+    info.height = half_height;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    runtime->hbao_texture = SDL_CreateGPUTexture(device, &info);
+    runtime->hbao_denoised_texture = SDL_CreateGPUTexture(device, &info);
+    if (runtime->hbao_texture == NULL ||
+        runtime->hbao_denoised_texture == NULL) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        btbh_gpu_scene_release_hbao_targets(runtime, device);
+        return false;
+    }
+    runtime->hbao_width = half_width;
+    runtime->hbao_height = half_height;
     return true;
 }
 
@@ -4245,6 +4462,7 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->surface_parameters1[1]) &&
             isfinite(batch->surface_parameters1[2]) &&
             isfinite(batch->surface_parameters1[3]) &&
+            batch->ssao_mode < BTBH_GPU_SCENE_SSAO_MODE_COUNT &&
             isfinite(batch->detail_parameters[0]) &&
             isfinite(batch->detail_parameters[1]) &&
             isfinite(batch->detail_parameters[2]) &&
@@ -4943,7 +5161,18 @@ static bool btbh_gpu_scene_post_valid(
         post->lut_enabled <= 1u &&
         post->cas_enabled <= 1u &&
         post->tilt_shift_enabled <= 1u &&
-        post->ssao_enabled <= 1u &&
+        post->ssao_enabled <= 2u &&
+        (post->ssao_enabled != 2u ||
+         (isfinite(post->ssao_radius) &&
+          post->ssao_radius >= 0.0f &&
+          isfinite(post->ssao_intensity) &&
+          post->ssao_intensity >= 0.0f &&
+          isfinite(post->ssao_power) &&
+          post->ssao_power >= 0.0f &&
+          isfinite(post->ssao_bias) &&
+          post->ssao_bias >= 0.0f &&
+          post->ssao_contact <= 1u &&
+          post->ssao_debug_view <= 1u)) &&
         isfinite(post->ssr_intensity) && post->ssr_intensity >= 0.0f &&
         isfinite(post->ssr_max_roughness) && post->ssr_max_roughness >= 0.0f &&
         isfinite(post->ssr_max_distance) && post->ssr_max_distance >= 0.0f &&
@@ -5345,6 +5574,54 @@ static bool btbh_gpu_scene_render_fullscreen(
     color_target.clear_color.b = 0.0f;
     color_target.clear_color.a = 1.0f;
     color_target.load_op = SDL_GPU_LOADOP_CLEAR;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
+        command,
+        &color_target,
+        1u,
+        NULL
+    );
+    if (pass == NULL) {
+        return false;
+    }
+    if (uniforms != NULL && uniform_size > 0u) {
+        SDL_PushGPUFragmentUniformData(
+            command,
+            0u,
+            uniforms,
+            uniform_size
+        );
+    }
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    if (samplers != NULL && sampler_count > 0u) {
+        SDL_BindGPUFragmentSamplers(
+            pass,
+            0u,
+            samplers,
+            sampler_count
+        );
+    }
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+/* As btbh_gpu_scene_render_fullscreen, drawn over what target holds (a blended pipeline). */
+static bool btbh_gpu_scene_render_fullscreen_over(
+    SDL_GPUCommandBuffer *command,
+    const char *debug_label,
+    SDL_GPUGraphicsPipeline *pipeline,
+    SDL_GPUTexture *target,
+    const void *uniforms,
+    uint32_t uniform_size,
+    SDL_GPUTextureSamplerBinding *samplers,
+    uint32_t sampler_count
+) {
+    SDL_InsertGPUDebugLabel(command, debug_label);
+    SDL_GPUColorTargetInfo color_target;
+    SDL_zero(color_target);
+    color_target.texture = target;
+    color_target.load_op = SDL_GPU_LOADOP_LOAD;
     color_target.store_op = SDL_GPU_STOREOP_STORE;
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
         command,
@@ -6041,7 +6318,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
     }
     const bool ambient_occlusion_active =
-        post->ssao_enabled != 0u &&
+        post->ssao_enabled == 1u &&
+        !radiance_cascades_debug_output;
+    /* ssao_enabled 2: the horizon-based occlusion (its own passes, laid over the opaque scene). */
+    const bool hbao_active =
+        post->ssao_enabled == 2u &&
         !radiance_cascades_debug_output;
     /* Reflections ride the SSAO resolve, which then runs without the occlusion passes too. */
     const bool ssr_active =
@@ -6073,7 +6354,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             scene_visibility
         );
     const bool auxiliary_geometry_outputs =
-        ssao_resolve_active || radiance_cascades_active || temporal_active;
+        ssao_resolve_active || hbao_active || radiance_cascades_active ||
+        temporal_active;
     uint32_t shadow_enabled[3] = {
         lighting->directional_shadow_enabled,
         lighting->secondary_directional_shadow_enabled,
@@ -6692,6 +6974,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
              shader_format,
               report
           )) &&
+        (!hbao_active ||
+         (btbh_gpu_scene_ensure_hbao_pipelines(
+              window,
+              post_vertex_shader_path,
+              post_fragment_shader_path,
+              shader_format,
+              report
+          ) &&
+          btbh_gpu_scene_ensure_hbao_targets(
+              window,
+              render_width,
+              render_height,
+              report
+          ))) &&
         btbh_gpu_scene_ensure_post_stage_pipelines(
             window,
             post_vertex_shader_path,
@@ -6916,6 +7212,101 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             transparency_phase == BTBH_GPU_SCENE_TRANSPARENCY_COUNT;
         const bool phase_auxiliary_geometry_outputs =
             !transparent_phase && auxiliary_geometry_outputs;
+        if (transparency_phase == 1u && hbao_active) {
+            /* The horizon-based occlusion, laid over the opaque scene before the transparent pass. */
+            BTBHGPUSceneHBAOUniforms hbao_uniforms;
+            SDL_zero(hbao_uniforms);
+            (void)memcpy(
+                hbao_uniforms.inverse_view_projection,
+                inverse_view_projection,
+                sizeof(hbao_uniforms.inverse_view_projection)
+            );
+            hbao_uniforms.controls[0] = post->ssao_radius;
+            hbao_uniforms.controls[1] = post->ssao_intensity;
+            hbao_uniforms.controls[2] = post->ssao_power;
+            hbao_uniforms.controls[3] = post->ssao_bias;
+            hbao_uniforms.options[0] = post->ssao_contact != 0u
+                ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
+                : (radiance_cascades_active
+                    ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
+                    : 1u);
+            hbao_uniforms.options[1] = post->ssao_debug_view != 0u ? 1u : 0u;
+            hbao_uniforms.view[0] = projection_scale_y;
+            SDL_GPUTextureSamplerBinding hbao_samplers[2];
+            SDL_zeroa(hbao_samplers);
+            hbao_samplers[0].texture = runtime->depth_texture;
+            hbao_samplers[1].texture = runtime->normal_texture;
+            SDL_GPUTextureSamplerBinding denoise_sampler;
+            SDL_zero(denoise_sampler);
+            denoise_sampler.texture = runtime->hbao_texture;
+            SDL_GPUTextureSamplerBinding hbao_resolve_samplers[6];
+            SDL_zeroa(hbao_resolve_samplers);
+            hbao_resolve_samplers[0].texture = runtime->depth_texture;
+            hbao_resolve_samplers[1].texture = runtime->ambient_texture;
+            hbao_resolve_samplers[2].texture = runtime->normal_texture;
+            hbao_resolve_samplers[3].texture =
+                runtime->ambient_specular_texture;
+            hbao_resolve_samplers[4].texture =
+                runtime->hbao_denoised_texture;
+            hbao_resolve_samplers[5].texture = runtime->emission_texture;
+            hbao_samplers[0].sampler = runtime->scene_color_sampler;
+            hbao_samplers[1].sampler = runtime->scene_color_sampler;
+            denoise_sampler.sampler = runtime->scene_color_sampler;
+            for (uint32_t index = 0u; index < 6u; ++index) {
+                hbao_resolve_samplers[index].sampler =
+                    runtime->scene_color_sampler;
+            }
+            if (!btbh_gpu_scene_render_fullscreen(
+                    command,
+                    "BTBH HBAO",
+                    runtime->hbao_pipeline,
+                    runtime->hbao_texture,
+                    &hbao_uniforms,
+                    (uint32_t)sizeof(hbao_uniforms),
+                    hbao_samplers,
+                    2u
+                ) ||
+                !btbh_gpu_scene_render_fullscreen(
+                    command,
+                    "BTBH HBAO Denoise",
+                    runtime->hbao_denoise_pipeline,
+                    runtime->hbao_denoised_texture,
+                    &hbao_uniforms,
+                    (uint32_t)sizeof(hbao_uniforms),
+                    &denoise_sampler,
+                    1u
+                ) ||
+                !btbh_gpu_scene_render_fullscreen_over(
+                    command,
+                    "BTBH HBAO Resolve",
+                    runtime->hbao_resolve_pipeline,
+                    radiance_cascades_post_input,
+                    &hbao_uniforms,
+                    (uint32_t)sizeof(hbao_uniforms),
+                    hbao_resolve_samplers,
+                    6u
+                )) {
+                btbh_gpu_scene_cancel_submission(window, command);
+                free(bone_offsets);
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
+                );
+                return report->result;
+            }
+            /* (With the SSAO resolve's reflections on as well, its split takes both.) */
+            if (!ssao_resolve_active &&
+                !btbh_gpu_scene_cost_split(
+                    window,
+                    &command,
+                    BTBH_GPU_COST_GROUP_SSAO,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
+        }
         if (transparency_phase == 1u && ssao_resolve_active) {
             /* Ambient occlusion darkens the opaque scene only: resolved before the
                transparent pass, an effect drawn over a dark corner keeps its light. */
@@ -7398,7 +7789,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->emission_energy;
             fragment_uniforms.unlit_enabled =
                 uniforms.unlit_enabled |
-                (batch->rc_receiver != 0u ? 4u : 0u);
+                (batch->rc_receiver != 0u ? 4u : 0u) |
+                (hbao_active
+                    ? 32u | ((uint32_t)batch->ssao_mode << 3u)
+                    : 0u);
             fragment_uniforms.alpha_cutoff =
                 batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
@@ -9074,6 +9468,8 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             &window->scene_runtime->radiance_cascades
         );
         btbh_gpu_fsr3_release(device, &window->scene_runtime->fsr3);
+        btbh_gpu_scene_release_hbao_pipelines(window->scene_runtime, device);
+        btbh_gpu_scene_release_hbao_targets(window->scene_runtime, device);
         if (window->scene_runtime->temporal_previous_color != NULL) {
             SDL_ReleaseGPUTexture(
                 device,

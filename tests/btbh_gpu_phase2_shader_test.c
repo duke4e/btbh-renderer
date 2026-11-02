@@ -47,6 +47,15 @@
 #ifndef BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH
 #error "BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_HBAO_REFLECTION_PATH
+#error "BTBH_PRODUCTION_HBAO_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_HBAO_DENOISE_REFLECTION_PATH
+#error "BTBH_PRODUCTION_HBAO_DENOISE_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_HBAO_RESOLVE_REFLECTION_PATH
+#error "BTBH_PRODUCTION_HBAO_RESOLVE_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH must be defined"
 #endif
@@ -245,6 +254,18 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH,
             "\"samplers\": 7, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_HBAO_REFLECTION_PATH,
+            "\"samplers\": 2, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_HBAO_DENOISE_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_HBAO_RESOLVE_REFLECTION_PATH,
+            "\"samplers\": 6, \"storage_textures\": 0"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH,

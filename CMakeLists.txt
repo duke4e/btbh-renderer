@@ -211,6 +211,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
+        "production_hbao.frag|fragment"
+        "production_hbao_denoise.frag|fragment"
+        "production_hbao_resolve.frag|fragment"
         "production_scene_distance.frag|fragment"
         "production_rc_source.vert|vertex"
         "production_rc_source.frag|fragment"
@@ -326,6 +329,13 @@ if(BTBH_BUILD_GPU_SPIKE)
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_smaa_common.hlsli"
                 "${BTBH_RENDERER_ROOT}/shaders/external/SMAA.hlsl"
+            )
+        endif()
+        if(_shader_name MATCHES "^production_hbao")
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_hbao.hlsli"
             )
         endif()
         if(_shader_name STREQUAL "production_hrc_resolve.comp")
@@ -710,6 +720,9 @@ if(BTBH_BUILD_GPU_SPIKE)
                 BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
                 BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
                 BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"
+                BTBH_PRODUCTION_HBAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hbao.frag.json"
+                BTBH_PRODUCTION_HBAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hbao_denoise.frag.json"
+                BTBH_PRODUCTION_HBAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_hbao_resolve.frag.json"
                 BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.vert.json"
                 BTBH_PRODUCTION_RC_SOURCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_source.frag.json"
                 BTBH_PRODUCTION_RC_DIRECTIONAL_SOURCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_rc_directional_source.vert.json"
