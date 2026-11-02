@@ -69,7 +69,9 @@ build from tags on `master`.
   - Two looks from 0.1.0 differ from `tyrian3d` and are retuned in the game rather than kept as options:
     - Bloom: `bloom_knee` and `bloom_radius` are gone. Retune with master's `bloom_intensity`,
       `bloom_threshold` (in exposed units, so the old threshold times the exposure), `bloom_soft_knee` and
-      `bloom_scatter`.
+      `bloom_scatter`. Master blends its mip levels, where `tyrian3d` added all six, so the intensity is
+      about 6.4 times the old one (Tyrian3D: 0.35 became 2.25, with knee 0.2 → soft knee 0.16, radius
+      1.2 → scatter 0.75).
     - Radiance cascades (`1917761`): a source is as opaque as it is bright against the light behind it, so
       rays pass the soft edges of additive glows. The light around explosions is slightly brighter.
 
