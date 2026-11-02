@@ -7480,6 +7480,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->unlit_darkness;
             fragment_uniforms.point_light_count[2] =
                 lighting->unlit_glow_threshold;
+            fragment_uniforms.point_light_count[3] =
+                SDL_max(lighting->point_light_ceiling, 0.0f);
             const float *primary_shadow_matrix =
                 runtime->retained_shadow_ready[0] != 0u
                     ? runtime->retained_shadow_view_projection[0]

@@ -831,6 +831,10 @@ typedef struct BTBHGPUSceneLighting {
      * unlit_glow_threshold (luminance 0-1) glow on regardless. */
     float unlit_darkness;
     float unlit_glow_threshold;
+    /* The point lights' ceiling (luminance; 0: none, as before): the light they add to a surface
+     * eases out towards the room the surface has left under it (at least a fifth of it), so dark
+     * ground still flashes bright while pale ground under many flashes doesn't burn white. */
+    float point_light_ceiling;
 } BTBHGPUSceneLighting;
 
 typedef struct BTBHGPUScenePost {
