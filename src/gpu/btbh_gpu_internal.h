@@ -87,6 +87,10 @@ struct BTBHGPUWindow {
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
     BTBHGPUSceneRuntime *scene_runtime;
+    /* The scenes rendered to a target (btbh_gpu_window_scene_render_to_target): their own targets,
+       shadow maps and history, so they never touch the window's frame (its FSR 3 history above all).
+       Made by the first such scene. */
+    BTBHGPUSceneRuntime *aside_scene_runtime;
     BTBHGPUSceneTelemetryReport scene_telemetry;
     uint32_t scene_shadow_update_period_frames[3];
     BTBHGPUCanvasRuntime *canvas_runtime;
@@ -119,6 +123,8 @@ struct BTBHGPUTexture {
     uint32_t width;
     uint32_t height;
     uint32_t mip_count;
+    /* Made with SDL_GPU_TEXTUREUSAGE_COLOR_TARGET (a render target): a scene can be drawn into it. */
+    bool color_target;
 };
 
 struct BTBHGPUModel {
@@ -204,6 +210,7 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
+void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
 uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
 bool btbh_gpu_window_finish_pending_frame(

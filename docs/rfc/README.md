@@ -26,6 +26,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0003](0003-light-regions.md) | Light regions with their own key light and LUT | Draft | CHIMERA |
 | [0004](0004-small-text.md) | Readable small text (oversampled exact-size atlases, kerning, snapping) | Draft, for later | CHIMERA |
 | [0005](0005-screen-space-refraction.md) | Screen-space refraction batches (`BTBH_GPU_SCENE_SURFACE_REFRACT`) | Prototype on `feature/refraction`, accepted by CHIMERA (Windows) | CHIMERA |
+| [0006](0006-scene-render-to-target.md) | A scene into a render target, apart from the window's temporal history; per-batch reactive mask | Implemented in v0.1.1 | CHIMERA |
 
 CHIMERA's map-look note (`RTS/docs/v2/izgled-mapa.md` §9, branch `v2-izgled`) made six proposals. Three became
 the RFCs above. The other three need none:

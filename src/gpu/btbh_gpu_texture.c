@@ -192,6 +192,8 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
     resource->height = height;
     resource->mip_count = 1u;
     resource->format = format;
+    resource->color_target =
+        (usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) != 0u;
 
     SDL_GPUTextureCreateInfo texture_info;
     SDL_zero(texture_info);

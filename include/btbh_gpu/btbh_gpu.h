@@ -10,7 +10,7 @@ extern "C" {
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
 #define BTBH_GPU_VERSION_MINOR 1
-#define BTBH_GPU_VERSION_PATCH 0
+#define BTBH_GPU_VERSION_PATCH 1
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
 /* Lamps (street lamps, car headlights) a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */
@@ -455,6 +455,20 @@ typedef enum BTBHGPUSceneSurfaceVariant {
 
 /* Defined when the renderer draws BTBH_GPU_SCENE_SURFACE_REFRACT (every device that runs the scene). */
 #define BTBH_GPU_SCENE_HAS_REFRACTION 1
+/* Defined when btbh_gpu_window_scene_render_to_target exists (a scene into a render target, apart
+   from the window's frame and its temporal history), with BTBHGPUSceneGeometryBatch.reactive_mode
+   and BTBHGPUSceneReport.upscale_mode (since 0.1.1). */
+#define BTBH_GPU_SCENE_HAS_RENDER_TO_TARGET 1
+
+/* What a transparent batch writes into FSR 3's reactive mask (BTBHGPUSceneGeometryBatch.reactive_mode),
+   where the upscaler keeps less of its history. */
+typedef enum BTBHGPUSceneReactiveMode {
+    /* Its alpha times BTBHGPUScenePost.temporal_reactive_scale (as before). */
+    BTBH_GPU_SCENE_REACTIVE_SCALED = 0,
+    /* Nothing: the layer is accumulated like the opaque scene (ground detail drawn over its base). */
+    BTBH_GPU_SCENE_REACTIVE_NONE = 1,
+    BTBH_GPU_SCENE_REACTIVE_COUNT = 2
+} BTBHGPUSceneReactiveMode;
 
 typedef enum BTBHGPUSceneBillboardMode {
     BTBH_GPU_SCENE_BILLBOARD_DISABLED = 0,
@@ -706,6 +720,8 @@ typedef struct BTBHGPUSceneGeometryBatch {
     /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
      * source of it (unlit surfaces are, unless this is set). */
     uint8_t rc_receiver;
+    /* BTBHGPUSceneReactiveMode: how a transparent batch marks FSR 3's reactive mask; 0 as before. */
+    uint8_t reactive_mode;
     BTBHGPUSceneSurfaceVariant surface_variant;
     float surface_time;
     float surface_parameters0[4];
@@ -945,6 +961,12 @@ typedef struct BTBHGPUSceneReport {
     double cpu_post_encode_milliseconds;
     BTBHGPUSceneRadianceCascadesStatus radiance_cascades;
     char message[256];
+    /* The upscaling the scene ran (BTBHGPUSceneUpscaleMode): post->upscale_mode, except
+       BTBH_GPU_SCENE_UPSCALE_FSR1 where FSR 3 was asked for and is unavailable (the device lacks
+       its formats or shaders, an encode failed, or the scene was rendered to a target). 0 when the
+       present failed. */
+    uint8_t upscale_mode;
+    uint8_t upscale_reserved[3];
 } BTBHGPUSceneReport;
 
 typedef struct BTBHGPUFrameTelemetrySample {
@@ -1278,6 +1300,59 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
 // maps), one byte (0 or 1) per batch; NULL means every batch.
 BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+);
+/* Renders a scene into `target` (a render target of this window, btbh_gpu_window_render_target_create)
+   apart from the window's frame, for a picture inside it (a unit's portrait). Arguments as
+   btbh_gpu_window_scene_present_instances_with_visibility; the scene renders at render_width x
+   render_height and is upscaled to the target's size (post->upscale_mode: Lanczos or FSR 1, else
+   bilinear; render it at twice the target's size to supersample it, halved exactly).
+   - It is never temporal and leaves the window's temporal state alone: FSR 3 runs as FSR 1, the
+     temporal_* fields of `post` are ignored, and the window's FSR 3 history, previous view-projection
+     and bone palettes, retained shadow maps and radiance-cascade history are neither read nor written.
+     The next frame's scene reprojects as if this one had not been drawn.
+   - It has its own scene targets (at its render size), shadow maps and pipelines, made by the first
+     call and kept with the window; models, meshes, textures and instance buffers are the window's.
+   - Call it when no scene is waiting for its canvas: before the frame's scene present, or after its
+     canvas present. It submits its own work; the canvas (or a later scene) can sample `target` in
+     the same frame.
+   report->drawable_width/height are the target's size. Fails with BTBH_GPU_INVALID_ARGUMENT, leaving
+   the window as it was, for a texture that is not this window's render target or while a scene waits
+   for its canvas. */
+BTBHGPUResult btbh_gpu_window_scene_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
     const char *fast_shadow_vertex_shader_path,

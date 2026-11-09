@@ -38,6 +38,8 @@
 #define BTBH_GPU_SCENE_PATH_CAPACITY 1024u
 #define BTBH_GPU_SCENE_SHADOW_SPOT 2u
 #define BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE 2u
+/* BTBH_GPU_SCENE_REACTIVE_NONE: a reactive scale that rounds full alpha to 0 in the R8 mask. */
+#define BTBH_GPU_SCENE_REACTIVE_NONE_SCALE 1.0e-6f
 
 typedef enum BTBHGPUSceneStencilVariant {
     BTBH_GPU_SCENE_STENCIL_DISABLED = 0,
@@ -4156,6 +4158,7 @@ static bool btbh_gpu_scene_validate_batches(
             (directional_shadow_visibility == NULL ||
              directional_shadow_visibility[index] <= 1u) &&
             batch->spot_shadow_visible <= 1u &&
+            batch->reactive_mode < BTBH_GPU_SCENE_REACTIVE_COUNT &&
             batch->surface_variant >=
                 BTBH_GPU_SCENE_SURFACE_NONE &&
             batch->surface_variant <
@@ -5641,6 +5644,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     uint8_t clear_green,
     uint8_t clear_blue,
     uint8_t clear_alpha,
+    /* The size the finished scene is upscaled (or not) to: the window's drawable size when zero,
+       else a render target's (btbh_gpu_window_scene_render_to_target, never temporal). */
+    uint32_t output_width,
+    uint32_t output_height,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -5822,6 +5829,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const bool temporal_requested =
         post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 &&
         !radiance_cascades_debug_output &&
+        output_width == 0u &&
         SDL_GetWindowSizeInPixels(
             window->window,
             &temporal_window_width,
@@ -6543,14 +6551,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
 
-    int drawable_width_value = 0;
-    int drawable_height_value = 0;
+    int drawable_width_value = (int)output_width;
+    int drawable_height_value = (int)output_height;
     const bool drawable_size_available =
-        SDL_GetWindowSizeInPixels(
-            window->window,
-            &drawable_width_value,
-            &drawable_height_value
-        ) &&
+        (output_width != 0u ||
+         SDL_GetWindowSizeInPixels(
+             window->window,
+             &drawable_width_value,
+             &drawable_height_value
+         )) &&
         drawable_width_value > 0 &&
         drawable_height_value > 0;
     const uint32_t drawable_width =
@@ -7424,9 +7433,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->sun_curve;
             fragment_uniforms.procedural_controls[1] =
                 (float)lighting->ibl_enabled;
+            /* The reactive mask's scale: the frame's, unless this batch stays out of the mask (a
+               transparent layer that should be accumulated like the opaque scene, such as ground
+               detail drawn over its base). The shader writes the mask only for a positive scale (at
+               zero the pass's second target keeps the shading's ambient term), so "none" is a scale
+               too small to reach the mask's first step (1/255 of full alpha). */
             fragment_uniforms.procedural_controls[2] =
                 transparent_phase && temporal_active
-                    ? post->temporal_reactive_scale
+                    ? (batch->reactive_mode == BTBH_GPU_SCENE_REACTIVE_NONE
+                        ? BTBH_GPU_SCENE_REACTIVE_NONE_SCALE
+                        : post->temporal_reactive_scale)
                     : 0.0f;
             fragment_uniforms.procedural_controls[3] =
                 temporal_lod_bias;
@@ -8554,6 +8570,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     report->instance_count = logical_instance_count;
     report->transient_instance_count = transient_instance_count;
     report->persistent_batch_count = persistent_batch_count;
+    /* What ran: FSR 3 only while it is available (a failed encode turns it off from then on). */
+    report->upscale_mode =
+        upscale_mode == (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR3 &&
+            runtime->fsr3.unavailable
+            ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
+            : upscale_mode;
     report->message[0] = '\0';
     return report->result;
 }
@@ -8626,6 +8648,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
         clear_green,
         clear_blue,
         clear_alpha,
+        0u,
+        0u,
         report
     );
 }
@@ -8696,8 +8720,179 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         clear_green,
         clear_blue,
         clear_alpha,
+        0u,
+        0u,
         report
     );
+}
+
+/* A scene drawn into a render target apart from the window's frame (a unit's portrait). It renders
+   with the window's aside runtime in place of its own: its own scene targets at this render size, its
+   own shadow maps and its own (never temporal) state. So the window's runtime (the FSR 3 history, the
+   previous view-projection and bone palettes, the retained shadow maps, the radiance cascades' history)
+   is neither read nor written, and its targets keep the frame's size. Models, meshes, textures and
+   instance buffers are the window's, shared. The finished scene, upscaled to the target's size (FSR 1
+   or Lanczos as asked, else bilinear), is blitted into the target and submitted here. */
+BTBHGPUResult btbh_gpu_window_scene_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->claimed ||
+        post == NULL ||
+        target == NULL ||
+        target->owner != window ||
+        target->texture == NULL ||
+        !target->color_target ||
+        target->width == 0u ||
+        target->height == 0u) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene cannot render into that target"
+        );
+        return report->result;
+    }
+    if (window->pending_scene_ready || window->pending_command != NULL) {
+        /* The frame's scene waits for its canvas; rendering now would drop it. */
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene to a target while the frame's scene waits for its canvas"
+        );
+        return report->result;
+    }
+    /* Never temporal: FSR 3 runs as FSR 1, and the instance motions and the reset don't apply. */
+    BTBHGPUScenePost target_post = *post;
+    if (target_post.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3) {
+        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR1;
+    }
+    target_post.temporal_instance_motions = NULL;
+    target_post.temporal_instance_motion_count = 0u;
+    target_post.temporal_reset = 0u;
+
+    BTBHGPUSceneRuntime *window_runtime = window->scene_runtime;
+    const BTBHGPUSceneTelemetryReport window_telemetry =
+        window->scene_telemetry;
+    const bool window_radiance_cascades_telemetry =
+        window->radiance_cascades_telemetry_enabled;
+    window->scene_runtime = window->aside_scene_runtime;
+    const BTBHGPUResult result =
+        btbh_gpu_window_scene_present_instances_internal(
+            window,
+            vertex_shader_path,
+            animated_vertex_shader_path,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
+            shadow_vertex_shader_path,
+            animated_shadow_vertex_shader_path,
+            shadow_fragment_shader_path,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            view_projection,
+            camera_right,
+            camera_up,
+            camera_position,
+            lighting,
+            &target_post,
+            instances,
+            transient_instance_count,
+            logical_instance_count,
+            batches,
+            scene_visibility,
+            directional_shadow_visibility,
+            batch_count,
+            clear_red,
+            clear_green,
+            clear_blue,
+            clear_alpha,
+            target->width,
+            target->height,
+            report
+        );
+    if (result == BTBH_GPU_OK) {
+        BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+        SDL_GPUCommandBuffer *command = window->pending_command;
+        window->pending_command = NULL;
+        window->pending_scene_ready = false;
+        /* The composite is at the target's size after an upscale, else at the render size: a blit
+           scales it (bilinearly; a render twice the target's size is halved exactly). */
+        SDL_GPUBlitInfo blit;
+        SDL_zero(blit);
+        blit.source.texture = runtime->composite_color_texture;
+        blit.source.w = runtime->composite_width;
+        blit.source.h = runtime->composite_height;
+        blit.destination.texture = target->texture;
+        blit.destination.w = target->width;
+        blit.destination.h = target->height;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = runtime->composite_width == target->width &&
+                runtime->composite_height == target->height
+            ? SDL_GPU_FILTER_NEAREST
+            : SDL_GPU_FILTER_LINEAR;
+        SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
+        SDL_BlitGPUTexture(command, &blit);
+        const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+        btbh_gpu_window_scene_submission_finished(window, submitted);
+        if (!submitted) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+        }
+    }
+    /* (The aside runtime may have been made, or released by a failure, in the call.) */
+    window->aside_scene_runtime = window->scene_runtime;
+    window->scene_runtime = window_runtime;
+    window->scene_telemetry = window_telemetry;
+    window->radiance_cascades_telemetry_enabled =
+        window_radiance_cascades_telemetry;
+    return report->result;
 }
 
 BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
@@ -9443,4 +9638,19 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     free(window->scene_runtime->temporal_palette_matrices);
     free(window->scene_runtime);
     window->scene_runtime = NULL;
+}
+
+/* Releases the runtime of the scenes rendered to a target (btbh_gpu_window_scene_render_to_target);
+   the window's own runtime and its pending frame stay as they are. */
+void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window) {
+    if (window == NULL || window->aside_scene_runtime == NULL) {
+        return;
+    }
+    BTBHGPUSceneRuntime *window_runtime = window->scene_runtime;
+    const bool pending_scene_ready = window->pending_scene_ready;
+    window->scene_runtime = window->aside_scene_runtime;
+    btbh_gpu_window_release_scene(window);
+    window->aside_scene_runtime = NULL;
+    window->scene_runtime = window_runtime;
+    window->pending_scene_ready = pending_scene_ready;
 }

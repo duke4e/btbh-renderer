@@ -760,6 +760,29 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
         add_test(NAME btbh_gpu_window_smoke COMMAND btbh_gpu_window_smoke)
 
+        # A scene rendered into a render target beside a window's FSR 3 frames (two hidden windows).
+        add_executable(btbh_gpu_scene_target_smoke
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_scene_target_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_target_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_target_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_target_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        add_dependencies(btbh_gpu_scene_target_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_target_smoke COMMAND btbh_gpu_scene_target_smoke)
+        set_tests_properties(btbh_gpu_scene_target_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
