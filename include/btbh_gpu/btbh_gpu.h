@@ -963,8 +963,9 @@ typedef struct BTBHGPUSceneReport {
     char message[256];
     /* The upscaling the scene ran (BTBHGPUSceneUpscaleMode): post->upscale_mode, except
        BTBH_GPU_SCENE_UPSCALE_FSR1 where FSR 3 was asked for and is unavailable (the device lacks
-       its formats or shaders, an encode failed, or the scene was rendered to a target). 0 when the
-       present failed. */
+       its formats or shaders, an encode failed, or the scene was rendered to a target), and
+       BTBH_GPU_SCENE_UPSCALE_LINEAR for a scene rendered to a target at its size or bigger. 0 when
+       the present failed. */
     uint8_t upscale_mode;
     uint8_t upscale_reserved[3];
 } BTBHGPUSceneReport;
@@ -1336,12 +1337,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
 /* Renders a scene into `target` (a render target of this window, btbh_gpu_window_render_target_create)
    apart from the window's frame, for a picture inside it (a unit's portrait). Arguments as
    btbh_gpu_window_scene_present_instances_with_visibility; the scene renders at render_width x
-   render_height and is upscaled to the target's size (post->upscale_mode: Lanczos or FSR 1, else
-   bilinear; render it at twice the target's size to supersample it, halved exactly).
+   render_height and is brought to the target's size: enlarged by post->upscale_mode (Lanczos or FSR 1)
+   when it is smaller, else scaled bilinearly without sharpening (render it at twice the target's size
+   to supersample it: it is halved exactly).
    - It is never temporal and leaves the window's temporal state alone: FSR 3 runs as FSR 1, the
      temporal_* fields of `post` are ignored, and the window's FSR 3 history, previous view-projection
      and bone palettes, retained shadow maps and radiance-cascade history are neither read nor written.
-     The next frame's scene reprojects as if this one had not been drawn.
+     The next frame's scene reprojects as if this one had not been drawn. Each call starts afresh
+     itself (its shadow maps redrawn whatever the shadow update periods, no history of its own).
    - It has its own scene targets (at its render size), shadow maps and pipelines, made by the first
      call and kept with the window; models, meshes, textures and instance buffers are the window's.
    - Call it when no scene is waiting for its canvas: before the frame's scene present, or after its

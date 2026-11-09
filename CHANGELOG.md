@@ -18,13 +18,16 @@ new field renders exactly as with 0.1.0. Additive, so a patch release under the 
   marker `BTBH_GPU_SCENE_HAS_RENDER_TO_TARGET`). It is meant for a picture inside the frame, such as a unit
   portrait. It takes the arguments of `btbh_gpu_window_scene_present_instances_with_visibility`, plus a render
   target of the window (`btbh_gpu_window_render_target_create`, any size).
-  - The scene renders at its own render size and is upscaled to the target's size: FSR 1 or Lanczos, else
-    bilinear. Rendered at twice the target's size, it is halved exactly.
+  - The scene renders at its own render size. When it is smaller than the target, it is enlarged with
+    FSR 1 or Lanczos (as `upscale_mode` asks). At the target's size or bigger it is scaled bilinearly without
+    sharpening, so a render twice the target's size is halved exactly.
   - It runs on a second scene runtime the window keeps for these scenes. That runtime has its own targets,
     shadow maps and pipelines, so the frame's targets keep their size.
   - It is never temporal: FSR 3 runs as FSR 1 and `post`'s `temporal_*` fields are ignored. The window's
     FSR 3 history, previous view-projection, bone palettes, retained shadow maps and radiance-cascade history
-    are neither read nor written. The next frame reprojects as if the portrait had not been drawn.
+    are neither read nor written. The next frame reprojects as if the portrait had not been drawn. Each call
+    also starts afresh itself: its shadow maps are redrawn whatever the shadow update periods, and it keeps no
+    cascade history from the last portrait.
   - Call it before the frame's scene present or after its canvas present. While a scene waits for its
     canvas, it is refused and the waiting frame is kept.
 - **Per-batch reactive mask** (`BTBHGPUSceneGeometryBatch.reactive_mode`). `BTBH_GPU_SCENE_REACTIVE_NONE`
@@ -36,8 +39,10 @@ new field renders exactly as with 0.1.0. Additive, so a patch release under the 
   scene rendered to a target). Before, a fallback was only a log line.
 
 ### Notes
-- The first scene rendered to a target creates its runtime: pipelines (a one-time hitch) and, with
-  shadows, its own shadow maps (about 21 MB with the directional and spot maps).
+- The first scene rendered to a target creates its runtime: pipelines (a one-time hitch of about 10–20 ms
+  CPU in the smoke) and, with shadows, its own shadow maps (about 21 MB with the directional and spot maps).
+- `BTBH_GPU_COST_LOG`: a scene rendered to a target is no frame of its own. It counts in the frame it is
+  drawn for, and it doesn't split the GPU timing.
 - Known, unchanged: with `temporal_reactive_scale` 0, transparent batches leave the shading's ambient term in
   the reactive mask. The shader writes the mask only for a positive scale. `REACTIVE_NONE` does not have this
   problem.

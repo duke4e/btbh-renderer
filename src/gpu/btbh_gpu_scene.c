@@ -6341,7 +6341,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    btbh_gpu_cost_begin_frame(device);
+    /* (A scene rendered to a target is no frame of its own in the cost log: it counts in the frame
+       it is drawn for.) */
+    if (output_width == 0u) {
+        btbh_gpu_cost_begin_frame(device);
+    }
     if (transfer_bytes > 0u) {
         SDL_InsertGPUDebugLabel(command, "BTBH Scene Upload");
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
@@ -8801,10 +8805,15 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         );
         return report->result;
     }
-    /* Never temporal: FSR 3 runs as FSR 1, and the instance motions and the reset don't apply. */
+    /* Never temporal: FSR 3 runs as FSR 1, and the instance motions and the reset don't apply. The
+       upscalers only enlarge: a render at the target's size or bigger is scaled bilinearly (a render
+       twice the target's size is halved exactly), with no sharpening. */
     BTBHGPUScenePost target_post = *post;
     if (target_post.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3) {
         target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR1;
+    }
+    if (render_width >= target->width && render_height >= target->height) {
+        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
     }
     target_post.temporal_instance_motions = NULL;
     target_post.temporal_instance_motion_count = 0u;
@@ -8815,7 +8824,13 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         window->scene_telemetry;
     const bool window_radiance_cascades_telemetry =
         window->radiance_cascades_telemetry_enabled;
+    SDL_GPUDevice *const window_cost_split_device =
+        btbh_gpu_cost_split_device;
+    btbh_gpu_cost_split_device = NULL;
     window->scene_runtime = window->aside_scene_runtime;
+    /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
+       update periods), no radiance-cascade history (two portraits are two pictures). */
+    btbh_gpu_window_scene_submission_finished(window, false);
     const BTBHGPUResult result =
         btbh_gpu_window_scene_present_instances_internal(
             window,
@@ -8892,6 +8907,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
     window->scene_telemetry = window_telemetry;
     window->radiance_cascades_telemetry_enabled =
         window_radiance_cascades_telemetry;
+    btbh_gpu_cost_split_device = window_cost_split_device;
     return report->result;
 }
 

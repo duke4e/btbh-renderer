@@ -2,19 +2,23 @@
  * FSR 3 frames: the window's temporal history must not notice it.
  *
  * Two hidden windows render the same world frames with FSR 3 (a lit cube, a moving camera, a
- * directional shadow). Window B also renders a portrait into a small target between two of them.
+ * directional shadow updated every other frame). Window B also renders portraits into a small target
+ * between two of them.
  * The world frame after it must be byte-identical in both windows: the portrait neither reset nor
  * fed the history. Then window B renders a scene aside the old way (a present with FSR 1 and a copy),
  * and the next world frame must differ (the history started again): the check can tell. The test
  * also reads the portrait back (a cube on the clear colour, at the target's size), and checks the
  * refusals (another window's texture, a texture that is no render target, a scene waiting for its
- * canvas, which must survive the refusal).
+ * canvas, which must survive the refusal). A second portrait with another sun, rendered in B after the
+ * first ones and in A as A's first, must be byte-identical: no shadow map is kept from one portrait to
+ * the next, whatever the shadow update periods.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_internal.h"
+#include "btbh_gpu_package_internal.h"
 
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
@@ -153,17 +157,14 @@ static SmokeCamera look_at(
     return camera;
 }
 
-/* A sun from above and to the side, its shadow covering the cube and the ground. */
-static BTBHGPUSceneLighting smoke_lighting(void) {
+/* A sun from above and to the side (from `sun`), its shadow covering the cube and the ground. */
+static BTBHGPUSceneLighting smoke_lighting_from(const float sun[3]) {
     BTBHGPUSceneLighting lighting;
     memset(&lighting, 0, sizeof(lighting));
     lighting.ambient_red = 1.0f;
     lighting.ambient_green = 1.0f;
     lighting.ambient_blue = 1.0f;
     lighting.ambient_energy = 0.25f;
-    lighting.directional_x = -0.4f;
-    lighting.directional_y = -1.0f;
-    lighting.directional_z = -0.3f;
     lighting.directional_energy = 2.0f;
     lighting.directional_red = 1.0f;
     lighting.directional_green = 0.95f;
@@ -172,7 +173,9 @@ static BTBHGPUSceneLighting smoke_lighting(void) {
     lighting.spot_falloff = 1.0f;
     lighting.spot_inner_cutoff = 1.0f;
     lighting.spot_outer_cutoff = 0.0f;
-    const float eye[3] = {4.0f, 10.0f, 3.0f};
+    lighting.directional_x = -sun[0];
+    lighting.directional_y = -sun[1];
+    lighting.directional_z = -sun[2];
     const float centre[3] = {0.0f, 0.0f, 0.0f};
     const float rcp = 1.0f / 8.0f;
     const float range = 1.0f / (1.0f - 30.0f);
@@ -182,15 +185,20 @@ static BTBHGPUSceneLighting smoke_lighting(void) {
         0.0f, 0.0f, range, 0.0f,
         0.0f, 0.0f, range * 1.0f, 1.0f,
     };
-    const SmokeCamera sun = look_at(eye, centre, 1.0f, 1.0f, orthographic);
+    const SmokeCamera light = look_at(sun, centre, 1.0f, 1.0f, orthographic);
     memcpy(
         lighting.directional_shadow_view_projection,
-        sun.view_projection,
+        light.view_projection,
         sizeof(lighting.directional_shadow_view_projection)
     );
     lighting.directional_shadow_enabled = 1u;
     lighting.directional_shadow_softness = 1.0f;
     return lighting;
+}
+
+static BTBHGPUSceneLighting smoke_lighting(void) {
+    const float sun[3] = {4.0f, 10.0f, 3.0f};
+    return smoke_lighting_from(sun);
 }
 
 static BTBHGPUScenePost smoke_post(const SmokeCamera *camera, uint8_t reset) {
@@ -267,18 +275,19 @@ static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
             const float su = (corner == 1u || corner == 2u) ? 0.5f : -0.5f;
             const float sv = corner >= 2u ? 0.5f : -0.5f;
             float *vertex = vertices[face * 4u + corner];
+            /* Floats: position 0-2, normal 3-5, uv 6-7, tangent 8-11, colour 12-15, joints 16-19,
+               weights 20-23 (the renderer's 96-byte model vertex). */
             for (int axis = 0; axis < 3; ++axis) {
                 vertex[axis] = 0.5f * n[axis] + su * u[axis] + sv * v[axis];
                 vertex[3 + axis] = n[axis];
-                vertex[12 + axis] = u[axis];
+                vertex[8 + axis] = u[axis];
             }
             vertex[6] = su + 0.5f;
             vertex[7] = sv + 0.5f;
-            vertex[15] = 1.0f;
-            vertex[16] = 1.0f;
-            vertex[17] = 1.0f;
-            vertex[18] = 1.0f;
-            vertex[19] = 1.0f;
+            vertex[11] = 1.0f;
+            for (int channel = 12; channel < 16; ++channel) {
+                vertex[channel] = 1.0f;
+            }
             vertex[20] = 1.0f;
         }
         const uint32_t base = face * 4u;
@@ -415,24 +424,36 @@ static void world_frame(SmokeWindow *smoke, uint32_t index, uint8_t *expected_up
     assert(btbh_gpu_window_copy_pending_scene_texture(smoke->window, smoke->frame, &copied) == BTBH_GPU_OK);
 }
 
-/* A portrait: the cube alone, close, on a dark clear colour, from another side, rendered twice the
-   target's size (FSR 3 asked for: it must run as FSR 1 and say so). */
+/* A portrait, on a dark clear colour, from another side; FSR 3 asked for (it must run as FSR 1, or
+   bilinearly when not smaller than the target). Variant 0: the cube alone, close. Variant 1: the cube
+   moved, on a slab, under another sun, so a shadow map kept from variant 0 would show. Variant 2:
+   variant 1 without the shadow (to show that the shadow shows). */
 static BTBHGPUResult render_portrait(
     SmokeWindow *smoke,
     BTBHGPUTexture *target,
     uint32_t render_size,
+    uint32_t variant,
     BTBHGPUSceneReport *report
 ) {
-    const float eye[3] = {-1.6f, 1.4f, -2.2f};
+    const float close_eye[3] = {-1.6f, 1.4f, -2.2f};
+    const float far_eye[3] = {-4.0f, 4.0f, -5.0f};
     const float centre[3] = {0.0f, 0.5f, 0.0f};
-    const SmokeCamera camera = look_at(eye, centre, 0.6f, 1.0f, NULL);
-    const BTBHGPUSceneLighting lighting = smoke_lighting();
+    const SmokeCamera camera = look_at(variant == 0u ? close_eye : far_eye, centre, 0.6f, 1.0f, NULL);
+    const float other_sun[3] = {-10.0f, 3.0f, 1.0f};
+    BTBHGPUSceneLighting lighting =
+        variant == 0u ? smoke_lighting() : smoke_lighting_from(other_sun);
+    if (variant == 2u) {
+        lighting.directional_shadow_enabled = 0u;
+    }
     BTBHGPUScenePost post = smoke_post(&camera, 0u);
     post.temporal_reactive_scale = -1.0f; /* ignored: never temporal */
     const float gold[4] = {1.0f, 0.8f, 0.3f, 1.0f};
-    float cube[24];
-    instance(cube, 0.0f, 0.5f, 0.0f, 1.0f, 1.0f, 1.0f, gold);
-    const BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube, 0u, 1u);
+    const float slate[4] = {0.5f, 0.55f, 0.6f, 1.0f};
+    float cube[2][24];
+    /* (Variant 1 floats the cube over the slab: its shadow lies on the slab beside it.) */
+    instance(cube[0], variant == 0u ? 0.0f : 0.3f, variant == 0u ? 0.5f : 1.4f, variant == 0u ? 0.0f : -0.2f, 1.0f, 1.0f, 1.0f, gold);
+    instance(cube[1], 0.0f, -0.05f, 0.0f, 4.0f, 0.1f, 4.0f, slate);
+    const BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube, 0u, variant == 0u ? 1u : 2u);
     return btbh_gpu_window_scene_render_to_target(
         smoke->window,
         target,
@@ -448,9 +469,9 @@ static BTBHGPUResult render_portrait(
         camera.position,
         &lighting,
         &post,
-        cube,
-        1u,
-        1u,
+        &cube[0][0],
+        2u,
+        2u,
         &batch,
         NULL,
         NULL,
@@ -476,6 +497,8 @@ static SmokeWindow open_window(BTBHGPUDevice *device, const char *title) {
     assert(smoke.window != NULL);
     assert(btbh_gpu_window_claim(device, smoke.window, &report) == BTBH_GPU_OK);
     smoke.cube = create_cube(smoke.window);
+    /* Shadows every other scene: a portrait must still draw its own. */
+    assert(btbh_gpu_window_scene_set_shadow_update_periods(smoke.window, 2u, 2u, 2u) == 1u);
     BTBHGPUTextureReport texture_report;
     smoke.frame = btbh_gpu_window_render_target_create(
         smoke.window, WORLD_WIDTH, WORLD_HEIGHT, BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
@@ -530,31 +553,41 @@ int main(void) {
     const bool fsr3 = upscale_a == BTBH_GPU_SCENE_UPSCALE_FSR3;
     printf("world frames upscaled with %s\n", fsr3 ? "FSR 3" : "FSR 1 (FSR 3 unavailable here)");
     assert(upscale_a == upscale_b);
+#if !defined(__APPLE__)
+    /* Vulkan runs FSR 3; without it the history checks below would prove nothing. */
+    assert(fsr3);
+#else
+    if (!fsr3) {
+        printf("FSR 3 falls back to FSR 1 on Metal: the history checks below hold trivially\n");
+    }
+#endif
 
     BTBHGPUSceneReport report;
     /* (The first call makes the window's second runtime: its pipelines and targets.) */
     const uint64_t first_started = SDL_GetTicksNS();
-    BTBHGPUResult result = render_portrait(&b, b.portrait, 2u * PORTRAIT_SIZE, &report);
+    BTBHGPUResult result = render_portrait(&b, b.portrait, 2u * PORTRAIT_SIZE, 0u, &report);
     const double first_milliseconds = (double)(SDL_GetTicksNS() - first_started) / 1.0e6;
     if (result != BTBH_GPU_OK) {
         fprintf(stderr, "portrait: %s\n", report.message);
     }
     assert(result == BTBH_GPU_OK);
     assert(report.drawable_width == PORTRAIT_SIZE && report.drawable_height == PORTRAIT_SIZE);
-    assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1);
+    /* Twice the target's size: halved bilinearly (FSR 1 only enlarges). */
+    assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR);
     uint8_t *portrait = read_texture(b.window, b.portrait);
     const uint32_t middle = PORTRAIT_SIZE / 2u;
     const uint32_t last = PORTRAIT_SIZE - 1u;
     assert(texel_distance(portrait, PORTRAIT_SIZE, 0u, 0u, last, last) <= 3);
     assert(texel_distance(portrait, PORTRAIT_SIZE, 0u, 0u, last, 0u) <= 3);
     assert(texel_distance(portrait, PORTRAIT_SIZE, 0u, 0u, middle, middle) > 60);
-    free(portrait);
     /* Smaller than the target, enlarged by FSR 1; and again at the same size. */
-    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE / 2u, &report);
+    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE / 2u, 0u, &report);
     assert(result == BTBH_GPU_OK);
+    assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1);
     const uint64_t later_started = SDL_GetTicksNS();
-    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE, &report);
+    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE, 0u, &report);
     assert(result == BTBH_GPU_OK);
+    assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR);
     printf(
         "portrait to a target: first call %.1f ms CPU (makes its runtime), a later one %.2f ms\n",
         first_milliseconds,
@@ -571,8 +604,44 @@ int main(void) {
     const size_t frame_bytes = (size_t)WORLD_WIDTH * WORLD_HEIGHT * 4u;
     assert(memcmp(frame_a, frame_b, frame_bytes) == 0);
     printf("world frame after the portraits: identical in both windows\n");
+    if (getenv("BTBH_SMOKE_DUMP") != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof(path), "%s/world.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, WORLD_WIDTH, WORLD_HEIGHT, frame_a);
+    }
     free(frame_a);
     free(frame_b);
+
+    /* Variant 1 in B (after three portraits of variant 0) and as A's very first portrait: the same
+       bytes, so B kept no shadow map from before; and not variant 0's picture. */
+    result = render_portrait(&b, b.portrait, 2u * PORTRAIT_SIZE, 1u, &report);
+    assert(result == BTBH_GPU_OK);
+    uint8_t *second_b = read_texture(b.window, b.portrait);
+    result = render_portrait(&a, a.portrait, 2u * PORTRAIT_SIZE, 1u, &report);
+    assert(result == BTBH_GPU_OK);
+    uint8_t *second_a = read_texture(a.window, a.portrait);
+    const size_t portrait_bytes = (size_t)PORTRAIT_SIZE * PORTRAIT_SIZE * 4u;
+    const char *dump = getenv("BTBH_SMOKE_DUMP");
+    if (dump != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof(path), "%s/portrait-0.png", dump);
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, portrait);
+        (void)snprintf(path, sizeof(path), "%s/portrait-1-a.png", dump);
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, second_a);
+        (void)snprintf(path, sizeof(path), "%s/portrait-1-b.png", dump);
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, second_b);
+    }
+    result = render_portrait(&a, a.portrait, 2u * PORTRAIT_SIZE, 2u, &report);
+    assert(result == BTBH_GPU_OK);
+    uint8_t *unshadowed = read_texture(a.window, a.portrait);
+    assert(memcmp(unshadowed, second_a, portrait_bytes) != 0);
+    free(unshadowed);
+    assert(memcmp(portrait, second_b, portrait_bytes) != 0);
+    assert(memcmp(second_a, second_b, portrait_bytes) == 0);
+    printf("a second portrait: the same after earlier ones as on its own\n");
+    free(portrait);
+    free(second_a);
+    free(second_b);
 
     /* The old way in B: a scene aside presented with FSR 1 and copied. B's next frame starts its
        history again, so it differs from A's (under FSR 3). */
@@ -592,7 +661,7 @@ int main(void) {
     free(frame_b);
 
     /* Refusals. Another window's render target; a texture that is no render target. */
-    result = render_portrait(&b, a.portrait, PORTRAIT_SIZE, &report);
+    result = render_portrait(&b, a.portrait, PORTRAIT_SIZE, 0u, &report);
     assert(result == BTBH_GPU_INVALID_ARGUMENT);
     const uint8_t white[4] = {255u, 255u, 255u, 255u};
     BTBHGPUTextureReport texture_report;
@@ -600,13 +669,13 @@ int main(void) {
         b.window, white, 1u, 1u, 0u, BTBH_GPU_TEXTURE_FILTER_LINEAR,
         BTBH_GPU_TEXTURE_WRAP_CLAMP, BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB, &texture_report);
     assert(plain != NULL);
-    result = render_portrait(&b, plain, PORTRAIT_SIZE, &report);
+    result = render_portrait(&b, plain, PORTRAIT_SIZE, 0u, &report);
     assert(result == BTBH_GPU_INVALID_ARGUMENT);
     btbh_gpu_texture_destroy(plain);
     /* While the frame's scene waits for its canvas: refused, and the frame survives. */
     result = present_world(&b, 5u, BTBH_GPU_SCENE_UPSCALE_FSR3, &report);
     assert(result == BTBH_GPU_OK);
-    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE, &report);
+    result = render_portrait(&b, b.portrait, PORTRAIT_SIZE, 0u, &report);
     assert(result == BTBH_GPU_INVALID_ARGUMENT);
     assert(btbh_gpu_window_copy_pending_scene_texture(b.window, b.frame, &copied) == BTBH_GPU_OK);
 

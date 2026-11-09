@@ -81,9 +81,13 @@ What `btbh_gpu_window_scene_render_to_target` does:
   frame's size. Models, custom meshes, textures and instance buffers are the window's, shared.
 - **Never temporal.** `BTBH_GPU_SCENE_UPSCALE_FSR3` runs as FSR 1, and `temporal_*` are ignored (not even
   validated). The report says FSR 1.
-- **Output size** is the target's. The scene renders at `render_width × render_height`, and FSR 1 or Lanczos
-  upscales it to the target's size when asked. Otherwise a bilinear blit scales it, and a render twice the
-  target's size is halved exactly (CHIMERA's supersampling). Then a blit puts it into the target, and the call
+- **Each call starts afresh.** The aside runtime keeps nothing from the last call. Its retained shadow
+  maps and cascade history are reset first, so a portrait never shows the previous unit's shadow, whatever
+  the window's shadow update periods. (The code review found this; the smoke now covers it.)
+- **Output size** is the target's. The scene renders at `render_width × render_height`. When that is smaller
+  than the target, FSR 1 or Lanczos enlarges it (as asked). At the target's size or bigger, a bilinear blit
+  scales it without sharpening, and a render twice the target's size is halved exactly (CHIMERA's
+  supersampling). Then a blit puts it into the target, and the call
   submits.
 - **When.** No scene may be waiting for its canvas: call it before the frame's scene present, or after the
   canvas present. Otherwise it returns `BTBH_GPU_INVALID_ARGUMENT` and leaves the waiting frame as it is (the
@@ -140,7 +144,10 @@ report)`. The camera no longer needs `CameraFrame::placed`: the target is the pi
   (e.g. 518² instead of 2560 × 1440), and it no longer needs a frame-sized copy texture. The aside runtime's
   memory is its targets at the portrait's size (a few MB at 518²) plus, with shadows, its own shadow maps (2048²
   and two 512² D32 directional maps and a 1024² spot map: 21 MB). Its first call creates its pipelines, a
-  one-time hitch: a host can warm it up with one call at load.
+  one-time hitch (about 10–20 ms CPU in the smoke, debug device): a host can warm it up with one call at
+  load. A later call cost 1–2 ms CPU in the smoke.
+- `BTBH_GPU_COST_LOG`: a scene rendered to a target doesn't begin a cost-log frame or split the GPU timing.
+  Its draws count in the frame it is drawn for.
 
 ## Compatibility
 
@@ -160,13 +167,19 @@ report)`. The camera no longer needs `CameraFrame::placed`: the target is the pi
 - **Windows / Vulkan:** `tools/check.ps1` with the new GPU smoke `btbh_gpu_scene_target_smoke`. It uses two
   hidden windows, a lit cube, FSR 3 at 50 %, and a directional shadow:
   - window A renders world frames 0–3; window B renders the same frames, with three portraits into a 64 × 64
-    target between frames 1 and 2 (rendered at 128, 32 and 64);
+    target between frames 1 and 2 (rendered at 128, 32 and 64, which is bilinear, FSR 1 and bilinear);
+    both windows update their shadows every other scene (`set_shadow_update_periods` 2);
   - frame 3 is **byte-identical** in both windows;
   - then B renders a scene aside the old way (a present with FSR 1 and a copy), and B's next frame **differs**
     from A's (its history restarted), so the check can tell;
+  - a second portrait (the cube moved over a slab, under another sun, its shadow visible, as checked
+    against the same picture without the shadow) is **byte-identical** when B renders it after its earlier
+    portraits and when A renders it as its very first. With the per-call reset removed, this check fails,
+    so it can tell (mutation-checked);
   - it reads the portrait back (cube on the clear colour, at the target's size) and checks
-    `report.upscale_mode` (FSR 3 in the world, FSR 1 in the portrait), the three refusals and the
-    `reactive_mode` validation.
+    `report.upscale_mode` (FSR 3 in the world; LINEAR or FSR 1 in the portraits, as above), the three
+    refusals and the `reactive_mode` validation. On Vulkan it requires FSR 3, so the history checks can't
+    pass vacuously.
 - **macOS / Metal:** not verified on the Mac. The change is C only, and the smoke runs there with metallibs
   (it skips with 77 when they are missing). FSR 3 still falls back to FSR 1 on Metal in 0.1.x, so the
   byte-identity check only shows the fallback there.

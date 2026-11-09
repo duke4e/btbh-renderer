@@ -30,20 +30,22 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
 ```
 
 - It renders the portrait at `render_width × render_height` and puts it into `target`, at the target's size.
-  Render it at **2 × the slot** with the target **1 × the slot**: the renderer halves it exactly (bilinear),
-  which replaces the overlay's own halving. Or make the target 2 × and keep halving in the overlay.
+  Render it at **2 × the slot** with the target **1 × the slot**. At the target's size or bigger, the
+  renderer scales bilinearly, without FSR 1's sharpening, so it halves exactly, which replaces the overlay's
+  own halving. Or make the target 2 × and keep halving in the overlay.
 - **FSR 3 in `post` is fine.** It runs as FSR 1, and the `temporal_*` fields are ignored and not validated.
   The report says `upscale_mode == FSR1`.
 - **The window's FSR 3 history is untouched.** No reset, no accumulation: the previous view-projection, bone
-  palettes, retained shadow maps and the radiance cascades are left alone. The next world frame reprojects as
+  palettes, retained shadow maps and the radiance cascades are left alone. Each portrait also starts
+  afresh itself (its own shadow redrawn, nothing kept from the last unit). The next world frame reprojects as
   if no portrait had been drawn. The renderer's GPU smoke checks this byte for byte.
 - Call it **before** the frame's `scene_present_instances` (where `render_aside` is called now), or after the
   canvas present. While a scene waits for its canvas, it returns `INVALID_ARGUMENT` and the waiting frame
   survives.
 - The camera is the portrait's own. `CameraFrame::placed` (the corner of a full frame) is not needed: the
   target is the whole picture.
-- The first call makes the window's second scene runtime: about 20 ms CPU here, once (pipelines). With a
-  shadow it also makes its own shadow maps (21 MB). Later calls cost about 2 ms CPU in the smoke (debug
+- The first call makes the window's second scene runtime: about 10–20 ms CPU here, once (pipelines). With
+  a shadow it also makes its own shadow maps (21 MB). Later calls cost about 1–2 ms CPU in the smoke (debug
   device, one cube). Warm it at load with one call if the first selection should not hitch.
 - Feature test: `BTBH_GPU_SCENE_HAS_RENDER_TO_TARGET` (bindgen: `ffi::BTBH_GPU_SCENE_HAS_RENDER_TO_TARGET`),
   if `btbh-gpu-sys/build.rs` wants a cfg as it has for refraction.
@@ -108,7 +110,9 @@ of frame-sized (14.7 MB → about 0.3 MB at 259²).
 - `tools/check.ps1 -SkipGpuTests` on the candidate: build, 66 shaders (SPIR-V + MSL), the native tests, the
   headers as C11/C++17.
 - GPU tests run separately: `btbh_gpu_device_smoke` and the new `btbh_gpu_scene_target_smoke`, which uses
-  hidden windows and never takes focus.
+  hidden windows and never takes focus. An independent code review found that shadow maps carried over from
+  one portrait to the next (with shadow update periods above 1). That is fixed, and the smoke covers it: the
+  check fails without the fix.
 - `btbh_gpu_window_smoke` was **not** run: it opens a visible window and toggles fullscreen, and the author
   may be playing. Its code is untouched, except a no-op release at window destroy.
 - CHIMERA: `cargo build --release --locked -p chimera-game` against the candidate and against v0.1.0. Each
