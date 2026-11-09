@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag | `renderer.pin` → `../btbh-renderer-v0.1.0` (tag `v0.1.0`) | submodule at `89266d2` (`tyrian3d`, 2026-10-30) |
+| Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag | `renderer.pin` → `../btbh-renderer-v0.1.0` (tag `v0.1.0`); `v0.1.1` (render to target, RFC 0006) is out for it | submodule at `89266d2` (`tyrian3d`, 2026-10-30) |
 | Target pin | `v0.2.0` | `v0.2.0` | `v0.2.0` (its last four `tyrian3d` commits ported as opt-in: see the CHANGELOG's "Upgrading") |
 
 ## Features used
@@ -32,7 +32,9 @@ library and poses, custom meshes (create, update), `window_scene_present_instanc
 mesh batches, directional + spot shadows, ACES tonemap, alpha/additive blend, `RIM` and
 `SOFT_PARTICLE` surfaces, stencil replace), canvas, presented-frame readback and PNG. Forces Vulkan
 and loads 14 named `.spv` shaders. Uses `REFRACT` (screen-space refraction, RFC 0005) for its Optical Fluid,
-when `BTBH_GPU_SCENE_HAS_REFRACTION` is defined. Not used yet: terrain, FSR, `_with_visibility`. Requested (drafts in
+when `BTBH_GPU_SCENE_HAS_REFRACTION` is defined. FSR 3 (since 2026-11-09: instance motions, lens, cuts, reactive
+scale 0.3). From v0.1.1 its live unit portrait can use `window_scene_render_to_target` and its ground detail
+`reactive_mode` (RFC 0006). Not used yet: terrain, `_with_visibility`. Requested (drafts in
 `docs/rfc/`): layered terrain (0001), height fog and water at RTS scale (0002), light regions (0003); its
 lamps should move to `lamp_*` (in v0.1.0).
 

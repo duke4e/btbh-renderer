@@ -12,6 +12,9 @@ Tyrian3D's last four `tyrian3d` commits, ported to master as opt-in features: wi
 a scene looks as it did in 0.1.0. After this release the `tyrian3d` branch is retired and all three games
 build from tags on `master`.
 
+It also contains 0.1.1 (a scene into a render target, per-batch reactive mask, `upscale_mode` in the
+report; RFC 0006), merged from `master`.
+
 ### Added
 - **Soft sun shadows** (from `f7c3773`): `BTBHGPUSceneLighting.directional_shadow_filter`
   (`BTBHGPUSceneShadowFilter`). `BTBH_GPU_SCENE_SHADOW_FILTER_TENT` (0) is the filter as before;
@@ -74,6 +77,50 @@ build from tags on `master`.
       1.2 → scatter 0.75).
     - Radiance cascades (`1917761`): a source is as opaque as it is bright against the light behind it, so
       rays pass the soft edges of additive glows. The light around explosions is slightly brighter.
+
+## [0.1.1] — 2026-11-09
+
+0.1.0 plus three opt-in additions requested by CHIMERA ([RFC 0006](docs/rfc/0006-scene-render-to-target.md)).
+C code only: no shader, uniform or G-buffer changed. A host that doesn't call the new function or set the
+new field renders exactly as with 0.1.0. Additive, so a patch release under the pre-1.0 rule in
+`COORDINATION.md`.
+
+### Added
+- **A scene into a render target, apart from the window's frame** (`btbh_gpu_window_scene_render_to_target`,
+  marker `BTBH_GPU_SCENE_HAS_RENDER_TO_TARGET`). It is meant for a picture inside the frame, such as a unit
+  portrait. It takes the arguments of `btbh_gpu_window_scene_present_instances_with_visibility`, plus a render
+  target of the window (`btbh_gpu_window_render_target_create`, any size).
+  - The scene renders at its own render size. When it is smaller than the target, it is enlarged with
+    FSR 1 or Lanczos (as `upscale_mode` asks). At the target's size or bigger it is scaled bilinearly without
+    sharpening, so a render twice the target's size is halved exactly.
+  - It runs on a second scene runtime the window keeps for these scenes. That runtime has its own targets,
+    shadow maps and pipelines, so the frame's targets keep their size.
+  - It is never temporal: FSR 3 runs as FSR 1 and `post`'s `temporal_*` fields are ignored. The window's
+    FSR 3 history, previous view-projection, bone palettes, retained shadow maps and radiance-cascade history
+    are neither read nor written. The next frame reprojects as if the portrait had not been drawn. Each call
+    also starts afresh itself: its shadow maps are redrawn whatever the shadow update periods, and it keeps no
+    cascade history from the last portrait.
+  - Call it before the frame's scene present or after its canvas present. While a scene waits for its
+    canvas, it is refused and the waiting frame is kept.
+- **Per-batch reactive mask** (`BTBHGPUSceneGeometryBatch.reactive_mode`). `BTBH_GPU_SCENE_REACTIVE_NONE`
+  keeps a transparent batch out of FSR 3's reactive mask, so it is accumulated like the opaque scene. This
+  suits ground detail layers drawn over their base, which made the whole ground "reactive". The default
+  (`BTBH_GPU_SCENE_REACTIVE_SCALED`, 0) is as before: alpha times `temporal_reactive_scale`.
+- **What upscaling ran** (`BTBHGPUSceneReport.upscale_mode`). It is `post->upscale_mode`, or
+  `BTBH_GPU_SCENE_UPSCALE_FSR1` where FSR 3 was asked for and is unavailable (the device, a failed encode, or a
+  scene rendered to a target). Before, a fallback was only a log line.
+
+### Notes
+- The first scene rendered to a target creates its runtime: pipelines (a one-time hitch of about 10–20 ms
+  CPU in the smoke) and, with shadows, its own shadow maps (about 21 MB with the directional and spot maps).
+- `BTBH_GPU_COST_LOG`: a scene rendered to a target is no frame of its own. It counts in the frame it is
+  drawn for, and it doesn't split the GPU timing.
+- Known, unchanged: with `temporal_reactive_scale` 0, transparent batches leave the shading's ambient term in
+  the reactive mask. The shader writes the mask only for a positive scale. `REACTIVE_NONE` does not have this
+  problem.
+- Not in this release: motion vectors for meshes updated in place (cloth, decals). The vertex shader would
+  need each vertex's previous position, which is a vertex-layout change (RFC 0006, open questions).
+- Merged into `release/v0.2.0` (the v0.2.0 candidate) on 2026-11-10.
 
 ## [0.1.0] — 2026-11-01 (first tagged release)
 

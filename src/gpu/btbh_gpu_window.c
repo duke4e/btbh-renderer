@@ -1453,6 +1453,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     }
     btbh_gpu_window_release_frame_telemetry(window);
     btbh_gpu_window_release_canvas(window);
+    btbh_gpu_window_release_aside_scene(window);
     btbh_gpu_window_release_scene(window);
     btbh_gpu_window_release_custom_meshes(window);
     btbh_gpu_window_release_instance_buffers(window);
