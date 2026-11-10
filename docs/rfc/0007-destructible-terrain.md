@@ -3,7 +3,7 @@
 - **Status:** Draft
 - **Requested by:** Be The Bullet Hell, CHIMERA (proposed by the coordinator)
 - **Affects:** Be The Bullet Hell and CHIMERA (each adopts it on its own). Tyrian3D: nothing, it is opt-in
-- **Issue:** to be opened
+- **Issue:** [#3](https://github.com/duke4e/btbh-renderer/issues/3)
 - **Depends on:** nothing to start. [RFC 0001](0001-layered-terrain.md) (layered terrain) for the full
   material look (phase 4)
 
