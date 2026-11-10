@@ -15,6 +15,9 @@ build from tags on `master`.
 It also contains 0.1.1 (a scene into a render target, per-batch reactive mask, `upscale_mode` in the
 report; RFC 0006), merged from `master`.
 
+Tested on Windows (Vulkan). macOS (Metal), including the new HBAO metallibs, isn't verified yet. Its check
+is pending in issue #1 and didn't hold up this release.
+
 ### Added
 - **Soft sun shadows** (from `f7c3773`): `BTBHGPUSceneLighting.directional_shadow_filter`
   (`BTBHGPUSceneShadowFilter`). `BTBH_GPU_SCENE_SHADOW_FILTER_TENT` (0) is the filter as before;
