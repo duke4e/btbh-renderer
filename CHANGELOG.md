@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-11-10
 
 Tyrian3D's last four `tyrian3d` commits, ported to master as opt-in features: with every new field zeroed
 a scene looks as it did in 0.1.0. After this release the `tyrian3d` branch is retired and all three games
@@ -15,8 +15,13 @@ build from tags on `master`.
 It also contains 0.1.1 (a scene into a render target, per-batch reactive mask, `upscale_mode` in the
 report; RFC 0006), merged from `master`.
 
-Tested on Windows (Vulkan). macOS (Metal), including the new HBAO metallibs, isn't verified yet. Its check
-is pending in issue #1 and didn't hold up this release.
+Tested on Windows (Vulkan) with all three games:
+- CHIMERA is byte-identical to 0.1.0.
+- Be The Bullet Hell builds unchanged from `e95b392` and keeps its look.
+- Tyrian3D matches `tyrian3d` @ `89266d2` with the settings below.
+
+macOS (Metal), including the new HBAO metallibs, isn't verified yet. Its check is pending in issue #1 and
+didn't hold up this release.
 
 ### Added
 - **Soft sun shadows** (from `f7c3773`): `BTBHGPUSceneLighting.directional_shadow_filter`
@@ -61,9 +66,14 @@ is pending in issue #1 and didn't hold up this release.
   - Bump the submodule to `v0.2.0` and rebuild the shaders.
   - There is nothing to set. The look stays the same, because 0.1.0's fixes only change zeroed fields and the
     log contrast is already in `e95b392`.
-  - Check the text: the font atlas now filters linearly by default.
+  - Text: the font atlas filters linearly since 0.1.0.
+    - Text drawn at whole pixels is unchanged.
+    - A pixel font drawn at half a pixel (centred labels, outlines) gets a soft fringe.
+    - Round text positions and outline offsets to whole pixels to keep it sharp.
+  - `build-gpu-game` stages an explicit shader list. Add `production_hbao*.spv` to it before using
+    `ssao_enabled` 2.
   - On macOS, FSR 3 falls back to FSR 1.
-- **CHIMERA** (from `v0.1.0`): point `renderer.pin` at a `v0.2.0` checkout and rebuild the shaders. There is
+- **CHIMERA** (from `v0.1.0` or `v0.1.1`): point `renderer.pin` at a `v0.2.0` checkout and rebuild the shaders. There is
   nothing to set.
 - **Tyrian3D** (from `tyrian3d` @ `89266d2`):
   - Bump the submodule to `v0.2.0`.

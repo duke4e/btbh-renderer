@@ -13,7 +13,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
 | Pinned version | submodule at `e95b392` (GitHub `master`, 2026-10-22) — no tag | `renderer.pin` → `../btbh-renderer-v0.1.0` (tag `v0.1.0`); `v0.1.1` (render to target, RFC 0006) is out for it | submodule at `89266d2` (`tyrian3d`, 2026-10-30) |
-| Target pin | `v0.2.0` | `v0.2.0` | `v0.2.0` (its last four `tyrian3d` commits ported as opt-in: see the CHANGELOG's "Upgrading") |
+| Target pin (`v0.2.0` out 2026-11-10) | `v0.2.0` | `v0.2.0` | `v0.2.0` (its last four `tyrian3d` commits ported as opt-in: see the CHANGELOG's "Upgrading") |
 
 ## Features used
 
