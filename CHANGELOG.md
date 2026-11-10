@@ -33,10 +33,14 @@ loader did: rebuild the shaders together with the C core.
 
 ### Upgrading
 - All three games: bump to `v0.2.1` and rebuild the shaders. There is nothing to set.
-- Only skinned models with vertices blended from several bones can look different, and only where they were
-  wrong. Where such a vertex's weights didn't add up to 255, one or two of them change by a 255th, and the
-  vertex comes back to where its bones put it: by up to 2/255 of its instance's distance from the world
-  origin.
+- Skinned models with vertices blended from several bones change where they were wrong. Where such a vertex's
+  weights didn't add up to 255, one or two of them change by a 255th, and the vertex comes back to where its
+  bones put it: by up to 2/255 of its instance's distance from the world origin.
+- Every other skinned vertex moves only by float rounding: its instance's translation is added in a different
+  order. A/B captures show scattered single edge pixels on skinned meshes, more of them further from the
+  origin, and nothing visible side by side. CHIMERA, whose skins all add up to 255 already, measured this at
+  1920 × 1080: 28 pixels differ near the origin and 318 at 175 units out (8 mechs), with no shape change.
+  Static meshes are unchanged.
 
 ## [0.2.0] — 2026-11-10
 
