@@ -1947,6 +1947,30 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shadowFragment.contains("discard;"))
     }
 
+    func testSkinnedVertexShadersTakeTheSkinnedPointWithWOne() throws {
+        // The blended bone matrix gives w = the sum of the weights; the instance matrix must see w = 1, or its
+        // translation is scaled by the sum (0.2.1).
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let shaderDirectory = packageRoot.appendingPathComponent("shaders/gpu")
+        let animated = try String(
+            contentsOf: shaderDirectory.appendingPathComponent("production_animated_model.vert.hlsl"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(animated.contains("float4(mul(skin_matrix, local_position).xyz, 1.0f);"))
+        XCTAssertTrue(animated.contains(
+            "float4(mul(previous_skin_matrix, float4(previous_local_position, 1.0f)).xyz, 1.0f)"
+        ))
+        let shadow = try String(
+            contentsOf: shaderDirectory.appendingPathComponent("production_animated_shadow.vert.hlsl"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(shadow.contains("mul(skin_matrix, float4(surface.position, 1.0f)).xyz,"))
+        XCTAssertFalse(shadow.contains("const float4 skinned_position = mul("))
+    }
+
     func testProductionShadowFastPathsPreserveDeformationAndDiscardVariants()
         throws
     {

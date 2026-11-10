@@ -135,8 +135,11 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         bones[bone_offset + joint_indices.z] * input.weights.z +
         bones[bone_offset + joint_indices.w] * input.weights.w;
     const float3x3 skin_linear = (float3x3)skin_matrix;
+    // The blended matrix's bottom row is (0, 0, 0, sum of weights), so its w is that sum, not 1. A sum a
+    // fraction off 1 would scale the instance's translation below and throw the vertex along the line
+    // to the world origin, so the skinned point is taken with w = 1.
     const float4 skinned_position =
-        mul(skin_matrix, local_position);
+        float4(mul(skin_matrix, local_position).xyz, 1.0f);
     const float3 skinned_normal =
         transform_normal(skin_linear, surface.normal);
     const float3 skinned_tangent =
@@ -211,9 +214,10 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
             bones[previous_bone_offset + joint_indices.y] * input.weights.y +
             bones[previous_bone_offset + joint_indices.z] * input.weights.z +
             bones[previous_bone_offset + joint_indices.w] * input.weights.w;
+        // w = 1 for the same reason as the current pose.
         previous_world_position = mul(
             instance.model,
-            mul(previous_skin_matrix, float4(previous_local_position, 1.0f))
+            float4(mul(previous_skin_matrix, float4(previous_local_position, 1.0f)).xyz, 1.0f)
         ).xyz - translation;
     }
     const BTBHTemporalClip motion_clip = btbh_temporal_clip(

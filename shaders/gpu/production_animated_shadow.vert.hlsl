@@ -56,9 +56,11 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         bones[bone_offset + joint_indices.y] * input.weights.y +
         bones[bone_offset + joint_indices.z] * input.weights.z +
         bones[bone_offset + joint_indices.w] * input.weights.w;
-    const float4 skinned_position = mul(
-        skin_matrix,
-        float4(surface.position, 1.0f)
+    // w = 1, not the weights' sum, as in production_animated_model.vert.hlsl: the instance's translation
+    // must not be scaled.
+    const float4 skinned_position = float4(
+        mul(skin_matrix, float4(surface.position, 1.0f)).xyz,
+        1.0f
     );
     VertexOutput output;
     output.position = mul(

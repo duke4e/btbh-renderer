@@ -10,7 +10,7 @@ extern "C" {
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
 #define BTBH_GPU_VERSION_MINOR 2
-#define BTBH_GPU_VERSION_PATCH 0
+#define BTBH_GPU_VERSION_PATCH 1
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
 /* Lamps (street lamps, car headlights) a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */

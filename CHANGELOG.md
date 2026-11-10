@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] — unreleased
+
+0.2.0 plus a skinning fix found by CHIMERA. No API changed, but the skinned vertex shaders and the model
+loader did: rebuild the shaders together with the C core.
+
+### Fixed
+- **Skinned vertices away from the world origin** were thrown towards or away from it. A vertex blended from
+  several bones moved by (Σw − 1) times its instance's translation, along the line through the world origin.
+  At 175 units from the origin that is about 1 unit, enough for long shards on CHIMERA's infantry. Present
+  since 0.1.0. Two causes, both fixed:
+  - The skinned vertex shaders took the skinned point's w from the blended bone matrix, which makes it the
+    weights' sum rather than 1, and the instance matrix then scaled its translation by that sum. They now
+    take the point with w = 1. This covers `production_animated_model.vert` (the scene draw, its previous
+    pose for motion vectors, and the radiance-cascade source variant
+    `production_rc_animated_material_source.vert`) and `production_animated_shadow.vert`.
+  - Loading quantised each bone weight to a 255th on its own, so a multi-bone vertex's weights added up to
+    254–257 255ths. They now add up to exactly 255: each share is rounded down, and the 255ths left over go to
+    the largest remainders. Weights that already added up to 255 (every single-bone vertex among them) pack
+    exactly as before.
+
+### Known
+- A rigid mesh on a node inside a skin's skeleton (a soldier's gun under its hand) is drawn where the file
+  puts it at rest; it doesn't follow its node through the pose. Following it is a feature for a later release.
+  Until then, bind such meshes into the skin offline (CHIMERA does so with `asset-tool bind-skin`).
+
+### Upgrading
+- All three games: bump to `v0.2.1` and rebuild the shaders. There is nothing to set.
+- Only skinned models with vertices blended from several bones can look different, and only where they were
+  wrong. Where such a vertex's weights didn't add up to 255, one or two of them change by a 255th, and the
+  vertex comes back to where its bones put it: by up to 2/255 of its instance's distance from the world
+  origin.
+
 ## [0.2.0] — 2026-11-10
 
 Tyrian3D's last four `tyrian3d` commits, ported to master as opt-in features: with every new field zeroed

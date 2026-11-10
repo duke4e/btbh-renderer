@@ -165,11 +165,33 @@ void btbh_gpu_model_normalize_bone_weights(
         weights[0] = 1.0f;
         return;
     }
-    const uint32_t half = sum >> 1u;
+    // Whole 255ths that add up to exactly 255: each slot gets its share rounded down, and the 255ths
+    // left over go one each to the slots with the largest remainders (the lower slot on a tie).
+    // Rounding each slot on its own let multi-bone vertices add up to 254..257, and a sum off 1 moves
+    // the vertex in proportion to its distance from the world origin.
+    uint32_t quantized[4];
+    uint32_t remainders[4];
+    uint32_t total = 0u;
     for (uint32_t slot = 0u; slot < 4u; slot += 1u) {
-        const uint32_t quantized =
-            ((uint32_t) weights[slot] * 255u + half) / sum;
-        weights[slot] = (float) quantized / 255.0f;
+        const uint32_t scaled = (uint32_t) weights[slot] * 255u;
+        quantized[slot] = scaled / sum;
+        remainders[slot] = scaled % sum;
+        total += quantized[slot];
+    }
+    // Each slot loses less than one 255th, so fewer than four are left; the remainders add up to
+    // exactly that many times `sum`, which gives every one of them a slot with a remainder.
+    for (uint32_t left = 255u - total; left > 0u; left -= 1u) {
+        uint32_t largest = 0u;
+        for (uint32_t slot = 1u; slot < 4u; slot += 1u) {
+            if (remainders[slot] > remainders[largest]) {
+                largest = slot;
+            }
+        }
+        quantized[largest] += 1u;
+        remainders[largest] = 0u;
+    }
+    for (uint32_t slot = 0u; slot < 4u; slot += 1u) {
+        weights[slot] = (float) quantized[slot] / 255.0f;
     }
 }
 
