@@ -6,10 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.2.1] — unreleased
+## [0.2.1] — 2026-11-11
 
 0.2.0 plus a skinning fix found by CHIMERA. No API changed, but the skinned vertex shaders and the model
 loader did: rebuild the shaders together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes, the Swift build, and CHIMERA's build and on-screen
+A/B (its original infantry no longer shard at 175 units). macOS (Metal) isn't verified, as for 0.2.0.
 
 ### Fixed
 - **Skinned vertices away from the world origin** were thrown towards or away from it. A vertex blended from
