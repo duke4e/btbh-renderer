@@ -1240,6 +1240,9 @@ final class GPUResourceBackend: RenderResourceBackend {
                 let ormTexture = try patch.ormTexture.map {
                     try canvasTexture($0).pointer
                 }
+                let emissionTexture = try patch.emissionTexture.map {
+                    try canvasTexture($0).pointer
+                }
                 let base = modelResource.materials[override.slot]
                 let surface = try sceneSurface(patch.surfaceShader)
                 var patched = GPUSceneMaterialProbe(
@@ -1255,9 +1258,11 @@ final class GPUResourceBackend: RenderResourceBackend {
                     occlusion: base.occlusion,
                     roughness: base.roughness,
                     metalness: base.metalness,
-                    emissionTexture: patch.clearEmissionTexture
-                        ? nil
-                        : base.emissionTexture,
+                    emissionTexture: emissionTexture ?? (
+                        patch.clearEmissionTexture
+                            ? nil
+                            : base.emissionTexture
+                    ),
                     emissionColor:
                         patch.emissionColor ?? base.emissionColor,
                     emissionEnergy: max(
@@ -2145,6 +2150,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                 patch.albedoTexture,
                 patch.normalTexture,
                 patch.ormTexture,
+                patch.emissionTexture,
             ].compactMap { $0 }
         )
         try validateMaterialDependencies(

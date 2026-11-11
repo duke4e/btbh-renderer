@@ -796,6 +796,35 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_target_smoke COMMAND btbh_gpu_scene_target_smoke)
         set_tests_properties(btbh_gpu_scene_target_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # Models sharing external textures (BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES), one hidden window.
+        add_executable(btbh_gpu_model_texture_share_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_model_texture_share_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_model_texture_share_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_model_texture_share_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_model_texture_share_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_model_texture_share_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_model_texture_share_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(NAME btbh_gpu_model_texture_share_smoke COMMAND btbh_gpu_model_texture_share_smoke)
+        set_tests_properties(btbh_gpu_model_texture_share_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

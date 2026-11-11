@@ -356,6 +356,215 @@ static char *btbh_gpu_model_resolve_texture_path(
     return resolved;
 }
 
+/* In place and lexical (the file system is not asked): '\' becomes '/', empty and "." segments
+   go, and "name/.." pairs cancel. The root ("/", "//", "X:/") stays and nothing climbs above it.
+   Two spellings of one file can still differ (letter case, links): they then load twice, as
+   without sharing. */
+static void btbh_gpu_model_normalize_texture_path(char *path) {
+    for (char *cursor = path; *cursor != '\0'; cursor += 1) {
+        if (*cursor == '\\') {
+            *cursor = '/';
+        }
+    }
+    size_t root = 0u;
+    if (path[0] == '/') {
+        root = path[1] == '/' ? 2u : 1u;
+    } else if (
+        ((path[0] >= 'A' && path[0] <= 'Z') ||
+            (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':' &&
+        path[2] == '/'
+    ) {
+        root = 3u;
+    }
+    size_t read = root;
+    size_t write = root;
+    while (path[read] != '\0') {
+        size_t end = read;
+        while (path[end] != '\0' && path[end] != '/') {
+            end += 1u;
+        }
+        const size_t length = end - read;
+        const bool current = length == 1u && path[read] == '.';
+        const bool parent =
+            length == 2u && path[read] == '.' && path[read + 1u] == '.';
+        bool append = length > 0u && !current;
+        if (parent && write > root) {
+            size_t start = write;
+            while (start > root && path[start - 1u] != '/') {
+                start -= 1u;
+            }
+            const bool previous_is_parent =
+                write - start == 2u &&
+                path[start] == '.' &&
+                path[start + 1u] == '.';
+            if (!previous_is_parent) {
+                write = start > root ? start - 1u : root;
+                append = false;
+            }
+        } else if (parent && root > 0u) {
+            append = false;
+        }
+        if (append) {
+            if (write > root) {
+                path[write] = '/';
+                write += 1u;
+            }
+            (void)memmove(path + write, path + read, length);
+            write += length;
+        }
+        read = path[end] == '/' ? end + 1u : end;
+    }
+    path[write] = '\0';
+}
+
+/* The share key of a resolved external texture path: a normalised copy; NULL when the copy cannot
+   be allocated (the texture is then loaded unshared). */
+static char *btbh_gpu_model_texture_share_key(const char *texture_path) {
+    const size_t length = strlen(texture_path);
+    char *key = malloc(length + 1u);
+    if (key == NULL) {
+        return NULL;
+    }
+    (void)memcpy(key, texture_path, length + 1u);
+    btbh_gpu_model_normalize_texture_path(key);
+    return key;
+}
+
+static bool btbh_gpu_model_texture_share_path_equal(
+    const char *left,
+    const char *right
+) {
+    if (left == NULL || right == NULL) {
+        return left == right;
+    }
+    return strcmp(left, right) == 0;
+}
+
+static BTBHGPUModelTextureShare *btbh_gpu_model_texture_share_find(
+    const BTBHGPUWindow *window,
+    const char *path,
+    const char *second_path,
+    SDL_GPUTextureFormat format,
+    bool composed_orm
+) {
+    for (
+        BTBHGPUModelTextureShare *share = window->model_texture_share_head;
+        share != NULL;
+        share = share->next
+    ) {
+        if (
+            share->format == format &&
+            share->composed_orm == composed_orm &&
+            btbh_gpu_model_texture_share_path_equal(share->path, path) &&
+            btbh_gpu_model_texture_share_path_equal(
+                share->second_path,
+                second_path
+            )
+        ) {
+            return share;
+        }
+    }
+    return NULL;
+}
+
+/* Hands `texture` (just loaded for one material slot) to a new share. Takes the paths either way;
+   when the share cannot be allocated the texture stays the model's own, as without sharing. */
+static void btbh_gpu_model_texture_share_add(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *texture,
+    char *path,
+    char *second_path,
+    SDL_GPUTextureFormat format,
+    bool composed_orm
+) {
+    BTBHGPUModelTextureShare *share = calloc(1, sizeof(*share));
+    if (share == NULL) {
+        free(path);
+        free(second_path);
+        return;
+    }
+    share->owner = window;
+    share->texture = texture;
+    share->path = path;
+    share->second_path = second_path;
+    share->format = format;
+    share->composed_orm = composed_orm;
+    share->reference_count = 1u;
+    share->next = window->model_texture_share_head;
+    if (window->model_texture_share_head != NULL) {
+        window->model_texture_share_head->previous = share;
+    }
+    window->model_texture_share_head = share;
+    texture->share = share;
+}
+
+static void btbh_gpu_model_texture_share_free(
+    BTBHGPUModelTextureShare *share
+) {
+    BTBHGPUWindow *owner = share->owner;
+    if (owner != NULL) {
+        if (share->previous != NULL) {
+            share->previous->next = share->next;
+        } else if (owner->model_texture_share_head == share) {
+            owner->model_texture_share_head = share->next;
+        }
+        if (share->next != NULL) {
+            share->next->previous = share->previous;
+        }
+    }
+    if (share->texture != NULL) {
+        share->texture->share = NULL;
+        btbh_gpu_texture_destroy(share->texture);
+    }
+    free(share->path);
+    free(share->second_path);
+    free(share);
+}
+
+/* What a model's destroy does with each of its material textures: a shared one loses this slot's
+   count (and is freed with the last), any other is destroyed as before. */
+static void btbh_gpu_model_texture_release(BTBHGPUTexture *texture) {
+    BTBHGPUModelTextureShare *share = texture->share;
+    if (share == NULL) {
+        btbh_gpu_texture_destroy(texture);
+        return;
+    }
+    if (share->reference_count > 1u) {
+        share->reference_count -= 1u;
+        return;
+    }
+    btbh_gpu_model_texture_share_free(share);
+}
+
+/* The share key of one ORM source: true with *key NULL for no image, true with a key for an
+   external image; false for anything else (an embedded or data-URI image, a texture without an
+   image, no memory), which loads the ORM texture unshared. */
+static bool btbh_gpu_model_orm_share_key(
+    const cgltf_texture_view *view,
+    const char *model_path,
+    char **key
+) {
+    *key = NULL;
+    if (view == NULL || view->texture == NULL) {
+        return true;
+    }
+    const cgltf_image *image = view->texture->image;
+    if (image == NULL || image->buffer_view != NULL) {
+        return false;
+    }
+    char *texture_path = btbh_gpu_model_resolve_texture_path(
+        model_path,
+        image->uri
+    );
+    if (texture_path == NULL) {
+        return false;
+    }
+    btbh_gpu_model_normalize_texture_path(texture_path);
+    *key = texture_path;
+    return true;
+}
+
 bool btbh_gpu_model_compose_orm_rgba8(
     const uint8_t *occlusion_pixels,
     uint32_t occlusion_width,
@@ -584,6 +793,7 @@ static bool btbh_gpu_model_load_orm_texture(
     const cgltf_texture_view *occlusion_view,
     const cgltf_texture_view *metallic_roughness_view,
     const char *model_path,
+    bool share,
     BTBHGPUTexture **texture,
     BTBHGPUModelReport *model_report
 ) {
@@ -595,6 +805,39 @@ static bool btbh_gpu_model_load_orm_texture(
             metallic_roughness_view->texture == NULL)
     ) {
         return true;
+    }
+    /* Shared by the pair of external images it is composed from: the composition depends on
+       nothing else. An embedded image keeps the texture the model's own. */
+    char *occlusion_key = NULL;
+    char *metallic_roughness_key = NULL;
+    const bool shared =
+        share &&
+        btbh_gpu_model_orm_share_key(
+            occlusion_view,
+            model_path,
+            &occlusion_key
+        ) &&
+        btbh_gpu_model_orm_share_key(
+            metallic_roughness_view,
+            model_path,
+            &metallic_roughness_key
+        );
+    if (shared) {
+        BTBHGPUModelTextureShare *existing =
+            btbh_gpu_model_texture_share_find(
+                window,
+                occlusion_key,
+                metallic_roughness_key,
+                SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                true
+            );
+        if (existing != NULL) {
+            existing->reference_count += 1u;
+            *texture = existing->texture;
+            free(metallic_roughness_key);
+            free(occlusion_key);
+            return true;
+        }
     }
     uint8_t *occlusion = NULL;
     uint32_t occlusion_width = 0u;
@@ -666,6 +909,19 @@ static bool btbh_gpu_model_load_orm_texture(
     free(composed);
     free(metallic_roughness);
     free(occlusion);
+    if (success && shared) {
+        btbh_gpu_model_texture_share_add(
+            window,
+            *texture,
+            occlusion_key,
+            metallic_roughness_key,
+            SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+            true
+        );
+    } else {
+        free(metallic_roughness_key);
+        free(occlusion_key);
+    }
     return success;
 }
 
@@ -674,6 +930,7 @@ static bool btbh_gpu_model_load_texture(
     const cgltf_texture_view *view,
     const char *model_path,
     SDL_GPUTextureFormat format,
+    bool share,
     BTBHGPUTexture **texture,
     BTBHGPUModelReport *model_report
 ) {
@@ -704,6 +961,28 @@ static bool btbh_gpu_model_load_texture(
             );
             return false;
         }
+        /* Shared by its normalised path and format: an sRGB albedo or emission texture never
+           shares with a linear normal one of the same image. */
+        char *share_key = share
+            ? btbh_gpu_model_texture_share_key(texture_path)
+            : NULL;
+        if (share_key != NULL) {
+            BTBHGPUModelTextureShare *existing =
+                btbh_gpu_model_texture_share_find(
+                    window,
+                    share_key,
+                    NULL,
+                    format,
+                    false
+                );
+            if (existing != NULL) {
+                existing->reference_count += 1u;
+                *texture = existing->texture;
+                free(share_key);
+                free(texture_path);
+                return true;
+            }
+        }
         BTBHGPUTextureReport texture_report = {0};
         *texture = btbh_gpu_window_texture_load_format(
             window,
@@ -716,8 +995,19 @@ static bool btbh_gpu_model_load_texture(
         );
         free(texture_path);
         if (*texture != NULL) {
+            if (share_key != NULL) {
+                btbh_gpu_model_texture_share_add(
+                    window,
+                    *texture,
+                    share_key,
+                    NULL,
+                    format,
+                    false
+                );
+            }
             return true;
         }
+        free(share_key);
         btbh_gpu_model_error(
             model_report,
             texture_report.message[0] != '\0'
@@ -782,6 +1072,7 @@ static bool btbh_gpu_model_load_gltf_materials(
     const cgltf_data *data,
     const char *model_path,
     bool load_material_textures,
+    bool share_external_textures,
     BTBHGPUModelReport *report
 ) {
     model->materials = calloc(
@@ -835,6 +1126,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                     &source->pbr_metallic_roughness.base_color_texture,
                     model_path,
                     SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+                    share_external_textures,
                     &destination->albedo_texture,
                     report
                 )) {
@@ -847,6 +1139,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                 &source->pbr_metallic_roughness
                     .metallic_roughness_texture,
                 model_path,
+                share_external_textures,
                 &destination->orm_texture,
                 report
             )) {
@@ -857,6 +1150,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                     &source->normal_texture,
                     model_path,
                     SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                    share_external_textures,
                     &destination->normal_texture,
                     report
                 )) {
@@ -880,6 +1174,7 @@ static bool btbh_gpu_model_load_gltf_materials(
                 &source->emissive_texture,
                 model_path,
                 SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+                share_external_textures,
                 &destination->emission_texture,
                 report
             )) {
@@ -1143,19 +1438,19 @@ static void btbh_gpu_model_release_handles(
             BTBHGPUModelMaterialInfo *material =
                 &model->materials[index];
             if (material->albedo_texture != NULL) {
-                btbh_gpu_texture_destroy(material->albedo_texture);
+                btbh_gpu_model_texture_release(material->albedo_texture);
                 material->albedo_texture = NULL;
             }
             if (material->emission_texture != NULL) {
-                btbh_gpu_texture_destroy(material->emission_texture);
+                btbh_gpu_model_texture_release(material->emission_texture);
                 material->emission_texture = NULL;
             }
             if (material->normal_texture != NULL) {
-                btbh_gpu_texture_destroy(material->normal_texture);
+                btbh_gpu_model_texture_release(material->normal_texture);
                 material->normal_texture = NULL;
             }
             if (material->orm_texture != NULL) {
-                btbh_gpu_texture_destroy(material->orm_texture);
+                btbh_gpu_model_texture_release(material->orm_texture);
                 material->orm_texture = NULL;
             }
         }
@@ -2369,6 +2664,8 @@ BTBHGPUModel *btbh_gpu_window_model_load_ex(
             path,
             (import_flags
                 & BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES) == 0u,
+            (import_flags
+                & BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES) != 0u,
             report
         )) {
         cgltf_free(data);
@@ -2626,6 +2923,11 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window) {
         model->previous = NULL;
         model->next = NULL;
         model = next;
+    }
+    /* The models' releases freed every shared texture; whatever a share still holds goes now,
+       before the window's textures. */
+    while (window->model_texture_share_head != NULL) {
+        btbh_gpu_model_texture_share_free(window->model_texture_share_head);
     }
 }
 

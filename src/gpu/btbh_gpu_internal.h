@@ -41,6 +41,7 @@ typedef struct BTBHGPUModelPrimitive {
 
 typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
 typedef struct BTBHGPUCanvasRuntime BTBHGPUCanvasRuntime;
+typedef struct BTBHGPUModelTextureShare BTBHGPUModelTextureShare;
 
 #define BTBH_GPU_FRAME_TELEMETRY_CAPACITY 256u
 
@@ -85,6 +86,8 @@ struct BTBHGPUWindow {
     BTBHGPUTexture *texture_head;
     BTBHGPUFont *font_head;
     BTBHGPUModel *model_head;
+    /* The model textures that BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES shares (btbh_gpu_model.c). */
+    BTBHGPUModelTextureShare *model_texture_share_head;
     BTBHGPUGeometryArena vertex_arena;
     BTBHGPUGeometryArena index_arena;
     BTBHGPUInstanceBuffer *instance_buffer_head;
@@ -129,6 +132,27 @@ struct BTBHGPUTexture {
     uint32_t mip_count;
     /* Made with SDL_GPU_TEXTUREUSAGE_COLOR_TARGET (a render target): a scene can be drawn into it. */
     bool color_target;
+    /* Set while models share it (BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES): the share owns it,
+       so btbh_gpu_texture_destroy leaves it alone; the last model that holds it frees it. */
+    BTBHGPUModelTextureShare *share;
+};
+
+/* A texture that models loaded with BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES share: one per
+   external image (or, for an ORM texture, pair of images) and format, kept in the window's list.
+   Each material slot that holds it counts once; the last one released frees it, and the window's
+   destroy frees what is left. */
+struct BTBHGPUModelTextureShare {
+    BTBHGPUWindow *owner;
+    BTBHGPUModelTextureShare *previous;
+    BTBHGPUModelTextureShare *next;
+    BTBHGPUTexture *texture;
+    /* Normalised resolved paths: the image (for an ORM texture, its occlusion image) and the ORM
+       texture's metallic-roughness image. NULL where an ORM texture has no such image. */
+    char *path;
+    char *second_path;
+    SDL_GPUTextureFormat format;
+    bool composed_orm;
+    uint32_t reference_count;
 };
 
 struct BTBHGPUModel {

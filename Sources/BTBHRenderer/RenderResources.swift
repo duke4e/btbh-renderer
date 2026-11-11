@@ -133,6 +133,11 @@ public struct ModelImportFlags: OptionSet, Sendable {
     /// but do not resolve or upload texture references embedded in the model.
     /// Use this when the caller supplies complete material overrides.
     public static let ignoreMaterialTextures = Self(rawValue: 1 << 2)
+    /// Models that reference the same external image file share one GPU texture of it
+    /// (per image and color space) instead of uploading a copy each; embedded images stay
+    /// per model. The last model destroyed frees a shared texture. Ignored with
+    /// `ignoreMaterialTextures`.
+    public static let shareExternalTextures = Self(rawValue: 1 << 3)
 }
 
 public enum ModelFootprintKind: UInt8, Hashable, Sendable {
@@ -519,6 +524,10 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     public var albedoColor: RenderColor?
     public var normalTexture: TextureHandle?
     public var ormTexture: TextureHandle?
+    /// Replaces the imported emission texture; it wins over `clearEmissionTexture`. The importer
+    /// loads emission as sRGB: load a replacement with `colorSpace: .sRGB` to match its look.
+    public var emissionTexture: TextureHandle?
+    /// Drops the imported emission texture when `emissionTexture` is nil.
     public var clearEmissionTexture: Bool
     public var emissionColor: RenderColor?
     public var emissionEnergy: Float?
@@ -541,6 +550,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         albedoColor: RenderColor? = nil,
         normalTexture: TextureHandle? = nil,
         ormTexture: TextureHandle? = nil,
+        emissionTexture: TextureHandle? = nil,
         clearEmissionTexture: Bool = false,
         emissionColor: RenderColor? = nil,
         emissionEnergy: Float? = nil,
@@ -557,6 +567,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.albedoColor = albedoColor
         self.normalTexture = normalTexture
         self.ormTexture = ormTexture
+        self.emissionTexture = emissionTexture
         self.clearEmissionTexture = clearEmissionTexture
         self.emissionColor = emissionColor
         self.emissionEnergy = emissionEnergy

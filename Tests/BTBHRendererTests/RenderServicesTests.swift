@@ -666,6 +666,7 @@ final class RenderServicesTests: XCTestCase {
             importFlags.rawValue,
             ModelImportFlags.meshData.rawValue | ModelImportFlags.highQuality.rawValue
         )
+        XCTAssertEqual(ModelImportFlags.shareExternalTextures.rawValue, 1 << 3)
 
         let modelMetadata = ModelMetadata(
             bounds: bounds,
@@ -783,6 +784,14 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(modelMaterialPatch.stencilReference, 1)
         XCTAssertEqual(modelMaterialPatch.cullMode, CullMode.none)
         XCTAssertEqual(modelMaterialPatch.surfaceShader, surfaceShader)
+        XCTAssertNil(modelMaterialPatch.emissionTexture)
+        XCTAssertNil(ModelMaterialPatch.identity.emissionTexture)
+        var emissionPatch = ModelMaterialPatch(emissionTexture: albedoTexture)
+        XCTAssertEqual(emissionPatch.emissionTexture, albedoTexture)
+        XCTAssertFalse(emissionPatch.clearEmissionTexture)
+        XCTAssertNotEqual(emissionPatch, .identity)
+        emissionPatch.emissionTexture = nil
+        XCTAssertEqual(emissionPatch, .identity)
 
         let instanceBuffer = InstanceBufferDescriptor(
             capacity: 100, stride: 64, includesColor: true, customFloatCount: 4

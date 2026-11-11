@@ -5298,6 +5298,112 @@ final class GPURenderServicesTests: XCTestCase {
         XCTAssertLessThan(unlitReadback.rgba8[center + 2], 50)
     }
 
+    func testModelMaterialPatchSetsEmissionTexture() throws {
+        RenderServices.uninstall()
+        defer { RenderServices.uninstall() }
+        try RenderServices.install(GPURenderServices.make(
+            request: .platformDefault,
+            debugMode: true
+        ))
+        try RenderServices.platform.openWindow(.init(
+            title: "BTBH GPU imported material emission patch test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            frameRatePolicy: .uncapped,
+            drawableScalePolicy: .oneToOne
+        ))
+        try RenderServices.scene.initialize(
+            drawableSize: .init(width: 320, height: 180)
+        )
+
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        // Its imported material has no emission texture and a black emission factor.
+        let model = try RenderServices.resources.loadModel(
+            path: packageRoot
+                .appendingPathComponent(
+                    "Tests/Fixtures/material-factor-triangle.gltf"
+                )
+                .path,
+            flags: [.meshData, .shareExternalTextures]
+        )
+        let blue = try RenderServices.resources.loadTexture(.init(
+            path: packageRoot
+                .appendingPathComponent("Tests/Fixtures/emission-blue.png")
+                .path,
+            colorSpace: .sRGB
+        ))
+        // A black body glowing white: only the emission shows.
+        let glow = ModelMaterialPatch(
+            albedoColor: .black,
+            emissionColor: .white,
+            emissionEnergy: 1
+        )
+        var textured = glow
+        textured.emissionTexture = blue
+        var texturedAndCleared = textured
+        texturedAndCleared.clearEmissionTexture = true
+        let materials = try [glow, textured, texturedAndCleared].map {
+            try RenderServices.resources.createMaterialOverride(
+                from: model,
+                materialIndex: 1,
+                patch: $0
+            )
+        }
+        defer {
+            materials.forEach { RenderServices.resources.destroyMaterial($0) }
+            RenderServices.resources.destroyTexture(blue)
+            RenderServices.resources.destroyModel(model)
+        }
+
+        func centerColor(_ material: MaterialHandle) throws -> [UInt8] {
+            RenderServices.canvas.requestPresentedFrameReadback()
+            RenderServices.canvas.beginFrame()
+            RenderServices.canvas.submit(.clear(.black))
+            RenderServices.scene.beginFrame(.init(
+                camera: .init(
+                    position: .init(x: 0.5, y: 0.5, z: -3),
+                    target: .init(x: 0.5, y: 0.5, z: 0),
+                    up: .up,
+                    verticalFOVDegrees: 60,
+                    projection: .perspective
+                ),
+                environment: .default
+            ))
+            RenderServices.scene.submit(.modelInstances(.init(
+                model: model,
+                instances: [.init(
+                    transform: .identity,
+                    color: .white,
+                    custom: .init(x: 0, y: 0, z: 0, w: 0)
+                )],
+                overrides: [.init(slot: 1, material: material)],
+                persistentBuffer: nil
+            )))
+            try RenderServices.scene.endFrame()
+            RenderServices.canvas.endFrame()
+            let readback = try RenderServices.canvas.readbackPresentedFrame()
+            let center = ((readback.size.height / 2) * readback.size.width
+                + readback.size.width / 2) * 4
+            return Array(readback.rgba8[center..<(center + 3)])
+        }
+
+        let untextured = try centerColor(materials[0])
+        XCTAssertGreaterThan(untextured[0], 150)
+        XCTAssertGreaterThan(untextured[1], 150)
+        XCTAssertGreaterThan(untextured[2], 150)
+        // The patched texture tints the glow blue, and wins over clearEmissionTexture.
+        for material in materials[1...] {
+            let color = try centerColor(material)
+            XCTAssertLessThan(color[0], 60)
+            XCTAssertGreaterThan(color[2], 150)
+            XCTAssertGreaterThan(Int(color[2]), Int(color[1]) + 60)
+        }
+    }
+
     func testModelMaterialPatchPreservesImportedBaseColor() throws {
         RenderServices.uninstall()
         defer { RenderServices.uninstall() }

@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Models share external textures** (asked for by Be The Bullet Hell, whose 37 army models each uploaded
+  their own copy of the same `textures/mc_*.png`): `BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES` for
+  `btbh_gpu_window_model_load_ex`. Models loaded with it share one texture per external image (a glTF image
+  with a `uri`) and format, through a window-level cache keyed by the image's normalised resolved path: an sRGB
+  albedo or emission texture never shares with a linear normal or ORM one. A composed ORM texture is shared by
+  its pair of external images, so it is composed once. Embedded (buffer-view) images stay each model's own.
+  The path key is lexical (`\` and `/` alike, `.` and `name/..` folded); spellings that differ otherwise
+  (letter case, links) load twice, as without the flag. Without the flag nothing changes.
+- Ownership, now in the header: a model's textures (`BTBHGPUModelMaterialInfo`) belong to the model. A shared
+  one is counted per material slot that holds it; the last model destroyed frees it, the window's destroy frees
+  what is left, and `btbh_gpu_texture_destroy` on it does nothing (so a host can't free it twice). Any other
+  model texture is the model's alone, as before.
+- `BTBH_GPU_MODEL_HAS_SHARED_EXTERNAL_TEXTURES`, defined when the flag exists, for hosts that build against
+  several releases.
+- Swift: `ModelImportFlags.shareExternalTextures`, and `ModelMaterialPatch.emissionTexture`, which replaces
+  an imported material's emission texture as `albedoTexture`, `normalTexture` and `ormTexture` replace theirs.
+  It wins over `clearEmissionTexture`. Load it with `colorSpace: .sRGB` to match the importer. Existing calls
+  compile unchanged.
+
 ## [0.3.0] — 2026-11-11
 
 0.2.1 plus a choosable present mode (V-Sync), asked for by CHIMERA's Graphics tab. New API, opt-in: a zeroed
