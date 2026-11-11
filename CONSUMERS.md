@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at tag `v0.2.1` (BTBH `d2689071`, 2026-11-11) | `renderer.pin` → `../btbh-renderer-v0.2.1` (tag `v0.2.1`; CHIMERA `b522f4ee`, 2026-11-11) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
+| Pinned version | submodule at tag `v0.2.1` (BTBH `d2689071`, 2026-11-11) | `renderer.pin` → `../btbh-renderer-v0.3.0` (tag `v0.3.0`; CHIMERA `099d45ec`, 2026-11-11) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
 
 ## Features used
 
