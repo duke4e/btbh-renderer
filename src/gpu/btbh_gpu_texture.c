@@ -931,7 +931,9 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_ex(
 }
 
 void btbh_gpu_texture_destroy(BTBHGPUTexture *texture) {
-    if (texture == NULL) {
+    /* A texture models share belongs to the share (btbh_gpu_model.c), which frees it when the last
+       model lets go: a host's destroy of it, from BTBHGPUModelMaterialInfo, must not free it twice. */
+    if (texture == NULL || texture->share != NULL) {
         return;
     }
     SDL_GPUDevice *device = NULL;

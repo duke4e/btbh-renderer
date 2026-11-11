@@ -3768,6 +3768,66 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(material.alphaCutoff, 0.42, accuracy: 0.0001)
     }
 
+    func testModelImportFlagsMatchTheCEnum() {
+        XCTAssertEqual(
+            ModelImportFlags.ignoreMaterialTextures.rawValue,
+            UInt32(BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES)
+        )
+        XCTAssertEqual(
+            ModelImportFlags.shareExternalTextures.rawValue,
+            UInt32(BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES)
+        )
+    }
+
+    func testGLTFImportSharesExternalTexturesOnlyWhenAsked() throws {
+        let probe = try GPUWindowProbe(
+            request: .platformDefault,
+            title: "BTBH shared imported textures",
+            width: 320,
+            height: 180,
+            hidden: true,
+            debugMode: true
+        )
+        defer { probe.shutdown() }
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let path = packageRoot
+            .appendingPathComponent(
+                "Tests/Fixtures/material-factor-triangle.gltf"
+            )
+            .path
+        let first = try probe.loadModel(
+            path: path,
+            flags: [.meshData, .shareExternalTextures]
+        )
+        let second = try probe.loadModel(
+            path: path,
+            flags: [.meshData, .shareExternalTextures]
+        )
+        let own = try probe.loadModel(path: path, flags: [.meshData])
+        defer { GPUWindowProbe.destroyModel(own.pointer) }
+
+        let shared = try XCTUnwrap(first.materials[1].normalTexture)
+        let sharedORM = try XCTUnwrap(first.materials[1].ormTexture)
+        XCTAssertEqual(second.materials[1].normalTexture, shared)
+        XCTAssertEqual(second.materials[1].ormTexture, sharedORM)
+        XCTAssertNotEqual(sharedORM, shared)
+        XCTAssertNotNil(own.materials[1].normalTexture)
+        XCTAssertNotEqual(own.materials[1].normalTexture, shared)
+        XCTAssertNotEqual(own.materials[1].ormTexture, sharedORM)
+        // Either model may go first: the texture stays for the other.
+        GPUWindowProbe.destroyModel(first.pointer)
+        var info = BTBHGPUModelMaterialInfo()
+        XCTAssertEqual(
+            btbh_gpu_model_material_info(second.pointer, 1, &info),
+            BTBH_GPU_OK
+        )
+        XCTAssertEqual(info.normal_texture, shared)
+        GPUWindowProbe.destroyModel(second.pointer)
+    }
+
     func testAssimpOBJImportPreservesLegacyMaterialFactors() throws {
         let probe = try GPUWindowProbe(
             request: .platformDefault,

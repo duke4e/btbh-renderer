@@ -360,9 +360,28 @@ typedef struct BTBHGPUModelReport {
 } BTBHGPUModelReport;
 
 enum {
-    BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES = 1u << 2
+    BTBH_GPU_MODEL_IMPORT_IGNORE_MATERIAL_TEXTURES = 1u << 2,
+    /* Models that load an external image (a glTF image with a uri, resolved against the model's
+       directory) share one texture of it, in the window's cache, keyed by the image's normalised
+       path and the texture's format: an sRGB albedo or emission texture never shares with a linear
+       normal or ORM one. A composed ORM texture is shared by its pair of external images. Embedded
+       (buffer-view) images stay each model's own. The key is lexical ('\' and '/' alike, "." and
+       "name/.." folded); spellings that differ otherwise (letter case, links) load twice. Without
+       the flag every model loads its own textures, as before. IGNORE_MATERIAL_TEXTURES wins over it.
+       (since 0.4.0) */
+    BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES = 1u << 3
 };
 
+/* Defined when BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES exists (since 0.4.0). */
+#define BTBH_GPU_MODEL_HAS_SHARED_EXTERNAL_TEXTURES 1
+
+/* An imported material (btbh_gpu_model_material_info). Its textures belong to the model: the
+   model's destroy, or the window's, frees them, and they live as long as the model does.
+   A texture shared by BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES belongs to the window's cache:
+   every material that holds it keeps it alive, the last model destroyed frees it, the window's
+   destroy frees what is left, and btbh_gpu_texture_destroy on it does nothing. Any other model
+   texture is the model's alone, as before: the host must not destroy it (the model would free it
+   again). */
 typedef struct BTBHGPUModelMaterialInfo {
     BTBHGPUTexture *albedo_texture;
     uint8_t albedo_red;
