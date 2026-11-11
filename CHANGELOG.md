@@ -25,6 +25,29 @@ All notable changes to this project are documented here. The format follows
   an imported material's emission texture as `albedoTexture`, `normalTexture` and `ormTexture` replace theirs.
   It wins over `clearEmissionTexture`. Load it with `colorSpace: .sRGB` to match the importer. Existing calls
   compile unchanged.
+- **Readable small text** (RFC 0004, option A; prototype for the games to accept): `btbh_gpu_window_font_load_ex`
+  bakes a font from a `BTBHGPUFontDesc` with stb_truetype's packer, oversampled (`oversample_x`, `oversample_y`,
+  up to 8) and prefiltered. `BTBHGPUFontGlyph` then has fractional offsets and advances and UVs that undo the
+  oversampling, so a glyph drawn on the 1/`oversample_x` pixel grid stays sharp and spacing stays even. Its atlas
+  is always linear. `snap_advances` rounds advances and kerning to whole pixels. `coverage_gamma` (0.25 to 4,
+  0 = 1) is applied once to the atlas while baking: 1.2-1.4 thickens light-on-dark text, and the canvas shader
+  doesn't change. An invalid descriptor returns NULL with `BTBH_GPU_INVALID_ARGUMENT` and the reason in the
+  report.
+- `btbh_gpu_font_metrics`: ascent, descent, line gap and size in pixels (for a plain font, what its report says).
+- `btbh_gpu_font_kerning(font, left, right)`: the font's kerning in pixels (GPOS pairs or its kern table),
+  precomputed between the baked glyphs. 0 for fonts from `btbh_gpu_window_font_load`.
+- `BTBH_GPU_HAS_FONT_LOAD_EX`, defined when these exist, for hosts that build against several releases.
+- Native test `btbh_gpu_font_smoke` (GPU): `_ex`'s validation, its metrics against the plain loader (within a
+  pixel), kerning, the coverage curve, and a line of text at 10, 12 and 16 px with and without `_ex`, read back
+  into PNGs (`font-smoke/` in the build directory). Its face is Titillium Web SemiBold (OFL), added under
+  `Tests/Fixtures` with its licence. `check.ps1 -SkipGpuTests` and `SKIP_GPU_TESTS=1 check.sh` skip it.
+
+### Upgrading
+- Nothing changes unless a model is loaded with `BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES` or a patch sets
+  `emissionTexture`.
+- Nothing changes unless a game calls `btbh_gpu_window_font_load_ex`: `btbh_gpu_window_font_load` is byte for
+  byte the same. No shader changed.
+- Swift: no wrapper yet (Be The Bullet Hell doesn't need one).
 
 ## [0.3.0] — 2026-11-11
 
