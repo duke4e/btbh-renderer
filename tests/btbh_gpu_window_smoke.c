@@ -181,6 +181,77 @@ int main(void) {
         telemetry[0].cpu_submit_milliseconds
     );
 
+    /* The present mode switches at run time (0.3.0): VSYNC always, IMMEDIATE and MAILBOX where the
+       window has them (else VSYNC), and 0 goes back to the default the claim took, the fastest. */
+    const BTBHGPUPresentMode default_mode = window_report.present_mode;
+    const BTBHGPUPresentMode requests[] = {
+        BTBH_GPU_PRESENT_MODE_VSYNC,
+        BTBH_GPU_PRESENT_MODE_IMMEDIATE,
+        BTBH_GPU_PRESENT_MODE_MAILBOX,
+        BTBH_GPU_PRESENT_MODE_VSYNC,
+        BTBH_GPU_PRESENT_MODE_VSYNC,
+        BTBH_GPU_PRESENT_MODE_INVALID
+    };
+    int has_immediate = 0;
+    int has_mailbox = 0;
+    for (size_t index = 0; index < sizeof(requests) / sizeof(requests[0]); index += 1) {
+        const BTBHGPUPresentMode request = requests[index];
+        BTBHGPUWindowReport switch_report = {0};
+        assert(
+            btbh_gpu_window_set_present_mode(window, request, &switch_report) ==
+            BTBH_GPU_OK
+        );
+        const BTBHGPUPresentMode taken = switch_report.present_mode;
+        printf("present mode: asked %d, took %d\n", (int) request, (int) taken);
+        if (request == BTBH_GPU_PRESENT_MODE_INVALID) {
+            assert(taken == default_mode);
+        } else if (request == BTBH_GPU_PRESENT_MODE_VSYNC) {
+            assert(taken == BTBH_GPU_PRESENT_MODE_VSYNC);
+        } else {
+            assert(taken == request || taken == BTBH_GPU_PRESENT_MODE_VSYNC);
+        }
+        if (request == BTBH_GPU_PRESENT_MODE_IMMEDIATE) {
+            has_immediate = taken == BTBH_GPU_PRESENT_MODE_IMMEDIATE;
+        }
+        if (request == BTBH_GPU_PRESENT_MODE_MAILBOX) {
+            has_mailbox = taken == BTBH_GPU_PRESENT_MODE_MAILBOX;
+        }
+        assert(switch_report.claimed != 0);
+        assert(switch_report.logical_width == 800);
+        assert(switch_report.swapchain_format == present_report.swapchain_format);
+        assert(switch_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
+        BTBHGPUWindowReport switched_present_report = {0};
+        assert(
+            btbh_gpu_window_present_clear(
+                window,
+                18u,
+                52u,
+                86u,
+                255u,
+                &switched_present_report
+            ) == BTBH_GPU_OK
+        );
+        assert(switched_present_report.present_mode == taken);
+        assert(switched_present_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
+    }
+    /* The default is the first of IMMEDIATE, MAILBOX and VSYNC the window has, as before 0.3.0. */
+    assert(
+        default_mode ==
+        (has_immediate ? BTBH_GPU_PRESENT_MODE_IMMEDIATE
+            : has_mailbox ? BTBH_GPU_PRESENT_MODE_MAILBOX
+            : BTBH_GPU_PRESENT_MODE_VSYNC)
+    );
+    {
+        BTBHGPUWindowReport unknown_report = {0};
+        assert(
+            btbh_gpu_window_set_present_mode(
+                window,
+                (BTBHGPUPresentMode) 4,
+                &unknown_report
+            ) == BTBH_GPU_INVALID_ARGUMENT
+        );
+        assert(unknown_report.result == BTBH_GPU_OK && unknown_report.present_mode == 0);
+    }
     /* Alt+Enter enters borderless desktop fullscreen and leaves it again; the key press never
        reaches the project key state, so Enter bindings do not fire with it. */
     int window_count = 0;
@@ -207,6 +278,62 @@ int main(void) {
     }
 
     btbh_gpu_window_destroy(window);
+
+    /* The descriptor's present mode is what the claim asks for (0.3.0); before the claim the
+       runtime switch changes only the request. Hidden windows, so nothing more shows. */
+    for (int before_claim = 0; before_claim < 2; before_claim += 1) {
+        BTBHGPUWindowDescriptor vsync_descriptor = window_descriptor;
+        vsync_descriptor.title = "BTBH SDL_GPU window smoke (V-Sync)";
+        vsync_descriptor.hidden = 1;
+        vsync_descriptor.fullscreen_toggle = 0;
+        vsync_descriptor.present_mode = before_claim != 0
+            ? (uint8_t) BTBH_GPU_PRESENT_MODE_MAILBOX
+            : (uint8_t) BTBH_GPU_PRESENT_MODE_VSYNC;
+        BTBHGPUWindowReport vsync_report = {0};
+        BTBHGPUWindow *vsync_window = btbh_gpu_window_create(
+            &vsync_descriptor,
+            &vsync_report
+        );
+        assert(vsync_window != NULL);
+        if (before_claim != 0) {
+            assert(
+                btbh_gpu_window_set_present_mode(
+                    vsync_window,
+                    BTBH_GPU_PRESENT_MODE_VSYNC,
+                    &vsync_report
+                ) == BTBH_GPU_OK
+            );
+            assert(vsync_report.claimed == 0);
+            assert(vsync_report.present_mode == BTBH_GPU_PRESENT_MODE_INVALID);
+        }
+        assert(
+            btbh_gpu_window_claim(device, vsync_window, &vsync_report) ==
+            BTBH_GPU_OK
+        );
+        assert(vsync_report.present_mode == BTBH_GPU_PRESENT_MODE_VSYNC);
+        assert(vsync_report.composition == BTBH_GPU_SWAPCHAIN_SDR);
+        assert(
+            btbh_gpu_window_present_clear(
+                vsync_window,
+                18u,
+                52u,
+                86u,
+                255u,
+                &vsync_report
+            ) == BTBH_GPU_OK
+        );
+        assert(vsync_report.present_mode == BTBH_GPU_PRESENT_MODE_VSYNC);
+        assert(
+            btbh_gpu_window_set_present_mode(
+                vsync_window,
+                BTBH_GPU_PRESENT_MODE_INVALID,
+                &vsync_report
+            ) == BTBH_GPU_OK
+        );
+        assert(vsync_report.present_mode == default_mode);
+        btbh_gpu_window_destroy(vsync_window);
+    }
+
     btbh_gpu_device_shutdown(device);
     btbh_gpu_device_destroy(device);
     return 0;

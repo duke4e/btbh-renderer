@@ -28,6 +28,20 @@ final class GPUWindowProbeTests: XCTestCase {
         }
     }
 
+    func testPresentModesMatchTheCEnum() {
+        let expected: [(GPUPresentMode, BTBHGPUPresentMode)] = [
+            (.automatic, BTBH_GPU_PRESENT_MODE_INVALID),
+            (.vsync, BTBH_GPU_PRESENT_MODE_VSYNC),
+            (.immediate, BTBH_GPU_PRESENT_MODE_IMMEDIATE),
+            (.mailbox, BTBH_GPU_PRESENT_MODE_MAILBOX),
+        ]
+        XCTAssertEqual(expected.count, GPUPresentMode.allCases.count)
+        for (mode, native) in expected {
+            XCTAssertEqual(Int(mode.rawValue), Int(native.rawValue))
+        }
+        XCTAssertEqual(BTBHGPUWindowDescriptor().present_mode, 0)
+    }
+
     func testRadianceCascadesPipelineCacheSeparatesAttachmentLayouts()
         throws
     {

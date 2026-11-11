@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — unreleased
+
+0.2.1 plus a choosable present mode (V-Sync), asked for by CHIMERA's Graphics tab. New API, opt-in: a zeroed
+`BTBHGPUWindowDescriptor` takes the same present mode as before, and nothing else changed. No shader changed.
+
+### Added
+- **Choosable present mode**: `BTBHGPUWindowDescriptor.present_mode` (a `BTBHGPUPresentMode` in a byte that
+  was `reserved`, so the struct keeps its size). `BTBH_GPU_PRESENT_MODE_INVALID` (0) takes the first of
+  IMMEDIATE, MAILBOX and VSYNC that the window supports, as before. `BTBH_GPU_PRESENT_MODE_VSYNC`,
+  `_IMMEDIATE` or `_MAILBOX` asks for that mode, and takes VSYNC, which every window supports, where the window
+  lacks it. Any other value fails `btbh_gpu_window_create`. `BTBHGPUWindowReport.present_mode` says what was
+  taken.
+- `btbh_gpu_window_set_present_mode(window, mode, report)`: switches the mode at run time, without recreating
+  the window, by the same rules (0 is the default choice again). The swapchain keeps its SDR composition.
+  Call it between frames: with a frame pending (a scene presented, its canvas not yet) it changes nothing and
+  returns `BTBH_GPU_INVALID_ARGUMENT`. Switching rebuilds the swapchain and may wait for the GPU to finish
+  the frames in flight; a request that resolves to the mode in use does nothing. Before the claim it sets the
+  mode the claim asks for.
+- `BTBH_GPU_WINDOW_HAS_PRESENT_MODE`, defined when both exist, for hosts that build against several releases.
+- Swift: `GPUPresentMode` (`.automatic`, `.vsync`, `.immediate`, `.mailbox`), `GPUWindowProbe`'s
+  `presentMode:` parameter (defaults to `.automatic`) and `GPUWindowProbe.setPresentMode(_:)`. Existing calls
+  compile unchanged. `GPUPlatform` and `WindowDescriptor` don't take a present mode yet.
+
+### Upgrading
+- Nothing to set: a zeroed descriptor, `= {0}` or `..Default::default()`, presents as in 0.2.1.
+- For a V-Sync option, V-Sync on is `BTBH_GPU_PRESENT_MODE_VSYNC`, and V-Sync off is 0 (the fastest mode the
+  window has). Asking for IMMEDIATE instead gives VSYNC on a window that has only MAILBOX besides it.
+
 ## [0.2.1] — 2026-11-11
 
 0.2.0 plus a skinning fix found by CHIMERA. No API changed, but the skinned vertex shaders and the model

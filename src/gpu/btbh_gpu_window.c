@@ -221,29 +221,67 @@ static BTBHGPUTextureFormat btbh_gpu_texture_format(
     }
 }
 
-static SDL_GPUPresentMode btbh_gpu_choose_present_mode(
+BTBHGPUPresentMode btbh_gpu_resolve_present_mode(
+    int requested,
+    bool supports_immediate,
+    bool supports_mailbox
+) {
+    switch (requested) {
+        case BTBH_GPU_PRESENT_MODE_INVALID:
+            /* The default: the fastest mode the window supports (the only choice before 0.3.0). */
+            if (supports_immediate) {
+                return BTBH_GPU_PRESENT_MODE_IMMEDIATE;
+            }
+            return supports_mailbox
+                ? BTBH_GPU_PRESENT_MODE_MAILBOX
+                : BTBH_GPU_PRESENT_MODE_VSYNC;
+        case BTBH_GPU_PRESENT_MODE_VSYNC:
+            return BTBH_GPU_PRESENT_MODE_VSYNC;
+        case BTBH_GPU_PRESENT_MODE_IMMEDIATE:
+            return supports_immediate
+                ? BTBH_GPU_PRESENT_MODE_IMMEDIATE
+                : BTBH_GPU_PRESENT_MODE_VSYNC;
+        case BTBH_GPU_PRESENT_MODE_MAILBOX:
+            return supports_mailbox
+                ? BTBH_GPU_PRESENT_MODE_MAILBOX
+                : BTBH_GPU_PRESENT_MODE_VSYNC;
+        default:
+            return BTBH_GPU_PRESENT_MODE_INVALID;
+    }
+}
+
+static SDL_GPUPresentMode btbh_gpu_sdl_present_mode(BTBHGPUPresentMode mode) {
+    switch (mode) {
+        case BTBH_GPU_PRESENT_MODE_IMMEDIATE:
+            return SDL_GPU_PRESENTMODE_IMMEDIATE;
+        case BTBH_GPU_PRESENT_MODE_MAILBOX:
+            return SDL_GPU_PRESENTMODE_MAILBOX;
+        default:
+            return SDL_GPU_PRESENTMODE_VSYNC;
+    }
+}
+
+/* The mode a claimed window takes for the request (a valid BTBHGPUPresentMode); SDL guarantees VSYNC. */
+static BTBHGPUPresentMode btbh_gpu_choose_present_mode(
     BTBHGPUDevice *device,
     BTBHGPUWindow *window,
-    BTBHGPUPresentMode *project_mode
+    BTBHGPUPresentMode requested
 ) {
-    if (SDL_WindowSupportsGPUPresentMode(
+    const bool supports_immediate = SDL_WindowSupportsGPUPresentMode(
         device->gpu,
         window->window,
         SDL_GPU_PRESENTMODE_IMMEDIATE
-    )) {
-        *project_mode = BTBH_GPU_PRESENT_MODE_IMMEDIATE;
-        return SDL_GPU_PRESENTMODE_IMMEDIATE;
-    }
-    if (SDL_WindowSupportsGPUPresentMode(
+    );
+    const bool supports_mailbox = SDL_WindowSupportsGPUPresentMode(
         device->gpu,
         window->window,
         SDL_GPU_PRESENTMODE_MAILBOX
-    )) {
-        *project_mode = BTBH_GPU_PRESENT_MODE_MAILBOX;
-        return SDL_GPU_PRESENTMODE_MAILBOX;
-    }
-    *project_mode = BTBH_GPU_PRESENT_MODE_VSYNC;
-    return SDL_GPU_PRESENTMODE_VSYNC;
+    );
+    return btbh_gpu_resolve_present_mode(
+        (int) requested,
+        supports_immediate,
+        supports_mailbox
+    );
 }
 
 static uint32_t btbh_gpu_default_allowed_frames_in_flight(void) {
@@ -350,7 +388,9 @@ BTBHGPUWindow *btbh_gpu_window_create(
     memset(report, 0, sizeof(*report));
     if (
         descriptor->title == NULL ||
-        !btbh_gpu_valid_window_size(descriptor->width, descriptor->height)
+        !btbh_gpu_valid_window_size(descriptor->width, descriptor->height) ||
+        btbh_gpu_resolve_present_mode(descriptor->present_mode, false, false) ==
+            BTBH_GPU_PRESENT_MODE_INVALID
     ) {
         btbh_gpu_set_window_error(
             report,
@@ -415,6 +455,7 @@ BTBHGPUWindow *btbh_gpu_window_create(
         );
     }
     window->fullscreen_toggle = descriptor->fullscreen_toggle != 0;
+    window->requested_present_mode = (BTBHGPUPresentMode) descriptor->present_mode;
     /* Centred on the primary display, the display the size was fitted to. SDL centres an
        undefined position itself on Windows and macOS but leaves it to the window manager
        on X11, which put the window in a corner; Wayland compositors place it themselves. */
@@ -490,13 +531,14 @@ BTBHGPUResult btbh_gpu_window_claim(
 
     window->device = device;
     window->claimed = true;
-    BTBHGPUPresentMode project_present_mode =
-        BTBH_GPU_PRESENT_MODE_INVALID;
-    const SDL_GPUPresentMode present_mode = btbh_gpu_choose_present_mode(
-        device,
-        window,
-        &project_present_mode
-    );
+    const BTBHGPUPresentMode project_present_mode =
+        btbh_gpu_choose_present_mode(
+            device,
+            window,
+            window->requested_present_mode
+        );
+    const SDL_GPUPresentMode present_mode =
+        btbh_gpu_sdl_present_mode(project_present_mode);
     const uint32_t allowed_frames_in_flight =
         btbh_gpu_allowed_frames_in_flight();
     if (
@@ -677,6 +719,87 @@ BTBHGPUResult btbh_gpu_window_restore(
     BTBHGPUWindowReport *report
 ) {
     return btbh_gpu_window_set_minimized(window, false, report);
+}
+
+BTBHGPUResult btbh_gpu_window_set_present_mode(
+    BTBHGPUWindow *window,
+    BTBHGPUPresentMode present_mode,
+    BTBHGPUWindowReport *report
+) {
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        report == NULL ||
+        btbh_gpu_resolve_present_mode((int) present_mode, false, false) ==
+            BTBH_GPU_PRESENT_MODE_INVALID ||
+        (window->claimed &&
+            (window->device == NULL || window->device->gpu == NULL))
+    ) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+
+    memset(report, 0, sizeof(*report));
+    /* A pending frame holds an acquired swapchain image (or a scene waiting for one), and SDL
+       rebuilds the swapchain when its present mode changes. */
+    if (window->pending_command != NULL || window->pending_scene_ready) {
+        (void) btbh_gpu_refresh_window_sizes(window, report);
+        report->result = BTBH_GPU_INVALID_ARGUMENT;
+        report->error_stage = BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION;
+        (void) snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            "A frame is pending: switch the present mode between frames"
+        );
+        return report->result;
+    }
+
+    if (window->claimed) {
+        const BTBHGPUPresentMode taken = btbh_gpu_choose_present_mode(
+            window->device,
+            window,
+            present_mode
+        );
+        if (
+            taken != window->present_mode &&
+            !SDL_SetGPUSwapchainParameters(
+                window->device->gpu,
+                window->window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                btbh_gpu_sdl_present_mode(taken)
+            )
+        ) {
+            btbh_gpu_set_window_error(
+                report,
+                BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+                SDL_GetError()
+            );
+            /* SDL may have taken the new mode before rebuilding the swapchain failed: go back to
+               the mode in use, so the report's present_mode stays true. */
+            (void) SDL_SetGPUSwapchainParameters(
+                window->device->gpu,
+                window->window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                btbh_gpu_sdl_present_mode(window->present_mode)
+            );
+            btbh_gpu_write_window_state(window, report);
+            return report->result;
+        }
+        window->present_mode = taken;
+    }
+    window->requested_present_mode = present_mode;
+
+    if (!btbh_gpu_refresh_window_sizes(window, report)) {
+        btbh_gpu_set_window_error(
+            report,
+            BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
+            SDL_GetError()
+        );
+        btbh_gpu_write_window_state(window, report);
+        return report->result;
+    }
+    report->result = BTBH_GPU_OK;
+    return report->result;
 }
 
 BTBHGPUResult btbh_gpu_window_present_clear(

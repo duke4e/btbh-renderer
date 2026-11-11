@@ -9,8 +9,8 @@ extern "C" {
 
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
-#define BTBH_GPU_VERSION_MINOR 2
-#define BTBH_GPU_VERSION_PATCH 1
+#define BTBH_GPU_VERSION_MINOR 3
+#define BTBH_GPU_VERSION_PATCH 0
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
 /* Lamps (street lamps, car headlights) a scene draw weighs per pixel (BTBHGPUSceneLighting.lamp_*). */
@@ -144,8 +144,19 @@ typedef struct BTBHGPUWindowDescriptor {
     /* 1...100 sizes the window to that percentage of the primary display (keeping the
        width:height aspect and fitting the usable area); 0 uses width x height exactly. */
     uint8_t display_percent;
-    uint8_t reserved[3];
+    /* The present mode the claim asks for, a BTBHGPUPresentMode (since 0.3.0).
+       0 (BTBH_GPU_PRESENT_MODE_INVALID) takes the first of IMMEDIATE, MAILBOX and VSYNC that the
+       window supports, as before. VSYNC, IMMEDIATE or MAILBOX asks for that mode, and takes VSYNC,
+       which every window supports, where the window lacks it. Any other value fails the create.
+       BTBHGPUWindowReport.present_mode says what was taken; btbh_gpu_window_set_present_mode
+       switches it later. */
+    uint8_t present_mode;
+    uint8_t reserved[2];
 } BTBHGPUWindowDescriptor;
+
+/* Defined when BTBHGPUWindowDescriptor.present_mode and btbh_gpu_window_set_present_mode exist
+   (since 0.3.0). */
+#define BTBH_GPU_WINDOW_HAS_PRESENT_MODE 1
 
 typedef struct BTBHGPUWindowReport {
     BTBHGPUResult result;
@@ -1066,6 +1077,20 @@ BTBHGPUResult btbh_gpu_window_minimize(
 );
 BTBHGPUResult btbh_gpu_window_restore(
     BTBHGPUWindow *window,
+    BTBHGPUWindowReport *report
+);
+/* Switches the window's present mode without recreating the window, e.g. from a Graphics menu's
+   V-Sync row (since 0.3.0). present_mode is taken as BTBHGPUWindowDescriptor.present_mode is:
+   0 for the default choice (the fastest mode the window supports), else that mode, or VSYNC where
+   the window lacks it. The swapchain keeps its SDR composition. report->present_mode says what
+   was taken, from the next frame on. Switching may wait for the GPU to finish the frames in
+   flight; a request that resolves to the mode in use changes nothing. Call it between frames:
+   while a frame is pending (a scene presented, its canvas not yet) it changes nothing and returns
+   BTBH_GPU_INVALID_ARGUMENT. Before the claim it sets the mode the claim asks for. An unknown
+   mode returns BTBH_GPU_INVALID_ARGUMENT without touching the report. */
+BTBHGPUResult btbh_gpu_window_set_present_mode(
+    BTBHGPUWindow *window,
+    BTBHGPUPresentMode present_mode,
     BTBHGPUWindowReport *report
 );
 BTBHGPUResult btbh_gpu_window_present_clear(

@@ -114,6 +114,18 @@ static void test_matching_snapshot_passes(void) {
     assert(report.missing_features == 0);
 }
 
+/* present_mode takes the first reserved byte after display_percent, so the window descriptor
+ * keeps its size (0.3.0). */
+_Static_assert(
+    offsetof(BTBHGPUWindowDescriptor, present_mode) ==
+        offsetof(BTBHGPUWindowDescriptor, display_percent) + 1u,
+    "present_mode must follow display_percent"
+);
+_Static_assert(
+    sizeof(void *) != 8u || sizeof(BTBHGPUWindowDescriptor) == 24u,
+    "the window descriptor must keep its 64-bit size"
+);
+
 /* The mirror flag takes the padding byte after upscale_mode, so the
  * radiance-cascade block keeps its offset and the struct its size. */
 _Static_assert(

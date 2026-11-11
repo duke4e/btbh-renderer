@@ -187,6 +187,19 @@ public final class GPUDeviceProbe {
     }
 }
 
+/// The present mode a GPU window asks for (`BTBHGPUWindowDescriptor.present_mode`, since 0.3.0).
+/// `GPUWindowDiagnostics.presentMode` says what the window took.
+public enum GPUPresentMode: UInt8, Equatable, Sendable, CaseIterable {
+    /// The fastest mode the window supports: immediate, else mailbox, else V-Sync (as before 0.3.0).
+    case automatic = 0
+    /// V-Sync, which every window supports.
+    case vsync = 1
+    /// Immediate (it may tear); V-Sync where the window lacks it.
+    case immediate = 2
+    /// Mailbox (the newest frame replaces a waiting one); V-Sync where the window lacks it.
+    case mailbox = 3
+}
+
 public struct GPUWindowDiagnostics: Equatable, Sendable {
     public let logicalWidth: UInt32
     public let logicalHeight: UInt32
@@ -1347,6 +1360,7 @@ public final class GPUWindowProbe {
         resizable: Bool = false,
         fullscreenToggle: Bool = false,
         displayPercent: UInt8 = 0,
+        presentMode: GPUPresentMode = .automatic,
         debugMode: Bool
     ) throws {
         deviceProbe = try GPUDeviceProbe(
@@ -1363,6 +1377,7 @@ public final class GPUWindowProbe {
         descriptor.resizable = resizable ? 1 : 0
         descriptor.fullscreen_toggle = fullscreenToggle ? 1 : 0
         descriptor.display_percent = min(displayPercent, 100)
+        descriptor.present_mode = presentMode.rawValue
         createdWindow = title.withCString { titlePointer in
             descriptor.title = titlePointer
             return btbh_gpu_window_create(&descriptor, &report)
@@ -1404,6 +1419,18 @@ public final class GPUWindowProbe {
                 green,
                 blue,
                 alpha,
+                report
+            )
+        }
+    }
+
+    /// Switches the present mode without recreating the window (a Graphics menu's V-Sync row).
+    /// Call it between frames; `windowDiagnostics.presentMode` says what was taken.
+    public func setPresentMode(_ presentMode: GPUPresentMode) throws {
+        try perform("setPresentMode") { window, report in
+            btbh_gpu_window_set_present_mode(
+                window,
+                BTBHGPUPresentMode(rawValue: numericCast(presentMode.rawValue)),
                 report
             )
         }

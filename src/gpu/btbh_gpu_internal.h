@@ -62,6 +62,9 @@ struct BTBHGPUWindow {
     BTBHGPUDevice *device;
     BTBHGPUTextureFormat swapchain_format;
     BTBHGPUPresentMode present_mode;
+    /* What the host asked for (BTBHGPUWindowDescriptor.present_mode, btbh_gpu_window_set_present_mode);
+       present_mode above is what the swapchain took. */
+    BTBHGPUPresentMode requested_present_mode;
     BTBHGPUSwapchainComposition composition;
     bool owns_video_subsystem;
     bool claimed;
@@ -214,6 +217,14 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
 void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
 uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
+/* The present mode a window takes for `requested` (a BTBHGPUPresentMode), given whether it supports
+   IMMEDIATE and MAILBOX; every window supports VSYNC. BTBH_GPU_PRESENT_MODE_INVALID for a value
+   that isn't a request. */
+BTBHGPUPresentMode btbh_gpu_resolve_present_mode(
+    int requested,
+    bool supports_immediate,
+    bool supports_mailbox
+);
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
