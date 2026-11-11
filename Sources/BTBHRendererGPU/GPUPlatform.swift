@@ -147,6 +147,7 @@ public final class GPUPlatform: GamePlatform {
     private var state = GPUPlatformState.empty
     private var forcedClose = false
     private var targetFramesPerSecond = 0
+    private var frameRatePolicy: FrameRatePolicy = .uncapped
     private var previousFrameStart: TimeInterval?
     private var frameTelemetrySamples: [GPUFrameTelemetrySample] = []
     private var sceneAdapterTelemetry: [GPUSceneAdapterTelemetrySample] = []
@@ -202,6 +203,7 @@ public final class GPUPlatform: GamePlatform {
             policy: descriptor.frameRatePolicy,
             displayRefreshRate: 0
         )
+        frameRatePolicy = descriptor.frameRatePolicy
 
         let window = try GPUWindowProbe(
             request: request,
@@ -272,6 +274,34 @@ public final class GPUPlatform: GamePlatform {
         gamepadState = GPUGamepadState()
         state = .empty
         targetFramesPerSecond = 0
+        frameRatePolicy = .uncapped
+        previousFrameStart = nil
+    }
+
+    /// The present mode the open window took: `.vsync`, `.immediate` or `.mailbox` (never `.automatic`).
+    /// `nil` without a window. A request the window lacks resolves to `.vsync`, so an options menu can
+    /// compare it with what it asked for.
+    public var presentMode: GPUPresentMode? {
+        guard let window else { return nil }
+        return GPUPresentMode(rawValue: UInt8(clamping: window.windowDiagnostics.presentMode))
+    }
+
+    /// Switches the present mode without recreating the window, for a V-Sync option: `.vsync` for on,
+    /// `.automatic` for off (the fastest mode the window has, as before 0.3.0). Call it between frames,
+    /// for example from an options menu, or right after `openWindow` to apply a saved setting.
+    ///
+    /// While the window presents with V-Sync, the swapchain paces the frames, so a `.displayRefresh` frame-rate
+    /// policy stops throttling: SDL reports the refresh as whole hertz, and a throttle at 1/60 s on a 60.05 Hz
+    /// panel would miss a vblank now and then (judder). A `.fixed` cap keeps applying, because it was asked
+    /// for. Until this is first called, pacing is exactly as before.
+    public func setPresentMode(_ mode: GPUPresentMode) throws {
+        guard let window else { throw GPUPlatformError.windowNotOpen }
+        try window.setPresentMode(mode)
+        targetFramesPerSecond = try Self.targetFrameRate(
+            policy: frameRatePolicy,
+            displayRefreshRate: state.refreshRate,
+            swapchainPacesFrames: presentMode == .vsync
+        )
         previousFrameStart = nil
     }
 
@@ -975,9 +1005,12 @@ public final class GPUPlatform: GamePlatform {
         }
     }
 
-    private static func targetFrameRate(
+    /// The throttle's target (0 = none). `swapchainPacesFrames`: the host chose a present mode and the window
+    /// took V-Sync, so `.displayRefresh` leaves the pacing to the swapchain.
+    static func targetFrameRate(
         policy: FrameRatePolicy,
-        displayRefreshRate: Int
+        displayRefreshRate: Int,
+        swapchainPacesFrames: Bool = false
     ) throws -> Int {
         switch policy {
         case .displayRefresh(let minimum):
@@ -986,6 +1019,7 @@ public final class GPUPlatform: GamePlatform {
                     "Display-refresh minimum must fit a nonnegative Int32"
                 )
             }
+            if swapchainPacesFrames { return 0 }
             return max(minimum, max(0, displayRefreshRate))
         case .fixed(let framesPerSecond):
             guard framesPerSecond > 0,

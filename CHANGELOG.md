@@ -42,12 +42,19 @@ All notable changes to this project are documented here. The format follows
   into PNGs (`font-smoke/` in the build directory). Its face is Titillium Web SemiBold (OFL), added under
   `Tests/Fixtures` with its licence. `check.ps1 -SkipGpuTests` and `SKIP_GPU_TESTS=1 check.sh` skip it.
 
+- **V-Sync through `GPUPlatform`** (asked for by Be The Bullet Hell, which opens its window through it):
+  `GPUPlatform.setPresentMode(_:)` switches the present mode between frames without reopening the window
+  (`.vsync` for on, `.automatic` for off), and `GPUPlatform.presentMode` says what the window took. While a
+  chosen mode resolves to V-Sync, a `.displayRefresh` frame-rate policy stops throttling and leaves the pacing
+  to the swapchain, so a whole-hertz throttle can't miss a vblank on a panel that is a little faster; `.fixed`
+  caps still apply. Until a game calls it, pacing is as before.
+
 ### Upgrading
 - Nothing changes unless a model is loaded with `BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES` or a patch sets
   `emissionTexture`.
 - Nothing changes unless a game calls `btbh_gpu_window_font_load_ex`: `btbh_gpu_window_font_load` is byte for
   byte the same. No shader changed.
-- Swift: no wrapper yet (Be The Bullet Hell doesn't need one).
+- Swift: no font wrapper yet (Be The Bullet Hell doesn't need one).
 
 ## [0.3.0] — 2026-11-11
 

@@ -245,6 +245,45 @@ final class GPUPlatformTests: XCTestCase {
         )
     }
 
+    func testVSyncLeavesDisplayRefreshPacingToTheSwapchain() throws {
+        XCTAssertEqual(try GPUPlatform.targetFrameRate(
+            policy: .displayRefresh(minimum: 30), displayRefreshRate: 60
+        ), 60)
+        XCTAssertEqual(try GPUPlatform.targetFrameRate(
+            policy: .displayRefresh(minimum: 30), displayRefreshRate: 60, swapchainPacesFrames: true
+        ), 0)
+        XCTAssertEqual(try GPUPlatform.targetFrameRate(
+            policy: .fixed(45), displayRefreshRate: 60, swapchainPacesFrames: true
+        ), 45)
+        XCTAssertEqual(try GPUPlatform.targetFrameRate(
+            policy: .uncapped, displayRefreshRate: 60, swapchainPacesFrames: true
+        ), 0)
+    }
+
+    func testPlatformSwitchesPresentModeWithoutReopening() throws {
+        let platform = GPUPlatform(request: .platformDefault, debugMode: true)
+        XCTAssertNil(platform.presentMode)
+        XCTAssertThrowsError(try platform.setPresentMode(.vsync)) { error in
+            XCTAssertEqual(error as? GPUPlatformError, .windowNotOpen)
+        }
+        try platform.openWindow(.init(
+            title: "BTBH GPU present mode test",
+            width: 320,
+            height: 180,
+            mode: .windowed,
+            drawableScalePolicy: .oneToOne
+        ))
+        defer { platform.closeWindow() }
+        let automatic = try XCTUnwrap(platform.presentMode)
+        XCTAssertNotEqual(automatic, .automatic)
+        _ = platform.beginFrame()
+        try platform.setPresentMode(.vsync)
+        XCTAssertEqual(platform.presentMode, .vsync)
+        _ = platform.beginFrame()
+        try platform.setPresentMode(.automatic)
+        XCTAssertEqual(platform.presentMode, automatic)
+    }
+
     func testPlatformOwnsWindowTimingAndCleanShutdown() throws {
         let platform = GPUPlatform(
             request: .platformDefault,
