@@ -799,7 +799,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).
         add_executable(btbh_gpu_font_smoke
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_font_smoke.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_font_smoke.c"
         )
         target_include_directories(
             btbh_gpu_font_smoke
