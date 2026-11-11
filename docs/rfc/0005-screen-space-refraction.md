@@ -1,7 +1,6 @@
 # RFC 0005: Screen-space refraction batches
 
-- **Status:** Prototype on branch `feature/refraction`, accepted by CHIMERA after testing on Windows/Vulkan
-  (2026-10-31); waits for the Mac's `tools/check.sh` and a release
+- **Status:** Implemented in v0.1.0. Accepted by CHIMERA after testing on Windows/Vulkan (2026-10-31)
 - **Requested by:** CHIMERA (2026-10-31: "Void Matter" and "Optical Fluid")
 - **Affects:** CHIMERA (adopts it). Be The Bullet Hell and Tyrian3D: nothing, opt-in
 - **Issue:** to be opened
