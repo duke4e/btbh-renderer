@@ -6,10 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.0] — unreleased
+## [0.3.0] — 2026-11-11
 
 0.2.1 plus a choosable present mode (V-Sync), asked for by CHIMERA's Graphics tab. New API, opt-in: a zeroed
 `BTBHGPUWindowDescriptor` takes the same present mode as before, and nothing else changed. No shader changed.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes, the Swift build, and CHIMERA's build and on-screen
+test at 60 Hz. In a running mission, V-Sync toggled on and off without recreating the window, and the report
+followed. On capped the frame rate at the refresh. Off left 7 scenes with 0 differing pixels against 0.2.1, at
+the same frame rate within noise. macOS (Metal) isn't verified, as for 0.2.0.
 
 ### Added
 - **Choosable present mode**: `BTBHGPUWindowDescriptor.present_mode` (a `BTBHGPUPresentMode` in a byte that
