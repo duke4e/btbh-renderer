@@ -6,6 +6,55 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+0.3.0 plus destructible terrain from SDF edits, phases 1 to 3 of [RFC 0007](docs/rfc/0007-destructible-terrain.md)
+(asked for by Be The Bullet Hell and CHIMERA on #3). New API, opt-in: a zeroed `BTBHGPUSceneGeometryBatch` and a
+host with no terrain render as before. The scene, unlit, shadow and radiance-cascade material-source shaders
+changed (a dig-mask branch that a zeroed batch never takes): rebuild the shaders together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (17/17), with the new native test
+(`btbh_gpu_sdf_terrain`) and GPU contract test (`btbh_gpu_sdf_terrain_smoke`). A plain ground renders
+byte-identical with 0.3.0's compiled shaders. macOS (Metal), the Swift build and the games aren't verified.
+
+### Added
+- **`BTBHGPUSdfTerrain`** (`include/btbh_gpu/btbh_gpu_sdf_terrain.h`, included at the end of `btbh_gpu.h`;
+  `BTBH_GPU_HAS_SDF_TERRAIN`): the ground before any damage (a heightfield, or the host's batch function) and an
+  ordered list of edits: sphere, ellipsoid, rounded box, capsule, rounded cylinder and torus shapes that ADD,
+  SUBTRACT, INTERSECT (within the edit's bounds) or PAINT, with a smooth-min radius and a material.
+  - `btbh_gpu_sdf_terrain_create` needs no window; `add_edit`, `set_edit` (non-destructive) and `remove_edit`;
+    `update` with a budget in microseconds and an optional `run_jobs` callback (the same results either way).
+  - Queries from the edit list, exact whatever the budget left pending: `distance`, `height`, `raycast`,
+    `sample_height_deltas`, and `take_changes` for the rectangles whose look changed.
+  - Sparse 8³ bricks of int8 distances only where edits reach; chunk meshes from surface nets with smooth or
+    faceted normals, vertex colours from `material_colors` and watertight seams. `chunk_count`, `chunk` (a custom
+    mesh to draw as an ordinary batch) and `chunk_geometry` (its triangles on the CPU, also without a window).
+    Triangles are clockwise seen from outside: front faces for `BTBH_GPU_SCENE_CULL_BACK` under a camera built as
+    the Swift layer builds it.
+  - The edit cap (`max_edits`, 4096 by default): `edit_cap` freeze folds the oldest edits into the base, reject
+    makes `add_edit` return 0.
+  - `btbh_gpu_window_sdf_terrain_attach` / `btbh_gpu_sdf_terrain_detach`: the GPU side (the chunk meshes and the
+    dig mask) on a window. Destroying the window detaches its terrains.
+- **`BTBHGPUSceneGeometryBatch.dug_by`** (appended): ground that a terrain may dig through. Where the terrain's
+  patch has taken over (a crater, a mound's foot, paint), the batch's fragments that don't lie more than a tenth
+  of a cell under the patch's top surface are discarded at their flat world position (so `world_curvature`
+  keeps the hole under its patch), in the colour, shadow and radiance-cascade passes. The mask is one R16F
+  texel per cell column over the terrain's bounds, made on the first patch; until then the batch draws exactly
+  as with NULL. A dug batch takes the shadow pipeline with a fragment stage while the mask exists.
+
+### Changed
+- `btbh_gpu_custom_mesh_update` keeps its buffers when the new data fits and otherwise makes them a quarter
+  bigger than needed (grow-only), instead of reallocating for every size change. Nothing renders differently.
+- Shaders: `production_model*.frag`, `production_model_unlit.frag` and `production_rc_material_source.frag` take
+  one more texture (after their others) and a second fragment uniform buffer; `production_shadow.frag` takes a
+  texture and a uniform buffer; `production_shadow.vert` and `production_animated_shadow.vert` pass the world
+  position on. Shader file names are unchanged.
+
+### Upgrading
+- Nothing to set: zeroed batches (`= {0}`, `..Default::default()`, Swift's `init()`) have `dug_by` NULL.
+  Rebuild the shaders with the C core.
+- To adopt the terrain, see RFC 0007 ("Compatibility") and its implementation notes: a base, `dug_by` on the
+  host's ground batches, one patch batch per chunk with a mesh, `update` once a frame. The Swift layer doesn't
+  wrap the terrain yet; Swift hosts call the C API.
+
 ## [0.3.0] — 2026-11-11
 
 0.2.1 plus a choosable present mode (V-Sync), asked for by CHIMERA's Graphics tab. New API, opt-in: a zeroed
