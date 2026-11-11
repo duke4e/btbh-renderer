@@ -358,6 +358,8 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
     mesh->vertex_count = vertex_count;
     mesh->index_count = index_count;
     mesh->vertex_byte_count = vertex_byte_count;
+    mesh->vertex_buffer_capacity = vertex_byte_count;
+    mesh->index_buffer_capacity = index_count * (uint32_t) sizeof(uint32_t);
 
     report->result = BTBH_GPU_OK;
     report->vertex_count = vertex_count;
@@ -409,70 +411,84 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
         return report->result;
     }
 
+    /* The buffers only grow (since 0.4.0): an update that fits their capacity reuses them, and one that
+       doesn't makes them a quarter bigger than it needs, so a mesh that keeps changing size (an SDF terrain
+       chunk) stops reallocating. Draws use the counts, not the capacities. */
     SDL_GPUDevice *device = mesh->owner->device->gpu;
-    if (
-        vertex_byte_count != mesh->vertex_byte_count ||
-        index_count != mesh->index_count
-    ) {
-        SDL_GPUBuffer *new_vertex_buffer =
-            btbh_gpu_custom_mesh_create_buffer(
-                device,
-                SDL_GPU_BUFFERUSAGE_VERTEX,
-                vertex_byte_count,
-                report
-            );
-        if (new_vertex_buffer == NULL) {
-            return report->result;
-        }
-        SDL_GPUBuffer *new_index_buffer = NULL;
-        if (index_count > 0u) {
-            new_index_buffer = btbh_gpu_custom_mesh_create_buffer(
-                device,
-                SDL_GPU_BUFFERUSAGE_INDEX,
-                index_count * (uint32_t) sizeof(uint32_t),
-                report
-            );
-            if (new_index_buffer == NULL) {
-                SDL_ReleaseGPUBuffer(device, new_vertex_buffer);
-                return report->result;
-            }
-        }
-        if (!btbh_gpu_custom_mesh_upload_buffers(
-                device,
-                new_vertex_buffer,
-                vertices,
-                vertex_byte_count,
-                new_index_buffer,
-                indices,
-                index_count * (uint32_t) sizeof(uint32_t),
-                report
-            )
-        ) {
-            if (new_index_buffer != NULL) {
-                SDL_ReleaseGPUBuffer(device, new_index_buffer);
-            }
-            SDL_ReleaseGPUBuffer(device, new_vertex_buffer);
-            return report->result;
-        }
-        btbh_gpu_custom_mesh_release_handles(mesh, device);
-        mesh->vertex_buffer = new_vertex_buffer;
-        mesh->index_buffer = new_index_buffer;
-        mesh->vertex_count = vertex_count;
-        mesh->index_count = index_count;
-        mesh->vertex_byte_count = vertex_byte_count;
-    } else if (!btbh_gpu_custom_mesh_upload_buffers(
+    const uint32_t index_byte_count = index_count * (uint32_t) sizeof(uint32_t);
+    SDL_GPUBuffer *vertex_buffer = mesh->vertex_buffer;
+    SDL_GPUBuffer *index_buffer = mesh->index_buffer;
+    uint32_t vertex_capacity = mesh->vertex_buffer_capacity;
+    uint32_t index_capacity = mesh->index_buffer_capacity;
+    const bool grow_vertices = vertex_byte_count > vertex_capacity;
+    const bool grow_indices = index_byte_count > index_capacity;
+    if (grow_vertices) {
+        const uint64_t grown = (uint64_t) vertex_byte_count + (uint64_t) vertex_byte_count / 4u;
+        vertex_capacity = grown > UINT32_MAX - BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE
+            ? vertex_byte_count
+            : (uint32_t) (grown - grown % BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE);
+        vertex_buffer = btbh_gpu_custom_mesh_create_buffer(
             device,
-            mesh->vertex_buffer,
+            SDL_GPU_BUFFERUSAGE_VERTEX,
+            vertex_capacity,
+            report
+        );
+        if (vertex_buffer == NULL) {
+            return report->result;
+        }
+    }
+    if (grow_indices) {
+        const uint64_t grown = (uint64_t) index_byte_count + (uint64_t) index_byte_count / 4u;
+        index_capacity = grown > UINT32_MAX - 4u
+            ? index_byte_count
+            : (uint32_t) (grown - grown % 4u);
+        index_buffer = btbh_gpu_custom_mesh_create_buffer(
+            device,
+            SDL_GPU_BUFFERUSAGE_INDEX,
+            index_capacity,
+            report
+        );
+        if (index_buffer == NULL) {
+            if (grow_vertices) {
+                SDL_ReleaseGPUBuffer(device, vertex_buffer);
+            }
+            return report->result;
+        }
+    }
+    if (!btbh_gpu_custom_mesh_upload_buffers(
+            device,
+            vertex_buffer,
             vertices,
             vertex_byte_count,
-            mesh->index_buffer,
+            index_buffer,
             indices,
-            index_count * (uint32_t) sizeof(uint32_t),
+            index_byte_count,
             report
         )
     ) {
+        if (grow_indices) {
+            SDL_ReleaseGPUBuffer(device, index_buffer);
+        }
+        if (grow_vertices) {
+            SDL_ReleaseGPUBuffer(device, vertex_buffer);
+        }
         return report->result;
     }
+    if (grow_vertices) {
+        SDL_ReleaseGPUBuffer(device, mesh->vertex_buffer);
+        mesh->vertex_buffer = vertex_buffer;
+        mesh->vertex_buffer_capacity = vertex_capacity;
+    }
+    if (grow_indices) {
+        if (mesh->index_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, mesh->index_buffer);
+        }
+        mesh->index_buffer = index_buffer;
+        mesh->index_buffer_capacity = index_capacity;
+    }
+    mesh->vertex_count = vertex_count;
+    mesh->index_count = index_count;
+    mesh->vertex_byte_count = vertex_byte_count;
 
     report->result = BTBH_GPU_OK;
     report->vertex_count = vertex_count;

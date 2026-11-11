@@ -166,6 +166,9 @@ struct BTBHGPUCustomMesh {
     uint32_t vertex_count;
     uint32_t index_count;
     uint32_t vertex_byte_count;
+    /* The buffers' sizes in bytes: an update that fits reuses them (grow-only, since 0.4.0). */
+    uint32_t vertex_buffer_capacity;
+    uint32_t index_buffer_capacity;
 };
 
 bool btbh_gpu_scene_uses_transparent_pass(
