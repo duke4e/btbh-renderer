@@ -1,6 +1,7 @@
 # RFC 0004: Readable small text
 
-- **Status:** Draft (for later; no implementation scheduled)
+- **Status:** Prototype on branch `claude/rfc0004-small-text-037444` (option A, 2026-11-11), for CHIMERA to test
+  and accept. Findings below, under [Prototype](#prototype-2026-11-11)
 - **Requested by:** CHIMERA (its HUD's small text is unreadable)
 - **Affects:** CHIMERA (adopts it). Be The Bullet Hell and Tyrian3D: nothing, opt-in. The linear atlas default
   that `v0.1.0` takes from `tyrian3d` (`c505715`) is discussed below
@@ -15,7 +16,9 @@ requirement is better rendering at **no per-frame cost**.
 
 - `btbh_gpu_window_font_load(window, path, base_size, glyphs, count, report)` rasterises each glyph once with
   `stbtt_GetCodepointBitmap` at `base_size` px into an atlas: no oversampling, no hinting, no kerning.
-- Advances are rounded to whole pixels (`(int)(advance * scale)`), so spacing drifts at small sizes.
+- Advances are rounded down to whole pixels (`(int)(advance * scale)`), so spacing drifts at small sizes. The
+  prototype measured it: a 76-character HUD line set in Titillium Web is 11-18% narrower than the font's own
+  advances at 16-10 px, and words run together.
 - The atlas is filtered with nearest on GitHub `master`, linear since `c505715` (in `v0.1.0`).
 - The host lays out glyph quads from `BTBHGPUFontGlyph` and draws them with the canvas. The canvas goes to the
   swapchain at the window's size after the scene, so it is already at native resolution after any upscale
@@ -101,6 +104,74 @@ A separate opt-in atlas kind (`BTBH_GPU_FONT_KIND_MSDF`) and a canvas fragment v
 (`production_canvas_msdf.frag`) for titles, damage numbers and world-space labels that scale or animate. Not
 for small text. Its own RFC when a game needs it.
 
+## Prototype (2026-11-11)
+
+Built on branch `claude/rfc0004-small-text-037444` as sketched above, with nothing changed in
+`btbh_gpu_window_font_load` (the diff to `btbh_gpu_font.c` only adds) and no shader changed.
+
+**What it does**
+
+- `BTBHGPUFontDesc` as in the sketch. Validation: `pixel_size` 1 to 1024 (fractional allowed),
+  `oversample_x` and `oversample_y` 0 to 8 (stb_truetype's limit), `snap_advances` 0 or 1, `reserved` 0,
+  `coverage_gamma` 0 or 0.25 to 4. A NULL or invalid descriptor, an unclaimed window, no glyphs or a codepoint
+  above `INT_MAX` return NULL with `BTBH_GPU_INVALID_ARGUMENT` and the reason in the report. A zeroed
+  descriptor is invalid, because there is no size to default to.
+- Baking: `stbtt_PackBegin` (2 texels of padding), `stbtt_PackSetOversampling`, `stbtt_PackFontRanges` with
+  its prefilter, on stb_truetype's built-in row packer (no `stb_rect_pack.h`). The atlas starts at the smallest
+  power of two the glyph boxes need and doubles until they fit, up to 8192. Only codepoints the font has are
+  packed. The others get an empty glyph with no advance, as with the plain loader.
+- Each glyph's quad is stb's packed quad plus one texel of margin all round, so bilinear filtering at a
+  fractional position isn't cut off at the quad's edge. The UVs cover the same texels, so a quad drawn at its
+  `width` x `height` takes `oversample_x` texels per pixel across.
+- A glyph placed on the 1/`oversample_x` grid samples texel centres exactly: the box prefilter is then the
+  pixel's own coverage, and bilinear adds no blur. Off the grid it adds at most 1/`oversample_x` px of blur.
+- `coverage_gamma`: coverage' = coverage^(1/gamma), through a 256-entry table over the atlas after the
+  prefilter. 0 and 255 stay as they are.
+- `btbh_gpu_font_kerning`: stb_truetype's `GetGlyphKernAdvance` (GPOS pair adjustment, else the kern table),
+  computed once per font between every two baked glyphs. Only nonzero pairs are kept, sorted, and a lookup
+  is a binary search. With `snap_advances` the pairs are whole pixels too. A font from the plain loader has
+  none.
+- `btbh_gpu_font_metrics`: unrounded ascent, descent and line gap for `_ex`. For a plain font it returns what
+  its report said (ascent rounded down, line gap 2).
+
+**What the native test found** (`tests/btbh_gpu_font_smoke.c`, Windows/Vulkan, RTX 3070 Ti; CHIMERA's face
+Titillium Web SemiBold and its 117-glyph set):
+
+- Metrics against the plain loader at 10, 12, 16 and 24 px with `oversample_x` 1-3:
+  - advances within 0.997 px (the plain loader rounds down);
+  - glyph centres within 1/3 px across and identical down;
+  - ascent within a pixel, descent identical.
+- The UVs undo the oversampling exactly. Advances and kerning are whole numbers with `snap_advances`.
+- A line of HUD text (76 characters), light on dark, read back at 10 / 12 / 16 px:
+
+  | | plain loader | CHIMERA's layout today | `_ex`, `oversample_x` 3, kerning |
+  | --- | --- | --- | --- |
+  | line width (px) | 168 / 210 / 294 | 202.5 / 243 / 324 | 206.3 / 247.5 / 330.1 |
+  | furthest a glyph sits from its pen (px) | 0 (but the pen drifts) | 0.50 / 0.40 / 0.47 | 0.16 / 0.17 / 0.16 |
+  | ink, pixels of full coverage | 296 / 430 / 773 | 302 / 435 / 775 | 302 / 435 / 773 |
+
+  CHIMERA's layout scales advances from its 60 px face and snaps each glyph to the nearest pixel. That gets
+  the width right, but places glyphs up to half a pixel off. That is the jitter CHIMERA measured, and in the
+  readback it shows as uneven gaps ("Plan t", "1 00" at 12 px).
+  `_ex` puts every glyph within 1/6 px of its pen and keeps the ink. `coverage_gamma` 1.3 adds 16-19% ink
+  (359 / 502 / 867), which is the thicker light-on-dark text it is meant to give.
+- Kerning in Titillium Web at 16 px, in px: AV −0.29, To −0.83, Ty −0.61, Yo −0.74, LT −0.88, P. −0.74.
+- Bake cost: CHIMERA's 117 glyphs at 12 px take about 2 ms (the plain loader about 1 ms), with an atlas of
+  128 x 128 to 256 x 128 at 10-16 px. 560 codepoints (Latin to Latin Extended-B) take about 7 ms (plain:
+  2 ms). Kerning grows with the square of the glyph count, so a CJK-sized set would need another way (on-demand
+  lookups). Per frame nothing changes: the same quads, one texture each, the same canvas shader.
+- The PNGs (`font-smoke/` in the build directory, or `BTBH_SMOKE_DUMP`): `text-<size>px-{plain, snapped, ex,
+  ex-gamma}.png`, and `text-all.png` / `text-all-x4.png` with every row.
+
+**By eye** (the 4x PNGs): the plain rows run words together. CHIMERA's layout has visibly uneven gaps. `_ex` is
+evenly spaced and as sharp as the plain loader at 12 and 16 px. At 10 px the stems are as soft as before,
+because there is still no hinting, and `coverage_gamma` 1.3 makes them read heavier. Whether that is enough at
+9-11 px (the open question) is for CHIMERA to judge in its HUD.
+
+**Not done:** macOS/Metal, a Swift wrapper (Be The Bullet Hell doesn't need one now), and CHIMERA's in-game
+before and after. The plain loader also fails to pack very small glyph sets (three glyphs at 12 px); the
+prototype leaves it as it is, because that loader must stay byte for byte the same.
+
 ## What CHIMERA changes
 
 - Request the sizes it actually draws, times the UI scale, and draw each string at the size it was baked for;
@@ -111,6 +182,21 @@ for small text. Its own RFC when a game needs it.
 - Pick a face made for small sizes for anything below about 14 px (a UI sans with a large x-height and open
   apertures, such as Inter or Noto Sans), and keep display faces for 22 px and up. Below about 10 px, a
   pixel font drawn at integer scale with nearest filtering reads better than any outline font.
+
+Concretely, in `crates/chimera-platform/src/gpu.rs`, behind `BTBH_GPU_HAS_FONT_LOAD_EX` (as the V-Sync row
+is behind `BTBH_GPU_WINDOW_HAS_PRESENT_MODE`):
+
+- `bake_sizes`: bake each face with `btbh_gpu_window_font_load_ex`, `pixel_size` = the size,
+  `oversample_x` 3, `oversample_y` 1, `snap_advances` 0, and `coverage_gamma` 1.3 below 14 px (0 above).
+  Take the ascent from `btbh_gpu_font_metrics`, now unrounded. At bake, fill a per-face table of the nonzero
+  `btbh_gpu_font_kerning` pairs between its glyphs (117² FFI calls, once), so layout doesn't cross the FFI per
+  pair.
+- `Font::advance`: use the exact face's own advance, which is now fractional and right. Keep scaling the
+  biggest face's advance only for a size that has no face yet.
+- `lay_out`: keep the pen fractional and add the face's kerning before each glyph. Place each glyph at
+  `(pen * 3.0).round() / 3.0 + g.offset_x` instead of `pen.round() + g.offset_x`. Keep the run start and the
+  baseline on whole pixels, as now. `width` must add the same kerning, so measured text matches drawn text.
+- The fake glyphs in its layout test (around line 2105) get fractional advances to match.
 
 ## Compatibility
 

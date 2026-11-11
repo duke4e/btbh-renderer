@@ -24,7 +24,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0001](0001-layered-terrain.md) | Layered terrain in one pass (texture arrays, splat control, height blend) | Draft | CHIMERA |
 | [0002](0002-height-fog-and-water-scale.md) | Height fog; water at RTS scale | Draft | CHIMERA |
 | [0003](0003-light-regions.md) | Light regions with their own key light and LUT | Draft | CHIMERA |
-| [0004](0004-small-text.md) | Readable small text (oversampled exact-size atlases, kerning, snapping) | Draft, for later | CHIMERA |
+| [0004](0004-small-text.md) | Readable small text (oversampled exact-size atlases, kerning, snapping) | Prototype on branch `claude/rfc0004-small-text-037444` (option A) | CHIMERA |
 | [0005](0005-screen-space-refraction.md) | Screen-space refraction batches (`BTBH_GPU_SCENE_SURFACE_REFRACT`) | Implemented in v0.1.0 | CHIMERA |
 | [0006](0006-scene-render-to-target.md) | A scene into a render target, apart from the window's temporal history; per-batch reactive mask | Implemented in v0.1.1 | CHIMERA |
 | [0007](0007-destructible-terrain.md) | Destructible terrain from SDF edits (sparse bricks, meshed patches, dig mask) | Accepted | Be The Bullet Hell, CHIMERA |
