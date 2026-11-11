@@ -507,6 +507,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_radiance_cascades.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_resources.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_scene.c"
+        "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_sdf_terrain.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_texture.c"
         "${BTBH_RENDERER_ROOT}/src/gpu/btbh_gpu_window.c"
     )
@@ -699,6 +700,28 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
+
+        # RFC 0007: the SDF terrain's CPU core (no window): determinism with and without jobs and budgets,
+        # removal, heights against the mesh, seams, the edit cap and faceted meshes.
+        add_executable(btbh_gpu_sdf_terrain_test
+            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_sdf_terrain_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_sdf_terrain_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_sdf_terrain_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_sdf_terrain_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_sdf_terrain_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(NAME btbh_gpu_sdf_terrain COMMAND btbh_gpu_sdf_terrain_test)
 
         add_executable(btbh_gpu_phase2_shader_test
             "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_phase2_shader_test.c"

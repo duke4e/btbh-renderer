@@ -243,6 +243,8 @@ typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
 typedef struct BTBHGPUCustomMesh BTBHGPUCustomMesh;
 typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
 typedef struct BTBHGPUAnimationPose BTBHGPUAnimationPose;
+/* Destructible terrain from SDF edits (btbh_gpu_sdf_terrain.h, since 0.4.0). */
+typedef struct BTBHGPUSdfTerrain BTBHGPUSdfTerrain;
 
 typedef enum BTBHGPUTextureFilter {
     BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
@@ -1530,5 +1532,7 @@ struct SDL_Window *btbh_gpu_window_sdl_window(BTBHGPUWindow *window);
 #if defined(__cplusplus)
 }
 #endif
+
+#include "btbh_gpu_sdf_terrain.h"
 
 #endif

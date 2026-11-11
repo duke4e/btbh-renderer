@@ -89,6 +89,8 @@ struct BTBHGPUWindow {
     BTBHGPUGeometryArena index_arena;
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
+    /* The SDF terrains attached to this window (btbh_gpu_window_sdf_terrain_attach). */
+    BTBHGPUSdfTerrain *sdf_terrain_head;
     BTBHGPUSceneRuntime *scene_runtime;
     /* The scenes rendered to a target (btbh_gpu_window_scene_render_to_target): their own targets,
        shadow maps and history, so they never touch the window's frame (its FSR 3 history above all).
