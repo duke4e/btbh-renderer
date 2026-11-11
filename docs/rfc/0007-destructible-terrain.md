@@ -1,6 +1,6 @@
 # RFC 0007: Destructible terrain from SDF edits
 
-- **Status:** Draft
+- **Status:** Accepted (2026-11-11). The implementation follows on a branch, phases 1 to 3 first
 - **Requested by:** Be The Bullet Hell, CHIMERA (proposed by the coordinator)
 - **Affects:** Be The Bullet Hell and CHIMERA (each adopts it on its own). Tyrian3D: nothing, it is opt-in
 - **Issue:** [#3](https://github.com/duke4e/btbh-renderer/issues/3). Both games answered on 2026-11-11; their
