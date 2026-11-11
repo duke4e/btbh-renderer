@@ -569,10 +569,13 @@ final class RadianceCascadesTests: XCTestCase {
             compose.components(separatedBy: "indirect_strength").count - 1,
             1
         )
+        // The uniform's declaration, the lit receivers' resolve and the unlit (pixel-art) receivers' bounce,
+        // which came with the tyrian3d merge.
         XCTAssertEqual(
             holographicResolve.components(separatedBy: "indirect_strength").count - 1,
-            2
+            3
         )
+        XCTAssertTrue(holographicResolve.contains("bounce * (2.0f * indirect_strength)"))
     }
 
     func testHRCMaterialResponseKeepsBRDFAOAndEmissionSeparated() throws {
