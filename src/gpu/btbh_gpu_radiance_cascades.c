@@ -964,8 +964,10 @@ btbh_gpu_radiance_cascades_create_material_source_pipeline(
         shader_format,
         SDL_GPU_SHADERSTAGE_FRAGMENT,
         0u,
+        /* albedo, emission, and an SDF terrain's dig mask (RFC 0007) */
+        3u,
+        /* the material, the dig mask's placement */
         2u,
-        1u,
         message,
         message_capacity
     );

@@ -195,7 +195,9 @@ uint32_t btbh_gpu_sdf_terrain_take_changes(BTBHGPUSdfTerrain *terrain, float (*r
 
 /* Drawing: one ordinary batch per chunk that has a mesh (a BTBH_GPU_SCENE_GEOMETRY_CUSTOM_MESH batch with an
  * identity instance). The vertices carry world positions, normals, UVs from world x and z, the material's colour
- * and, in the joint and weight slots (bytes 64..95), a weight of 1 for the vertex's material among layers 0..7. */
+ * and, in the joint and weight slots (bytes 64..95), a weight of 1 for the vertex's material among layers 0..7.
+ * Triangles are clockwise seen from outside: front faces for BTBH_GPU_SCENE_CULL_BACK under a camera built as the
+ * Swift layer builds it (right = forward x up, view z along forward). */
 typedef struct BTBHGPUSdfTerrainChunk {
     BTBHGPUCustomMesh *mesh;     /* NULL: nothing changed in this chunk, or no window attached */
     float bounds_min[3];

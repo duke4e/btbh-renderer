@@ -289,6 +289,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             shadercross
             "${_shader_source}"
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_surface.hlsli"
+            "${BTBH_RENDERER_ROOT}/shaders/gpu/production_dig_mask.hlsli"
         )
         if(
             _shader_name STREQUAL "production_model_unshadowed.frag" OR
@@ -704,7 +705,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         # RFC 0007: the SDF terrain's CPU core (no window): determinism with and without jobs and budgets,
         # removal, heights against the mesh, seams, the edit cap and faceted meshes.
         add_executable(btbh_gpu_sdf_terrain_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_sdf_terrain_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_sdf_terrain_test.c"
         )
         target_include_directories(
             btbh_gpu_sdf_terrain_test
@@ -818,6 +819,30 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_dependencies(btbh_gpu_scene_target_smoke btbh_gpu_shaders)
         add_test(NAME btbh_gpu_scene_target_smoke COMMAND btbh_gpu_scene_target_smoke)
         set_tests_properties(btbh_gpu_scene_target_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
+        # RFC 0007: an SDF terrain's crater patch over a dug ground, rendered into a target (a hidden window).
+        add_executable(btbh_gpu_sdf_terrain_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_sdf_terrain_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_sdf_terrain_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_sdf_terrain_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_sdf_terrain_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        add_dependencies(btbh_gpu_sdf_terrain_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_sdf_terrain_smoke COMMAND btbh_gpu_sdf_terrain_smoke)
+        set_tests_properties(btbh_gpu_sdf_terrain_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.

@@ -2197,7 +2197,9 @@ static SdfMesh *sdf_mesh_chunk(const BTBHGPUSdfTerrain *t, uint32_t chunk_index)
             if (!complete) {
                 continue;
             }
-            if (!inside) {
+            /* Clockwise seen from outside: the renderer's front faces (SDL flips Vulkan's viewport, and the scene
+             * pipelines take clockwise as front) under a camera built as the Swift layer builds it. */
+            if (inside) {
                 const uint32_t swap = quad[1];
                 quad[1] = quad[3];
                 quad[3] = swap;
@@ -2266,10 +2268,11 @@ columns:
                 const float e2[3] = {
                     c->position[0] - a->position[0], c->position[1] - a->position[1], c->position[2] - a->position[2]
                 };
+                /* e2 x e1: the triangle is clockwise seen from outside. */
                 float normal[3] = {
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0]
+                    e2[1] * e1[2] - e2[2] * e1[1],
+                    e2[2] * e1[0] - e2[0] * e1[2],
+                    e2[0] * e1[1] - e2[1] * e1[0]
                 };
                 const float length = sdf_length3(normal[0], normal[1], normal[2]);
                 if (length > 1.0e-20f) {
@@ -3858,8 +3861,8 @@ bool btbh_gpu_sdf_terrain_mask_binding(
     binding->origin[2] = terrain->lattice_min[1];
     binding->origin[3] = terrain->cell;
     binding->scale[0] = 1.0f / ((float)terrain->cells[0] * terrain->cell);
-    binding->scale[1] = 1.0f / ((float)terrain->cells[2] * terrain->cell);
-    binding->scale[2] = 1.0f / terrain->cell;
+    binding->scale[1] = 1.0f / terrain->cell;
+    binding->scale[2] = 1.0f / ((float)terrain->cells[2] * terrain->cell);
     binding->scale[3] = SDF_MASK_THRESHOLD_CELLS;
     return true;
 }

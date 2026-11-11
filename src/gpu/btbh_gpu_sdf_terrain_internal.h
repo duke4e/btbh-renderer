@@ -7,10 +7,10 @@
 typedef struct BTBHGPUSdfTerrainMaskBinding {
     SDL_GPUTexture *texture;
     SDL_GPUSampler *sampler;
-    /* x, z of the lattice's min corner; y its floor; w the cell size */
+    /* x, y: the lattice's min x and z; z: its floor (min y); w: the cell size (production_dig_mask.hlsli) */
     float origin[4];
-    /* x, z: 1 / the mask's extent (world units) along x and z; y: 1 / the cell size; w: the discard threshold
-     * (cells under the patch's top surface that the host's ground may lie and still draw) */
+    /* x, z: 1 / the mask's extent (world units) along x and z; y: 1 / the cell size; w: the threshold (cells
+     * under the patch's top surface the host's ground must lie to still draw) */
     float scale[4];
 } BTBHGPUSdfTerrainMaskBinding;
 

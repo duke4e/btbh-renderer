@@ -790,7 +790,7 @@ static void test_faceted(void) {
             CHECK(memcmp(&normals[a * 3u], &normals[c * 3u], sizeof(float) * 3u) == 0);
             CHECK(materials[a] == materials[b] && materials[a] == materials[c]);
             materials_seen |= 1u << materials[a];
-            /* The face normal points out of the ground (the winding is counter-clockwise from outside). */
+            /* The face normal points out of the ground. */
             const float *pa = &positions[a * 3u];
             const float *pb = &positions[b * 3u];
             const float *pc = &positions[c * 3u];

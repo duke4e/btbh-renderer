@@ -213,7 +213,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 10"
+            "\"samplers\": 11"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
@@ -221,27 +221,27 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 5"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 2"
-        ) ||
-        !require_text(
-            BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 10"
         ) ||
         !require_text(
+            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 6"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 3"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 11"
+        ) ||
+        !require_text(
             BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
+            "\"samplers\": 10"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 5"
+            "\"samplers\": 6"
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH,
@@ -313,7 +313,20 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 2, \"storage_textures\": 0"
+            "\"samplers\": 3, \"storage_textures\": 0"
+        ) ||
+        /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer. */
+        !require_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH,

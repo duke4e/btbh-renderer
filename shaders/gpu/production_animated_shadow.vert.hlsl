@@ -35,6 +35,8 @@ struct VertexOutput
 {
     float4 position : SV_Position;
     float4 surface_data : TEXCOORD0;
+    // The flat world position, for a dug batch's dig mask (production_shadow.frag.hlsl).
+    float3 world_position : TEXCOORD1;
 };
 
 VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
@@ -62,11 +64,10 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         mul(skin_matrix, float4(surface.position, 1.0f)).xyz,
         1.0f
     );
+    const float4 world_position = mul(instance.model, skinned_position);
     VertexOutput output;
-    output.position = mul(
-        light_view_projection,
-        mul(instance.model, skinned_position)
-    );
+    output.position = mul(light_view_projection, world_position);
     output.surface_data = surface.data;
+    output.world_position = world_position.xyz;
     return output;
 }

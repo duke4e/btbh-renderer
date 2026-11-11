@@ -760,6 +760,13 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * fully). Procedural pixel water is never darkened by it where it is water. */
     uint8_t ssao_mode;
     uint8_t ssao_reserved[3];
+    /* NULL: drawn as before. Otherwise the batch is ground that this terrain may dig through
+     * (btbh_gpu_sdf_terrain.h, since 0.4.0): where the terrain's patch has taken over from the base (a crater,
+     * a mound's foot, paint), its fragments that don't lie more than a tenth of a cell under the patch's top
+     * surface at their flat world XZ are discarded, in the colour, depth, shadow and radiance-cascade passes.
+     * Until the terrain has a dig mask (it is attached to this window and a patch exists), the batch draws
+     * exactly as with NULL. */
+    const BTBHGPUSdfTerrain *dug_by;
 } BTBHGPUSceneGeometryBatch;
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
