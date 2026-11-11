@@ -36,6 +36,13 @@ typedef struct BTBHGPUFontRasterGlyph {
     uint32_t height;
 } BTBHGPUFontRasterGlyph;
 
+/* A kerning pair of a font from btbh_gpu_window_font_load_ex, in pixels at its size. */
+typedef struct BTBHGPUFontKern {
+    uint32_t left;
+    uint32_t right;
+    float advance;
+} BTBHGPUFontKern;
+
 struct BTBHGPUFont {
     BTBHGPUWindow *owner;
     BTBHGPUFont *previous;
@@ -50,7 +57,24 @@ struct BTBHGPUFont {
     float ascent;
     float descent;
     float line_gap;
+    /* btbh_gpu_window_font_load_ex only (NULL and 0 from btbh_gpu_window_font_load): each
+       codepoint's glyph as btbh_gpu_font_glyph returns it, the kerning pairs sorted by (left,
+       right), and the size asked for. */
+    BTBHGPUFontGlyph *baked;
+    BTBHGPUFontKern *kerning;
+    uint32_t kerning_count;
+    float pixel_size;
 };
+
+/* btbh_gpu_window_font_load_ex's atlas: empty texels between two glyphs (and at the atlas edges),
+   and how far each glyph's quad reaches past its glyph, in texels, so linear filtering at a
+   fractional position isn't cut off at the quad's edge. The margin must stay below the padding,
+   or a quad's filter would reach its neighbour. */
+#define BTBH_GPU_FONT_EX_PADDING 2
+#define BTBH_GPU_FONT_EX_MARGIN 1
+#define BTBH_GPU_FONT_EX_MAX_ATLAS 8192u
+#define BTBH_GPU_FONT_EX_MIN_ATLAS 64u
+#define BTBH_GPU_FONT_EX_MAX_OVERSAMPLE 8u
 
 static void btbh_gpu_font_error(
     BTBHGPUFontReport *report,
@@ -456,6 +480,545 @@ BTBHGPUFont *btbh_gpu_window_font_load(
     return font;
 }
 
+static void btbh_gpu_font_invalid(
+    BTBHGPUFontReport *report,
+    const char *message
+) {
+    report->result = BTBH_GPU_INVALID_ARGUMENT;
+    (void)snprintf(report->message, sizeof(report->message), "%s", message);
+}
+
+/* Why desc can't be baked, or NULL if it can. */
+static const char *btbh_gpu_font_desc_problem(const BTBHGPUFontDesc *desc) {
+    if (desc == NULL) {
+        return "BTBHGPUFontDesc is NULL";
+    }
+    if (
+        !isfinite(desc->pixel_size) ||
+        desc->pixel_size < 1.0f ||
+        desc->pixel_size > 1024.0f
+    ) {
+        return "BTBHGPUFontDesc.pixel_size must be 1 to 1024";
+    }
+    if (
+        desc->oversample_x > BTBH_GPU_FONT_EX_MAX_OVERSAMPLE ||
+        desc->oversample_y > BTBH_GPU_FONT_EX_MAX_OVERSAMPLE
+    ) {
+        return "BTBHGPUFontDesc.oversample_x and oversample_y must be 0 to 8";
+    }
+    if (desc->snap_advances > 1u) {
+        return "BTBHGPUFontDesc.snap_advances must be 0 or 1";
+    }
+    if (desc->reserved != 0u) {
+        return "BTBHGPUFontDesc.reserved must be 0";
+    }
+    if (
+        desc->coverage_gamma != 0.0f &&
+        (
+            !isfinite(desc->coverage_gamma) ||
+            desc->coverage_gamma < 0.25f ||
+            desc->coverage_gamma > 4.0f
+        )
+    ) {
+        return "BTBHGPUFontDesc.coverage_gamma must be 0 or 0.25 to 4";
+    }
+    return NULL;
+}
+
+static int btbh_gpu_font_kern_compare(const void *a, const void *b) {
+    const BTBHGPUFontKern *left = a;
+    const BTBHGPUFontKern *right = b;
+    if (left->left != right->left) {
+        return left->left < right->left ? -1 : 1;
+    }
+    if (left->right != right->right) {
+        return left->right < right->right ? -1 : 1;
+    }
+    return 0;
+}
+
+/* The font's kerning between every two of the n codepoints it has, in pixels (whole ones when
+   snap), sorted. stb_truetype reads GPOS pair adjustments when the font has them, else its kern
+   table. False only when out of memory; a font with no kerning gives none. */
+static bool btbh_gpu_font_ex_kerning(
+    const stbtt_fontinfo *info,
+    const int *codepoints,
+    const int *glyph_indices,
+    uint32_t count,
+    float scale,
+    bool snap,
+    BTBHGPUFontKern **pairs,
+    uint32_t *pair_count
+) {
+    *pairs = NULL;
+    *pair_count = 0u;
+    if (info->gpos == 0 && info->kern == 0) {
+        return true;
+    }
+    BTBHGPUFontKern *list = NULL;
+    uint32_t capacity = 0u;
+    uint32_t used = 0u;
+    for (uint32_t a = 0u; a < count; a += 1u) {
+        for (uint32_t b = 0u; b < count; b += 1u) {
+            const int units = stbtt_GetGlyphKernAdvance(
+                info,
+                glyph_indices[a],
+                glyph_indices[b]
+            );
+            if (units == 0) {
+                continue;
+            }
+            float advance = (float)units * scale;
+            if (snap) {
+                advance = roundf(advance);
+            }
+            if (advance == 0.0f) {
+                continue;
+            }
+            if (used == capacity) {
+                const uint32_t grown = capacity == 0u ? 256u : capacity * 2u;
+                if (grown < capacity || (size_t)grown > SIZE_MAX / sizeof(*list)) {
+                    free(list);
+                    return false;
+                }
+                BTBHGPUFontKern *larger = realloc(list, (size_t)grown * sizeof(*list));
+                if (larger == NULL) {
+                    free(list);
+                    return false;
+                }
+                list = larger;
+                capacity = grown;
+            }
+            list[used].left = (uint32_t)codepoints[a];
+            list[used].right = (uint32_t)codepoints[b];
+            list[used].advance = advance;
+            used += 1u;
+        }
+    }
+    if (used > 1u) {
+        qsort(list, used, sizeof(*list), btbh_gpu_font_kern_compare);
+    }
+    *pairs = list;
+    *pair_count = used;
+    return true;
+}
+
+/* What btbh_gpu_window_font_load_ex bakes, and its scratch: btbh_gpu_font_ex_bake fills it, the
+   loader frees whatever is left in it. */
+typedef struct BTBHGPUFontExBake {
+    /* Kept by the font. */
+    uint32_t *codepoints;
+    BTBHGPUFontGlyph *baked;
+    BTBHGPUFontKern *kerning;
+    uint32_t kerning_count;
+    uint8_t *rgba;
+    uint32_t atlas_width;
+    uint32_t atlas_height;
+    /* Scratch: the codepoints the font has (present), their glyph indices, where each is in
+       glyphs, stb_truetype's packed glyphs and its one-channel atlas. */
+    int *present;
+    int *present_glyphs;
+    uint32_t *present_index;
+    stbtt_packedchar *packed;
+    uint8_t *bitmap;
+} BTBHGPUFontExBake;
+
+static void btbh_gpu_font_ex_bake_free(BTBHGPUFontExBake *bake) {
+    free(bake->codepoints);
+    free(bake->baked);
+    free(bake->kerning);
+    free(bake->rgba);
+    free(bake->present);
+    free(bake->present_glyphs);
+    free(bake->present_index);
+    free(bake->packed);
+    free(bake->bitmap);
+    (void)memset(bake, 0, sizeof(*bake));
+}
+
+/* Packs the glyphs of glyphs the font has with stb_truetype's packer (oversampled and
+   prefiltered), applies the coverage curve and lays out each glyph's quad and UVs; NULL, or why it
+   failed. */
+static const char *btbh_gpu_font_ex_bake(
+    const stbtt_fontinfo *info,
+    const uint8_t *font_bytes,
+    const BTBHGPUFontDesc *desc,
+    const uint32_t *glyphs,
+    uint32_t glyph_count,
+    BTBHGPUFontExBake *bake
+) {
+    const int oversample_x = desc->oversample_x > 1u ? (int)desc->oversample_x : 1;
+    const int oversample_y = desc->oversample_y > 1u ? (int)desc->oversample_y : 1;
+    const bool snap = desc->snap_advances != 0u;
+    const float coverage_gamma =
+        desc->coverage_gamma != 0.0f ? desc->coverage_gamma : 1.0f;
+    const float scale = stbtt_ScaleForPixelHeight(info, desc->pixel_size);
+
+    bake->codepoints = malloc((size_t)glyph_count * sizeof(*bake->codepoints));
+    bake->baked = calloc(glyph_count, sizeof(*bake->baked));
+    bake->present = malloc((size_t)glyph_count * sizeof(*bake->present));
+    bake->present_glyphs = malloc((size_t)glyph_count * sizeof(*bake->present_glyphs));
+    bake->present_index = malloc((size_t)glyph_count * sizeof(*bake->present_index));
+    bake->packed = calloc(glyph_count, sizeof(*bake->packed));
+    if (
+        bake->codepoints == NULL ||
+        bake->baked == NULL ||
+        bake->present == NULL ||
+        bake->present_glyphs == NULL ||
+        bake->present_index == NULL ||
+        bake->packed == NULL
+    ) {
+        return "Could not allocate font glyph storage";
+    }
+
+    /* Only the codepoints the font has are packed; the rest keep an empty glyph, no advance. */
+    uint32_t present_count = 0u;
+    uint64_t area = 0u;
+    for (uint32_t index = 0u; index < glyph_count; index += 1u) {
+        bake->codepoints[index] = glyphs[index];
+        bake->baked[index].codepoint = glyphs[index];
+        const int glyph = stbtt_FindGlyphIndex(info, (int)glyphs[index]);
+        if (glyph <= 0) {
+            continue;
+        }
+        int x0 = 0;
+        int y0 = 0;
+        int x1 = 0;
+        int y1 = 0;
+        stbtt_GetGlyphBitmapBoxSubpixel(
+            info,
+            glyph,
+            scale * (float)oversample_x,
+            scale * (float)oversample_y,
+            0.0f,
+            0.0f,
+            &x0,
+            &y0,
+            &x1,
+            &y1
+        );
+        area +=
+            (uint64_t)(x1 - x0 + BTBH_GPU_FONT_EX_PADDING + oversample_x - 1) *
+            (uint64_t)(y1 - y0 + BTBH_GPU_FONT_EX_PADDING + oversample_y - 1);
+        bake->present[present_count] = (int)glyphs[index];
+        bake->present_glyphs[present_count] = glyph;
+        bake->present_index[present_count] = index;
+        present_count += 1u;
+    }
+
+    /* The smallest power-of-two atlas the glyphs should fit (stb_truetype's own row packer, in
+       order, wastes some), doubled until they do. */
+    const uint64_t wanted = area + area / 3u + 1u;
+    uint32_t atlas_width = BTBH_GPU_FONT_EX_MIN_ATLAS;
+    while (
+        atlas_width < BTBH_GPU_FONT_EX_MAX_ATLAS &&
+        (uint64_t)atlas_width * (uint64_t)atlas_width < wanted
+    ) {
+        atlas_width *= 2u;
+    }
+    uint32_t atlas_height =
+        (uint64_t)atlas_width * (uint64_t)(atlas_width / 2u) >= wanted
+        ? atlas_width / 2u
+        : atlas_width;
+    for (;;) {
+        bake->bitmap = malloc((size_t)atlas_width * (size_t)atlas_height);
+        if (bake->bitmap == NULL) {
+            return "Could not allocate font atlas pixels";
+        }
+        int fitted = 1;
+        if (present_count > 0u) {
+            stbtt_pack_context context;
+            if (
+                stbtt_PackBegin(
+                    &context,
+                    bake->bitmap,
+                    (int)atlas_width,
+                    (int)atlas_height,
+                    0,
+                    BTBH_GPU_FONT_EX_PADDING,
+                    NULL
+                ) == 0
+            ) {
+                return "Could not allocate font atlas packer";
+            }
+            stbtt_PackSetOversampling(
+                &context,
+                (unsigned int)oversample_x,
+                (unsigned int)oversample_y
+            );
+            stbtt_pack_range range;
+            (void)memset(&range, 0, sizeof(range));
+            range.font_size = desc->pixel_size;
+            range.array_of_unicode_codepoints = bake->present;
+            range.num_chars = (int)present_count;
+            range.chardata_for_range = bake->packed;
+            fitted = stbtt_PackFontRanges(&context, font_bytes, 0, &range, 1);
+            stbtt_PackEnd(&context);
+        } else {
+            (void)memset(bake->bitmap, 0, (size_t)atlas_width * (size_t)atlas_height);
+        }
+        if (fitted != 0) {
+            break;
+        }
+        free(bake->bitmap);
+        bake->bitmap = NULL;
+        if (atlas_height < atlas_width) {
+            atlas_height *= 2u;
+        } else if (atlas_width < BTBH_GPU_FONT_EX_MAX_ATLAS) {
+            atlas_width *= 2u;
+        } else {
+            return "Could not pack the glyphs into an 8192 x 8192 atlas";
+        }
+    }
+    bake->atlas_width = atlas_width;
+    bake->atlas_height = atlas_height;
+
+    /* Coverage contrast, once, here: the canvas shader stays the same. */
+    const size_t pixel_count = (size_t)atlas_width * (size_t)atlas_height;
+    if (coverage_gamma != 1.0f) {
+        uint8_t curve[256];
+        for (uint32_t level = 0u; level < 256u; level += 1u) {
+            const float coverage = powf((float)level / 255.0f, 1.0f / coverage_gamma);
+            curve[level] = (uint8_t)lroundf(fminf(fmaxf(coverage, 0.0f), 1.0f) * 255.0f);
+        }
+        for (size_t index = 0u; index < pixel_count; index += 1u) {
+            bake->bitmap[index] = curve[bake->bitmap[index]];
+        }
+    }
+    bake->rgba = malloc(pixel_count * 4u);
+    if (bake->rgba == NULL) {
+        return "Could not allocate font atlas pixels";
+    }
+    for (size_t index = 0u; index < pixel_count; index += 1u) {
+        bake->rgba[index * 4u] = 255u;
+        bake->rgba[index * 4u + 1u] = 255u;
+        bake->rgba[index * 4u + 2u] = 255u;
+        bake->rgba[index * 4u + 3u] = bake->bitmap[index];
+    }
+
+    /* Each glyph's quad: its packed rect (the oversampled glyph and its prefilter's spread), and a
+       margin round it, in output pixels; UVs over the same texels, so a quad drawn width x height
+       pixels takes oversample texels a pixel. */
+    const float margin = (float)BTBH_GPU_FONT_EX_MARGIN;
+    const float margin_x = margin / (float)oversample_x;
+    const float margin_y = margin / (float)oversample_y;
+    for (uint32_t k = 0u; k < present_count; k += 1u) {
+        const stbtt_packedchar *source = &bake->packed[k];
+        BTBHGPUFontGlyph *glyph = &bake->baked[bake->present_index[k]];
+        glyph->advance = snap ? roundf(source->xadvance) : source->xadvance;
+        glyph->offset_x = source->xoff - margin_x;
+        glyph->offset_y = source->yoff - margin_y;
+        glyph->width = (source->xoff2 - source->xoff) + 2.0f * margin_x;
+        glyph->height = (source->yoff2 - source->yoff) + 2.0f * margin_y;
+        glyph->u0 = ((float)source->x0 - margin) / (float)atlas_width;
+        glyph->v0 = ((float)source->y0 - margin) / (float)atlas_height;
+        glyph->u1 = ((float)source->x1 + margin) / (float)atlas_width;
+        glyph->v1 = ((float)source->y1 + margin) / (float)atlas_height;
+    }
+
+    if (
+        !btbh_gpu_font_ex_kerning(
+            info,
+            bake->present,
+            bake->present_glyphs,
+            present_count,
+            scale,
+            snap,
+            &bake->kerning,
+            &bake->kerning_count
+        )
+    ) {
+        return "Could not allocate font kerning";
+    }
+    return NULL;
+}
+
+BTBHGPUFont *btbh_gpu_window_font_load_ex(
+    BTBHGPUWindow *window,
+    const char *path,
+    const BTBHGPUFontDesc *desc,
+    const uint32_t *glyphs,
+    uint32_t glyph_count,
+    BTBHGPUFontReport *report
+) {
+    if (report == NULL) {
+        return NULL;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->device->shutdown ||
+        !window->claimed
+    ) {
+        btbh_gpu_font_invalid(report, "The window has no claimed GPU device");
+        return NULL;
+    }
+    if (path == NULL) {
+        btbh_gpu_font_invalid(report, "The font path is NULL");
+        return NULL;
+    }
+    if (glyphs == NULL || glyph_count == 0u || glyph_count > (uint32_t)INT_MAX) {
+        btbh_gpu_font_invalid(report, "No glyphs to bake");
+        return NULL;
+    }
+    const char *problem = btbh_gpu_font_desc_problem(desc);
+    if (problem != NULL) {
+        btbh_gpu_font_invalid(report, problem);
+        return NULL;
+    }
+    for (uint32_t index = 0u; index < glyph_count; index += 1u) {
+        if (glyphs[index] > (uint32_t)INT_MAX) {
+            btbh_gpu_font_invalid(report, "A glyph codepoint is out of range");
+            return NULL;
+        }
+    }
+
+    size_t font_byte_count = 0u;
+    uint8_t *font_bytes = SDL_LoadFile(path, &font_byte_count);
+    if (font_bytes == NULL || font_byte_count == 0u) {
+        SDL_free(font_bytes);
+        btbh_gpu_font_error(report, SDL_GetError());
+        return NULL;
+    }
+    stbtt_fontinfo info;
+    if (
+        stbtt_InitFont(
+            &info,
+            font_bytes,
+            stbtt_GetFontOffsetForIndex(font_bytes, 0)
+        ) == 0
+    ) {
+        SDL_free(font_bytes);
+        btbh_gpu_font_error(report, "Could not initialize TTF font");
+        return NULL;
+    }
+    const float scale = stbtt_ScaleForPixelHeight(&info, desc->pixel_size);
+    int ascent = 0;
+    int descent = 0;
+    int line_gap = 0;
+    stbtt_GetFontVMetrics(&info, &ascent, &descent, &line_gap);
+
+    BTBHGPUFontExBake bake;
+    (void)memset(&bake, 0, sizeof(bake));
+    const char *failure = btbh_gpu_font_ex_bake(
+        &info,
+        font_bytes,
+        desc,
+        glyphs,
+        glyph_count,
+        &bake
+    );
+    SDL_free(font_bytes);
+    if (failure != NULL) {
+        btbh_gpu_font_ex_bake_free(&bake);
+        btbh_gpu_font_error(report, failure);
+        return NULL;
+    }
+
+    BTBHGPUTextureReport texture_report;
+    BTBHGPUTexture *atlas = btbh_gpu_window_texture_create_rgba8(
+        window,
+        bake.rgba,
+        bake.atlas_width,
+        bake.atlas_height,
+        BTBH_GPU_TEXTURE_FILTER_LINEAR,  /* the prefilter assumes it */
+        BTBH_GPU_TEXTURE_WRAP_CLAMP,
+        &texture_report
+    );
+    if (atlas == NULL) {
+        btbh_gpu_font_ex_bake_free(&bake);
+        btbh_gpu_font_error(report, texture_report.message);
+        return NULL;
+    }
+    BTBHGPUFont *font = calloc(1, sizeof(*font));
+    if (font == NULL) {
+        btbh_gpu_texture_destroy(atlas);
+        btbh_gpu_font_ex_bake_free(&bake);
+        btbh_gpu_font_error(report, "Could not allocate font resource");
+        return NULL;
+    }
+    font->owner = window;
+    font->next = window->font_head;
+    if (window->font_head != NULL) {
+        window->font_head->previous = font;
+    }
+    window->font_head = font;
+    font->atlas = atlas;
+    font->base_size = (uint32_t)lroundf(desc->pixel_size);
+    font->glyph_count = glyph_count;
+    font->atlas_width = bake.atlas_width;
+    font->atlas_height = bake.atlas_height;
+    font->codepoints = bake.codepoints;
+    font->glyphs = NULL;
+    font->ascent = (float)ascent * scale;
+    font->descent = (float)descent * scale;
+    font->line_gap = (float)line_gap * scale;
+    font->baked = bake.baked;
+    font->kerning = bake.kerning;
+    font->kerning_count = bake.kerning_count;
+    font->pixel_size = desc->pixel_size;
+    bake.codepoints = NULL;
+    bake.baked = NULL;
+    bake.kerning = NULL;
+    btbh_gpu_font_ex_bake_free(&bake);
+
+    report->result = BTBH_GPU_OK;
+    report->base_size = font->base_size;
+    report->glyph_count = glyph_count;
+    report->atlas_width = font->atlas_width;
+    report->atlas_height = font->atlas_height;
+    report->ascent = font->ascent;
+    report->descent = font->descent;
+    report->line_gap = font->line_gap;
+    return font;
+}
+
+BTBHGPUResult btbh_gpu_font_metrics(
+    const BTBHGPUFont *font,
+    BTBHGPUFontMetrics *metrics
+) {
+    if (font == NULL || metrics == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    metrics->ascent = font->ascent;
+    metrics->descent = font->descent;
+    metrics->line_gap = font->line_gap;
+    metrics->pixel_size =
+        font->baked != NULL ? font->pixel_size : (float)font->base_size;
+    return BTBH_GPU_OK;
+}
+
+float btbh_gpu_font_kerning(
+    const BTBHGPUFont *font,
+    uint32_t left,
+    uint32_t right
+) {
+    if (font == NULL || font->kerning == NULL) {
+        return 0.0f;
+    }
+    uint32_t low = 0u;
+    uint32_t high = font->kerning_count;
+    while (low < high) {
+        const uint32_t middle = low + (high - low) / 2u;
+        const BTBHGPUFontKern *pair = &font->kerning[middle];
+        if (pair->left < left || (pair->left == left && pair->right < right)) {
+            low = middle + 1u;
+        } else {
+            high = middle;
+        }
+    }
+    if (
+        low < font->kerning_count &&
+        font->kerning[low].left == left &&
+        font->kerning[low].right == right
+    ) {
+        return font->kerning[low].advance;
+    }
+    return 0.0f;
+}
+
 BTBHGPUResult btbh_gpu_font_glyph(
     const BTBHGPUFont *font,
     uint32_t codepoint,
@@ -484,6 +1047,10 @@ BTBHGPUResult btbh_gpu_font_glyph(
     }
     if (glyph_index == UINT32_MAX) {
         return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (font->baked != NULL) {
+        *glyph = font->baked[glyph_index];
+        return BTBH_GPU_OK;
     }
     const BTBHGPUFontGlyphData *packed = &font->glyphs[glyph_index];
     const float padding = (float)BTBH_GPU_FONT_GLYPH_PADDING;
@@ -522,6 +1089,8 @@ void btbh_gpu_font_destroy(BTBHGPUFont *font) {
         btbh_gpu_texture_destroy(font->atlas);
     }
     free(font->glyphs);
+    free(font->baked);
+    free(font->kerning);
     free(font->codepoints);
     free(font);
 }

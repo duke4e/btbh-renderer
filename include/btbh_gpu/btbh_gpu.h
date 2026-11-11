@@ -294,6 +294,46 @@ typedef struct BTBHGPUFontGlyph {
     float v1;
 } BTBHGPUFontGlyph;
 
+/* How btbh_gpu_window_font_load_ex bakes a font (RFC 0004, option A: readable small text). Bake one
+   font per size it is drawn at, in output pixels (size x UI scale), and draw it at that size: text
+   scaled at draw time blurs, whatever the filter. A zeroed descriptor is invalid (pixel_size 0). */
+typedef struct BTBHGPUFontDesc {
+    /* The size it will be drawn at, in output pixels: the line from the font's ascent to its
+       descent, as btbh_gpu_window_font_load's base_size. 1 to 1024; it may be fractional. */
+    float pixel_size;
+    /* Horizontal oversampling: 0 or 1 is none, 2 to 8 rasterises each glyph that many times wider
+       and box-filters it (stb_truetype's prefilter), so a glyph drawn at a pen position on a
+       1/oversample_x pixel grid samples whole texels and stays as sharp as at a whole pixel. 3 is
+       recommended for UI text. The atlas is that much wider. */
+    uint8_t oversample_x;
+    /* Vertical oversampling, the same way (0 or 1: none). It rarely helps: draw baselines on whole
+       pixels instead. */
+    uint8_t oversample_y;
+    /* 1: advances (and kerning) rounded to whole pixels, so a pen that starts on a whole pixel stays
+       on one (crisp, uneven spacing). 0: fractional advances and kerning (even spacing; place each
+       glyph on the 1/oversample_x grid). Other values are invalid. */
+    uint8_t snap_advances;
+    uint8_t reserved; /* 0 */
+    /* Coverage contrast, applied once to the atlas while baking: coverage' = coverage^(1 /
+       coverage_gamma). 0 means 1 (as rasterised); 0.25 to 4 otherwise. Values above 1 (1.2-1.4)
+       thicken light-on-dark small text, which blending in gamma space thins out; below 1 thins it. */
+    float coverage_gamma;
+} BTBHGPUFontDesc;
+
+/* A font's vertical metrics in pixels at its size: ascent above the baseline (positive), descent
+   below it (negative), the font's line gap, and the size it was baked at. Line height is
+   ascent - descent + line_gap. */
+typedef struct BTBHGPUFontMetrics {
+    float ascent;
+    float descent;
+    float line_gap;
+    float pixel_size;
+} BTBHGPUFontMetrics;
+
+/* Defined when BTBHGPUFontDesc, btbh_gpu_window_font_load_ex, btbh_gpu_font_metrics and
+   btbh_gpu_font_kerning exist. */
+#define BTBH_GPU_HAS_FONT_LOAD_EX 1
+
 typedef enum BTBHGPUCanvasBlendMode {
     BTBH_GPU_CANVAS_BLEND_ALPHA = 0,
     BTBH_GPU_CANVAS_BLEND_ADDITIVE = 1,
@@ -1217,6 +1257,41 @@ BTBHGPUResult btbh_gpu_font_glyph(
 );
 BTBHGPUTexture *btbh_gpu_font_atlas(BTBHGPUFont *font);
 void btbh_gpu_font_destroy(BTBHGPUFont *font);
+/* A font baked for readable small text (BTBHGPUFontDesc): oversampled and prefiltered with
+   stb_truetype's packer, its atlas always sampled linearly. The glyphs from btbh_gpu_font_glyph have
+   fractional offsets and advances (whole-pixel advances with snap_advances), and UVs that undo the
+   oversampling: draw each glyph's quad at (pen + offset_x, baseline + offset_y), width x height
+   output pixels, with no scaling. For sharp text put the baseline and each run's start on whole
+   pixels, and each glyph's pen position on the 1/oversample_x pixel grid (whole pixels without
+   oversampling); add btbh_gpu_font_kerning between glyphs. The canvas shader is the same.
+   Codepoints the font lacks get a glyph with nothing in it (no advance), as with
+   btbh_gpu_window_font_load. An invalid desc or argument returns NULL with the report's result
+   BTBH_GPU_INVALID_ARGUMENT and the reason; report must not be NULL. report->base_size is
+   pixel_size rounded to whole pixels; its ascent, descent and line_gap are
+   btbh_gpu_font_metrics'. */
+BTBHGPUFont *btbh_gpu_window_font_load_ex(
+    BTBHGPUWindow *window,
+    const char *path,
+    const BTBHGPUFontDesc *desc,
+    const uint32_t *glyphs,
+    uint32_t glyph_count,
+    BTBHGPUFontReport *report
+);
+/* Vertical metrics in pixels at the font's size. For a font from btbh_gpu_window_font_load they are
+   what its report said (the ascent rounded down, a line gap of 2). */
+BTBHGPUResult btbh_gpu_font_metrics(
+    const BTBHGPUFont *font,
+    BTBHGPUFontMetrics *metrics
+);
+/* How much further (negative: closer) the pen moves between left and right at the font's size, in
+   pixels, from the font's kerning (GPOS pair adjustments or its kern table): 0 if none, or if either
+   codepoint isn't one the font was baked with or the font lacks it. Whole pixels with snap_advances.
+   Always 0 for a font from btbh_gpu_window_font_load. */
+float btbh_gpu_font_kerning(
+    const BTBHGPUFont *font,
+    uint32_t left,
+    uint32_t right
+);
 BTBHGPUResult btbh_gpu_window_canvas_present(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,

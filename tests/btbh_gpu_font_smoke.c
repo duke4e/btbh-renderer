@@ -1,0 +1,775 @@
+/* RFC 0004 option A (readable small text): btbh_gpu_window_font_load_ex.
+ *
+ * Checks the descriptor's validation; that oversampled glyphs keep the plain loader's metrics within
+ * a pixel (advances, glyph centres, ascent and descent) and that their UVs undo the oversampling;
+ * snap_advances, kerning, a codepoint the font lacks, and the coverage curve (read back from the
+ * atlases). It prints how long each bake takes.
+ *
+ * Then it draws one line of HUD text at 10, 12 and 16 px, light on dark, into a render target with
+ * the canvas, reads it back and writes PNGs for comparison (into BTBH_GPU_FONT_SMOKE_OUTPUT_DIR, or
+ * BTBH_SMOKE_DUMP when set):
+ *   text-<size>px-plain.png     btbh_gpu_window_font_load, its whole-pixel advances
+ *   text-<size>px-snapped.png   the plain loader laid out as CHIMERA does (0.3.0): fractional advances
+ *                               scaled from a 60 px face, each glyph snapped to the nearest pixel
+ *   text-<size>px-ex.png        _ex with oversample_x 3, fractional advances, kerning, glyphs on 1/3 px
+ *   text-<size>px-ex-gamma.png  the same with coverage_gamma 1.3
+ *   text-all.png, text-all-x4.png  every row in that order for each size, and the same 4x (nearest)
+ *
+ * The face is Titillium Web SemiBold (SIL OFL 1.1, Tests/Fixtures/OFL-TitilliumWeb.txt), CHIMERA's UI
+ * face. It needs a GPU and the canvas shaders; with neither it is skipped (77). */
+#undef NDEBUG
+
+#include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_internal.h"
+
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_gpu.h>
+#include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
+
+#include <assert.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define SMOKE_SKIP 77
+#define CANVAS_WIDTH 640u
+#define CANVAS_HEIGHT 288u
+#define MAX_VERTICES 16384u
+#define MAX_BATCHES 16u
+#define SIZE_COUNT 3u
+#define VARIANT_COUNT 4u
+
+#if defined(__APPLE__)
+#define SMOKE_SHADER_EXTENSION ".metallib"
+#define SMOKE_SHADER_FORMAT BTBH_GPU_SHADER_FORMAT_METALLIB
+#define SMOKE_BACKEND BTBH_GPU_BACKEND_METAL
+#else
+#define SMOKE_SHADER_EXTENSION ".spv"
+#define SMOKE_SHADER_FORMAT BTBH_GPU_SHADER_FORMAT_SPIRV
+#define SMOKE_BACKEND BTBH_GPU_BACKEND_VULKAN
+#endif
+
+static const char text_line[] =
+    "Power Plant: 100 Void Matter, 10 s. AV Ta We Yo - right-click again: cancel";
+static const uint32_t sizes[SIZE_COUNT] = {10u, 12u, 16u};
+static const char *const variant_names[VARIANT_COUNT] = {"plain", "snapped", "ex", "ex-gamma"};
+static const uint8_t background[3] = {22u, 24u, 30u};
+static const float ink[4] = {236.0f / 255.0f, 232.0f / 255.0f, 220.0f / 255.0f, 1.0f};
+
+static char shader_paths[3][1024];
+static uint32_t codepoints[128];
+static uint32_t codepoint_count;
+
+static BTBHGPUCanvasVertex vertices[MAX_VERTICES];
+static uint32_t vertex_count;
+
+/* CHIMERA's glyph set: printable ASCII, the Croatian letters and its punctuation. */
+static void fill_codepoints(void) {
+    static const uint32_t extra[] = {
+        0x10Cu, 0x10Du, 0x106u, 0x107u, 0x110u, 0x111u, 0x160u, 0x161u, 0x17Du, 0x17Eu,
+        0x2013u, 0x2014u, 0x2018u, 0x2019u, 0x201Cu, 0x201Du, 0x2026u, 0x2022u, 0xB7u, 0xD7u,
+        0xB0u, 0x2713u,
+    };
+    codepoint_count = 0u;
+    for (uint32_t c = 32u; c < 127u; c += 1u) {
+        codepoints[codepoint_count++] = c;
+    }
+    for (size_t i = 0u; i < sizeof(extra) / sizeof(extra[0]); i += 1u) {
+        codepoints[codepoint_count++] = extra[i];
+    }
+}
+
+static uint8_t *read_texture(BTBHGPUWindow *window, BTBHGPUTexture *texture) {
+    SDL_GPUDevice *device = window->device->gpu;
+    const uint32_t texel = SDL_GPUTextureFormatTexelBlockSize(texture->format);
+    assert(texel == 4u);
+    const uint32_t size = texture->width * texture->height * texel;
+    SDL_GPUTransferBufferCreateInfo info;
+    SDL_zero(info);
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    info.size = size;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &info);
+    assert(transfer != NULL);
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    assert(command != NULL);
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    SDL_GPUTextureRegion region;
+    SDL_zero(region);
+    region.texture = texture->texture;
+    region.w = texture->width;
+    region.h = texture->height;
+    region.d = 1u;
+    SDL_GPUTextureTransferInfo destination;
+    SDL_zero(destination);
+    destination.transfer_buffer = transfer;
+    SDL_DownloadFromGPUTexture(copy, &region, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    assert(fence != NULL);
+    assert(SDL_WaitForGPUFences(device, true, &fence, 1u));
+    SDL_ReleaseGPUFence(device, fence);
+    uint8_t *pixels = malloc(size);
+    assert(pixels != NULL);
+    const uint8_t *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    assert(mapped != NULL);
+    memcpy(pixels, mapped, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    if (
+        texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+        texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB
+    ) {
+        for (uint32_t i = 0u; i < texture->width * texture->height; i += 1u) {
+            const uint8_t blue = pixels[i * 4u];
+            pixels[i * 4u] = pixels[i * 4u + 2u];
+            pixels[i * 4u + 2u] = blue;
+        }
+    }
+    return pixels;
+}
+
+static BTBHGPUFont *load_plain(BTBHGPUWindow *window, uint32_t size, BTBHGPUFontReport *report) {
+    memset(report, 0, sizeof(*report));
+    BTBHGPUFont *font = btbh_gpu_window_font_load(
+        window, BTBH_GPU_FONT_SMOKE_FONT, size, codepoints, codepoint_count, report);
+    assert(font != NULL && report->result == BTBH_GPU_OK);
+    return font;
+}
+
+static BTBHGPUFont *load_ex(
+    BTBHGPUWindow *window,
+    float size,
+    uint8_t oversample_x,
+    uint8_t snap,
+    float gamma,
+    BTBHGPUFontReport *report
+) {
+    BTBHGPUFontDesc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.pixel_size = size;
+    desc.oversample_x = oversample_x;
+    desc.oversample_y = 1u;
+    desc.snap_advances = snap;
+    desc.coverage_gamma = gamma;
+    BTBHGPUFont *font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &desc, codepoints, codepoint_count, report);
+    if (font == NULL) {
+        fprintf(stderr, "_ex failed: %s\n", report->message);
+    }
+    assert(font != NULL && report->result == BTBH_GPU_OK);
+    return font;
+}
+
+/* _ex with this desc must fail as invalid, with a reason. */
+static void expect_invalid(BTBHGPUWindow *window, const BTBHGPUFontDesc *desc, const char *what) {
+    BTBHGPUFontReport report;
+    memset(&report, 0xAB, sizeof(report));
+    BTBHGPUFont *font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, desc, codepoints, codepoint_count, &report);
+    if (font != NULL || report.result != BTBH_GPU_INVALID_ARGUMENT || report.message[0] == '\0') {
+        fprintf(stderr, "not refused: %s\n", what);
+    }
+    assert(font == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(report.message[0] != '\0');
+    assert(report.atlas_width == 0u && report.glyph_count == 0u);
+}
+
+static void check_validation(BTBHGPUDevice *device, BTBHGPUWindow *window) {
+    BTBHGPUFontDesc good;
+    memset(&good, 0, sizeof(good));
+    good.pixel_size = 12.0f;
+    good.oversample_x = 3u;
+
+    BTBHGPUFontDesc desc = good;
+    expect_invalid(window, NULL, "NULL desc");
+    BTBHGPUFontDesc zero;
+    memset(&zero, 0, sizeof(zero));
+    expect_invalid(window, &zero, "zeroed desc");
+    const float bad_sizes[] = {-12.0f, 0.5f, 1025.0f, NAN, INFINITY};
+    for (size_t i = 0u; i < sizeof(bad_sizes) / sizeof(bad_sizes[0]); i += 1u) {
+        desc = good;
+        desc.pixel_size = bad_sizes[i];
+        expect_invalid(window, &desc, "pixel_size");
+    }
+    desc = good;
+    desc.oversample_x = 9u;
+    expect_invalid(window, &desc, "oversample_x 9");
+    desc = good;
+    desc.oversample_y = 9u;
+    expect_invalid(window, &desc, "oversample_y 9");
+    desc = good;
+    desc.snap_advances = 2u;
+    expect_invalid(window, &desc, "snap_advances 2");
+    desc = good;
+    desc.reserved = 1u;
+    expect_invalid(window, &desc, "reserved");
+    const float bad_gammas[] = {0.2f, 4.5f, -1.0f, NAN};
+    for (size_t i = 0u; i < sizeof(bad_gammas) / sizeof(bad_gammas[0]); i += 1u) {
+        desc = good;
+        desc.coverage_gamma = bad_gammas[i];
+        expect_invalid(window, &desc, "coverage_gamma");
+    }
+
+    BTBHGPUFontReport report;
+    /* No report: NULL, nothing to say it in. */
+    assert(btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &good, codepoints, codepoint_count, NULL) == NULL);
+    assert(btbh_gpu_window_font_load_ex(
+        NULL, BTBH_GPU_FONT_SMOKE_FONT, &good, codepoints, codepoint_count, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(btbh_gpu_window_font_load_ex(
+        window, NULL, &good, codepoints, codepoint_count, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &good, NULL, codepoint_count, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &good, codepoints, 0u, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    const uint32_t out_of_range[2] = {65u, 0x80000000u};
+    assert(btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &good, out_of_range, 2u, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    /* A file that isn't there fails as the plain loader does. */
+    assert(btbh_gpu_window_font_load_ex(
+        window, "no-such-font.ttf", &good, codepoints, codepoint_count, &report) == NULL);
+    assert(report.result == BTBH_GPU_DEVICE_FAILURE);
+
+    /* A window nobody claimed. */
+    const BTBHGPUWindowDescriptor descriptor = {
+        .title = "BTBH font smoke (unclaimed)", .width = 64, .height = 64, .hidden = 1,
+    };
+    BTBHGPUWindowReport window_report;
+    memset(&window_report, 0, sizeof(window_report));
+    BTBHGPUWindow *unclaimed = btbh_gpu_window_create(&descriptor, &window_report);
+    assert(unclaimed != NULL);
+    assert(btbh_gpu_window_font_load_ex(
+        unclaimed, BTBH_GPU_FONT_SMOKE_FONT, &good, codepoints, codepoint_count, &report) == NULL);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT);
+    btbh_gpu_window_destroy(unclaimed);
+    (void)device;
+
+    /* The edges of each range bake. */
+    BTBHGPUFontDesc edge = good;
+    edge.pixel_size = 1.0f;
+    edge.oversample_x = 8u;
+    edge.oversample_y = 8u;
+    edge.coverage_gamma = 4.0f;
+    BTBHGPUFont *font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &edge, codepoints, codepoint_count, &report);
+    assert(font != NULL && report.result == BTBH_GPU_OK && report.base_size == 1u);
+    btbh_gpu_font_destroy(font);
+    edge.pixel_size = 9.5f;
+    edge.oversample_x = 0u;
+    edge.oversample_y = 0u;
+    edge.coverage_gamma = 0.25f;
+    font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &edge, codepoints, codepoint_count, &report);
+    assert(font != NULL && report.result == BTBH_GPU_OK && report.base_size == 10u);
+    BTBHGPUFontMetrics metrics;
+    assert(btbh_gpu_font_metrics(font, &metrics) == BTBH_GPU_OK);
+    assert(metrics.pixel_size == 9.5f);
+    btbh_gpu_font_destroy(font);
+    printf("validation: refusals and range edges as documented\n");
+}
+
+static void check_metrics(BTBHGPUWindow *window) {
+    const uint32_t check_sizes[] = {10u, 12u, 16u, 24u};
+    const uint8_t oversamples[] = {1u, 2u, 3u};
+    float worst_advance = 0.0f;
+    float worst_centre_x = 0.0f;
+    float worst_centre_y = 0.0f;
+    for (size_t s = 0u; s < sizeof(check_sizes) / sizeof(check_sizes[0]); s += 1u) {
+        BTBHGPUFontReport plain_report;
+        BTBHGPUFont *plain = load_plain(window, check_sizes[s], &plain_report);
+        BTBHGPUFontMetrics plain_metrics;
+        assert(btbh_gpu_font_metrics(plain, &plain_metrics) == BTBH_GPU_OK);
+        assert(plain_metrics.ascent == plain_report.ascent);
+        assert(plain_metrics.descent == plain_report.descent);
+        assert(plain_metrics.line_gap == plain_report.line_gap);
+        assert(plain_metrics.pixel_size == (float)check_sizes[s]);
+        assert(btbh_gpu_font_kerning(plain, 'A', 'V') == 0.0f);
+        for (size_t o = 0u; o < sizeof(oversamples) / sizeof(oversamples[0]); o += 1u) {
+            const uint8_t oversample = oversamples[o];
+            BTBHGPUFontReport report;
+            BTBHGPUFont *ex = load_ex(window, (float)check_sizes[s], oversample, 0u, 0.0f, &report);
+            assert(report.base_size == check_sizes[s]);
+            assert(report.glyph_count == codepoint_count);
+            BTBHGPUFontMetrics metrics;
+            assert(btbh_gpu_font_metrics(ex, &metrics) == BTBH_GPU_OK);
+            assert(metrics.ascent == report.ascent && metrics.descent == report.descent);
+            assert(metrics.line_gap == report.line_gap);
+            assert(fabsf(metrics.ascent - plain_report.ascent) <= 1.0f);
+            assert(fabsf(metrics.descent - plain_report.descent) < 1e-3f);
+            assert(metrics.descent < 0.0f && metrics.line_gap >= 0.0f);
+            assert(metrics.pixel_size == (float)check_sizes[s]);
+            bool fractional = false;
+            for (uint32_t c = 32u; c < 127u; c += 1u) {
+                BTBHGPUFontGlyph p;
+                BTBHGPUFontGlyph e;
+                assert(btbh_gpu_font_glyph(plain, c, &p) == BTBH_GPU_OK);
+                assert(btbh_gpu_font_glyph(ex, c, &e) == BTBH_GPU_OK);
+                assert(e.codepoint == c);
+                const float advance = fabsf(e.advance - p.advance);
+                worst_advance = fmaxf(worst_advance, advance);
+                assert(advance <= 1.0f);
+                fractional = fractional || e.advance != floorf(e.advance);
+                if (c == ' ') {
+                    continue;
+                }
+                /* Each glyph's quad is centred on its ink in both loaders. */
+                const float centre_x = fabsf(
+                    (e.offset_x + 0.5f * e.width) - (p.offset_x + 0.5f * p.width));
+                const float centre_y = fabsf(
+                    (e.offset_y + 0.5f * e.height) - (p.offset_y + 0.5f * p.height));
+                worst_centre_x = fmaxf(worst_centre_x, centre_x);
+                worst_centre_y = fmaxf(worst_centre_y, centre_y);
+                assert(centre_x <= 1.0f);
+                assert(centre_y <= 1.0f);
+                /* The UVs take oversample texels for each output pixel across, one down. */
+                const float texels_x = (e.u1 - e.u0) * (float)report.atlas_width;
+                const float texels_y = (e.v1 - e.v0) * (float)report.atlas_height;
+                assert(fabsf(texels_x - e.width * (float)oversample) < 0.01f);
+                assert(fabsf(texels_y - e.height) < 0.01f);
+                assert(e.u0 >= 0.0f && e.v0 >= 0.0f && e.u1 <= 1.0f && e.v1 <= 1.0f);
+            }
+            assert(fractional);
+            btbh_gpu_font_destroy(ex);
+        }
+        btbh_gpu_font_destroy(plain);
+    }
+    printf(
+        "metrics against the plain loader (10-24 px, oversample 1-3): advances within %.3f px, "
+        "glyph centres within %.3f px across and %.3f px down\n",
+        (double)worst_advance,
+        (double)worst_centre_x,
+        (double)worst_centre_y
+    );
+
+    /* Whole-pixel advances and kerning with snap_advances. */
+    BTBHGPUFontReport report;
+    BTBHGPUFont *snapped = load_ex(window, 12.0f, 3u, 1u, 0.0f, &report);
+    for (uint32_t c = 32u; c < 127u; c += 1u) {
+        BTBHGPUFontGlyph g;
+        assert(btbh_gpu_font_glyph(snapped, c, &g) == BTBH_GPU_OK);
+        assert(g.advance == roundf(g.advance));
+        for (uint32_t d = 32u; d < 127u; d += 1u) {
+            const float kern = btbh_gpu_font_kerning(snapped, c, d);
+            assert(kern == roundf(kern));
+        }
+    }
+    btbh_gpu_font_destroy(snapped);
+
+    /* Kerning (Titillium Web has GPOS pairs), and none for codepoints it wasn't baked with. */
+    BTBHGPUFont *ex = load_ex(window, 16.0f, 3u, 0u, 0.0f, &report);
+    static const char *const pairs[] = {"AV", "AT", "To", "Ty", "Wa", "Yo", "LT", "Te", "P.", "VA"};
+    uint32_t kerned = 0u;
+    printf("kerning at 16 px:");
+    for (size_t i = 0u; i < sizeof(pairs) / sizeof(pairs[0]); i += 1u) {
+        const float kern = btbh_gpu_font_kerning(ex, (uint32_t)pairs[i][0], (uint32_t)pairs[i][1]);
+        printf(" %s %.2f", pairs[i], (double)kern);
+        kerned += kern < 0.0f ? 1u : 0u;
+        assert(fabsf(kern) < 4.0f);
+    }
+    printf("\n");
+    assert(kerned >= 3u);
+    assert(btbh_gpu_font_kerning(ex, 'A', 0x4E00u) == 0.0f);
+    assert(btbh_gpu_font_kerning(ex, 0x4E00u, 'A') == 0.0f);
+    assert(btbh_gpu_font_kerning(NULL, 'A', 'V') == 0.0f);
+    BTBHGPUFontMetrics metrics;
+    assert(btbh_gpu_font_metrics(NULL, &metrics) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(btbh_gpu_font_metrics(ex, NULL) == BTBH_GPU_INVALID_ARGUMENT);
+    btbh_gpu_font_destroy(ex);
+
+    /* A codepoint the font lacks keeps an empty glyph, as with the plain loader; an unknown one
+       falls back to '?'. */
+    const uint32_t with_missing[3] = {'?', 'A', 0x4E00u};
+    BTBHGPUFontDesc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.pixel_size = 12.0f;
+    desc.oversample_x = 3u;
+    BTBHGPUFont *partial = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &desc, with_missing, 3u, &report);
+    assert(partial != NULL);
+    BTBHGPUFontGlyph glyph;
+    assert(btbh_gpu_font_glyph(partial, 0x4E00u, &glyph) == BTBH_GPU_OK);
+    assert(glyph.codepoint == 0x4E00u && glyph.advance == 0.0f && glyph.width == 0.0f);
+    assert(btbh_gpu_font_glyph(partial, 'Z', &glyph) == BTBH_GPU_OK);
+    assert(glyph.codepoint == '?' && glyph.advance > 0.0f);
+    /* (The plain loader can't pack as few glyphs as three: it gets the whole set and the missing one.) */
+    uint32_t plain_set[129];
+    memcpy(plain_set, codepoints, codepoint_count * sizeof(codepoints[0]));
+    plain_set[codepoint_count] = 0x4E00u;
+    BTBHGPUFontReport plain_report;
+    BTBHGPUFont *plain_partial = btbh_gpu_window_font_load(
+        window, BTBH_GPU_FONT_SMOKE_FONT, 12u, plain_set, codepoint_count + 1u, &plain_report);
+    assert(plain_partial != NULL);
+    assert(btbh_gpu_font_glyph(plain_partial, 0x4E00u, &glyph) == BTBH_GPU_OK);
+    assert(glyph.advance == 0.0f);
+    btbh_gpu_font_destroy(plain_partial);
+    btbh_gpu_font_destroy(partial);
+    /* None of them: an empty atlas, still a font. */
+    const uint32_t none[1] = {0x4E00u};
+    BTBHGPUFont *empty = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &desc, none, 1u, &report);
+    assert(empty != NULL && report.result == BTBH_GPU_OK);
+    btbh_gpu_font_destroy(empty);
+}
+
+/* coverage_gamma 1.3 raises every partial coverage and leaves 0 and 255: the same atlas otherwise. */
+static void check_coverage_curve(BTBHGPUWindow *window) {
+    BTBHGPUFontReport linear_report;
+    BTBHGPUFontReport curved_report;
+    BTBHGPUFont *linear = load_ex(window, 12.0f, 3u, 0u, 0.0f, &linear_report);
+    BTBHGPUFont *curved = load_ex(window, 12.0f, 3u, 0u, 1.3f, &curved_report);
+    assert(linear_report.atlas_width == curved_report.atlas_width);
+    assert(linear_report.atlas_height == curved_report.atlas_height);
+    uint8_t *a = read_texture(window, btbh_gpu_font_atlas(linear));
+    uint8_t *b = read_texture(window, btbh_gpu_font_atlas(curved));
+    const uint32_t count = linear_report.atlas_width * linear_report.atlas_height;
+    uint32_t raised = 0u;
+    uint32_t partial = 0u;
+    uint64_t sum_a = 0u;
+    uint64_t sum_b = 0u;
+    for (uint32_t i = 0u; i < count; i += 1u) {
+        const uint8_t before = a[i * 4u + 3u];
+        const uint8_t after = b[i * 4u + 3u];
+        assert(a[i * 4u] == 255u && b[i * 4u] == 255u);
+        assert(after >= before);
+        if (before == 0u || before == 255u) {
+            assert(after == before);
+        } else {
+            partial += 1u;
+            raised += after > before ? 1u : 0u;
+        }
+        sum_a += before;
+        sum_b += after;
+    }
+    assert(partial > 0u && raised * 2u > partial);
+    printf(
+        "coverage_gamma 1.3: %u of %u partial texels raised, total coverage x%.3f\n",
+        raised,
+        partial,
+        (double)sum_b / (double)sum_a
+    );
+    free(a);
+    free(b);
+    btbh_gpu_font_destroy(linear);
+    btbh_gpu_font_destroy(curved);
+}
+
+static void push_quad(
+    float x0, float y0, float x1, float y1,
+    float u0, float v0, float u1, float v1
+) {
+    assert(vertex_count + 6u <= MAX_VERTICES);
+    const BTBHGPUCanvasVertex corners[4] = {
+        {x0, y0, u0, v0, ink[0], ink[1], ink[2], ink[3]},
+        {x1, y0, u1, v0, ink[0], ink[1], ink[2], ink[3]},
+        {x1, y1, u1, v1, ink[0], ink[1], ink[2], ink[3]},
+        {x0, y1, u0, v1, ink[0], ink[1], ink[2], ink[3]},
+    };
+    const int order[6] = {0, 1, 2, 0, 2, 3};
+    for (int i = 0; i < 6; i += 1) {
+        vertices[vertex_count++] = corners[order[i]];
+    }
+}
+
+typedef struct LineStats {
+    float width;        /* where the pen ended, from the run's start */
+    float worst_offset; /* the furthest a glyph was placed from its own fractional pen */
+} LineStats;
+
+/* Lays out text_line at (x, baseline) as variant does; one batch of quads from font's atlas. */
+static LineStats lay_out(
+    uint32_t variant,
+    const BTBHGPUFont *font,
+    const BTBHGPUFont *big,
+    float size,
+    float x,
+    float baseline
+) {
+    LineStats stats = {0.0f, 0.0f};
+    float pen = x;
+    uint32_t previous = 0u;
+    for (const char *c = text_line; *c != '\0'; c += 1) {
+        const uint32_t codepoint = (uint32_t)(unsigned char)*c;
+        BTBHGPUFontGlyph g;
+        assert(btbh_gpu_font_glyph(font, codepoint, &g) == BTBH_GPU_OK);
+        float placed = pen;
+        float advance = g.advance;
+        if (variant == 1u) {
+            /* CHIMERA: the advance of its biggest face, scaled; each glyph on the nearest pixel. */
+            BTBHGPUFontGlyph b;
+            assert(btbh_gpu_font_glyph(big, codepoint, &b) == BTBH_GPU_OK);
+            advance = b.advance * size / 60.0f;
+            placed = roundf(pen);
+        } else if (variant >= 2u) {
+            if (previous != 0u) {
+                pen += btbh_gpu_font_kerning(font, previous, codepoint);
+            }
+            placed = floorf(pen * 3.0f + 0.5f) / 3.0f;
+        }
+        stats.worst_offset = fmaxf(stats.worst_offset, fabsf(placed - pen));
+        if (codepoint != ' ' && g.width > 0.0f) {
+            const float x0 = placed + g.offset_x;
+            const float y0 = baseline + g.offset_y;
+            push_quad(x0, y0, x0 + g.width, y0 + g.height, g.u0, g.v0, g.u1, g.v1);
+        }
+        pen += advance;
+        previous = codepoint;
+    }
+    stats.width = pen - x;
+    return stats;
+}
+
+static void write_png(const char *dir, const char *name, uint32_t width, uint32_t height, const uint8_t *rgba) {
+    char path[1024];
+    (void)snprintf(path, sizeof(path), "%s/%s", dir, name);
+    assert(btbh_gpu_write_png_rgba8(path, width, height, rgba) == BTBH_GPU_OK);
+}
+
+static void check_readback(BTBHGPUWindow *window) {
+    const char *dump = getenv("BTBH_SMOKE_DUMP");
+    const char *dir = dump != NULL ? dump : BTBH_GPU_FONT_SMOKE_OUTPUT_DIR;
+    (void)SDL_CreateDirectory(dir);
+
+    BTBHGPUTextureReport texture_report;
+    BTBHGPUTexture *target = btbh_gpu_window_render_target_create(
+        window, CANVAS_WIDTH, CANVAS_HEIGHT, BTBH_GPU_TEXTURE_FILTER_NEAREST, &texture_report);
+    assert(target != NULL);
+
+    BTBHGPUFontReport report;
+    BTBHGPUFont *big = load_plain(window, 60u, &report);
+    BTBHGPUFont *fonts[SIZE_COUNT][VARIANT_COUNT];
+    uint32_t row_top[SIZE_COUNT][VARIANT_COUNT];
+    uint32_t row_height[SIZE_COUNT];
+    LineStats stats[SIZE_COUNT][VARIANT_COUNT];
+    BTBHGPUCanvasBatch batches[MAX_BATCHES];
+    uint32_t batch_count = 0u;
+    vertex_count = 0u;
+    uint32_t y = 6u;
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        const float size = (float)sizes[s];
+        const uint64_t plain_start = SDL_GetTicksNS();
+        fonts[s][0] = load_plain(window, sizes[s], &report);
+        const uint64_t plain_time = SDL_GetTicksNS() - plain_start;
+        fonts[s][1] = load_plain(window, sizes[s], &report);
+        const uint64_t ex_start = SDL_GetTicksNS();
+        fonts[s][2] = load_ex(window, size, 3u, 0u, 0.0f, &report);
+        const uint64_t ex_time = SDL_GetTicksNS() - ex_start;
+        printf(
+            "%u px, %u glyphs: plain bake %.2f ms; _ex (oversample 3, kerning) %.2f ms, atlas %ux%u\n",
+            sizes[s],
+            codepoint_count,
+            (double)plain_time / 1e6,
+            (double)ex_time / 1e6,
+            report.atlas_width,
+            report.atlas_height
+        );
+        fonts[s][3] = load_ex(window, size, 3u, 0u, 1.3f, &report);
+        BTBHGPUFontMetrics metrics;
+        assert(btbh_gpu_font_metrics(fonts[s][2], &metrics) == BTBH_GPU_OK);
+        row_height[s] = (uint32_t)ceilf(size * 1.5f) + 2u;
+        for (uint32_t v = 0u; v < VARIANT_COUNT; v += 1u) {
+            row_top[s][v] = y;
+            const float baseline = (float)y + 1.0f + roundf(metrics.ascent);
+            const uint32_t first = vertex_count;
+            stats[s][v] = lay_out(v, fonts[s][v], big, size, 8.0f, baseline);
+            assert(batch_count < MAX_BATCHES);
+            BTBHGPUCanvasBatch *batch = &batches[batch_count++];
+            memset(batch, 0, sizeof(*batch));
+            batch->first_vertex = first;
+            batch->vertex_count = vertex_count - first;
+            batch->texture = btbh_gpu_font_atlas(fonts[s][v]);
+            batch->blend_mode = BTBH_GPU_CANVAS_BLEND_ALPHA;
+            y += row_height[s];
+        }
+        y += 4u;
+    }
+    assert(y <= CANVAS_HEIGHT);
+
+    BTBHGPUCanvasPass pass;
+    memset(&pass, 0, sizeof(pass));
+    pass.first_batch = 0u;
+    pass.batch_count = batch_count;
+    pass.target = target;
+    pass.clear_enabled = 1u;
+    pass.clear_red = background[0];
+    pass.clear_green = background[1];
+    pass.clear_blue = background[2];
+    pass.clear_alpha = 255u;
+    BTBHGPUCanvasReport canvas_report;
+    const BTBHGPUResult result = btbh_gpu_window_canvas_present(
+        window,
+        shader_paths[0],
+        shader_paths[1],
+        shader_paths[2],
+        SMOKE_SHADER_FORMAT,
+        vertices,
+        vertex_count,
+        batches,
+        batch_count,
+        &pass,
+        1u,
+        &canvas_report
+    );
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "canvas: %s\n", canvas_report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    uint8_t *pixels = read_texture(window, target);
+    for (uint32_t i = 0u; i < CANVAS_WIDTH * CANVAS_HEIGHT; i += 1u) {
+        pixels[i * 4u + 3u] = 255u;
+    }
+
+    /* Each row has text on it; _ex's coverage is the plain loader's within a third, and the
+       curve's is more. */
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        double coverage[VARIANT_COUNT];
+        for (uint32_t v = 0u; v < VARIANT_COUNT; v += 1u) {
+            double sum = 0.0;
+            uint32_t lit = 0u;
+            for (uint32_t row = 0u; row < row_height[s]; row += 1u) {
+                const uint8_t *line = &pixels[(size_t)(row_top[s][v] + row) * CANVAS_WIDTH * 4u];
+                for (uint32_t x = 0u; x < CANVAS_WIDTH; x += 1u) {
+                    const int excess = (int)line[x * 4u + 1u] - (int)background[1];
+                    if (excess > 0) {
+                        sum += (double)excess;
+                        lit += excess > 16 ? 1u : 0u;
+                    }
+                }
+            }
+            coverage[v] = sum / (232.0 - (double)background[1]);
+            assert(lit > 100u);
+            char name[64];
+            (void)snprintf(name, sizeof(name), "text-%upx-%s.png", sizes[s], variant_names[v]);
+            write_png(
+                dir,
+                name,
+                CANVAS_WIDTH,
+                row_height[s],
+                &pixels[(size_t)row_top[s][v] * CANVAS_WIDTH * 4u]
+            );
+        }
+        printf(
+            "%u px: ink (pixels of full coverage) plain %.0f, snapped %.0f, ex %.0f, ex-gamma %.0f; "
+            "line width plain %.2f, snapped %.2f, ex %.2f px; glyphs off their pen by up to "
+            "snapped %.3f, ex %.3f px\n",
+            sizes[s],
+            coverage[0],
+            coverage[1],
+            coverage[2],
+            coverage[3],
+            (double)stats[s][0].width,
+            (double)stats[s][1].width,
+            (double)stats[s][2].width,
+            (double)stats[s][1].worst_offset,
+            (double)stats[s][2].worst_offset
+        );
+        assert(fabs(coverage[2] / coverage[0] - 1.0) < 0.34);
+        assert(coverage[3] > coverage[2]);
+        assert(stats[s][1].worst_offset <= 0.5f + 1e-4f);
+        assert(stats[s][2].worst_offset <= 1.0f / 6.0f + 1e-4f);
+    }
+    write_png(dir, "text-all.png", CANVAS_WIDTH, CANVAS_HEIGHT, pixels);
+    const uint32_t zoom = 4u;
+    uint8_t *zoomed = malloc((size_t)CANVAS_WIDTH * CANVAS_HEIGHT * 4u * zoom * zoom);
+    assert(zoomed != NULL);
+    for (uint32_t zy = 0u; zy < CANVAS_HEIGHT * zoom; zy += 1u) {
+        for (uint32_t zx = 0u; zx < CANVAS_WIDTH * zoom; zx += 1u) {
+            memcpy(
+                &zoomed[((size_t)zy * CANVAS_WIDTH * zoom + zx) * 4u],
+                &pixels[((size_t)(zy / zoom) * CANVAS_WIDTH + zx / zoom) * 4u],
+                4u
+            );
+        }
+    }
+    write_png(dir, "text-all-x4.png", CANVAS_WIDTH * zoom, CANVAS_HEIGHT * zoom, zoomed);
+    printf("text PNGs in %s\n", dir);
+    free(zoomed);
+    free(pixels);
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        for (uint32_t v = 0u; v < VARIANT_COUNT; v += 1u) {
+            btbh_gpu_font_destroy(fonts[s][v]);
+        }
+    }
+    btbh_gpu_font_destroy(big);
+    btbh_gpu_texture_destroy(target);
+}
+
+int main(void) {
+    static const char *const shader_names[3] = {
+        "production_canvas.vert",
+        "production_canvas.frag",
+        "production_canvas_textured.frag",
+    };
+    for (int index = 0; index < 3; index += 1) {
+        (void)snprintf(
+            shader_paths[index],
+            sizeof(shader_paths[index]),
+            "%s/%s%s",
+            BTBH_GPU_SMOKE_SHADER_DIR,
+            shader_names[index],
+            SMOKE_SHADER_EXTENSION
+        );
+        FILE *file = fopen(shader_paths[index], "rb");
+        if (file == NULL) {
+            fprintf(stderr, "skipped: no shader %s\n", shader_paths[index]);
+            return SMOKE_SKIP;
+        }
+        fclose(file);
+    }
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
+    fill_codepoints();
+    (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+    const BTBHGPUDeviceDescriptor device_descriptor = {
+        .backend = SMOKE_BACKEND,
+        .required_features = BTBH_GPU_REQUIRED_FEATURES,
+        .debug_mode = 1,
+    };
+    BTBHGPUDeviceReport device_report;
+    memset(&device_report, 0, sizeof(device_report));
+    BTBHGPUDevice *device = btbh_gpu_device_create(&device_descriptor, &device_report);
+    if (device == NULL) {
+        fprintf(stderr, "skipped: no device (%s)\n", device_report.message);
+        return SMOKE_SKIP;
+    }
+    const BTBHGPUWindowDescriptor descriptor = {
+        .title = "BTBH font smoke",
+        .width = CANVAS_WIDTH,
+        .height = CANVAS_HEIGHT,
+        .hidden = 1,
+        .high_pixel_density = 0,
+    };
+    BTBHGPUWindowReport window_report;
+    memset(&window_report, 0, sizeof(window_report));
+    BTBHGPUWindow *window = btbh_gpu_window_create(&descriptor, &window_report);
+    assert(window != NULL);
+    assert(btbh_gpu_window_claim(device, window, &window_report) == BTBH_GPU_OK);
+
+    check_validation(device, window);
+    check_metrics(window);
+    check_coverage_curve(window);
+    check_readback(window);
+
+    /* A font outlives its window: metrics and kerning still answer. */
+    BTBHGPUFontReport report;
+    BTBHGPUFont *kept = load_ex(window, 12.0f, 3u, 0u, 0.0f, &report);
+    const float kern = btbh_gpu_font_kerning(kept, 'A', 'V');
+    btbh_gpu_window_destroy(window);
+    assert(btbh_gpu_font_atlas(kept) == NULL);
+    BTBHGPUFontMetrics metrics;
+    assert(btbh_gpu_font_metrics(kept, &metrics) == BTBH_GPU_OK && metrics.pixel_size == 12.0f);
+    assert(btbh_gpu_font_kerning(kept, 'A', 'V') == kern);
+    btbh_gpu_font_destroy(kept);
+
+    btbh_gpu_device_shutdown(device);
+    btbh_gpu_device_destroy(device);
+    printf("font smoke passed\n");
+    return 0;
+}
