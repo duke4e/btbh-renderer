@@ -548,13 +548,13 @@ if(BTBH_BUILD_GPU_SPIKE)
     # the tests unless they are asked for; the game builds need none of them.
     if(BTBH_BUILD_GPU_NATIVE_TESTS)
         add_executable(btbh_gpu_contract_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_contract_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_contract_test.c"
         )
         target_link_libraries(btbh_gpu_contract_test PRIVATE btbh_gpu)
         add_test(NAME btbh_gpu_contract COMMAND btbh_gpu_contract_test)
 
         add_executable(btbh_gpu_radiance_cascades_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_radiance_cascades_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_radiance_cascades_test.c"
         )
         target_include_directories(
             btbh_gpu_radiance_cascades_test
@@ -570,7 +570,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_scene_blend_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_scene_blend_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_blend_test.c"
         )
         target_include_directories(
             btbh_gpu_scene_blend_test
@@ -586,13 +586,13 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_gamepad_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_gamepad_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_gamepad_test.c"
         )
         target_link_libraries(btbh_gpu_gamepad_test PRIVATE btbh_gpu SDL3::SDL3-static)
         add_test(NAME btbh_gpu_gamepad COMMAND btbh_gpu_gamepad_test)
 
         add_executable(btbh_gpu_window_config_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_config_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_window_config_test.c"
         )
         target_include_directories(
             btbh_gpu_window_config_test
@@ -608,7 +608,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_animation_math_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_animation_math_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_animation_math_test.c"
         )
         target_include_directories(
             btbh_gpu_animation_math_test
@@ -630,7 +630,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_model_orm_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_orm_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_model_orm_test.c"
         )
         target_include_directories(
             btbh_gpu_model_orm_test
@@ -646,7 +646,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_model_skinning_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_model_skinning_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_model_skinning_test.c"
         )
         target_include_directories(
             btbh_gpu_model_skinning_test
@@ -662,7 +662,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_public_header_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_public_header_test.c"
         )
         target_compile_definitions(
             btbh_gpu_public_header_test
@@ -675,7 +675,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_resources_public_header_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_public_header_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_public_header_test.c"
         )
         target_compile_definitions(
             btbh_gpu_resources_public_header_test
@@ -688,7 +688,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         )
 
         add_executable(btbh_gpu_resource_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_resource_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_resource_test.c"
         )
         target_link_libraries(btbh_gpu_resource_test PRIVATE btbh_gpu)
         if(MSVC)
@@ -701,7 +701,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_resources COMMAND btbh_gpu_resource_test)
 
         add_executable(btbh_gpu_phase2_shader_test
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_phase2_shader_test.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_phase2_shader_test.c"
         )
         target_compile_definitions(btbh_gpu_phase2_shader_test
             PRIVATE
@@ -750,7 +750,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_phase2_shaders COMMAND btbh_gpu_phase2_shader_test)
 
         add_executable(btbh_gpu_device_smoke
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_device_smoke.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_device_smoke.c"
         )
         target_compile_definitions(btbh_gpu_device_smoke PRIVATE SDL_MAIN_HANDLED)
         target_link_libraries(
@@ -762,7 +762,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_device_smoke COMMAND btbh_gpu_device_smoke)
 
         add_executable(btbh_gpu_window_smoke
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_window_smoke.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_window_smoke.c"
         )
         target_compile_definitions(btbh_gpu_window_smoke PRIVATE SDL_MAIN_HANDLED)
         target_link_libraries(
@@ -775,7 +775,7 @@ if(BTBH_BUILD_GPU_SPIKE)
 
         # A scene rendered into a render target beside a window's FSR 3 frames (two hidden windows).
         add_executable(btbh_gpu_scene_target_smoke
-            "${BTBH_RENDERER_ROOT}/tests/btbh_gpu_scene_target_smoke.c"
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_target_smoke.c"
         )
         target_include_directories(
             btbh_gpu_scene_target_smoke
