@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-12
+
 Opt-in additions for 0.4.0's games:
 - destructible terrain from SDF edits, phases 1 to 3 of [RFC 0007](docs/rfc/0007-destructible-terrain.md) (asked
   for by Be The Bullet Hell and CHIMERA on #3), and a Swift layer for it (asked for by Be The Bullet Hell);
@@ -17,6 +19,20 @@ and the canvas draws what it drew; a zeroed batch, a zeroed `BTBHGPUScenePost` a
 as in 0.4.0 (in Swift: a platform with no terrain set, whatever its materials say). One shader is new
 (`production_canvas_coverage.frag`). The scene, unlit, shadow and radiance-cascade material-source shaders changed
 for the terrain (a dig-mask branch that a zeroed batch never takes): rebuild the shaders together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (20/20), the Swift build and the full Swift suite (301
+tests, 2 skipped, 0 failures).
+- Be The Bullet Hell, with nothing set (`83e05749`, before CHIMERA's notes and the Swift terrain): 5701 tests, 0
+  failures, and no frame time change it could measure. With craters, through the Swift layer (`a9b39f28`): 5709
+  tests, 0 failures. It used one terrain per city: 0.5 m cells, 10,400 chunks of 32 cells, and a heightfield base
+  at its floor tiles' tops. Crater and collapse edits dug through its floor tiles. With craters on against off,
+  interleaved, it ran at 77.7 / 77.2 fps (boss), 104.6 / 104.3 (stress) and 103.3 / 101.8 (mid), which is within
+  noise. After nine 13 m craters it held 5.7 MB of meshes and 20.7 MB of mask.
+- CHIMERA, on `751ddb01` (this release's C core): 996 workspace tests, both against it and against 0.3.0. With
+  nothing set, 0 pixels differ from 0.4.0. It turned on the kerning pairs, R8 atlases, `SNAP_X_HEIGHT`,
+  `NO_SUN_SHADOW`, and its ground on `KEEP_ORDER` drawn after the scenery. It has no terrain, so the dig mask and
+  the refusal of old shaders aren't exercised there.
+- macOS (Metal) isn't verified.
 
 ### Added
 - **`BTBHGPUSdfTerrain`** (`include/btbh_gpu/btbh_gpu_sdf_terrain.h`, included at the end of `btbh_gpu.h`;
@@ -212,6 +228,15 @@ quoted.
   produce bit-identical depth. Stencil users and depth-compare overrides would have to stay out of it. With the
   sort, early depth already drops most hidden pixels; a pre-pass is worth measuring again once the GPU can be
   timed per pass.
+
+### Known
+- The dig mask marks whole cell columns. Where a host's floor sits above a crater's lip, a sawtooth of floor one
+  cell wide shows along the top of the bowl wall. Be The Bullet Hell sees it from its gameplay camera. A
+  conservative or smoothly sampled mask would hide it; that is for 0.5.x.
+- `btbh_gpu_sdf_terrain_update` can overrun its budget, because a chunk's mesh build and upload don't split.
+  Be The Bullet Hell measured up to 3.8 ms in one frame with 32-cell chunks (5.6 ms with 64-cell ones), and
+  about 8 ms of work in all per 13 m crater. Meshing only the bricks near active ones (RFC 0007's next step), or
+  splitting the upload, would remove the spikes.
 
 ### Upgrading
 - Nothing to set: zeroed batches (`= {0}`, `..Default::default()`, Swift's `init()`) have `dug_by` NULL.

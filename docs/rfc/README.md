@@ -27,7 +27,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0004](0004-small-text.md) | Readable small text (oversampled exact-size atlases, kerning, snapping) | Implemented in v0.4.0 (option A) | CHIMERA |
 | [0005](0005-screen-space-refraction.md) | Screen-space refraction batches (`BTBH_GPU_SCENE_SURFACE_REFRACT`) | Implemented in v0.1.0 | CHIMERA |
 | [0006](0006-scene-render-to-target.md) | A scene into a render target, apart from the window's temporal history; per-batch reactive mask | Implemented in v0.1.1 | CHIMERA |
-| [0007](0007-destructible-terrain.md) | Destructible terrain from SDF edits (sparse bricks, meshed patches, dig mask) | Accepted | Be The Bullet Hell, CHIMERA |
+| [0007](0007-destructible-terrain.md) | Destructible terrain from SDF edits (sparse bricks, meshed patches, dig mask) | Implemented in v0.5.0 (phases 1–3) | Be The Bullet Hell, CHIMERA |
 
 CHIMERA's map-look note (`RTS/docs/v2/izgled-mapa.md` §9, branch `v2-izgled`) made six proposals. Three became
 the RFCs above. The other three need none:

@@ -1,7 +1,7 @@
 # RFC 0007: Destructible terrain from SDF edits
 
-- **Status:** Accepted (2026-11-11). Phases 1 to 3 are implemented on a branch, not released yet (see
-  "Implementation notes")
+- **Status:** Implemented in v0.5.0: phases 1 to 3, and a Swift layer (`GPUSdfTerrain`). Accepted on
+  2026-11-11. See "Implementation notes".
 - **Requested by:** Be The Bullet Hell, CHIMERA (proposed by the coordinator)
 - **Affects:** Be The Bullet Hell and CHIMERA (each adopts it on its own). Tyrian3D: nothing, it is opt-in
 - **Issue:** [#3](https://github.com/duke4e/btbh-renderer/issues/3). Both games answered on 2026-11-11; their
@@ -457,7 +457,7 @@ No new device capability: R16F sampling and custom meshes are core on Vulkan and
 
 ## Implementation notes (phases 1 to 3, 2026-11-11)
 
-Phases 1 to 3 are implemented on a branch (not released yet): `include/btbh_gpu/btbh_gpu_sdf_terrain.h`,
+Phases 1 to 3 are implemented in v0.5.0: `include/btbh_gpu/btbh_gpu_sdf_terrain.h`,
 `src/gpu/btbh_gpu_sdf_terrain.c`, the dig mask in the scene, unlit, shadow and radiance-cascade material-source
 shaders, `Tests/btbh_gpu_sdf_terrain_test.c` (native) and `Tests/btbh_gpu_sdf_terrain_smoke.c` (GPU). The API is
 the one above. Where the prototype had to differ from the text above, or measured something the text estimated,
