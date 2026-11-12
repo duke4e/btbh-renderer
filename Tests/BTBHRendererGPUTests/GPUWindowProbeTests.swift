@@ -203,12 +203,14 @@ final class GPUWindowProbeTests: XCTestCase {
             ),
             encoding: .utf8
         ).replacingOccurrences(of: "\r\n", with: "\n")
+        // The internal submission alone: the public wrappers follow it, then the render-to-target rare path
+        // (btbh_gpu_window_scene_render_to_target), which submits its own command on purpose.
         let sceneSubmission = try XCTUnwrap(
             sceneSource.range(
                 of: "btbh_gpu_window_scene_present_instances_internal("
             ).flatMap { start in
                 sceneSource.range(
-                    of: "\nBTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(",
+                    of: "\nBTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(",
                     range: start.lowerBound..<sceneSource.endIndex
                 ).map {
                     String(sceneSource[start.lowerBound..<$0.lowerBound])
@@ -232,7 +234,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 of: "\nBTBHGPUResult btbh_gpu_window_scene_present_instances("
             ).flatMap { start in
                 sceneSource.range(
-                    of: "\nBTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(",
+                    of: "\nBTBHGPUResult btbh_gpu_window_scene_render_to_target(",
                     range: start.lowerBound..<sceneSource.endIndex
                 ).map {
                     String(sceneSource[start.lowerBound..<$0.lowerBound])
@@ -807,9 +809,21 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(source.contains(
             "font->ascent = (float)((int)((float)ascent * metric_scale));"
         ))
-        XCTAssertTrue(source.contains(
-            "BTBH_GPU_TEXTURE_FILTER_NEAREST,\n" +
-            "        BTBH_GPU_TEXTURE_WRAP_CLAMP"
+        // The atlas clamps at its edges and filters linearly since c505715 (v0.1.0), so text drawn at any
+        // size stays smooth (CHANGELOG: "Font atlases filtered linearly").
+        let fontLoad = try XCTUnwrap(
+            source.range(of: "BTBHGPUFont *btbh_gpu_window_font_load(\n").flatMap { start in
+                source.range(of: "\n}\n", range: start.upperBound..<source.endIndex).map {
+                    String(source[start.lowerBound..<$0.lowerBound])
+                }
+            }
+        )
+        let fontLoadCode = fontLoad
+            .replacingOccurrences(of: #"/\*.*?\*/"#, with: "", options: .regularExpression)
+            .filter { !$0.isWhitespace }
+        XCTAssertTrue(fontLoadCode.contains(
+            "btbh_gpu_window_texture_create_rgba8(window,rgba,atlas_width,atlas_height," +
+                "BTBH_GPU_TEXTURE_FILTER_LINEAR,BTBH_GPU_TEXTURE_WRAP_CLAMP,&texture_report)"
         ))
     }
 
@@ -1069,9 +1083,13 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(nativeScene.contains(
             "!radiance_cascades_debug_output;"
         ))
-        // Resolved at the start of the transparent phase, on the opaque scene only.
+        // Resolved at the start of the transparent phase (phase 1, the first one after the opaque phase 0),
+        // on the opaque scene only, and only once: the refraction phase after it (7b48f758) is transparent too.
         XCTAssertTrue(nativeScene.contains(
-            "if (transparent_phase && ssao_resolve_active) {"
+            "const bool transparent_phase = transparency_phase != 0u;"
+        ))
+        XCTAssertTrue(nativeScene.contains(
+            "if (transparency_phase == 1u && ssao_resolve_active) {"
         ))
         XCTAssertFalse(nativeScene.contains(
             "post->ssao_enabled != 0u && !radiance_cascades_active"
@@ -1632,10 +1650,21 @@ final class GPUWindowProbeTests: XCTestCase {
             shader.components(separatedBy: "512.0f").count - 1,
             2
         )
+        // The primary map's size is settable (btbh_gpu_window_scene_set_directional_shadow_size, 2048 by default)
+        // since e3698ba6 (v0.2.0), so the shader reads it from the texture instead of a 2048.0f constant.
+        XCTAssertTrue(nativeScene.contains(
+            "            : BTBH_GPU_PRIMARY_DIRECTIONAL_SHADOW_MAP_SIZE;"
+        ))
         XCTAssertEqual(
             shader.components(separatedBy: "2048.0f").count - 1,
-            1
+            0
         )
+        XCTAssertTrue(shader.contains(
+            "directional_shadow_texture.GetDimensions(map_width, map_height);"
+        ))
+        XCTAssertTrue(shader.contains(
+            "const float2 primary_directional_shadow_map_size = float2(map_width, map_height);"
+        ))
         XCTAssertEqual(
             shader.components(separatedBy: "1024.0f").count - 1,
             1
@@ -2656,7 +2685,12 @@ final class GPUWindowProbeTests: XCTestCase {
         let resolve = try XCTUnwrap(scene.range(of: "\"BTBH SSAO Resolve\""))
         let transparent = try XCTUnwrap(scene.range(of: "SDL_GPUColorTargetInfo transparent_targets[2];"))
         XCTAssertLessThan(resolve.lowerBound, transparent.lowerBound)
-        XCTAssertTrue(scene.contains("if (transparent_phase && ssao_resolve_active) {"))
+        // Phase 1 is the transparent phase; the refraction phase after it (7b48f758) must not resolve again.
+        let firstTransparentPhase = try XCTUnwrap(
+            scene.range(of: "if (transparency_phase == 1u && ssao_resolve_active) {")
+        )
+        XCTAssertLessThan(firstTransparentPhase.lowerBound, resolve.lowerBound)
+        XCTAssertTrue(scene.contains("const bool transparent_phase = transparency_phase != 0u;"))
         XCTAssertEqual(scene.components(separatedBy: "post_input = runtime->ssao_resolved_texture;").count - 1, 1)
     }
 
@@ -3374,22 +3408,50 @@ final class GPUWindowProbeTests: XCTestCase {
             contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
             encoding: .utf8
         ).replacingOccurrences(of: "\r\n", with: "\n")
-        XCTAssertTrue(shader.contains("float4 procedural_controls;\n"))
-        XCTAssertTrue(shader.contains("    float4 detail_parameters;\n"))
-        XCTAssertTrue(shader.contains("    float4 surface_wetness;\n"))
-        XCTAssertTrue(shader.contains("    float4 lamp_color_energy[BTBH_MAX_LAMPS];\n#if BTBH_DIRECTIONAL_SHADOWS"))
+        // Since the tyrian3d merge (1021d8b1) the point lights follow the lamps, before the shadow block.
+        func uniformMembers(_ source: String, from start: String, to end: String) throws -> [String] {
+            let lower = try XCTUnwrap(source.range(of: start)).upperBound
+            let upper = try XCTUnwrap(source.range(of: end, range: lower..<source.endIndex)).lowerBound
+            let body: String = String(source[lower..<upper])
+                .replacingOccurrences(of: #"(?s)/\*.*?\*/"#, with: "", options: .regularExpression)
+            var code: [String] = []
+            for line in body.split(separator: "\n") {
+                let statement: Substring = line.range(of: "//").map { line[..<$0.lowerBound] } ?? line
+                if !statement.trimmingCharacters(in: .whitespaces).hasPrefix("#") {
+                    code.append(String(statement))
+                }
+            }
+            var names: [String] = []
+            for declaration in code.joined(separator: "\n").split(separator: ";") {
+                let beforeArray: Substring = declaration.prefix { $0 != "[" }
+                if let name = beforeArray.split(whereSeparator: \.isWhitespace).last {
+                    names.append(String(name))
+                }
+            }
+            return names
+        }
+        let shaderMembers = try uniformMembers(
+            shader, from: "cbuffer MaterialPBR : register(b0, space3)\n{", to: "\n};"
+        )
+        let nativeMembers = try uniformMembers(
+            scene, from: "typedef struct BTBHGPUSceneFragmentUniforms {", to: "\n} BTBHGPUSceneFragmentUniforms;"
+        )
+        XCTAssertEqual(shaderMembers, nativeMembers)
+        let detailToShadows = [
+            "procedural_controls", "detail_parameters", "surface_wetness", "cloud_controls", "cloud_shape",
+            "lamp_controls", "lamp_position_reach", "lamp_color_energy", "point_light_count", "point_lights",
+            "directional_shadow_view_projection",
+        ]
+        let proceduralControls = try XCTUnwrap(nativeMembers.firstIndex(of: "procedural_controls"))
+        XCTAssertEqual(Array(nativeMembers[proceduralControls...].prefix(detailToShadows.count)), detailToShadows)
+        // The shader's block stops right before the shadow block when shadows are off, as the native push does
+        // (offsetof directional_shadow_view_projection), so the arrays before it must match in size too.
+        XCTAssertTrue(shader.contains("#if BTBH_DIRECTIONAL_SHADOWS\n    float4x4 directional_shadow_view_projection;"))
         XCTAssertTrue(shader.contains("#define BTBH_MAX_LAMPS 40"))
-        XCTAssertLessThan(try XCTUnwrap(shader.range(of: "float4 detail_parameters;")).lowerBound,
-                          try XCTUnwrap(shader.range(of: "float4 surface_wetness;")).lowerBound)
-        XCTAssertTrue(scene.contains(
-            "    float procedural_controls[4];\n    float detail_parameters[4];\n"
-        ))
-        XCTAssertTrue(scene.contains(
-            "    float surface_wetness[4];\n"
-        ))
-        XCTAssertTrue(scene.contains(
-            "    float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];\n    float directional_shadow_view_projection[16];"
-        ))
+        XCTAssertTrue(shader.contains("    float4 lamp_color_energy[BTBH_MAX_LAMPS];\n"))
+        XCTAssertTrue(scene.contains("    float lamp_color_energy[BTBH_GPU_SCENE_MAX_LAMPS][4];\n"))
+        XCTAssertTrue(shader.contains("    float4 point_lights[\(Int(BTBH_GPU_SCENE_POINT_LIGHTS) * 2)];"))
+        XCTAssertTrue(scene.contains("    float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS * 2][4];\n"))
         XCTAssertEqual(Int(BTBH_GPU_SCENE_MAX_LAMPS), LampLightDescriptor.maximumCount)
         // Street lamps light every lit pixel through the sun's BRDF, after the spot.
         XCTAssertTrue(shader.contains("const float3 lamp_lighting = evaluate_lamps("))
@@ -3407,8 +3469,12 @@ final class GPUWindowProbeTests: XCTestCase {
         // The clouds sit right after the wetness and shade the sun in both shadow variants.
         XCTAssertTrue(shader.contains("    float4 cloud_controls;\n    float4 cloud_shape;\n"))
         XCTAssertTrue(scene.contains("    float cloud_controls[4];\n    float cloud_shape[4];\n"))
-        XCTAssertTrue(shader.contains(") * btbh_cloud_light(input.world_position)"))
-        XCTAssertTrue(shader.contains("#else\n        btbh_cloud_light(input.world_position)\n#endif"))
+        // (The sun's shadow is looked up into sun_visibility first since the soft filter, e3698ba6.)
+        XCTAssertTrue(shader.contains("sun_visibility = primary_directional_visibility("))
+        XCTAssertTrue(shader.contains(
+            "#if BTBH_DIRECTIONAL_SHADOWS\n        sun_visibility * btbh_cloud_light(input.world_position)\n" +
+                "#else\n        btbh_cloud_light(input.world_position)\n#endif"
+        ))
         XCTAssertTrue(scene.contains("fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;"))
         // The rain rides the wetness's third component and bends the ground's normal with the detail's.
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[2] ="))
