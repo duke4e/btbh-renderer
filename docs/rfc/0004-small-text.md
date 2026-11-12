@@ -1,7 +1,8 @@
 # RFC 0004: Readable small text
 
 - **Status:** Implemented in v0.4.0 (option A). CHIMERA tested it on its HUD and took it (2026-11-12). Findings
-  below, under [Prototype](#prototype-2026-11-11)
+  below, under [Prototype](#prototype-2026-11-11). Three opt-in follow-ups it asked for are in the next release:
+  [After v0.4.0](#after-v040)
 - **Requested by:** CHIMERA (its HUD's small text is unreadable)
 - **Affects:** CHIMERA (adopts it). Be The Bullet Hell and Tyrian3D: nothing, opt-in. The linear atlas default
   that `v0.1.0` takes from `tyrian3d` (`c505715`) is discussed below
@@ -176,6 +177,45 @@ because there is still no hinting, and `coverage_gamma` 1.3 makes them read heav
 **Not done:** macOS/Metal, a Swift wrapper (Be The Bullet Hell doesn't need one now), and CHIMERA's in-game
 before and after. The plain loader also fails to pack very small glyph sets (three glyphs at 12 px); the
 prototype leaves it as it is, because that loader must stay byte for byte the same.
+
+## After v0.4.0
+
+CHIMERA asked for three things after testing the v0.4.0 loader. All are opt-in (a zeroed `flags` bakes the
+v0.4.0 atlas, and every existing font smoke PNG and scene-target smoke dump is byte for byte the same), and they
+go in the release after v0.4.0, not in v0.4.0:
+
+- **`btbh_gpu_font_kerning_pairs(font, pairs, capacity)`**: every nonzero pair, sorted by (left, right), with
+  the advances `btbh_gpu_font_kerning` returns; `NULL, 0` gives the count. It replaces the 117² FFI calls per
+  face above with one call. Titillium Web at 16 px has 1754 pairs among CHIMERA's 117 glyphs.
+- **`BTBH_GPU_FONT_FLAG_R8_ATLAS`** (`BTBHGPUFontDesc.flags`, which was `reserved`; `reserved` stays as an
+  alias in a nameless union, so the struct's size and layout don't change): an R8 coverage atlas, a quarter of
+  the RGBA8 one (10 px: 128 x 128, 64 KiB to 16 KiB; 12 and 16 px: 256 x 128, 128 KiB to 32 KiB). SDL3 GPU has no
+  texture swizzle, so the canvas draws a one-channel texture with a new fragment shader,
+  `production_canvas_coverage.frag` (white x coverage x the vertex colour), picked per batch from the texture's
+  format and loaded beside `production_canvas_textured.frag` the first time it is needed. The existing pipelines
+  don't change. On the RTX 3070 Ti the R8 rows read back identical to the RGBA8 rows, pixel for pixel.
+- **`BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT`**: the glyphs are rasterised with a vertical scale of
+  scale x round(x) / x (x the x-height in pixels), through stb_truetype's gather, pack and render steps with
+  their own vertical scale, because `PackFontRanges` takes one scale. Advances, kerning and the horizontal
+  scale don't change. `btbh_gpu_font_metrics` gives the whole-pixel x-height and the ascent, descent, line gap
+  and cap height at the scale used. In Titillium Web the x-height goes 3.29 → 3 px at 10 px (vertical x0.91),
+  3.95 → 4 at 12 (x1.01) and 5.26 → 5 at 16 (x0.95). The most ink in the top row of the x-height, on a
+  whole-pixel baseline, without → with the flag:
+
+  | | 10 px | 12 px | 16 px |
+  | --- | --- | --- | --- |
+  | 'z' (a bar on top) | 0.29 → 0.72 | 0.92 → 0.97 | 0.26 → 1.00 |
+  | 'u' (stems) | 0.20 → 0.71 | 0.80 → 0.85 | 0.26 → 1.00 |
+  | 'x' | 0.22 → 0.58 | 0.76 → 0.80 | 0.26 → 0.93 |
+
+  Nothing lands in the row above for flat tops. At 10 px the bar of 'z' and the stems of 'u' are thinner than a
+  pixel, so their top row is as dark as they get anywhere (0.72 is the bar's own thickness), not 1.0. What it
+  doesn't fix: only the x-height's top edge is put on the grid. A horizontal stroke that isn't a whole number of
+  pixels thick, or that sits anywhere else (the bar of 'e', the cross of 't', the underside of the bar of 'z'),
+  still straddles a pixel edge and leaves a grey row; round tops ('o', 'n', 'e') overshoot into the row above by
+  a few percent; capitals and ascenders aren't snapped; and rounding changes the x-height by up to half a pixel,
+  so 10 px text gets about 9% shorter. The PNGs: `text-<size>px-ex-snap.png` (compare `text-<size>px-ex.png`)
+  and `probe-<size>px-ex-vs-snap.png` in `font-smoke/`.
 
 ## What CHIMERA changes
 

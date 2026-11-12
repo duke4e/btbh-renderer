@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Three opt-in font features, asked for by CHIMERA after it tested 0.4.0's small-text loader. Nothing changes until
+a game uses them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte, and the canvas draws
+what it drew. One shader is new; none changed.
+
+### Added
+- **All kerning pairs in one call** (CHIMERA made about 16k `btbh_gpu_font_kerning` calls per font):
+  `btbh_gpu_font_kerning_pairs(font, pairs, capacity)` copies the font's nonzero pairs, sorted by left then
+  right, as `BTBHGPUFontKerningPair { left, right, advance }`, with the advances `btbh_gpu_font_kerning` returns,
+  and returns how many the font has whatever the capacity (`NULL, 0` sizes the array). 0 for a font from
+  `btbh_gpu_window_font_load`. `BTBH_GPU_HAS_FONT_KERNING_PAIRS` is defined with it.
+- **`BTBHGPUFontDesc.flags`**: 0.4.0's `reserved` byte, which had to be 0, now holds `BTBH_GPU_FONT_FLAG_*`.
+  Size and layout are unchanged, and `reserved` stays as an alias in a nameless union, so C and C++ that write
+  `.reserved = 0` still compile. Unknown bits are still refused. `BTBH_GPU_HAS_FONT_FLAGS` is defined with it.
+- **One-channel font atlas**: `BTBH_GPU_FONT_FLAG_R8_ATLAS` bakes the atlas as R8 coverage instead of RGBA8
+  (white, coverage in alpha): a quarter of the memory at the same size (at 12 px with `oversample_x` 3, 128 KiB
+  becomes 32 KiB). Glyphs, metrics and kerning are the same. The canvas draws a batch whose texture has one
+  channel as white x coverage x the vertex colour, with a new shader, `production_canvas_coverage.frag`, which
+  it loads from the directory of the textured fragment shader the first time a batch needs it. In the font
+  smoke test the R8 rows match the RGBA8 rows pixel for pixel. Elsewhere (a scene material, a readback) the
+  atlas is an R8 texture, and `btbh_gpu_texture_update_rgba8` refuses it.
+- **Snapped x-height**: `BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT` rasterises with a vertical scale of
+  scale x round(x) / x, x being the x-height in pixels, so on a whole-pixel baseline the top of flat lowercase
+  ends on a pixel edge instead of leaving a grey row (a cheap stand-in for vertical hinting at 720p). The
+  horizontal scale, advances and kerning don't change. `btbh_gpu_font_metrics` reports the scale used:
+  `x_height` is a whole number, and ascent, descent, line gap and cap height are scaled to match (`pixel_size`
+  stays as asked). In Titillium Web at 16 px the top row of 'z' and 'u' goes from 26% ink to 100%. It only puts
+  the x-height's top edge on the grid: a horizontal stroke elsewhere or of a fractional thickness (the bar of
+  'e', the cross of 't') still straddles a pixel edge, round tops still overshoot a little, capitals and
+  ascenders aren't snapped, and rounding changes the size (10 px Titillium gets about 9% shorter).
+- Native test `btbh_gpu_font_smoke`: the pairs against `btbh_gpu_font_kerning`; the R8 atlas against the RGBA8
+  one (its alpha texel for texel, a quarter of the bytes, the same drawn text); a present that needs the
+  coverage shader and can't find it fails with the path; the snapped metrics; and the top row of
+  "xxx zzz uuu vvv nnn ooo eee" with and without the snap. New PNGs: `text-<size>px-ex-r8.png`,
+  `text-<size>px-ex-snap.png`, `probe-<size>px-ex-vs-snap.png` and `text-extras.png` / `text-extras-x4.png`.
+
+### Upgrading
+- Nothing changes unless a game sets `BTBHGPUFontDesc.flags` or calls `btbh_gpu_font_kerning_pairs`.
+- A game that bakes R8 atlases must ship `production_canvas_coverage.frag` (`.spv` or `.metallib`) next to
+  `production_canvas_textured.frag`. It is in the renderer's shader list in `CMakeLists.txt`, so build scripts
+  that read that list pick it up.
+- Rust (bindgen 0.73): the nameless union comes out as a field `__bindgen_anon_1`, and `BTBHGPUFontDesc` loses
+  its derived `Debug` (a union can't derive it; `Default` stays, written out). A struct literal that names
+  `reserved: 0`, or `{:?}` on a descriptor, no longer compiles: start from `Default::default()` and set
+  `desc.__bindgen_anon_1.flags`. C and C++ hosts that write `.reserved = 0` compile unchanged.
+
 ## [0.4.0] — 2026-11-12
 
 0.3.0 plus three opt-in features: models that share external textures and V-Sync through `GPUPlatform` (asked for
