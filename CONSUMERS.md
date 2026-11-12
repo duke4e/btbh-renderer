@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at tag `v0.4.0` (BTBH `ffb9840d`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.4.0` (tag `v0.4.0`; CHIMERA `a417831f`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.4.0` (tag `v0.4.0`; CHIMERA `a417831f`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
 
 ## Features used
 
@@ -24,7 +24,10 @@ fog edge, clouds, wetness/rain, shadows, radiance cascades with emitters, post c
 vignette, tonemap, AA), upscaling (`fsr1`, `fsr3`), frame readback for render baselines, file dialog.
 The most demanding consumer: it defines most of the scene API. From v0.4.0: V-Sync from its Graphics menu
 (`GPUPlatform.setPresentMode`, `.vsync` or `.automatic`, off by default) and `.shareExternalTextures` on its army
-bodies.
+bodies. From v0.5.1: craters (a torus rim and an ellipsoid bowl) and collapse rubble (rounded boxes) through
+`GPUSdfTerrain`, one per city. It has a heightfield base at its dug floor tiles' tops, 0.1-unit (0.5 m) cells, 32-cell
+chunks, smooth normals, concurrent jobs and a 1 ms update budget. It is drawn through `GPUPlatform.setSdfTerrain`;
+`dugByTerrain` is set on the floor tiles' `ModelMaterialPatch` and the kerb's `MaterialDescriptor`.
 
 **CHIMERA** (`crates/chimera-platform/src/gpu.rs`, bindgen): device and window, mouse buttons (keyboard
 and audio via raw SDL), fonts (`window_font_load`, glyphs, atlas), textures (`window_texture_load_ex`:
