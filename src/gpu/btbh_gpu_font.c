@@ -536,8 +536,8 @@ static const char *btbh_gpu_font_desc_problem(const BTBHGPUFontDesc *desc) {
     if (desc->snap_advances > 1u) {
         return "BTBHGPUFontDesc.snap_advances must be 0 or 1";
     }
-    if (desc->reserved != 0u) {
-        return "BTBHGPUFontDesc.reserved must be 0";
+    if (desc->flags != 0u) {
+        return "BTBHGPUFontDesc.flags must be 0";
     }
     if (
         desc->coverage_gamma != 0.0f &&

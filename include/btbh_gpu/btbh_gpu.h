@@ -313,7 +313,8 @@ typedef struct BTBHGPUFontDesc {
        on one (crisp, uneven spacing). 0: fractional advances and kerning (even spacing; place each
        glyph on the 1/oversample_x grid). Other values are invalid. */
     uint8_t snap_advances;
-    uint8_t reserved; /* 0 */
+    /* Options for later releases: 0 (none is defined yet; other values are invalid). */
+    uint8_t flags;
     /* Coverage contrast, applied once to the atlas while baking: coverage' = coverage^(1 /
        coverage_gamma). 0 means 1 (as rasterised); 0.25 to 4 otherwise. Values above 1 (1.2-1.4)
        thicken light-on-dark small text, which blending in gamma space thins out; below 1 thins it. */

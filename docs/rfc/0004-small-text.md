@@ -48,7 +48,7 @@ typedef struct BTBHGPUFontDesc {
     uint8_t oversample_x;          /* 0 or 1: none; 2-3 recommended for UI text */
     uint8_t oversample_y;          /* 0 or 1: none (vertical oversampling rarely helps) */
     uint8_t snap_advances;         /* 1: advances to whole pixels (crisp, uneven); 0: fractional */
-    uint8_t reserved;
+    uint8_t flags;
     /* Coverage contrast: 0 means 1 (as rasterised). Values above 1 thicken light-on-dark small text, which
      * gamma-space blending otherwise thins out. */
     float coverage_gamma;
@@ -115,7 +115,7 @@ Built on branch `claude/rfc0004-small-text-037444` as sketched above, with nothi
 **What it does**
 
 - `BTBHGPUFontDesc` as in the sketch. Validation: `pixel_size` 1 to 1024 (fractional allowed),
-  `oversample_x` and `oversample_y` 0 to 8 (stb_truetype's limit), `snap_advances` 0 or 1, `reserved` 0,
+  `oversample_x` and `oversample_y` 0 to 8 (stb_truetype's limit), `snap_advances` 0 or 1, `flags` 0,
   `coverage_gamma` 0 or 0.25 to 4. A NULL or invalid descriptor, an unclaimed window, no glyphs or a codepoint
   above `INT_MAX` return NULL with `BTBH_GPU_INVALID_ARGUMENT` and the reason in the report. A zeroed
   descriptor is invalid, because there is no size to default to.

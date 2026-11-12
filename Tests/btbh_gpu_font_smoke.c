@@ -205,8 +205,8 @@ static void check_validation(BTBHGPUDevice *device, BTBHGPUWindow *window) {
     desc.snap_advances = 2u;
     expect_invalid(window, &desc, "snap_advances 2");
     desc = good;
-    desc.reserved = 1u;
-    expect_invalid(window, &desc, "reserved");
+    desc.flags = 1u;
+    expect_invalid(window, &desc, "flags");
     const float bad_gammas[] = {0.2f, 4.5f, -1.0f, NAN};
     for (size_t i = 0u; i < sizeof(bad_gammas) / sizeof(bad_gammas[0]); i += 1u) {
         desc = good;
