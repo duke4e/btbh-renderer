@@ -1,6 +1,7 @@
 # RFC 0007: Destructible terrain from SDF edits
 
-- **Status:** Accepted (2026-11-11). The implementation follows on a branch, phases 1 to 3 first
+- **Status:** Accepted (2026-11-11). Phases 1 to 3 are implemented on a branch, not released yet (see
+  "Implementation notes")
 - **Requested by:** Be The Bullet Hell, CHIMERA (proposed by the coordinator)
 - **Affects:** Be The Bullet Hell and CHIMERA (each adopts it on its own). Tyrian3D: nothing, it is opt-in
 - **Issue:** [#3](https://github.com/duke4e/btbh-renderer/issues/3). Both games answered on 2026-11-11; their
@@ -395,7 +396,13 @@ mound is the second.
      chunk's edit list in order.
    - **Queries:** `height` first checks whether any edit's bounds cover the column (the per-chunk list); if
      none does, it returns the base height. CHIMERA's ~1000 unit-foot calls a frame mostly take that path.
-   - **The edit cap** freezes chunks as described above.
+   - - The mask's edge follows cell columns: where a patch's colour differs from the host's ground (a rim's foot in
+  soil next to grey asphalt), its outline steps by a cell. That is the "seam between host ground and patch" left
+  open below; the GPU test's reference image shows it (`Tests/Fixtures/sdf_terrain/crater.png`).
+- The GPU test needed the host's ground in tiles: one 14 m quad can't follow the world curvature (only its
+  corners bend), so a hole cut at flat positions no longer lies under the bent patch. BTBH's tiles bend per tile.
+
+**The edit cap** freezes chunks as described above.
    - **Budget:** measured on the calling thread. Results don't depend on it.
    - **Determinism:** the same results for the same edit sequence on the same binary.
 2. **Meshing.**
@@ -447,6 +454,103 @@ mound is the second.
 | Memory, dig mask | 1.4 MB for CHIMERA (832², R16F). 17 MB for BTBH's whole 1440 m map at 0.5 m (2880²), from its first crater on |
 
 No new device capability: R16F sampling and custom meshes are core on Vulkan and Metal.
+
+## Implementation notes (phases 1 to 3, 2026-11-11)
+
+Phases 1 to 3 are implemented on a branch (not released yet): `include/btbh_gpu/btbh_gpu_sdf_terrain.h`,
+`src/gpu/btbh_gpu_sdf_terrain.c`, the dig mask in the scene, unlit, shadow and radiance-cascade material-source
+shaders, `Tests/btbh_gpu_sdf_terrain_test.c` (native) and `Tests/btbh_gpu_sdf_terrain_smoke.c` (GPU). The API is
+the one above. Where the prototype had to differ from the text above, or measured something the text estimated,
+it is written down here.
+
+**Bricks and reach**
+- A brick stores and evaluates its own 8³ samples (512 base calls, not 729). The mesher reads its neighbours'
+  samples across brick and chunk borders.
+- An edit's bounds (its *reach*) are its shape's box grown by its smoothing and **five cells**. A sample can
+  differ from the base only within a clamp distance of the shape's box and smoothing, and the mesh reads samples
+  up to three cells from a differing one, so every sample a mesh reads lies in an evaluated brick.
+- A brick whose interval bound says that every sample clamps to the base's side is kept as a tag, not
+  evaluated: the bound comes from the base's samples (or the heightfield's corners), the shapes' Lipschitz
+  bounds and the monotone smooth operations.
+- **INTERSECT** can't be both local and continuous: kept as is, it would clear the whole map outside the shape.
+  It acts within its reach only, so it leaves walls at the reach box wherever that box cuts the ground (a true
+  discontinuity of the field). Use it to trim shapes that the box keeps clear of the ground (a slab cut out of a
+  floating ball, a mound trimmed from above), or use SUBTRACT.
+
+**Updates and switching**
+- Stale bricks are evaluated oldest first; a chunk is meshed once no brick it reads is stale. Chunks that touch
+  (26-neighbourhood) and are busy switch together, once none of them waits for a brick or a mesh: a crater over
+  four chunks appears in one frame. A region edited faster than its budget rebuilds it switches when it
+  settles.
+- A work item (one brick, or one chunk's mesh) is never split: a call can overrun its budget by one chunk's
+  mesh (about 1 to 3 ms at the sizes below).
+
+**The mesh**
+- Surface nets as specified: the mass point, one Newton step along the exact field's gradient (tetrahedral
+  differences), clamped to the cell. Quads belong to the chunk of their first sample, and the vertices of the
+  cells one under a chunk's low faces are computed identically on both sides, so seams are watertight.
+- Surface nets bevel sharp edges and corners (one vertex per cell) by up to about half a cell. Heights agree
+  with the mesh within half a cell where the surface is a plane at the cell's scale; at a box's edge the vertical
+  gap can be larger. Mesh vertices lie within 0.18 of a cell of the surface in the tests.
+- Apron vertices (cells with no differing corner) sink a twentieth of a cell, so the host's ground, which still
+  draws there, wins the depth test instead of fighting the patch.
+- Triangles are clockwise seen from outside. SDL flips Vulkan's viewport and the scene pipelines take clockwise
+  as front, so under a camera built as the Swift layer builds it (right = forward × up, view z along forward)
+  those are the front faces of `BTBH_GPU_SCENE_CULL_BACK`. The GPU test draws patches that way.
+- Faceted meshes go to the GPU without an index buffer. Vertices carry UVs from world x and z, and the joint and
+  weight slots already carry the one-hot layer weights phase 4 will read.
+
+**The dig mask** (different from "Proposal, 2" in what it marks)
+- One texel per *cell column*, point-sampled. A texel holds the height (in cells above the terrain's floor) of
+  the lowest crossing in the column's top surface cell, where that cell differs from the base: the patch owns
+  that column. Elsewhere it holds 65504.
+- A dug batch's fragment is discarded unless it lies **more than a tenth of a cell under** that height. The text
+  above discarded only fragments "more than a few centimetres above the dug surface", which keeps the host's
+  ground wherever the patch lies at the base's height: at a mound's foot, in PAINT, at a crater's lip. Both
+  surfaces then draw at the same depth and fight. Taking the whole patch footprint over removes that, and
+  host geometry under a mound (more than a tenth of a cell down) still draws.
+- So the mask is created on the first patch of any kind (a crater, a mound's foot, paint), not only on the
+  first dig. Mounds and rims do need it at their feet.
+- A column whose top surface is the base but which has a patch further down (a cave under unchanged ground)
+  is not handled; neither game needs one.
+- Slots: the scene's fragment shaders take the mask after each variant's own textures (t10, t9 or t5; t2 in the
+  fast unlit and RC material-source shaders) and its placement in a second fragment uniform buffer (b1, space3).
+  The shadow fragment shader takes them as t0 and b0. The material uniform layout is unchanged. RFC 0001's two
+  textures can follow the mask in the scene shaders.
+- The shadow vertex shaders now pass the flat world position to the shadow fragment shader. A dug batch takes
+  the fragment-stage shadow pipeline only while its terrain has a mask; other batches choose as before.
+
+**The edit cap**
+- Freezing as specified. Near the surface (within half the clamp distance) the frozen terrain's samples equal an
+  unfrozen terrain's within two int8 steps. Deeper, a smooth edit added later blends against the clamped frozen
+  base, which is the lossy part. Queries in a frozen chunk read its samples trilinearly: where the surface curves
+  within a cell (smoothing near the cell size) that moves it by up to about a tenth of a cell (0.12 measured),
+  not a hundredth.
+
+**Queries**
+- `height` over a column no edit reaches returns the heightfield's height at once; a base function is marched
+  (false position: exact at once for flat ground). Starting under a heightfield's surface, there is no surface
+  going down: -INFINITY.
+- `sample_height_deltas` samples at cell centres (documented in the header).
+
+**Measured costs** (`btbh_gpu_sdf_terrain_test`; Windows, Release, a flat function base, an idle desktop CPU;
+ranges over runs)
+
+| Item | Estimate | Measured |
+| --- | --- | --- |
+| 6 m crater (bowl and rim), 0.25 m cells, smooth | about 2 ms | 2.9–3.4 ms on one thread: bricks 1.6, mesh 1.7 (169 bricks evaluated, 94 kept) |
+| same, faceted | | 2.6–3.5 ms |
+| 20 m stomp, 0.5 m cells, faceted | about 6 ms | 6.1–8.1 ms on one thread: bricks 2.4, meshes 3.8 (324 bricks, 4 chunks); 2.8–3.3 ms on the calling thread with 4 job threads |
+| `height` in a crater / elsewhere | a few µs / under 1 µs | 0.4–0.7 µs / 0.06–0.12 µs |
+| Bricks, 6 m crater at 0.25 m | 15–60 KB | 101 KiB (94 bricks) |
+| Mesh, 6 m crater at 0.25 m | smooth about 100 KB, faceted about 0.6 MB | smooth 109 KiB CPU + 159 KiB GPU; faceted 267 KiB CPU + 733 KiB GPU |
+| Mesh, 20 m stomp at 0.5 m, faceted | about 1.3 MB | 744 KiB CPU + 2.2 MiB GPU (23 448 vertices) |
+| Dig mask | 2 bytes a cell column | as estimated for the texture; CPU tiles of chunk_cells² texels for each chunk column with a patch (18–32 KiB in these cases) |
+
+At BTBH's 0.5–1 ms main-thread budget a 20 m stomp takes 7 to 16 frames on one thread and 3 to 7 with four job
+threads. Under load (a build running beside it) the same work took about 1.5 times as long. The meshing is the
+larger half; the next step if that is too slow is to mesh only the bricks near active ones instead of their
+bounding box.
 
 ## Compatibility
 

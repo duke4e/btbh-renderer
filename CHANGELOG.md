@@ -6,13 +6,42 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Opt-in additions asked for by CHIMERA: three font features after it tested 0.4.0's small-text loader, and two
-scene features (batches that cast no sun shadow, a front-to-back opaque pass). Nothing changes until a game uses
-them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte, and the canvas draws what it drew;
-a zeroed batch and a zeroed `BTBHGPUScenePost` draw byte for byte as in 0.4.0 (the render-to-target smoke's world
-frame and portraits hash the same). One shader is new (`production_canvas_coverage.frag`); none changed.
+Opt-in additions for 0.4.0's games:
+- destructible terrain from SDF edits, phases 1 to 3 of [RFC 0007](docs/rfc/0007-destructible-terrain.md) (asked
+  for by Be The Bullet Hell and CHIMERA on #3);
+- three font features, asked for by CHIMERA after it tested 0.4.0's small-text loader;
+- two scene features for CHIMERA: batches that cast no sun shadow, and a front-to-back opaque pass.
+
+Nothing changes until a game uses them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte,
+and the canvas draws what it drew; a zeroed batch, a zeroed `BTBHGPUScenePost` and a host with no terrain render
+as in 0.4.0. One shader is new (`production_canvas_coverage.frag`). The scene, unlit, shadow and radiance-cascade
+material-source shaders changed for the terrain (a dig-mask branch that a zeroed batch never takes): rebuild the
+shaders together with the C core.
 
 ### Added
+- **`BTBHGPUSdfTerrain`** (`include/btbh_gpu/btbh_gpu_sdf_terrain.h`, included at the end of `btbh_gpu.h`;
+  `BTBH_GPU_HAS_SDF_TERRAIN`): the ground before any damage (a heightfield, or the host's batch function) and an
+  ordered list of edits: sphere, ellipsoid, rounded box, capsule, rounded cylinder and torus shapes that ADD,
+  SUBTRACT, INTERSECT (within the edit's bounds) or PAINT, with a smooth-min radius and a material.
+  - `btbh_gpu_sdf_terrain_create` needs no window; `add_edit`, `set_edit` (non-destructive) and `remove_edit`;
+    `update` with a budget in microseconds and an optional `run_jobs` callback (the same results either way).
+  - Queries from the edit list, exact whatever the budget left pending: `distance`, `height`, `raycast`,
+    `sample_height_deltas`, and `take_changes` for the rectangles whose look changed.
+  - Sparse 8³ bricks of int8 distances only where edits reach; chunk meshes from surface nets with smooth or
+    faceted normals, vertex colours from `material_colors` and watertight seams. `chunk_count`, `chunk` (a custom
+    mesh to draw as an ordinary batch) and `chunk_geometry` (its triangles on the CPU, also without a window).
+    Triangles are clockwise seen from outside: front faces for `BTBH_GPU_SCENE_CULL_BACK` under a camera built as
+    the Swift layer builds it.
+  - The edit cap (`max_edits`, 4096 by default): `edit_cap` freeze folds the oldest edits into the base, reject
+    makes `add_edit` return 0.
+  - `btbh_gpu_window_sdf_terrain_attach` / `btbh_gpu_sdf_terrain_detach`: the GPU side (the chunk meshes and the
+    dig mask) on a window. Destroying the window detaches its terrains.
+- **`BTBHGPUSceneGeometryBatch.dug_by`** (appended): ground that a terrain may dig through. Where the terrain's
+  patch has taken over (a crater, a mound's foot, paint), the batch's fragments that don't lie more than a tenth
+  of a cell under the patch's top surface are discarded at their flat world position (so `world_curvature`
+  keeps the hole under its patch), in the colour, shadow and radiance-cascade passes. The mask is one R16F
+  texel per cell column over the terrain's bounds, made on the first patch; until then the batch draws exactly
+  as with NULL. A dug batch takes the shadow pipeline with a fragment stage while the mask exists.
 - **All kerning pairs in one call** (CHIMERA made about 16k `btbh_gpu_font_kerning` calls per font):
   `btbh_gpu_font_kerning_pairs(font, pairs, capacity)` copies the font's nonzero pairs, sorted by left then
   right, as `BTBHGPUFontKerningPair { left, right, advance }`, with the advances `btbh_gpu_font_kerning` returns,
@@ -41,9 +70,8 @@ frame and portraits hash the same). One shader is new (`production_canvas_covera
   coverage shader and can't find it fails with the path; the snapped metrics; and the top row of
   "xxx zzz uuu vvv nnn ooo eee" with and without the snap. New PNGs: `text-<size>px-ex-r8.png`,
   `text-<size>px-ex-snap.png`, `probe-<size>px-ex-vs-snap.png` and `text-extras.png` / `text-extras-x4.png`.
-- **Batches that cast no sun shadow**: `BTBHGPUSceneGeometryBatch.flags` (a byte that was `ssao_reserved[0]`, so
-  the struct keeps its size and layout) with `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`. Such a batch is drawn and
-  shadowed as usual but stays out of both directional shadow maps (the primary sun's and the secondary's), for
+- **Batches that cast no sun shadow**: `BTBHGPUSceneGeometryBatch.flags` (a byte that was `ssao_reserved[0]`)
+  with `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`. Such a batch is drawn and shadowed as usual but stays out of both directional shadow maps (the primary sun's and the secondary's), for
   decals, ground overlays and small props whose shadow isn't worth the shadow pass. Every scene call takes it.
   The `_with_visibility` calls' `directional_shadow_visibility` bytes already did this per batch, through those
   calls only; a batch casts when both let it. The spot (or omni) light's shadow stays with
@@ -76,6 +104,14 @@ frame and portraits hash the same). One shader is new (`production_canvas_covera
   `ALWAYS`; a layered scene with see-through cubes byte for byte the same sorted; and the refusals.
   `BTBH_SMOKE_BENCH=1` prints the timings below.
 
+### Changed
+- `btbh_gpu_custom_mesh_update` keeps its buffers when the new data fits and otherwise makes them a quarter
+  bigger than needed (grow-only), instead of reallocating for every size change. Nothing renders differently.
+- Shaders: `production_model*.frag`, `production_model_unlit.frag` and `production_rc_material_source.frag` take
+  one more texture (after their others) and a second fragment uniform buffer; `production_shadow.frag` takes a
+  texture and a uniform buffer; `production_shadow.vert` and `production_animated_shadow.vert` pass the world
+  position on. Shader file names are unchanged.
+
 ### Measured
 Windows, RTX 3070 Ti, 1920x1080 renders to a target with a heavy pixel (soft sun shadow, 40 lamps, 32 point
 lights), `BTBH_SMOKE_BENCH=1`. SDL 3.4 has no GPU timestamps, so a sample is the wall time of 20 frames rendered
@@ -102,6 +138,11 @@ quoted.
   timed per pass.
 
 ### Upgrading
+- Nothing to set: zeroed batches (`= {0}`, `..Default::default()`, Swift's `init()`) have `dug_by` NULL.
+  Rebuild the shaders with the C core.
+- To adopt the terrain, see RFC 0007 ("Compatibility") and its implementation notes: a base, `dug_by` on the
+  host's ground batches, one patch batch per chunk with a mesh, `update` once a frame. The Swift layer doesn't
+  wrap the terrain yet; Swift hosts call the C API.
 - Nothing changes unless a game sets `BTBHGPUFontDesc.flags` or calls `btbh_gpu_font_kerning_pairs`.
 - A game that bakes R8 atlases must ship `production_canvas_coverage.frag` (`.spv` or `.metallib`) next to
   `production_canvas_textured.frag`. It is in the renderer's shader list in `CMakeLists.txt`, so build scripts

@@ -32,6 +32,8 @@ struct VertexOutput
 {
     float4 position : SV_Position;
     float4 surface_data : TEXCOORD0;
+    // The flat world position, for a dug batch's dig mask (production_shadow.frag.hlsl).
+    float3 world_position : TEXCOORD1;
 };
 
 float3 stable_normalize(float3 value, float3 fallback)
@@ -106,5 +108,6 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     VertexOutput output;
     output.position = mul(light_view_projection, world_position);
     output.surface_data = surface.data;
+    output.world_position = world_position.xyz;
     return output;
 }

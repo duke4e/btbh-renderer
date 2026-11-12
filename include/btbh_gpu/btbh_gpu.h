@@ -243,6 +243,8 @@ typedef struct BTBHGPUInstanceBuffer BTBHGPUInstanceBuffer;
 typedef struct BTBHGPUCustomMesh BTBHGPUCustomMesh;
 typedef struct BTBHGPUAnimationLibrary BTBHGPUAnimationLibrary;
 typedef struct BTBHGPUAnimationPose BTBHGPUAnimationPose;
+/* Destructible terrain from SDF edits (btbh_gpu_sdf_terrain.h, since 0.5.0). */
+typedef struct BTBHGPUSdfTerrain BTBHGPUSdfTerrain;
 
 typedef enum BTBHGPUTextureFilter {
     BTBH_GPU_TEXTURE_FILTER_NEAREST = 0,
@@ -865,11 +867,17 @@ typedef struct BTBHGPUSceneGeometryBatch {
     /* How it takes part in the horizon-based ambient occlusion (ssao_enabled 2): BTBHGPUSceneSSAOMode (0:
      * fully). Procedural pixel water is never darkened by it where it is water. */
     uint8_t ssao_mode;
-    /* BTBH_GPU_SCENE_BATCH_* bits (since 0.5.0, in a byte that was ssao_reserved[0], so the struct keeps its
-     * size and layout). 0 draws as before; a bit the renderer doesn't know fails the present with
+    /* BTBH_GPU_SCENE_BATCH_* bits (since 0.5.0, in a byte that was ssao_reserved[0]). 0 draws as before; a bit the renderer doesn't know fails the present with
      * BTBH_GPU_INVALID_ARGUMENT. */
     uint8_t flags;
     uint8_t ssao_reserved[2];
+    /* NULL: drawn as before. Otherwise the batch is ground that this terrain may dig through
+     * (btbh_gpu_sdf_terrain.h, since 0.5.0): where the terrain's patch has taken over from the base (a crater,
+     * a mound's foot, paint), its fragments that don't lie more than a tenth of a cell under the patch's top
+     * surface at their flat world XZ are discarded, in the colour, depth, shadow and radiance-cascade passes.
+     * Until the terrain has a dig mask (it is attached to this window and a patch exists), the batch draws
+     * exactly as with NULL. */
+    const BTBHGPUSdfTerrain *dug_by;
 } BTBHGPUSceneGeometryBatch;
 
 /* BTBHGPUSceneGeometryBatch.flags (since 0.5.0). */
@@ -1758,5 +1766,7 @@ struct SDL_Window *btbh_gpu_window_sdl_window(BTBHGPUWindow *window);
 #if defined(__cplusplus)
 }
 #endif
+
+#include "btbh_gpu_sdf_terrain.h"
 
 #endif

@@ -19,6 +19,7 @@
 
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
+#include "production_dig_mask.hlsli"
 
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
@@ -48,6 +49,23 @@ TextureCube<float> omni_shadow_texture : register(t9, space2);
 SamplerState omni_shadow_sampler : register(s9, space2);
 #endif
 #endif
+// RFC 0007: an SDF terrain's dig mask (production_dig_mask.hlsli), after the variant's other textures.
+#if BTBH_DIRECTIONAL_SHADOWS && BTBH_OMNI_SHADOWS
+Texture2D<float> dig_mask_texture : register(t10, space2);
+SamplerState dig_mask_sampler : register(s10, space2);
+#elif BTBH_DIRECTIONAL_SHADOWS
+Texture2D<float> dig_mask_texture : register(t9, space2);
+SamplerState dig_mask_sampler : register(s9, space2);
+#else
+Texture2D<float> dig_mask_texture : register(t5, space2);
+SamplerState dig_mask_sampler : register(s5, space2);
+#endif
+
+cbuffer DigMask : register(b1, space3)
+{
+    float4 dig_mask_origin;
+    float4 dig_mask_scale;
+};
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -2030,6 +2048,14 @@ float apply_surface_wetness(
 
 FragmentOutput shade_fragment(FragmentInput input)
 {
+    // Taken before any derivative, and discarded with the alpha cut-off below.
+    const bool dug = btbh_dig_mask_hidden(
+        dig_mask_texture,
+        dig_mask_sampler,
+        dig_mask_origin,
+        dig_mask_scale,
+        input.world_position
+    );
 #if BTBH_DIRECTIONAL_SHADOWS
     // The face's own normal, turned towards the camera (from the position's screen derivatives, taken
     // before anything can be discarded): the soft sun shadow takes its receiver plane from it.
@@ -2076,7 +2102,7 @@ FragmentOutput shade_fragment(FragmentInput input)
     );
     const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)
         + btbh_rain_ripples(input);
-    if (albedo_sample.a < alpha_cutoff)
+    if (albedo_sample.a < alpha_cutoff || dug)
     {
         discard;
     }

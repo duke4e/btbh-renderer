@@ -1,4 +1,5 @@
 #include "btbh_gpu_internal.h"
+#include "btbh_gpu_sdf_terrain_internal.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -1578,6 +1579,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
     btbh_gpu_window_release_canvas(window);
     btbh_gpu_window_release_aside_scene(window);
     btbh_gpu_window_release_scene(window);
+    btbh_gpu_window_detach_sdf_terrains(window);
     btbh_gpu_window_release_custom_meshes(window);
     btbh_gpu_window_release_instance_buffers(window);
     btbh_gpu_window_release_models(window);

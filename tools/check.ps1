@@ -1,7 +1,7 @@
 # Local release check for the renderer on Windows: builds the C core, every production shader (SPIR-V, MSL)
 # and the native tests with the vendored SDL_shadercross, runs the tests (the device, window, scene-target,
-# model-texture-share and font smoke tests need a GPU and a display, which this machine has) and compiles the
-# public headers on their own.
+# model-texture-share, font and SDF terrain smoke tests need a GPU and a display, which this machine has) and
+# compiles the public headers on their own.
 #
 #   powershell -ExecutionPolicy Bypass -File tools/check.ps1 [-BuildDir <dir>] [-SkipGpuTests]
 #
@@ -45,13 +45,13 @@ if ($missing) { throw "missing shader artifacts: $($missing -join ', ')" }
 Write-Host "$($names.Count) shaders: SPIR-V and MSL present"
 
 Write-Host "== native tests"
-$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke`"" } else { "" }
+$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke`"" } else { "" }
 Invoke-Msvc "ctest --test-dir `"$BuildDir`" --output-on-failure $exclude"
 
 Write-Host "== public headers on their own (C11, C++17, /W4 /WX)"
 $headerDir = Join-Path $BuildDir "header-check"
 New-Item -ItemType Directory -Force $headerDir | Out-Null
-$source = "#include <btbh_gpu/btbh_gpu.h>`n#include <btbh_gpu/btbh_gpu_resources.h>`nint main(void){return 0;}`n"
+$source = "#include <btbh_gpu/btbh_gpu.h>`n#include <btbh_gpu/btbh_gpu_resources.h>`n#include <btbh_gpu/btbh_gpu_sdf_terrain.h>`nint main(void){return 0;}`n"
 Set-Content -Path (Join-Path $headerDir "check.c") -Value $source -NoNewline
 Set-Content -Path (Join-Path $headerDir "check.cpp") -Value $source -NoNewline
 $include = Join-Path $root "include"

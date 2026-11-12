@@ -2,6 +2,11 @@ Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
 Texture2D<float4> emission_texture : register(t1, space2);
 SamplerState emission_sampler : register(s1, space2);
+// RFC 0007: an SDF terrain's dig mask (production_dig_mask.hlsli).
+Texture2D<float> dig_mask_texture : register(t2, space2);
+SamplerState dig_mask_sampler : register(s2, space2);
+
+#include "production_dig_mask.hlsli"
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -13,10 +18,17 @@ cbuffer MaterialPBR : register(b0, space3)
     float unused_surface_time;
 };
 
+cbuffer DigMask : register(b1, space3)
+{
+    float4 dig_mask_origin;
+    float4 dig_mask_scale;
+};
+
 struct FragmentInput
 {
     float4 color : TEXCOORD0;
     float2 texture_coordinate : TEXCOORD1;
+    float3 world_position : TEXCOORD2;
 };
 
 float4 main(FragmentInput input) : SV_Target0
@@ -29,7 +41,8 @@ float4 main(FragmentInput input) : SV_Target0
         raw_albedo.rgb * input.color.rgb,
         raw_albedo.a * input.color.a
     );
-    if (albedo.a < alpha_cutoff)
+    if (albedo.a < alpha_cutoff ||
+        btbh_dig_mask_hidden(dig_mask_texture, dig_mask_sampler, dig_mask_origin, dig_mask_scale, input.world_position))
     {
         discard;
     }

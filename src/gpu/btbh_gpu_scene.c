@@ -1,6 +1,7 @@
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_radiance_cascades_runtime.h"
 #include "btbh_gpu_fsr3.h"
+#include "btbh_gpu_sdf_terrain_internal.h"
 
 #include <float.h>
 #include <math.h>
@@ -129,6 +130,12 @@ typedef struct BTBHGPUSceneFragmentUniforms {
     float spot_shadow_controls[4];
     float omni_shadow_position_range[4];
 } BTBHGPUSceneFragmentUniforms;
+
+/* RFC 0007: where an SDF terrain's dig mask lies (production_dig_mask.hlsli); zero for a batch without one. */
+typedef struct BTBHGPUSceneDigMaskUniforms {
+    float origin[4];
+    float scale[4];
+} BTBHGPUSceneDigMaskUniforms;
 
 typedef struct BTBHGPUShadowUniforms {
     float light_view_projection[16];
@@ -315,6 +322,9 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *bloom_upsample_pipeline;
     SDL_GPUGraphicsPipeline *hdr_composite_pipeline;
     SDL_GPUGraphicsPipeline *scene_distance_pipeline;
+    /* Per batch of the scene being drawn: its dug_by terrain's dig mask, or a NULL texture (RFC 0007). */
+    BTBHGPUSdfTerrainMaskBinding *dig_bindings;
+    uint32_t dig_binding_capacity;
     BTBHGPUTexture *fallback_texture;
     BTBHGPUTexture *normal_fallback_texture;
     BTBHGPUTexture *smaa_area_texture;
@@ -1326,7 +1336,8 @@ static bool btbh_gpu_scene_create_model_pipeline(
         SDL_GPU_SHADERSTAGE_FRAGMENT,
         0u,
         fragment_sampler_count,
-        1u,
+        /* the material, and an SDF terrain's dig mask (RFC 0007) */
+        2u,
         report
     );
     if (fragment_shader == NULL) {
@@ -3046,11 +3057,12 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         selected_fragment_shader_path,
         project_format,
         animated,
+        /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007). */
         fast_unlit
-            ? 2u
+            ? 3u
             : (shadows_active
-                ? (omni_shadows_active ? 10u : 9u)
-                : 5u),
+                ? (omni_shadows_active ? 11u : 10u)
+                : 6u),
         auxiliary_geometry_outputs,
         temporal,
         batch,
@@ -3107,6 +3119,7 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         SDL_ReleaseGPUShader(device, shadow_vertex_shader);
         return false;
     }
+    /* Its texture and uniforms are an SDF terrain's dig mask (RFC 0007). */
     SDL_GPUShader *shadow_fragment_shader =
         btbh_gpu_scene_load_shader(
             device,
@@ -3115,8 +3128,8 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
             format,
             SDL_GPU_SHADERSTAGE_FRAGMENT,
             0u,
-            0u,
-            0u,
+            1u,
+            1u,
             report
         );
     if (shadow_fragment_shader == NULL) {
@@ -5524,6 +5537,63 @@ static bool btbh_gpu_scene_surface_uses_fast_shadow_vertex(
         surface_variant == BTBH_GPU_SCENE_SURFACE_RIM;
 }
 
+/* RFC 0007: each batch's dig mask for this scene (the dug_by terrain attached to this window, once it has a mask). */
+static bool btbh_gpu_scene_prepare_dig_bindings(
+    const BTBHGPUWindow *window,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count
+) {
+    if (batch_count > runtime->dig_binding_capacity) {
+        BTBHGPUSdfTerrainMaskBinding *bindings = (BTBHGPUSdfTerrainMaskBinding *)realloc(
+            runtime->dig_bindings,
+            sizeof(BTBHGPUSdfTerrainMaskBinding) * batch_count
+        );
+        if (bindings == NULL) {
+            return false;
+        }
+        runtime->dig_bindings = bindings;
+        runtime->dig_binding_capacity = batch_count;
+    }
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        BTBHGPUSdfTerrainMaskBinding *binding = &runtime->dig_bindings[index];
+        memset(binding, 0, sizeof(*binding));
+        if (batches[index].dug_by != NULL &&
+            !btbh_gpu_sdf_terrain_mask_binding(batches[index].dug_by, window, binding)) {
+            memset(binding, 0, sizeof(*binding));
+        }
+    }
+    return true;
+}
+
+static void btbh_gpu_scene_dig_uniforms(
+    const BTBHGPUSdfTerrainMaskBinding *binding,
+    BTBHGPUSceneDigMaskUniforms *uniforms
+) {
+    memset(uniforms, 0, sizeof(*uniforms));
+    if (binding->texture != NULL) {
+        memcpy(uniforms->origin, binding->origin, sizeof(uniforms->origin));
+        memcpy(uniforms->scale, binding->scale, sizeof(uniforms->scale));
+    }
+}
+
+/* The dig mask's texture for a batch, or the fallback texture where it has none (its uniforms then say so). */
+static SDL_GPUTextureSamplerBinding btbh_gpu_scene_dig_sampler(
+    const BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSdfTerrainMaskBinding *binding
+) {
+    SDL_GPUTextureSamplerBinding sampler;
+    SDL_zero(sampler);
+    if (binding->texture != NULL) {
+        sampler.texture = binding->texture;
+        sampler.sampler = binding->sampler;
+    } else {
+        sampler.texture = runtime->fallback_texture->texture;
+        sampler.sampler = runtime->fallback_texture->sampler;
+    }
+    return sampler;
+}
+
 static bool btbh_gpu_scene_render_directional_shadow(
     SDL_GPUCommandBuffer *command,
     BTBHGPUSceneRuntime *runtime,
@@ -5568,6 +5638,9 @@ static bool btbh_gpu_scene_render_directional_shadow(
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
     SDL_GPUBuffer *bound_index_buffer = NULL;
     bool shadow_uniform_bound = false;
+    /* The dig mask last given to the fragment-stage pipelines in this pass (RFC 0007). */
+    bool dig_bound = false;
+    SDL_GPUTexture *bound_dig_texture = NULL;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
          ++batch_index) {
@@ -5603,12 +5676,17 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 continue;
             }
             const bool animated = bone_offset != UINT32_MAX;
+            /* A dug batch (RFC 0007) takes the pipeline with a fragment stage once its terrain has a mask, so it
+               casts no shadow over the crater. */
+            const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+            const bool dug = dig->texture != NULL;
             const bool requires_shadow_discard =
                 btbh_gpu_scene_surface_requires_shadow_discard(
                     batch->surface_variant
-                );
+                ) || dug;
             const bool uses_fast_shadow =
                 !animated &&
+                !dug &&
                 btbh_gpu_scene_surface_uses_fast_shadow_vertex(
                     batch->surface_variant
                 ) &&
@@ -5697,6 +5775,16 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 }
             } else if (bind_telemetry) {
                 telemetry->shadow_pipeline_bind_skip_count += 1u;
+            }
+            if (!uses_fast_shadow && requires_shadow_discard &&
+                (!dig_bound || bound_dig_texture != dig->texture)) {
+                BTBHGPUSceneDigMaskUniforms dig_uniforms;
+                btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
+                SDL_PushGPUFragmentUniformData(command, 0u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+                const SDL_GPUTextureSamplerBinding dig_sampler = btbh_gpu_scene_dig_sampler(runtime, dig);
+                SDL_BindGPUFragmentSamplers(pass, 0u, &dig_sampler, 1u);
+                dig_bound = true;
+                bound_dig_texture = dig->texture;
             }
             if (animated) {
                 SDL_GPUBuffer *storage_buffers[2] = {
@@ -6122,13 +6210,18 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 batch->emission_texture != NULL
                     ? batch->emission_texture
                     : runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[2];
+            const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+            BTBHGPUSceneDigMaskUniforms dig_uniforms;
+            btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
+            SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+            SDL_GPUTextureSamplerBinding samplers[3];
             SDL_zeroa(samplers);
             samplers[0].texture = albedo_texture->texture;
             samplers[0].sampler = albedo_texture->sampler;
             samplers[1].texture = emission_texture->texture;
             samplers[1].sampler = emission_texture->sampler;
-            SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 2u);
+            samplers[2] = btbh_gpu_scene_dig_sampler(runtime, dig);
+            SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 3u);
 
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -6712,7 +6805,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             telemetry,
             temporal_active ? runtime : NULL
         ) ||
-        bone_count > UINT32_MAX / (sizeof(float) * 16u)
+        bone_count > UINT32_MAX / (sizeof(float) * 16u) ||
+        !btbh_gpu_scene_prepare_dig_bindings(window, runtime, batches, batch_count)
     ) {
         free(bone_matrices);
         free(bone_offsets);
@@ -8435,7 +8529,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->orm_texture != NULL
                     ? batch->orm_texture
                     : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[10];
+            SDL_GPUTextureSamplerBinding samplers[11];
             SDL_zeroa(samplers);
             samplers[0].texture = texture->texture;
             samplers[0].sampler = texture->sampler;
@@ -8487,16 +8581,25 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 samplers[9].sampler =
                     runtime->directional_shadow_sampler;
             }
-            SDL_BindGPUFragmentSamplers(
-                pass,
-                0u,
-                samplers,
+            /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), with its placement in the
+               fragment uniform slot 1. */
+            const uint32_t material_sampler_count =
                 (!radiance_cascades_active &&
                  btbh_gpu_scene_uses_fast_unlit_pipeline(batch))
                     ? 2u
                     : (shadows_active
                         ? (omni_shadows_active ? 10u : 9u)
-                        : 5u)
+                        : 5u);
+            const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+            samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
+            BTBHGPUSceneDigMaskUniforms dig_uniforms;
+            btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
+            SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+            SDL_BindGPUFragmentSamplers(
+                pass,
+                0u,
+                samplers,
+                material_sampler_count + 1u
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -10433,6 +10536,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
         );
     }
     window->pending_scene_ready = false;
+    free(window->scene_runtime->dig_bindings);
     free(window->scene_runtime->temporal_palettes);
     free(window->scene_runtime->temporal_palette_matrices);
     free(window->scene_runtime->opaque_order);

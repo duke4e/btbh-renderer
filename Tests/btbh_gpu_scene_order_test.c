@@ -13,7 +13,8 @@
 
 /* The released layouts (0.4.0, 64-bit): the new fields took reserved bytes. */
 #if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 256u, "BTBHGPUSceneGeometryBatch keeps its size");
+/* 0.4.0 was 256 bytes; RFC 0007 appends dug_by after the reserved bytes. */
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, dug_by) == 256u, "dug_by is appended after 0.4.0's 256 bytes");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_mode) == 252u, "ssao_mode keeps its place");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u, "flags is the old ssao_reserved[0]");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_reserved) == 254u, "the rest stays reserved");
