@@ -16,9 +16,8 @@ what it drew. One shader is new; none changed.
   right, as `BTBHGPUFontKerningPair { left, right, advance }`, with the advances `btbh_gpu_font_kerning` returns,
   and returns how many the font has whatever the capacity (`NULL, 0` sizes the array). 0 for a font from
   `btbh_gpu_window_font_load`. `BTBH_GPU_HAS_FONT_KERNING_PAIRS` is defined with it.
-- **`BTBHGPUFontDesc.flags`**: 0.4.0's `reserved` byte, which had to be 0, now holds `BTBH_GPU_FONT_FLAG_*`.
-  Size and layout are unchanged, and `reserved` stays as an alias in a nameless union, so C and C++ that write
-  `.reserved = 0` still compile. Unknown bits are still refused. `BTBH_GPU_HAS_FONT_FLAGS` is defined with it.
+- **`BTBHGPUFontDesc.flags`**, which had to be 0 in 0.4.0, now holds `BTBH_GPU_FONT_FLAG_*`. Unknown bits are
+  still refused. `BTBH_GPU_HAS_FONT_FLAGS` is defined with it.
 - **One-channel font atlas**: `BTBH_GPU_FONT_FLAG_R8_ATLAS` bakes the atlas as R8 coverage instead of RGBA8
   (white, coverage in alpha): a quarter of the memory at the same size (at 12 px with `oversample_x` 3, 128 KiB
   becomes 32 KiB). Glyphs, metrics and kerning are the same. The canvas draws a batch whose texture has one
@@ -46,10 +45,6 @@ what it drew. One shader is new; none changed.
 - A game that bakes R8 atlases must ship `production_canvas_coverage.frag` (`.spv` or `.metallib`) next to
   `production_canvas_textured.frag`. It is in the renderer's shader list in `CMakeLists.txt`, so build scripts
   that read that list pick it up.
-- Rust (bindgen 0.73): the nameless union comes out as a field `__bindgen_anon_1`, and `BTBHGPUFontDesc` loses
-  its derived `Debug` (a union can't derive it; `Default` stays, written out). A struct literal that names
-  `reserved: 0`, or `{:?}` on a descriptor, no longer compiles: start from `Default::default()` and set
-  `desc.__bindgen_anon_1.flags`. C and C++ hosts that write `.reserved = 0` compile unchanged.
 
 ## [0.4.0] — 2026-11-12
 

@@ -187,8 +187,8 @@ go in the release after v0.4.0, not in v0.4.0:
 - **`btbh_gpu_font_kerning_pairs(font, pairs, capacity)`**: every nonzero pair, sorted by (left, right), with
   the advances `btbh_gpu_font_kerning` returns; `NULL, 0` gives the count. It replaces the 117² FFI calls per
   face above with one call. Titillium Web at 16 px has 1754 pairs among CHIMERA's 117 glyphs.
-- **`BTBH_GPU_FONT_FLAG_R8_ATLAS`** (`BTBHGPUFontDesc.flags`, which was `reserved`; `reserved` stays as an
-  alias in a nameless union, so the struct's size and layout don't change): an R8 coverage atlas, a quarter of
+- **`BTBH_GPU_FONT_FLAG_R8_ATLAS`** (`BTBHGPUFontDesc.flags`, the byte that had to be 0 in 0.4.0, so the
+  struct's size and layout don't change): an R8 coverage atlas, a quarter of
   the RGBA8 one (10 px: 128 x 128, 64 KiB to 16 KiB; 12 and 16 px: 256 x 128, 128 KiB to 32 KiB). SDL3 GPU has no
   texture swizzle, so the canvas draws a one-channel texture with a new fragment shader,
   `production_canvas_coverage.frag` (white x coverage x the vertex colour), picked per batch from the texture's
