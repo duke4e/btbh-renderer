@@ -28,6 +28,18 @@ final class GPUWindowProbeTests: XCTestCase {
         }
     }
 
+    /// The compiled production shaders: BTBH_GPU_SHADER_DIR when set, as GPUPlatform reads it (then the older
+    /// BTBH_GPU_TEST_SHADER_DIR), else the in-tree preset build's output.
+    private func productionShaderDirectory(packageRoot: URL) -> URL {
+        let environment = ProcessInfo.processInfo.environment
+        for name in ["BTBH_GPU_SHADER_DIR", "BTBH_GPU_TEST_SHADER_DIR"] {
+            if let directory = environment[name], !directory.isEmpty {
+                return URL(fileURLWithPath: directory)
+            }
+        }
+        return packageRoot.appendingPathComponent(platformShaderFallbackDirectory)
+    }
+
     func testPresentModesMatchTheCEnum() {
         let expected: [(GPUPresentMode, BTBHGPUPresentMode)] = [
             (.automatic, BTBH_GPU_PRESENT_MODE_INVALID),
@@ -4004,13 +4016,7 @@ final class GPUWindowProbeTests: XCTestCase {
             0, 1, 0, 1,
             21, 22, 23, 24,
         ]
-        let shaderDirectory =
-            ProcessInfo.processInfo.environment[
-                "BTBH_GPU_TEST_SHADER_DIR"
-            ].map { URL(fileURLWithPath: $0) } ??
-            packageRoot.appendingPathComponent(
-                platformShaderFallbackDirectory
-            )
+        let shaderDirectory = productionShaderDirectory(packageRoot: packageRoot)
         var testLighting = GPUSceneLightingProbe(
             ambientColor: .white,
             ambientEnergy: 1,
@@ -4308,13 +4314,7 @@ final class GPUWindowProbeTests: XCTestCase {
                 .path
         )
         defer { GPUWindowProbe.destroyModel(model.pointer) }
-        let shaderDirectory =
-            ProcessInfo.processInfo.environment[
-                "BTBH_GPU_TEST_SHADER_DIR"
-            ].map { URL(fileURLWithPath: $0) } ??
-            packageRoot.appendingPathComponent(
-                platformShaderFallbackDirectory
-            )
+        let shaderDirectory = productionShaderDirectory(packageRoot: packageRoot)
         let instances = [
             GPUInstanceRecordPacking.record(
                 matrix: .identity,
@@ -4466,13 +4466,7 @@ final class GPUWindowProbeTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let shaderDirectory =
-            ProcessInfo.processInfo.environment[
-                "BTBH_GPU_TEST_SHADER_DIR"
-            ].map { URL(fileURLWithPath: $0) } ??
-            packageRoot.appendingPathComponent(
-                platformShaderFallbackDirectory
-            )
+        let shaderDirectory = productionShaderDirectory(packageRoot: packageRoot)
         let model = try probe.loadModel(
             path: packageRoot.appendingPathComponent(
                 "Tests/Fixtures/instanced-transformed-default-material.gltf"
