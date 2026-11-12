@@ -149,6 +149,11 @@ quoted.
   sorted 5.9 / 5.8 ms (the ground's centre lands among the units, so it moves only part-way back); the ground
   given last, sorted or not (`KEEP_ORDER`), 5.2 / 5.2 ms. The ground alone takes 2.4 / 3.1 ms, the units alone
   4.1 / 4.2 ms.
+- In CHIMERA (the main pass's 10th percentile, 770 frames a side, A/B in one run), with `KEEP_ORDER` on the
+  ground and everything lying on it: `FRONT_TO_BACK_LESS_EQUAL` alone gained 0.002 ms with 132 units and
+  0.019 ms in its town. Scenery drawn before the pinned ground, which `KEEP_ORDER` allows, gained 0.049 and
+  0.072 ms; both together, 0.044 and 0.092 ms. A game that already draws its ground last gains little from the
+  sort itself.
 - CPU (Ryzen 9 9950X, as contended), `btbh_gpu_scene_opaque_order` alone, 200 calls averaged: 17 µs for 256
   batches of 16 instances, 57-200 µs for 2048 batches of one, 0.23-0.31 ms for 1024 batches of 64 (one pass over
   the instances, then the sort). A custom mesh update of 100 000 vertices spends 0.35-0.38 ms on its bounds. The
