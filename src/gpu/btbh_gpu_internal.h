@@ -377,6 +377,17 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report
 );
+/* One channel, width x height bytes (R8_UNORM): a font atlas baked with
+   BTBH_GPU_FONT_FLAG_R8_ATLAS, which the canvas draws as coverage. */
+BTBHGPUTexture *btbh_gpu_window_texture_create_r8(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+);
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_mipmapped(
     BTBHGPUWindow *window,
     const uint8_t *pixels,

@@ -294,6 +294,39 @@ typedef struct BTBHGPUFontGlyph {
     float v1;
 } BTBHGPUFontGlyph;
 
+/* BTBHGPUFontDesc.flags (since 0.5.0). Zero is the 0.4.0 bake, byte for byte. */
+enum {
+    /* A one-channel atlas: R8 coverage instead of RGBA8 (white, coverage in alpha), a quarter of the
+       memory at the same width and height; the glyphs, metrics and kerning are the same. The canvas
+       draws a batch whose texture is a one-channel texture as white x coverage x the vertex colour,
+       which is what it draws from the RGBA8 atlas (within a level of rounding, should a GPU filter the
+       two formats differently). For that it loads
+       production_canvas_coverage.frag (.spv or .metallib, as the other shaders) from the directory of
+       btbh_gpu_window_canvas_present's textured_fragment_shader_path, the first time a batch needs it:
+       ship it with the other canvas shaders, or that present fails with BTBH_GPU_INVALID_ARGUMENT and
+       the path in its report. Anywhere but the canvas (a scene material, a readback) the atlas is an
+       R8 texture, and btbh_gpu_texture_update_rgba8 refuses it. */
+    BTBH_GPU_FONT_FLAG_R8_ATLAS = 1u << 0,
+    /* Puts the x-height on a whole pixel, a cheap stand-in for vertical hinting: glyphs are rasterised
+       with a vertical scale of scale x round(x) / x, x being the x-height in pixels at pixel_size, so
+       the top of flat lowercase ('x', 'z', 'u', stems) sits on a pixel edge on a whole-pixel baseline
+       instead of leaving a grey row. The horizontal scale, advances and kerning don't change, so
+       spacing stays even. btbh_gpu_font_metrics reports the scale used: x_height is round(x) (a whole
+       number, at least 1), and ascent, descent, line_gap and cap_height are scaled by round(x) / x like
+       the glyphs, so ascent - descent is pixel_size x round(x) / x (the rounding moves it by up to half
+       a pixel of x-height: about 10% at 10-14 px); pixel_size itself stays as asked. Only the
+       x-height's top edge goes on the grid: a horizontal stroke elsewhere or of a fractional thickness
+       (the bar of 'e', the cross of 't', the underside of the bar of 'z') still straddles a pixel edge,
+       round tops ('o', 'n') still overshoot a little, and capitals and ascenders aren't snapped. It
+       helps least with oversample_y above 1, which blurs vertically anyway. A font without an 'x'
+       bakes as without the flag. */
+    BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT = 1u << 1
+};
+
+/* Defined when BTBHGPUFontDesc.flags, BTBH_GPU_FONT_FLAG_R8_ATLAS (and the canvas's coverage shader)
+   and BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT exist (since 0.5.0). */
+#define BTBH_GPU_HAS_FONT_FLAGS 1
+
 /* How btbh_gpu_window_font_load_ex bakes a font (RFC 0004, option A: readable small text). Bake one
    font per size it is drawn at, in output pixels (size x UI scale), and draw it at that size: text
    scaled at draw time blurs, whatever the filter. A zeroed descriptor is invalid (pixel_size 0). */
@@ -313,7 +346,7 @@ typedef struct BTBHGPUFontDesc {
        on one (crisp, uneven spacing). 0: fractional advances and kerning (even spacing; place each
        glyph on the 1/oversample_x grid). Other values are invalid. */
     uint8_t snap_advances;
-    /* Options for later releases: 0 (none is defined yet; other values are invalid). */
+    /* BTBH_GPU_FONT_FLAG_* (0: none, as in 0.4.0); other bits are invalid. */
     uint8_t flags;
     /* Coverage contrast, applied once to the atlas while baking: coverage' = coverage^(1 /
        coverage_gamma). 0 means 1 (as rasterised); 0.25 to 4 otherwise. Values above 1 (1.2-1.4)
@@ -338,6 +371,17 @@ typedef struct BTBHGPUFontMetrics {
 /* Defined when BTBHGPUFontDesc, btbh_gpu_window_font_load_ex, btbh_gpu_font_metrics and
    btbh_gpu_font_kerning exist. */
 #define BTBH_GPU_HAS_FONT_LOAD_EX 1
+
+/* One kerning pair from btbh_gpu_font_kerning_pairs: advance is btbh_gpu_font_kerning(font, left,
+   right), never 0. */
+typedef struct BTBHGPUFontKerningPair {
+    uint32_t left;
+    uint32_t right;
+    float advance;
+} BTBHGPUFontKerningPair;
+
+/* Defined when BTBHGPUFontKerningPair and btbh_gpu_font_kerning_pairs exist (since 0.5.0). */
+#define BTBH_GPU_HAS_FONT_KERNING_PAIRS 1
 
 typedef enum BTBHGPUCanvasBlendMode {
     BTBH_GPU_CANVAS_BLEND_ALPHA = 0,
@@ -1292,7 +1336,8 @@ void btbh_gpu_font_destroy(BTBHGPUFont *font);
    btbh_gpu_window_font_load. An invalid desc or argument returns NULL with the report's result
    BTBH_GPU_INVALID_ARGUMENT and the reason; report must not be NULL. report->base_size is
    pixel_size rounded to whole pixels; its ascent, descent and line_gap are
-   btbh_gpu_font_metrics'. */
+   btbh_gpu_font_metrics'. The atlas is RGBA8 (white, coverage in alpha), or R8 coverage with
+   BTBH_GPU_FONT_FLAG_R8_ATLAS; report->atlas_width and atlas_height are its size either way. */
 BTBHGPUFont *btbh_gpu_window_font_load_ex(
     BTBHGPUWindow *window,
     const char *path,
@@ -1303,7 +1348,9 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
 );
 /* Vertical metrics in pixels at the font's size. For a font from btbh_gpu_window_font_load the
    ascent, descent and line gap are what its report said (the ascent rounded down, a line gap of 2);
-   x_height and cap_height are unrounded either way. */
+   x_height and cap_height are unrounded either way. With BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT they are at
+   the vertical scale the glyphs were rasterised with: x_height a whole number, the rest scaled to
+   match (see the flag); pixel_size is still the size asked for. */
 BTBHGPUResult btbh_gpu_font_metrics(
     const BTBHGPUFont *font,
     BTBHGPUFontMetrics *metrics
@@ -1317,6 +1364,24 @@ float btbh_gpu_font_kerning(
     uint32_t left,
     uint32_t right
 );
+/* Every nonzero kerning pair of the font in one call, sorted by left, then right: the pairs
+   btbh_gpu_font_kerning answers with something other than 0, with the same advances, between the
+   codepoints the font was baked with and has. Copies the first min(count, capacity) of them into pairs
+   and returns count, the number the font has, whatever capacity is: call it with NULL and 0 to size
+   the array, then again to fill it. With pairs NULL nothing is copied. 0 for a font from
+   btbh_gpu_window_font_load, a font without kerning, or a NULL font. It still answers after the
+   font's window is destroyed. */
+uint32_t btbh_gpu_font_kerning_pairs(
+    const BTBHGPUFont *font,
+    BTBHGPUFontKerningPair *pairs,
+    uint32_t capacity
+);
+/* A batch with a texture is drawn as the texture x the vertex colour with
+   textured_fragment_shader_path. A batch whose texture has one channel (a font atlas baked with
+   BTBH_GPU_FONT_FLAG_R8_ATLAS) is drawn as white x its coverage x the vertex colour with
+   production_canvas_coverage.frag from the same directory, loaded the first time a batch needs it (since
+   0.5.0); if it can't be loaded the present fails with BTBH_GPU_INVALID_ARGUMENT and the path in the
+   report, and draws nothing, as any other failed present. */
 BTBHGPUResult btbh_gpu_window_canvas_present(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -1615,7 +1680,8 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
     BTBHGPUTextureReport *report
 );
 /* Replaces a region of a raw-pixel texture. Submits its own upload, so call it
- * before the scene or canvas present that samples the texture. */
+ * before the scene or canvas present that samples the texture. A one-channel font atlas
+ * (BTBH_GPU_FONT_FLAG_R8_ATLAS) isn't RGBA: BTBH_GPU_INVALID_ARGUMENT. */
 BTBHGPUResult btbh_gpu_texture_update_rgba8(
     BTBHGPUTexture *texture,
     const uint8_t *pixels,

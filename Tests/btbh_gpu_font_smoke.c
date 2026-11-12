@@ -15,6 +15,16 @@
  *   text-<size>px-ex-gamma.png  the same with coverage_gamma 1.3
  *   text-all.png, text-all-x4.png  every row in that order for each size, and the same 4x (nearest)
  *
+ * After v0.4.0 (BTBHGPUFontDesc.flags, btbh_gpu_font_kerning_pairs): the pairs against
+ * btbh_gpu_font_kerning; the R8 atlas against the RGBA one (a quarter of the bytes, the same coverage,
+ * drawn within a level), the canvas refusing an R8 batch without its coverage shader; the snapped
+ * x-height's metrics (whole pixels, the vertical ones scaled to match, nothing across changed) and the
+ * ink at the top of flat lowercase without and with it. More PNGs, in the same directory:
+ *   text-<size>px-ex-r8.png     the ex row from the R8 atlas
+ *   text-<size>px-ex-snap.png   the ex row with BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT (compare -ex.png)
+ *   probe-<size>px-ex-vs-snap.png  "xxx zzz uuu vvv nnn ooo eee" without (left) and with (right) it
+ *   text-extras.png, text-extras-x4.png  ex, ex-r8, ex-snap and the probe for each size
+ *
  * The face is Titillium Web SemiBold (SIL OFL 1.1, Tests/Fixtures/OFL-TitilliumWeb.txt), CHIMERA's UI
  * face. It needs a GPU and the canvas shaders; with neither it is skipped (77). */
 #undef NDEBUG
@@ -30,6 +40,7 @@
 
 #include <assert.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,7 +70,7 @@ static const char *const variant_names[VARIANT_COUNT] = {"plain", "snapped", "ex
 static const uint8_t background[3] = {22u, 24u, 30u};
 static const float ink[4] = {236.0f / 255.0f, 232.0f / 255.0f, 220.0f / 255.0f, 1.0f};
 
-static char shader_paths[3][1024];
+static char shader_paths[4][1024]; /* the canvas shaders; [3] is the coverage one, beside [2] */
 static uint32_t codepoints[128];
 static uint32_t codepoint_count;
 
@@ -82,10 +93,11 @@ static void fill_codepoints(void) {
     }
 }
 
+/* The texture's texels, tightly packed: 4 bytes each (RGBA order), or 1 for an R8 atlas. */
 static uint8_t *read_texture(BTBHGPUWindow *window, BTBHGPUTexture *texture) {
     SDL_GPUDevice *device = window->device->gpu;
     const uint32_t texel = SDL_GPUTextureFormatTexelBlockSize(texture->format);
-    assert(texel == 4u);
+    assert(texel == 4u || (texel == 1u && texture->format == SDL_GPU_TEXTUREFORMAT_R8_UNORM));
     const uint32_t size = texture->width * texture->height * texel;
     SDL_GPUTransferBufferCreateInfo info;
     SDL_zero(info);
@@ -139,12 +151,13 @@ static BTBHGPUFont *load_plain(BTBHGPUWindow *window, uint32_t size, BTBHGPUFont
     return font;
 }
 
-static BTBHGPUFont *load_ex(
+static BTBHGPUFont *load_ex_flags(
     BTBHGPUWindow *window,
     float size,
     uint8_t oversample_x,
     uint8_t snap,
     float gamma,
+    uint8_t flags,
     BTBHGPUFontReport *report
 ) {
     BTBHGPUFontDesc desc;
@@ -154,6 +167,7 @@ static BTBHGPUFont *load_ex(
     desc.oversample_y = 1u;
     desc.snap_advances = snap;
     desc.coverage_gamma = gamma;
+    desc.flags = flags;
     BTBHGPUFont *font = btbh_gpu_window_font_load_ex(
         window, BTBH_GPU_FONT_SMOKE_FONT, &desc, codepoints, codepoint_count, report);
     if (font == NULL) {
@@ -161,6 +175,17 @@ static BTBHGPUFont *load_ex(
     }
     assert(font != NULL && report->result == BTBH_GPU_OK);
     return font;
+}
+
+static BTBHGPUFont *load_ex(
+    BTBHGPUWindow *window,
+    float size,
+    uint8_t oversample_x,
+    uint8_t snap,
+    float gamma,
+    BTBHGPUFontReport *report
+) {
+    return load_ex_flags(window, size, oversample_x, snap, gamma, 0u, report);
 }
 
 /* _ex with this desc must fail as invalid, with a reason. */
@@ -204,9 +229,13 @@ static void check_validation(BTBHGPUDevice *device, BTBHGPUWindow *window) {
     desc = good;
     desc.snap_advances = 2u;
     expect_invalid(window, &desc, "snap_advances 2");
-    desc = good;
-    desc.flags = 1u;
-    expect_invalid(window, &desc, "flags");
+    /* Bits other than the two flags stay invalid. */
+    const uint8_t bad_flags[] = {1u << 2, 1u << 7, 0xFFu};
+    for (size_t i = 0u; i < sizeof(bad_flags) / sizeof(bad_flags[0]); i += 1u) {
+        desc = good;
+        desc.flags = bad_flags[i];
+        expect_invalid(window, &desc, "flags");
+    }
     const float bad_gammas[] = {0.2f, 4.5f, -1.0f, NAN};
     for (size_t i = 0u; i < sizeof(bad_gammas) / sizeof(bad_gammas[0]); i += 1u) {
         desc = good;
@@ -274,7 +303,242 @@ static void check_validation(BTBHGPUDevice *device, BTBHGPUWindow *window) {
     assert(btbh_gpu_font_metrics(font, &metrics) == BTBH_GPU_OK);
     assert(metrics.pixel_size == 9.5f);
     btbh_gpu_font_destroy(font);
+
+    /* Both flags at the edges too: at 1 px the x-height snaps up to one pixel. */
+    edge.pixel_size = 1.0f;
+    edge.oversample_x = 8u;
+    edge.oversample_y = 8u;
+    edge.flags = BTBH_GPU_FONT_FLAG_R8_ATLAS | BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT;
+    font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &edge, codepoints, codepoint_count, &report);
+    assert(font != NULL && report.result == BTBH_GPU_OK);
+    assert(btbh_gpu_font_metrics(font, &metrics) == BTBH_GPU_OK);
+    assert(metrics.x_height == 1.0f && metrics.pixel_size == 1.0f);
+    assert(btbh_gpu_font_atlas(font)->format == SDL_GPU_TEXTUREFORMAT_R8_UNORM);
+    btbh_gpu_font_destroy(font);
+
+    /* No flags: the atlas is RGBA, as in 0.4.0. */
+    const BTBHGPUFontDesc plain_desc = {.pixel_size = 12.0f, .oversample_x = 3u, .flags = 0u};
+    font = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &plain_desc, codepoints, codepoint_count, &report);
+    assert(font != NULL && report.result == BTBH_GPU_OK);
+    assert(btbh_gpu_font_atlas(font)->format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    btbh_gpu_font_destroy(font);
     printf("validation: refusals and range edges as documented\n");
+}
+
+/* 0.4.0's layouts, which a host built against 0.4.0 still uses. */
+_Static_assert(sizeof(BTBHGPUFontDesc) == 12u, "BTBHGPUFontDesc keeps its size");
+_Static_assert(offsetof(BTBHGPUFontDesc, snap_advances) == 6u, "BTBHGPUFontDesc keeps its layout");
+_Static_assert(offsetof(BTBHGPUFontDesc, flags) == 7u, "BTBHGPUFontDesc keeps its layout");
+_Static_assert(offsetof(BTBHGPUFontDesc, coverage_gamma) == 8u, "BTBHGPUFontDesc keeps its layout");
+_Static_assert(sizeof(BTBHGPUFontMetrics) == 24u, "BTBHGPUFontMetrics keeps its size");
+_Static_assert(sizeof(BTBHGPUFontKerningPair) == 12u, "three 32-bit fields");
+
+/* btbh_gpu_font_kerning_pairs: the pairs btbh_gpu_font_kerning answers, all of them, sorted, with
+   the same advances. */
+static void check_kerning_pairs(BTBHGPUWindow *window) {
+    BTBHGPUFontReport report;
+    BTBHGPUFont *ex = load_ex(window, 16.0f, 3u, 0u, 0.0f, &report);
+    const uint32_t count = btbh_gpu_font_kerning_pairs(ex, NULL, 0u);
+    assert(count > 0u);
+    assert(btbh_gpu_font_kerning_pairs(ex, NULL, 100000u) == count);
+    BTBHGPUFontKerningPair *pairs = malloc(((size_t)count + 1u) * sizeof(*pairs));
+    assert(pairs != NULL);
+    memset(pairs, 0xAB, ((size_t)count + 1u) * sizeof(*pairs));
+    const uint64_t one_start = SDL_GetTicksNS();
+    assert(btbh_gpu_font_kerning_pairs(ex, pairs, count + 1u) == count);
+    const uint64_t one_time = SDL_GetTicksNS() - one_start;
+    const uint8_t untouched[sizeof(*pairs)] = {
+        0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB,
+    };
+    assert(memcmp(&pairs[count], untouched, sizeof(*pairs)) == 0);
+    for (uint32_t i = 0u; i < count; i += 1u) {
+        assert(pairs[i].advance != 0.0f);
+        assert(pairs[i].advance == btbh_gpu_font_kerning(ex, pairs[i].left, pairs[i].right));
+        if (i > 0u) {
+            assert(
+                pairs[i - 1u].left < pairs[i].left ||
+                (pairs[i - 1u].left == pairs[i].left && pairs[i - 1u].right < pairs[i].right)
+            );
+        }
+    }
+    /* Every nonzero btbh_gpu_font_kerning between the baked codepoints is in the list. */
+    uint32_t nonzero = 0u;
+    const uint64_t each_start = SDL_GetTicksNS();
+    for (uint32_t a = 0u; a < codepoint_count; a += 1u) {
+        for (uint32_t b = 0u; b < codepoint_count; b += 1u) {
+            nonzero += btbh_gpu_font_kerning(ex, codepoints[a], codepoints[b]) != 0.0f ? 1u : 0u;
+        }
+    }
+    const uint64_t each_time = SDL_GetTicksNS() - each_start;
+    assert(nonzero == count);
+    /* A short array takes the first pairs and leaves the rest alone. */
+    BTBHGPUFontKerningPair few[6];
+    memset(few, 0xAB, sizeof(few));
+    assert(btbh_gpu_font_kerning_pairs(ex, few, 5u) == count);
+    assert(memcmp(few, pairs, 5u * sizeof(*pairs)) == 0);
+    assert(memcmp(&few[5], untouched, sizeof(*pairs)) == 0);
+    printf(
+        "kerning pairs at 16 px: %u nonzero of %u x %u; one call %.3f ms, %u btbh_gpu_font_kerning "
+        "calls %.3f ms\n",
+        count,
+        codepoint_count,
+        codepoint_count,
+        (double)one_time / 1e6,
+        codepoint_count * codepoint_count,
+        (double)each_time / 1e6
+    );
+
+    /* The flags change nothing across: the same pairs. */
+    BTBHGPUFont *flagged = load_ex_flags(
+        window, 16.0f, 3u, 0u, 0.0f,
+        BTBH_GPU_FONT_FLAG_R8_ATLAS | BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT, &report);
+    BTBHGPUFontKerningPair *same = malloc((size_t)count * sizeof(*same));
+    assert(same != NULL);
+    assert(btbh_gpu_font_kerning_pairs(flagged, same, count) == count);
+    assert(memcmp(same, pairs, (size_t)count * sizeof(*pairs)) == 0);
+    free(same);
+    btbh_gpu_font_destroy(flagged);
+
+    /* Whole pixels with snap_advances. */
+    BTBHGPUFont *snapped = load_ex(window, 12.0f, 3u, 1u, 0.0f, &report);
+    const uint32_t snapped_count = btbh_gpu_font_kerning_pairs(snapped, pairs, count);
+    assert(snapped_count > 0u && snapped_count <= count);
+    for (uint32_t i = 0u; i < snapped_count; i += 1u) {
+        assert(pairs[i].advance == roundf(pairs[i].advance) && pairs[i].advance != 0.0f);
+    }
+    btbh_gpu_font_destroy(snapped);
+
+    /* None for the plain loader, a NULL font, or a font baked without any kerned pair. */
+    BTBHGPUFont *plain = load_plain(window, 16u, &report);
+    assert(btbh_gpu_font_kerning_pairs(plain, NULL, 0u) == 0u);
+    memset(few, 0xAB, sizeof(few));
+    assert(btbh_gpu_font_kerning_pairs(plain, few, 6u) == 0u);
+    assert(memcmp(&few[0], untouched, sizeof(*pairs)) == 0);
+    btbh_gpu_font_destroy(plain);
+    assert(btbh_gpu_font_kerning_pairs(NULL, few, 6u) == 0u);
+    const uint32_t lonely[1] = {' '};
+    BTBHGPUFontDesc desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.pixel_size = 16.0f;
+    BTBHGPUFont *single = btbh_gpu_window_font_load_ex(
+        window, BTBH_GPU_FONT_SMOKE_FONT, &desc, lonely, 1u, &report);
+    assert(single != NULL && btbh_gpu_font_kerning_pairs(single, NULL, 0u) == 0u);
+    btbh_gpu_font_destroy(single);
+    free(pairs);
+    btbh_gpu_font_destroy(ex);
+}
+
+/* BTBH_GPU_FONT_FLAG_R8_ATLAS: the same atlas, one channel, a quarter of the bytes; the same glyphs
+   and metrics. */
+static void check_r8_atlas(BTBHGPUWindow *window) {
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        for (uint32_t g = 0u; g < 2u; g += 1u) {
+            const float gamma = g == 0u ? 0.0f : 1.3f;
+            BTBHGPUFontReport rgba_report;
+            BTBHGPUFontReport r8_report;
+            BTBHGPUFont *rgba = load_ex(window, (float)sizes[s], 3u, 0u, gamma, &rgba_report);
+            BTBHGPUFont *r8 = load_ex_flags(
+                window, (float)sizes[s], 3u, 0u, gamma, BTBH_GPU_FONT_FLAG_R8_ATLAS, &r8_report);
+            assert(r8_report.atlas_width == rgba_report.atlas_width);
+            assert(r8_report.atlas_height == rgba_report.atlas_height);
+            assert(r8_report.ascent == rgba_report.ascent && r8_report.descent == rgba_report.descent);
+            BTBHGPUTexture *rgba_atlas = btbh_gpu_font_atlas(rgba);
+            BTBHGPUTexture *r8_atlas = btbh_gpu_font_atlas(r8);
+            assert(rgba_atlas->format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+            assert(r8_atlas->format == SDL_GPU_TEXTUREFORMAT_R8_UNORM);
+            const uint32_t width = r8_report.atlas_width;
+            const uint32_t height = r8_report.atlas_height;
+            const uint32_t rgba_bytes = width * height * SDL_GPUTextureFormatTexelBlockSize(rgba_atlas->format);
+            const uint32_t r8_bytes = width * height * SDL_GPUTextureFormatTexelBlockSize(r8_atlas->format);
+            assert(r8_bytes * 4u == rgba_bytes);
+            uint8_t *a = read_texture(window, rgba_atlas);
+            uint8_t *b = read_texture(window, r8_atlas);
+            for (uint32_t i = 0u; i < width * height; i += 1u) {
+                assert(a[i * 4u] == 255u && a[i * 4u + 1u] == 255u && a[i * 4u + 2u] == 255u);
+                assert(b[i] == a[i * 4u + 3u]);
+            }
+            free(a);
+            free(b);
+            for (uint32_t c = 0u; c < codepoint_count; c += 1u) {
+                BTBHGPUFontGlyph x;
+                BTBHGPUFontGlyph y;
+                assert(btbh_gpu_font_glyph(rgba, codepoints[c], &x) == BTBH_GPU_OK);
+                assert(btbh_gpu_font_glyph(r8, codepoints[c], &y) == BTBH_GPU_OK);
+                assert(memcmp(&x, &y, sizeof(x)) == 0);
+            }
+            BTBHGPUFontMetrics x_metrics;
+            BTBHGPUFontMetrics y_metrics;
+            assert(btbh_gpu_font_metrics(rgba, &x_metrics) == BTBH_GPU_OK);
+            assert(btbh_gpu_font_metrics(r8, &y_metrics) == BTBH_GPU_OK);
+            assert(memcmp(&x_metrics, &y_metrics, sizeof(x_metrics)) == 0);
+            /* Not an RGBA texture: refused. */
+            const uint8_t texel[4] = {255u, 255u, 255u, 255u};
+            assert(btbh_gpu_texture_update_rgba8(r8_atlas, texel, 0u, 0u, 1u, 1u) == BTBH_GPU_INVALID_ARGUMENT);
+            if (g == 0u) {
+                printf(
+                    "atlas at %u px (oversample 3): %u x %u, RGBA8 %u bytes, R8 %u bytes\n",
+                    sizes[s], width, height, rgba_bytes, r8_bytes);
+            }
+            btbh_gpu_font_destroy(rgba);
+            btbh_gpu_font_destroy(r8);
+        }
+    }
+    printf("R8 atlas: the RGBA atlas's alpha, texel for texel; same glyphs and metrics\n");
+}
+
+/* BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT's metrics: a whole-pixel x-height, everything vertical scaled to
+   match, nothing across changed. */
+static void check_snapped_metrics(BTBHGPUWindow *window) {
+    const float check_sizes[] = {9.0f, 10.0f, 11.0f, 12.0f, 13.5f, 16.0f, 24.0f};
+    for (size_t s = 0u; s < sizeof(check_sizes) / sizeof(check_sizes[0]); s += 1u) {
+        BTBHGPUFontReport report;
+        BTBHGPUFontReport snapped_report;
+        BTBHGPUFont *ex = load_ex(window, check_sizes[s], 3u, 0u, 0.0f, &report);
+        BTBHGPUFont *snapped = load_ex_flags(
+            window, check_sizes[s], 3u, 0u, 0.0f, BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT, &snapped_report);
+        BTBHGPUFontMetrics m;
+        BTBHGPUFontMetrics n;
+        assert(btbh_gpu_font_metrics(ex, &m) == BTBH_GPU_OK);
+        assert(btbh_gpu_font_metrics(snapped, &n) == BTBH_GPU_OK);
+        assert(n.x_height == roundf(m.x_height) && n.x_height == floorf(n.x_height));
+        const float ratio = n.x_height / m.x_height;
+        assert(fabsf(n.ascent - m.ascent * ratio) < 1e-3f);
+        assert(fabsf(n.descent - m.descent * ratio) < 1e-3f);
+        assert(fabsf(n.line_gap - m.line_gap * ratio) < 1e-3f);
+        assert(fabsf(n.cap_height - m.cap_height * ratio) < 1e-3f);
+        assert(n.pixel_size == m.pixel_size && snapped_report.base_size == report.base_size);
+        assert(snapped_report.ascent == n.ascent && snapped_report.descent == n.descent);
+        assert(snapped_report.line_gap == n.line_gap);
+        for (uint32_t c = 0u; c < codepoint_count; c += 1u) {
+            BTBHGPUFontGlyph a;
+            BTBHGPUFontGlyph b;
+            assert(btbh_gpu_font_glyph(ex, codepoints[c], &a) == BTBH_GPU_OK);
+            assert(btbh_gpu_font_glyph(snapped, codepoints[c], &b) == BTBH_GPU_OK);
+            assert(a.advance == b.advance && a.offset_x == b.offset_x && a.width == b.width);
+            /* The UVs still take one texel a pixel down. */
+            if (b.height > 0.0f) {
+                assert(fabsf((b.v1 - b.v0) * (float)snapped_report.atlas_height - b.height) < 0.01f);
+            }
+        }
+        printf(
+            "snapped x-height at %.1f px: %.3f -> %.0f (vertical x%.3f); ascent %.3f -> %.3f, "
+            "descent %.3f -> %.3f, cap height %.3f -> %.3f\n",
+            (double)check_sizes[s],
+            (double)m.x_height,
+            (double)n.x_height,
+            (double)ratio,
+            (double)m.ascent,
+            (double)n.ascent,
+            (double)m.descent,
+            (double)n.descent,
+            (double)m.cap_height,
+            (double)n.cap_height
+        );
+        btbh_gpu_font_destroy(ex);
+        btbh_gpu_font_destroy(snapped);
+    }
 }
 
 static void check_metrics(BTBHGPUWindow *window) {
@@ -494,8 +758,9 @@ typedef struct LineStats {
     float worst_offset; /* the furthest a glyph was placed from its own fractional pen */
 } LineStats;
 
-/* Lays out text_line at (x, baseline) as variant does; one batch of quads from font's atlas. */
-static LineStats lay_out(
+/* Lays out text at (x, baseline) as variant does; one batch of quads from font's atlas. */
+static LineStats lay_out_text(
+    const char *text,
     uint32_t variant,
     const BTBHGPUFont *font,
     const BTBHGPUFont *big,
@@ -506,7 +771,7 @@ static LineStats lay_out(
     LineStats stats = {0.0f, 0.0f};
     float pen = x;
     uint32_t previous = 0u;
-    for (const char *c = text_line; *c != '\0'; c += 1) {
+    for (const char *c = text; *c != '\0'; c += 1) {
         const uint32_t codepoint = (uint32_t)(unsigned char)*c;
         BTBHGPUFontGlyph g;
         assert(btbh_gpu_font_glyph(font, codepoint, &g) == BTBH_GPU_OK);
@@ -535,6 +800,17 @@ static LineStats lay_out(
     }
     stats.width = pen - x;
     return stats;
+}
+
+static LineStats lay_out(
+    uint32_t variant,
+    const BTBHGPUFont *font,
+    const BTBHGPUFont *big,
+    float size,
+    float x,
+    float baseline
+) {
+    return lay_out_text(text_line, variant, font, big, size, x, baseline);
 }
 
 static void write_png(const char *dir, const char *name, uint32_t width, uint32_t height, const uint8_t *rgba) {
@@ -712,13 +988,268 @@ static void check_readback(BTBHGPUWindow *window) {
     btbh_gpu_texture_destroy(target);
 }
 
+/* How much ink a read-back pixel has, 0 to 1, from its green against the background's. */
+static float pixel_coverage(const uint8_t *pixels, uint32_t x, uint32_t y) {
+    const float ink_green = roundf(ink[1] * 255.0f);
+    const float green = (float)pixels[((size_t)y * CANVAS_WIDTH + x) * 4u + 1u];
+    return fminf(fmaxf((green - (float)background[1]) / (ink_green - (float)background[1]), 0.0f), 1.0f);
+}
+
+/* The most ink in row y between columns x0 and x1. */
+static float row_peak(const uint8_t *pixels, uint32_t y, uint32_t x0, uint32_t x1) {
+    float peak = 0.0f;
+    for (uint32_t x = x0; x < x1 && x < CANVAS_WIDTH; x += 1u) {
+        peak = fmaxf(peak, pixel_coverage(pixels, x, y));
+    }
+    return peak;
+}
+
+#define EXTRA_COUNT 3u
+#define PROBE_LETTERS 7u
+
+/* The three font flags drawn: the line at 10, 12 and 16 px from the RGBA atlas, the R8 atlas and with
+   the x-height snapped, and a probe row of lowercase without and with the snap, read back:
+   text-<size>px-ex-r8.png, text-<size>px-ex-snap.png (compare text-<size>px-ex.png), and
+   text-extras.png / text-extras-x4.png with every row. */
+static void check_extras_readback(BTBHGPUWindow *window) {
+    static const char *const extra_names[EXTRA_COUNT] = {"ex", "ex-r8", "ex-snap"};
+    static const uint8_t extra_flags[EXTRA_COUNT] = {
+        0u, BTBH_GPU_FONT_FLAG_R8_ATLAS, BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT,
+    };
+    static const char probe_letters[PROBE_LETTERS + 1u] = "xzuvnoe";
+    const char *dump = getenv("BTBH_SMOKE_DUMP");
+    const char *dir = dump != NULL ? dump : BTBH_GPU_FONT_SMOKE_OUTPUT_DIR;
+    (void)SDL_CreateDirectory(dir);
+
+    BTBHGPUTextureReport texture_report;
+    BTBHGPUTexture *target = btbh_gpu_window_render_target_create(
+        window, CANVAS_WIDTH, CANVAS_HEIGHT, BTBH_GPU_TEXTURE_FILTER_NEAREST, &texture_report);
+    assert(target != NULL);
+
+    BTBHGPUFont *fonts[SIZE_COUNT][EXTRA_COUNT];
+    BTBHGPUFontMetrics metrics[SIZE_COUNT][EXTRA_COUNT];
+    uint32_t row_top[SIZE_COUNT][EXTRA_COUNT + 1u];
+    uint32_t row_height[SIZE_COUNT];
+    float probe_baseline[SIZE_COUNT];
+    uint32_t probe_span[SIZE_COUNT][2][PROBE_LETTERS][2];
+    BTBHGPUCanvasBatch batches[MAX_BATCHES];
+    uint32_t batch_count = 0u;
+    vertex_count = 0u;
+    uint32_t y = 6u;
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        const float size = (float)sizes[s];
+        BTBHGPUFontReport report;
+        for (uint32_t e = 0u; e < EXTRA_COUNT; e += 1u) {
+            fonts[s][e] = load_ex_flags(window, size, 3u, 0u, 0.0f, extra_flags[e], &report);
+            assert(btbh_gpu_font_metrics(fonts[s][e], &metrics[s][e]) == BTBH_GPU_OK);
+        }
+        row_height[s] = (uint32_t)ceilf(size * 1.5f) + 2u;
+        for (uint32_t e = 0u; e <= EXTRA_COUNT; e += 1u) {
+            row_top[s][e] = y;
+            /* The baseline as check_readback puts it, from the unsnapped ascent, on a whole pixel. */
+            const float baseline = (float)y + 1.0f + roundf(metrics[s][0].ascent);
+            const uint32_t first = vertex_count;
+            if (e < EXTRA_COUNT) {
+                (void)lay_out(2u, fonts[s][e], NULL, size, 8.0f, baseline);
+                assert(batch_count < MAX_BATCHES);
+                BTBHGPUCanvasBatch *batch = &batches[batch_count++];
+                memset(batch, 0, sizeof(*batch));
+                batch->first_vertex = first;
+                batch->vertex_count = vertex_count - first;
+                batch->texture = btbh_gpu_font_atlas(fonts[s][e]);
+                batch->blend_mode = BTBH_GPU_CANVAS_BLEND_ALPHA;
+            } else {
+                /* The probe: three of each letter, unsnapped from x = 8, snapped from x = 328. */
+                probe_baseline[s] = baseline;
+                for (uint32_t side = 0u; side < 2u; side += 1u) {
+                    const BTBHGPUFont *font = fonts[s][side == 0u ? 0u : 2u];
+                    const uint32_t side_first = vertex_count;
+                    float x = side == 0u ? 8.0f : 328.0f;
+                    for (uint32_t l = 0u; l < PROBE_LETTERS; l += 1u) {
+                        const char text[4] = {probe_letters[l], probe_letters[l], probe_letters[l], '\0'};
+                        const LineStats stats = lay_out_text(text, 2u, font, NULL, size, x, baseline);
+                        probe_span[s][side][l][0] = (uint32_t)floorf(x - 1.0f);
+                        probe_span[s][side][l][1] = (uint32_t)ceilf(x + stats.width + 1.0f);
+                        x = ceilf(x + stats.width + size * 0.6f);
+                    }
+                    assert(x < (side == 0u ? 328.0f : (float)CANVAS_WIDTH));
+                    assert(batch_count < MAX_BATCHES);
+                    BTBHGPUCanvasBatch *batch = &batches[batch_count++];
+                    memset(batch, 0, sizeof(*batch));
+                    batch->first_vertex = side_first;
+                    batch->vertex_count = vertex_count - side_first;
+                    batch->texture = btbh_gpu_font_atlas(fonts[s][side == 0u ? 0u : 2u]);
+                    batch->blend_mode = BTBH_GPU_CANVAS_BLEND_ALPHA;
+                }
+            }
+            y += row_height[s];
+        }
+        y += 4u;
+    }
+    assert(y <= CANVAS_HEIGHT);
+
+    BTBHGPUCanvasPass pass;
+    memset(&pass, 0, sizeof(pass));
+    pass.first_batch = 0u;
+    pass.batch_count = batch_count;
+    pass.target = target;
+    pass.clear_enabled = 1u;
+    pass.clear_red = background[0];
+    pass.clear_green = background[1];
+    pass.clear_blue = background[2];
+    pass.clear_alpha = 255u;
+    BTBHGPUCanvasReport canvas_report;
+
+    /* Without the coverage shader next to the textured one, an R8 batch fails, and says why. */
+    BTBHGPUResult result = btbh_gpu_window_canvas_present(
+        window,
+        shader_paths[0],
+        shader_paths[1],
+        "no-such-directory/production_canvas_textured.frag" SMOKE_SHADER_EXTENSION,
+        SMOKE_SHADER_FORMAT,
+        vertices,
+        vertex_count,
+        batches,
+        batch_count,
+        &pass,
+        1u,
+        &canvas_report
+    );
+    assert(result == BTBH_GPU_INVALID_ARGUMENT);
+    assert(strstr(canvas_report.message, "production_canvas_coverage.frag") != NULL);
+    printf("canvas without the coverage shader: %s\n", canvas_report.message);
+
+    result = btbh_gpu_window_canvas_present(
+        window,
+        shader_paths[0],
+        shader_paths[1],
+        shader_paths[2],
+        SMOKE_SHADER_FORMAT,
+        vertices,
+        vertex_count,
+        batches,
+        batch_count,
+        &pass,
+        1u,
+        &canvas_report
+    );
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "canvas: %s\n", canvas_report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    uint8_t *pixels = read_texture(window, target);
+    for (uint32_t i = 0u; i < CANVAS_WIDTH * CANVAS_HEIGHT; i += 1u) {
+        pixels[i * 4u + 3u] = 255u;
+    }
+
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        /* The R8 row against the RGBA row, pixel for pixel. */
+        int worst = 0;
+        uint32_t differing = 0u;
+        uint32_t lit = 0u;
+        for (uint32_t row = 0u; row < row_height[s]; row += 1u) {
+            const uint8_t *a = &pixels[(size_t)(row_top[s][0] + row) * CANVAS_WIDTH * 4u];
+            const uint8_t *b = &pixels[(size_t)(row_top[s][1] + row) * CANVAS_WIDTH * 4u];
+            for (uint32_t x = 0u; x < CANVAS_WIDTH; x += 1u) {
+                int pixel_worst = 0;
+                for (uint32_t c = 0u; c < 3u; c += 1u) {
+                    const int difference = abs((int)a[x * 4u + c] - (int)b[x * 4u + c]);
+                    pixel_worst = difference > pixel_worst ? difference : pixel_worst;
+                }
+                worst = pixel_worst > worst ? pixel_worst : worst;
+                differing += pixel_worst != 0 ? 1u : 0u;
+                lit += (int)a[x * 4u + 1u] > (int)background[1] + 16 ? 1u : 0u;
+            }
+        }
+        printf(
+            "%u px: R8 atlas against RGBA8, drawn: %u of %u pixels differ, by at most %d (%u lit)\n",
+            sizes[s], differing, CANVAS_WIDTH * row_height[s], worst, lit);
+        assert(lit > 100u);
+        assert(worst <= 1);
+
+        /* The probe, round the top of the x-height: the most ink in the row above it and in the row
+           it ends in, and that row's fill, its ink over the most in any row below it down to the
+           baseline (so a stem narrower than a pixel still fills its row: 1). */
+        printf("%u px top of the x-height (peak ink in the row above / the x-height's top row, fill):\n",
+            sizes[s]);
+        float fill[2][PROBE_LETTERS];
+        float above[2][PROBE_LETTERS];
+        for (uint32_t side = 0u; side < 2u; side += 1u) {
+            const float x_height = metrics[s][side == 0u ? 0u : 2u].x_height;
+            const uint32_t baseline = (uint32_t)probe_baseline[s];
+            const uint32_t top = baseline - (uint32_t)ceilf(x_height - 1e-3f);
+            printf("  %-7s x-height %.3f:", side == 0u ? "ex" : "ex-snap", (double)x_height);
+            for (uint32_t l = 0u; l < PROBE_LETTERS; l += 1u) {
+                const uint32_t x0 = probe_span[s][side][l][0];
+                const uint32_t x1 = probe_span[s][side][l][1];
+                const float at = row_peak(pixels, top, x0, x1);
+                float body = 0.0f;
+                for (uint32_t row = top + 1u; row < baseline; row += 1u) {
+                    body = fmaxf(body, row_peak(pixels, row, x0, x1));
+                }
+                above[side][l] = row_peak(pixels, top - 1u, x0, x1);
+                fill[side][l] = body > 0.0f ? at / body : 0.0f;
+                printf(" %c %.2f/%.2f %.2f", probe_letters[l], (double)above[side][l], (double)at,
+                    (double)fill[side][l]);
+            }
+            printf("\n");
+        }
+        for (uint32_t l = 0u; l < PROBE_LETTERS; l += 1u) {
+            const char letter = probe_letters[l];
+            /* Flat tops ('x', 'z', 'u', 'v'), snapped: nothing above the x-height, its top row full
+               (the bar of 'z' and the stems of 'u'), and never less full than unsnapped. */
+            if (letter == 'x' || letter == 'z' || letter == 'u' || letter == 'v') {
+                assert(above[1][l] <= 0.1f);
+                assert(fill[1][l] + 0.02f >= fill[0][l]);
+            }
+            if (letter == 'z' || letter == 'u') {
+                assert(fill[1][l] >= 0.9f);
+            }
+        }
+
+        for (uint32_t e = 1u; e < EXTRA_COUNT; e += 1u) {
+            char name[64];
+            (void)snprintf(name, sizeof(name), "text-%upx-%s.png", sizes[s], extra_names[e]);
+            write_png(dir, name, CANVAS_WIDTH, row_height[s],
+                &pixels[(size_t)row_top[s][e] * CANVAS_WIDTH * 4u]);
+        }
+        char probe_name[64];
+        (void)snprintf(probe_name, sizeof(probe_name), "probe-%upx-ex-vs-snap.png", sizes[s]);
+        write_png(dir, probe_name, CANVAS_WIDTH, row_height[s],
+            &pixels[(size_t)row_top[s][EXTRA_COUNT] * CANVAS_WIDTH * 4u]);
+    }
+    write_png(dir, "text-extras.png", CANVAS_WIDTH, CANVAS_HEIGHT, pixels);
+    const uint32_t zoom = 4u;
+    uint8_t *zoomed = malloc((size_t)CANVAS_WIDTH * CANVAS_HEIGHT * 4u * zoom * zoom);
+    assert(zoomed != NULL);
+    for (uint32_t zy = 0u; zy < CANVAS_HEIGHT * zoom; zy += 1u) {
+        for (uint32_t zx = 0u; zx < CANVAS_WIDTH * zoom; zx += 1u) {
+            memcpy(
+                &zoomed[((size_t)zy * CANVAS_WIDTH * zoom + zx) * 4u],
+                &pixels[((size_t)(zy / zoom) * CANVAS_WIDTH + zx / zoom) * 4u],
+                4u
+            );
+        }
+    }
+    write_png(dir, "text-extras-x4.png", CANVAS_WIDTH * zoom, CANVAS_HEIGHT * zoom, zoomed);
+    free(zoomed);
+    free(pixels);
+    for (uint32_t s = 0u; s < SIZE_COUNT; s += 1u) {
+        for (uint32_t e = 0u; e < EXTRA_COUNT; e += 1u) {
+            btbh_gpu_font_destroy(fonts[s][e]);
+        }
+    }
+    btbh_gpu_texture_destroy(target);
+}
+
 int main(void) {
-    static const char *const shader_names[3] = {
+    static const char *const shader_names[4] = {
         "production_canvas.vert",
         "production_canvas.frag",
         "production_canvas_textured.frag",
+        "production_canvas_coverage.frag",
     };
-    for (int index = 0; index < 3; index += 1) {
+    for (int index = 0; index < 4; index += 1) {
         (void)snprintf(
             shader_paths[index],
             sizeof(shader_paths[index]),
@@ -764,18 +1295,24 @@ int main(void) {
 
     check_validation(device, window);
     check_metrics(window);
+    check_kerning_pairs(window);
+    check_r8_atlas(window);
+    check_snapped_metrics(window);
     check_coverage_curve(window);
     check_readback(window);
+    check_extras_readback(window);
 
     /* A font outlives its window: metrics and kerning still answer. */
     BTBHGPUFontReport report;
     BTBHGPUFont *kept = load_ex(window, 12.0f, 3u, 0u, 0.0f, &report);
     const float kern = btbh_gpu_font_kerning(kept, 'A', 'V');
+    const uint32_t kept_pairs = btbh_gpu_font_kerning_pairs(kept, NULL, 0u);
     btbh_gpu_window_destroy(window);
     assert(btbh_gpu_font_atlas(kept) == NULL);
     BTBHGPUFontMetrics metrics;
     assert(btbh_gpu_font_metrics(kept, &metrics) == BTBH_GPU_OK && metrics.pixel_size == 12.0f);
     assert(btbh_gpu_font_kerning(kept, 'A', 'V') == kern);
+    assert(kept_pairs > 0u && btbh_gpu_font_kerning_pairs(kept, NULL, 0u) == kept_pairs);
     btbh_gpu_font_destroy(kept);
 
     btbh_gpu_device_shutdown(device);

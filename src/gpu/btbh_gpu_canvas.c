@@ -24,12 +24,18 @@
 
 #define BTBH_GPU_CANVAS_VERTEX_STRIDE 32u
 #define BTBH_GPU_CANVAS_PIPELINE_COUNT 4u
+#define BTBH_GPU_CANVAS_PATH_CAPACITY 1024u
 
 struct BTBHGPUCanvasRuntime {
     SDL_GPUGraphicsPipeline
         *solid_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
     SDL_GPUGraphicsPipeline
         *textured_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    /* For batches whose texture has one channel (a font atlas baked with
+       BTBH_GPU_FONT_FLAG_R8_ATLAS): white x coverage x the vertex colour, with
+       production_canvas_coverage.frag. Made the first time a batch needs them. */
+    SDL_GPUGraphicsPipeline
+        *coverage_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
     SDL_GPUBuffer *vertex_buffer;
     SDL_GPUTransferBuffer *upload_transfer;
     uint32_t vertex_capacity;
@@ -144,6 +150,13 @@ static void btbh_gpu_canvas_blend_state(
     }
 }
 
+static bool btbh_gpu_canvas_create_pipelines(
+    BTBHGPUWindow *window,
+    SDL_GPUShader *vertex_shader,
+    SDL_GPUShader *fragment_shader,
+    SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT]
+);
+
 static bool btbh_gpu_canvas_create_runtime(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -217,7 +230,162 @@ static bool btbh_gpu_canvas_create_runtime(
         );
         return false;
     }
+    const bool created =
+        btbh_gpu_canvas_create_pipelines(
+            window,
+            vertex_shader,
+            fragment_shader,
+            window->canvas_runtime->solid_pipelines
+        ) &&
+        btbh_gpu_canvas_create_pipelines(
+            window,
+            vertex_shader,
+            textured_fragment_shader,
+            window->canvas_runtime->textured_pipelines
+        );
+    SDL_ReleaseGPUShader(device, textured_fragment_shader);
+    SDL_ReleaseGPUShader(device, fragment_shader);
+    SDL_ReleaseGPUShader(device, vertex_shader);
+    if (!created) {
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        btbh_gpu_window_release_canvas(window);
+        return false;
+    }
+    return true;
+}
 
+/* The path of filename in the directory of reference (no directory: filename alone); false if it
+   doesn't fit in output. */
+static bool btbh_gpu_canvas_sibling_path(
+    const char *reference,
+    const char *filename,
+    char output[BTBH_GPU_CANVAS_PATH_CAPACITY]
+) {
+    const char *slash = strrchr(reference, '/');
+    const char *backslash = strrchr(reference, '\\');
+    const char *separator = slash;
+    if (backslash != NULL && (separator == NULL || backslash > separator)) {
+        separator = backslash;
+    }
+    const size_t directory_length =
+        separator == NULL ? 0u : (size_t)(separator - reference + 1);
+    const size_t filename_length = strlen(filename);
+    if (directory_length + filename_length + 1u > BTBH_GPU_CANVAS_PATH_CAPACITY) {
+        return false;
+    }
+    if (directory_length > 0u) {
+        (void)memcpy(output, reference, directory_length);
+    }
+    (void)memcpy(output + directory_length, filename, filename_length + 1u);
+    return true;
+}
+
+/* A batch whose texture has one channel (R8: a font atlas baked with BTBH_GPU_FONT_FLAG_R8_ATLAS)
+   is drawn as coverage. */
+static bool btbh_gpu_canvas_texture_is_coverage(const BTBHGPUTexture *texture) {
+    return texture != NULL && texture->format == SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+}
+
+/* Makes the coverage pipelines, once: production_canvas_coverage.frag from the directory of the
+   textured fragment shader, with the canvas's vertex shader. */
+static bool btbh_gpu_canvas_ensure_coverage_pipelines(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUCanvasReport *report
+) {
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    if (runtime->coverage_pipelines[0] != NULL) {
+        return true;
+    }
+    const bool metal = project_format == BTBH_GPU_SHADER_FORMAT_METALLIB;
+    char path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    if (!btbh_gpu_canvas_sibling_path(
+            textured_fragment_shader_path,
+            metal
+                ? "production_canvas_coverage.frag.metallib"
+                : "production_canvas_coverage.frag.spv",
+            path
+        )) {
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "The canvas coverage shader's path is too long"
+        );
+        return false;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    const SDL_GPUShaderFormat format =
+        btbh_gpu_canvas_shader_format(project_format);
+    const char *entrypoint = metal ? "main0" : "main";
+    SDL_GPUShader *vertex_shader = btbh_gpu_canvas_load_shader(
+        device,
+        vertex_shader_path,
+        entrypoint,
+        format,
+        SDL_GPU_SHADERSTAGE_VERTEX,
+        0u,
+        1u,
+        report
+    );
+    if (vertex_shader == NULL) {
+        return false;
+    }
+    SDL_GPUShader *coverage_shader = btbh_gpu_canvas_load_shader(
+        device,
+        path,
+        entrypoint,
+        format,
+        SDL_GPU_SHADERSTAGE_FRAGMENT,
+        1u,
+        0u,
+        report
+    );
+    if (coverage_shader == NULL) {
+        SDL_ReleaseGPUShader(device, vertex_shader);
+        if (report->result == BTBH_GPU_INVALID_ARGUMENT) {
+            (void)snprintf(
+                report->message,
+                sizeof(report->message),
+                "A one-channel texture (an R8 font atlas) needs %s",
+                path
+            );
+        }
+        return false;
+    }
+    const bool created = btbh_gpu_canvas_create_pipelines(
+        window,
+        vertex_shader,
+        coverage_shader,
+        runtime->coverage_pipelines
+    );
+    SDL_ReleaseGPUShader(device, coverage_shader);
+    SDL_ReleaseGPUShader(device, vertex_shader);
+    if (!created) {
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            SDL_GetError()
+        );
+        return false;
+    }
+    return true;
+}
+
+/* The canvas's pipeline for each blend mode from these shaders; false, with none kept, if one of them
+   can't be made. */
+static bool btbh_gpu_canvas_create_pipelines(
+    BTBHGPUWindow *window,
+    SDL_GPUShader *vertex_shader,
+    SDL_GPUShader *fragment_shader,
+    SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT]
+) {
+    SDL_GPUDevice *device = window->device->gpu;
     SDL_GPUVertexBufferDescription vertex_buffer;
     SDL_GPUVertexAttribute attributes[3];
     SDL_GPUColorTargetDescription color_target;
@@ -266,34 +434,15 @@ static bool btbh_gpu_canvas_create_runtime(
             (BTBHGPUCanvasBlendMode)index,
             &color_target.blend_state
         );
-        window->canvas_runtime->solid_pipelines[index] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
-        info.fragment_shader = textured_fragment_shader;
-        window->canvas_runtime->textured_pipelines[index] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
-        info.fragment_shader = fragment_shader;
-        if (
-            window->canvas_runtime->solid_pipelines[index] == NULL ||
-            window->canvas_runtime->textured_pipelines[index] == NULL
-        ) {
-            SDL_ReleaseGPUShader(
-                device,
-                textured_fragment_shader
-            );
-            SDL_ReleaseGPUShader(device, fragment_shader);
-            SDL_ReleaseGPUShader(device, vertex_shader);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            btbh_gpu_window_release_canvas(window);
+        pipelines[index] = SDL_CreateGPUGraphicsPipeline(device, &info);
+        if (pipelines[index] == NULL) {
+            for (uint32_t made = 0u; made < index; ++made) {
+                SDL_ReleaseGPUGraphicsPipeline(device, pipelines[made]);
+                pipelines[made] = NULL;
+            }
             return false;
         }
     }
-    SDL_ReleaseGPUShader(device, textured_fragment_shader);
-    SDL_ReleaseGPUShader(device, fragment_shader);
-    SDL_ReleaseGPUShader(device, vertex_shader);
     return true;
 }
 
@@ -1130,6 +1279,25 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
         }
         return report->result;
     }
+    bool draws_coverage = false;
+    for (uint32_t index = 0u; index < batch_count && !draws_coverage; ++index) {
+        draws_coverage = btbh_gpu_canvas_texture_is_coverage(batches[index].texture);
+    }
+    if (
+        draws_coverage &&
+        !btbh_gpu_canvas_ensure_coverage_pipelines(
+            window,
+            vertex_shader_path,
+            textured_fragment_shader_path,
+            shader_format,
+            report
+        )
+    ) {
+        if (window->pending_command != NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+        }
+        return report->result;
+    }
 
     SDL_GPUDevice *device = window->device->gpu;
     const bool had_scene = window->pending_scene_ready;
@@ -1361,11 +1529,14 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
              ++index) {
             const BTBHGPUCanvasBatch *batch = &batches[index];
             SDL_GPUGraphicsPipeline *pipeline =
-                batch->texture != NULL
+                batch->texture == NULL
                     ? window->canvas_runtime
-                        ->textured_pipelines[batch->blend_mode]
+                        ->solid_pipelines[batch->blend_mode]
+                    : btbh_gpu_canvas_texture_is_coverage(batch->texture)
+                    ? window->canvas_runtime
+                        ->coverage_pipelines[batch->blend_mode]
                     : window->canvas_runtime
-                        ->solid_pipelines[batch->blend_mode];
+                        ->textured_pipelines[batch->blend_mode];
             if (pipeline != bound_pipeline) {
                 SDL_BindGPUGraphicsPipeline(pass, pipeline);
                 bound_pipeline = pipeline;
@@ -1534,6 +1705,16 @@ void btbh_gpu_window_release_canvas(BTBHGPUWindow *window) {
                     device,
                     window->canvas_runtime
                         ->textured_pipelines[index]
+                );
+            }
+            if (
+                window->canvas_runtime
+                    ->coverage_pipelines[index] != NULL
+            ) {
+                SDL_ReleaseGPUGraphicsPipeline(
+                    device,
+                    window->canvas_runtime
+                        ->coverage_pipelines[index]
                 );
             }
         }

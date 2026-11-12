@@ -299,8 +299,14 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
         return NULL;
     }
     (void)memset(report, 0, sizeof(*report));
+    /* 4 for the RGBA8 formats, 1 for a one-channel font atlas (R8). */
     const uint64_t byte_count =
-        (uint64_t)width * (uint64_t)height * UINT64_C(4);
+        (uint64_t)width * (uint64_t)height *
+        (uint64_t)SDL_GPUTextureFormatTexelBlockSize(format);
+    if (byte_count == 0u) {
+        btbh_gpu_texture_error(report, "Texture format has no texel size");
+        return NULL;
+    }
     if (byte_count > UINT32_MAX) {
         btbh_gpu_texture_error(report, "Texture upload exceeds SDL_GPU limits");
         return NULL;
@@ -454,6 +460,28 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8(
     );
 }
 
+BTBHGPUTexture *btbh_gpu_window_texture_create_r8(
+    BTBHGPUWindow *window,
+    const uint8_t *pixels,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureReport *report
+) {
+    return btbh_gpu_window_texture_create_rgba8_format(
+        window,
+        pixels,
+        width,
+        height,
+        0u,
+        filter,
+        wrap,
+        SDL_GPU_TEXTUREFORMAT_R8_UNORM,
+        report
+    );
+}
+
 BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
     BTBHGPUWindow *window,
     const uint8_t *pixels,
@@ -490,6 +518,7 @@ BTBHGPUResult btbh_gpu_texture_update_rgba8(
 ) {
     if (texture == NULL || texture->owner == NULL ||
         texture->owner->device == NULL || texture->owner->device->shutdown ||
+        texture->format == SDL_GPU_TEXTUREFORMAT_R8_UNORM ||
         pixels == NULL || width == 0u || height == 0u ||
         x > texture->width || width > texture->width - x ||
         y > texture->height || height > texture->height - y) {

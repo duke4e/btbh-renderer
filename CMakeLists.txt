@@ -262,6 +262,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_canvas.vert|vertex"
         "production_canvas.frag|fragment"
         "production_canvas_textured.frag|fragment"
+        "production_canvas_coverage.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
