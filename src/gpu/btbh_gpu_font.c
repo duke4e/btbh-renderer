@@ -57,6 +57,8 @@ struct BTBHGPUFont {
     float ascent;
     float descent;
     float line_gap;
+    float x_height;
+    float cap_height;
     /* btbh_gpu_window_font_load_ex only (NULL and 0 from btbh_gpu_window_font_load): each
        codepoint's glyph as btbh_gpu_font_glyph returns it, the kerning pairs sorted by (left,
        right), and the size asked for. */
@@ -65,6 +67,26 @@ struct BTBHGPUFont {
     uint32_t kerning_count;
     float pixel_size;
 };
+
+/* The top of codepoint's outline above the baseline in pixels at scale, or 0 if the font lacks the
+   glyph or it has no outline. */
+static float btbh_gpu_font_outline_top(
+    const stbtt_fontinfo *info,
+    int codepoint,
+    float scale
+) {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    if (
+        stbtt_FindGlyphIndex(info, codepoint) <= 0 ||
+        stbtt_GetCodepointBox(info, codepoint, &x0, &y0, &x1, &y1) == 0
+    ) {
+        return 0.0f;
+    }
+    return (float)y1 * scale;
+}
 
 /* btbh_gpu_window_font_load_ex's atlas: empty texels between two glyphs (and at the atlas edges),
    and how far each glyph's quad reaches past its glyph, in texels, so linear filtering at a
@@ -302,6 +324,9 @@ BTBHGPUFont *btbh_gpu_window_font_load(
         &info,
         (float)base_size
     );
+    /* Read now: info points into font_bytes, which is freed before the font is filled in. */
+    const float x_height = btbh_gpu_font_outline_top(&info, 'x', metric_scale);
+    const float cap_height = btbh_gpu_font_outline_top(&info, 'H', metric_scale);
 
     bool valid = true;
     for (uint32_t index = 0u; index < glyph_count; index += 1u) {
@@ -468,6 +493,8 @@ BTBHGPUFont *btbh_gpu_window_font_load(
     font->ascent = (float)((int)((float)ascent * metric_scale));
     font->descent = (float)descent * metric_scale;
     font->line_gap = 2.0f;
+    font->x_height = x_height;
+    font->cap_height = cap_height;
 
     report->result = BTBH_GPU_OK;
     report->base_size = base_size;
@@ -899,6 +926,9 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
     int descent = 0;
     int line_gap = 0;
     stbtt_GetFontVMetrics(&info, &ascent, &descent, &line_gap);
+    /* Read now: info points into font_bytes, which is freed after the bake. */
+    const float x_height = btbh_gpu_font_outline_top(&info, 'x', scale);
+    const float cap_height = btbh_gpu_font_outline_top(&info, 'H', scale);
 
     BTBHGPUFontExBake bake;
     (void)memset(&bake, 0, sizeof(bake));
@@ -955,6 +985,8 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
     font->ascent = (float)ascent * scale;
     font->descent = (float)descent * scale;
     font->line_gap = (float)line_gap * scale;
+    font->x_height = x_height;
+    font->cap_height = cap_height;
     font->baked = bake.baked;
     font->kerning = bake.kerning;
     font->kerning_count = bake.kerning_count;
@@ -987,6 +1019,8 @@ BTBHGPUResult btbh_gpu_font_metrics(
     metrics->line_gap = font->line_gap;
     metrics->pixel_size =
         font->baked != NULL ? font->pixel_size : (float)font->base_size;
+    metrics->x_height = font->x_height;
+    metrics->cap_height = font->cap_height;
     return BTBH_GPU_OK;
 }
 

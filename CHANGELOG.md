@@ -33,7 +33,9 @@ All notable changes to this project are documented here. The format follows
   0 = 1) is applied once to the atlas while baking: 1.2-1.4 thickens light-on-dark text, and the canvas shader
   doesn't change. An invalid descriptor returns NULL with `BTBH_GPU_INVALID_ARGUMENT` and the reason in the
   report.
-- `btbh_gpu_font_metrics`: ascent, descent, line gap and size in pixels (for a plain font, what its report says).
+- `btbh_gpu_font_metrics`: ascent, descent, line gap and size in pixels (for a plain font, what its report says),
+  and x-height and cap height (the tops of 'x' and 'H', unrounded), so a host can pick a size that puts the
+  x-height on a whole pixel.
 - `btbh_gpu_font_kerning(font, left, right)`: the font's kerning in pixels (GPOS pairs or its kern table),
   precomputed between the baked glyphs. 0 for fonts from `btbh_gpu_window_font_load`.
 - `BTBH_GPU_HAS_FONT_LOAD_EX`, defined when these exist, for hosts that build against several releases.

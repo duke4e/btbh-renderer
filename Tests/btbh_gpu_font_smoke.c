@@ -292,6 +292,11 @@ static void check_metrics(BTBHGPUWindow *window) {
         assert(plain_metrics.descent == plain_report.descent);
         assert(plain_metrics.line_gap == plain_report.line_gap);
         assert(plain_metrics.pixel_size == (float)check_sizes[s]);
+        assert(plain_metrics.x_height > 0.0f);
+        assert(plain_metrics.x_height < plain_metrics.cap_height);
+        assert(plain_metrics.cap_height <= plain_metrics.ascent + 1.0f);
+        printf("metrics: %u px, x-height %.3f, cap height %.3f, ascent %.0f\n",
+            check_sizes[s], plain_metrics.x_height, plain_metrics.cap_height, plain_metrics.ascent);
         assert(btbh_gpu_font_kerning(plain, 'A', 'V') == 0.0f);
         for (size_t o = 0u; o < sizeof(oversamples) / sizeof(oversamples[0]); o += 1u) {
             const uint8_t oversample = oversamples[o];
@@ -307,6 +312,11 @@ static void check_metrics(BTBHGPUWindow *window) {
             assert(fabsf(metrics.descent - plain_report.descent) < 1e-3f);
             assert(metrics.descent < 0.0f && metrics.line_gap >= 0.0f);
             assert(metrics.pixel_size == (float)check_sizes[s]);
+            /* Same outlines, same scale: the plain loader only rounds its ascent. */
+            assert(fabsf(metrics.x_height - plain_metrics.x_height) < 1e-3f);
+            assert(fabsf(metrics.cap_height - plain_metrics.cap_height) < 1e-3f);
+            assert(metrics.x_height > 0.0f && metrics.x_height < metrics.cap_height);
+            assert(metrics.cap_height < metrics.ascent);
             bool fractional = false;
             for (uint32_t c = 32u; c < 127u; c += 1u) {
                 BTBHGPUFontGlyph p;

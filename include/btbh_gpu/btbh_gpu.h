@@ -322,12 +322,16 @@ typedef struct BTBHGPUFontDesc {
 
 /* A font's vertical metrics in pixels at its size: ascent above the baseline (positive), descent
    below it (negative), the font's line gap, and the size it was baked at. Line height is
-   ascent - descent + line_gap. */
+   ascent - descent + line_gap. x_height and cap_height are the tops of 'x' and 'H' above the
+   baseline, unrounded, from their outlines (0 if the font lacks the glyph): a size that puts
+   x_height on a whole pixel keeps the top of lowercase sharp. */
 typedef struct BTBHGPUFontMetrics {
     float ascent;
     float descent;
     float line_gap;
     float pixel_size;
+    float x_height;
+    float cap_height;
 } BTBHGPUFontMetrics;
 
 /* Defined when BTBHGPUFontDesc, btbh_gpu_window_font_load_ex, btbh_gpu_font_metrics and
@@ -1296,8 +1300,9 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
     uint32_t glyph_count,
     BTBHGPUFontReport *report
 );
-/* Vertical metrics in pixels at the font's size. For a font from btbh_gpu_window_font_load they are
-   what its report said (the ascent rounded down, a line gap of 2). */
+/* Vertical metrics in pixels at the font's size. For a font from btbh_gpu_window_font_load the
+   ascent, descent and line gap are what its report said (the ascent rounded down, a line gap of 2);
+   x_height and cap_height are unrounded either way. */
 BTBHGPUResult btbh_gpu_font_metrics(
     const BTBHGPUFont *font,
     BTBHGPUFontMetrics *metrics

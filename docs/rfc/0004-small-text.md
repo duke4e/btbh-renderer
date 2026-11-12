@@ -64,7 +64,10 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
 );
 
 /* Vertical metrics in pixels at the font's size, and kerning between two codepoints (0 if none). */
-typedef struct BTBHGPUFontMetrics { float ascent; float descent; float line_gap; float pixel_size; } BTBHGPUFontMetrics;
+typedef struct BTBHGPUFontMetrics {
+    float ascent; float descent; float line_gap; float pixel_size;
+    float x_height; float cap_height;
+} BTBHGPUFontMetrics;
 BTBHGPUResult btbh_gpu_font_metrics(const BTBHGPUFont *font, BTBHGPUFontMetrics *metrics);
 float btbh_gpu_font_kerning(const BTBHGPUFont *font, uint32_t left, uint32_t right);
 ```
@@ -132,7 +135,9 @@ Built on branch `claude/rfc0004-small-text-037444` as sketched above, with nothi
   is a binary search. With `snap_advances` the pairs are whole pixels too. A font from the plain loader has
   none.
 - `btbh_gpu_font_metrics`: unrounded ascent, descent and line gap for `_ex`. For a plain font it returns what
-  its report said (ascent rounded down, line gap 2).
+  its report said (ascent rounded down, line gap 2). x-height and cap height (added after CHIMERA's test,
+  before v0.4.0, so the struct didn't have to grow after a release) are the tops of the 'x' and 'H' outlines,
+  unrounded for both loaders.
 
 **What the native test found** (`tests/btbh_gpu_font_smoke.c`, Windows/Vulkan, RTX 3070 Ti; CHIMERA's face
 Titillium Web SemiBold and its 117-glyph set):
