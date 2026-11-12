@@ -582,8 +582,11 @@ bounding box.
   - Nearby craters merge through `set_edit`; a frozen id falls back to `add_edit`.
   - Headless tools and tests can run the core without a window.
 - **Tyrian3D:** nothing.
-- **FSR 3:** a changed chunk pops in a single frame. The host can set `reactive_mode` on a chunk whose
-  `revision` changed in the last few frames.
+- **FSR 3:** a changed chunk pops in a single frame. Setting `reactive_mode` on the chunk's batch doesn't
+  help: only the transparent pass writes the reactive mask, and `reactive_mode` only affects transparent
+  batches. (Corrected in 0.5.0.) For a few frames after a chunk's `revision` changes, the host can instead
+  draw the chunk a second time in the transparent pass: unlit, black, additive, with `LESS_EQUAL`. That adds
+  nothing to the colour and marks the mask. The Swift layer (`GPUSdfTerrain.reactiveFrameCount`) does this.
 
 ## Platforms and testing
 
