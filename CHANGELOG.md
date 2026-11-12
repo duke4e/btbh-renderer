@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-12
+
+0.5.0 plus a fix for its destructible terrain, found by Be The Bullet Hell. No API changed and no shader changed:
+rebuilding the C core is enough. A host without a terrain draws as in 0.5.0.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (20/20), the Swift build and the full Swift suite (301
+tests, 2 skipped, 0 failures). Be The Bullet Hell: 5709 tests, 0 failures. In its captures, a bare crater and 19
+overlapping boss craters show clean lips, with no floor over the bowls and no holes. `update` costs what it did:
+about 8.7 ms of work per 13 m crater, against 8 before. macOS (Metal) isn't verified.
+
 ### Fixed
 - Destructible terrain: a host's floor no longer shows as a sawtooth along the top of a crater's bowl wall (found
   by Be The Bullet Hell). Where the patch's surface drops across a cell column, as it does where a bowl cuts its
