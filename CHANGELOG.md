@@ -88,9 +88,10 @@ quoted.
   sorted 5.9 / 5.8 ms (the ground's centre lands among the units, so it moves only part-way back); the ground
   given last, sorted or not (`KEEP_ORDER`), 5.2 / 5.2 ms. The ground alone takes 2.4 / 3.1 ms, the units alone
   4.1 / 4.2 ms.
-- CPU, `btbh_gpu_scene_opaque_order` alone: 17 µs for 256 batches of 16 instances, 57 µs for 2048 batches of one,
-  0.23-0.31 ms for 1024 batches of 64 (one pass over the instances, then the sort). A custom mesh update of
-  100 000 vertices spends 0.35-0.38 ms on its bounds. The default order costs nothing new.
+- CPU (Ryzen 9 9950X, as contended), `btbh_gpu_scene_opaque_order` alone, 200 calls averaged: 17 µs for 256
+  batches of 16 instances, 57-200 µs for 2048 batches of one, 0.23-0.31 ms for 1024 batches of 64 (one pass over
+  the instances, then the sort). A custom mesh update of 100 000 vertices spends 0.35-0.38 ms on its bounds. The
+  default order costs nothing new.
 
 ### Not added
 - A depth pre-pass. It would draw every opaque batch twice (double the vertex work and draw calls, skinned units
