@@ -1,7 +1,7 @@
 # RFC 0004: Readable small text
 
-- **Status:** Prototype on branch `claude/rfc0004-small-text-037444` (option A, 2026-11-11), for CHIMERA to test
-  and accept. Findings below, under [Prototype](#prototype-2026-11-11)
+- **Status:** Implemented in v0.4.0 (option A). CHIMERA tested it on its HUD and took it (2026-11-12). Findings
+  below, under [Prototype](#prototype-2026-11-11)
 - **Requested by:** CHIMERA (its HUD's small text is unreadable)
 - **Affects:** CHIMERA (adopts it). Be The Bullet Hell and Tyrian3D: nothing, opt-in. The linear atlas default
   that `v0.1.0` takes from `tyrian3d` (`c505715`) is discussed below

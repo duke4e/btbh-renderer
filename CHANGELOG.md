@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-12
+
+0.3.0 plus three opt-in features: models that share external textures and V-Sync through `GPUPlatform` (asked for
+by Be The Bullet Hell), and readable small text (RFC 0004, option A, asked for by CHIMERA). Nothing changes until
+a game uses them. No shader changed.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (17/17), the Swift build and the Swift GPU tests.
+- Be The Bullet Hell: 5699 tests, 0 failures, plus its debug and release builds and a real start. It shared the
+  textures of every army body and boss, and its night army capture matched the old build, emission glow included.
+  It toggled V-Sync between frames from its Options row, and each switch took the mode asked for.
+- CHIMERA: 951 workspace tests against 0.3.0 and the candidate, then 206 against the final one, with no failures.
+  On the HUD at 720, 900 and 1440, spacing became even, sharpness was unchanged, small rows at 720 read better,
+  frame time was the same, and the font atlases got smaller (31.9 vs 48.8 MB at 1440).
+- macOS (Metal) isn't verified, as for 0.2.0.
+
 ### Added
 - **Models share external textures** (asked for by Be The Bullet Hell, whose 37 army models each uploaded
   their own copy of the same `textures/mc_*.png`): `BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES` for
@@ -25,7 +40,7 @@ All notable changes to this project are documented here. The format follows
   an imported material's emission texture as `albedoTexture`, `normalTexture` and `ormTexture` replace theirs.
   It wins over `clearEmissionTexture`. Load it with `colorSpace: .sRGB` to match the importer. Existing calls
   compile unchanged.
-- **Readable small text** (RFC 0004, option A; prototype for the games to accept): `btbh_gpu_window_font_load_ex`
+- **Readable small text** (RFC 0004, option A): `btbh_gpu_window_font_load_ex`
   bakes a font from a `BTBHGPUFontDesc` with stb_truetype's packer, oversampled (`oversample_x`, `oversample_y`,
   up to 8) and prefiltered. `BTBHGPUFontGlyph` then has fractional offsets and advances and UVs that undo the
   oversampling, so a glyph drawn on the 1/`oversample_x` pixel grid stays sharp and spacing stays even. Its atlas
@@ -43,7 +58,6 @@ All notable changes to this project are documented here. The format follows
   pixel), kerning, the coverage curve, and a line of text at 10, 12 and 16 px with and without `_ex`, read back
   into PNGs (`font-smoke/` in the build directory). Its face is Titillium Web SemiBold (OFL), added under
   `Tests/Fixtures` with its licence. `check.ps1 -SkipGpuTests` and `SKIP_GPU_TESTS=1 check.sh` skip it.
-
 - **V-Sync through `GPUPlatform`** (asked for by Be The Bullet Hell, which opens its window through it):
   `GPUPlatform.setPresentMode(_:)` switches the present mode between frames without reopening the window
   (`.vsync` for on, `.automatic` for off), and `GPUPlatform.presentMode` says what the window took. While a
