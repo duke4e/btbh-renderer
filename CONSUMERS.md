@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at tag `v0.2.1` (BTBH `d2689071`, 2026-11-11) | `renderer.pin` → `../btbh-renderer-v0.3.0` (tag `v0.3.0`; CHIMERA `099d45ec`, 2026-11-11) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
+| Pinned version | submodule at tag `v0.4.0` (BTBH `ffb9840d`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.3.0` (tag `v0.3.0`; CHIMERA `099d45ec`, 2026-11-11) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
 
 ## Features used
 
@@ -22,7 +22,9 @@ with materials and patches, surface details, persistent instanced ranges with LO
 skinning and animation trees, lights (directional, spot, omni, street lamps), procedural sky, fog and
 fog edge, clouds, wetness/rain, shadows, radiance cascades with emitters, post chain (SSAO/SSR, bloom,
 vignette, tonemap, AA), upscaling (`fsr1`, `fsr3`), frame readback for render baselines, file dialog.
-The most demanding consumer: it defines most of the scene API.
+The most demanding consumer: it defines most of the scene API. From v0.4.0: V-Sync from its Graphics menu
+(`GPUPlatform.setPresentMode`, `.vsync` or `.automatic`, off by default) and `.shareExternalTextures` on its army
+bodies.
 
 **CHIMERA** (`crates/chimera-platform/src/gpu.rs`, bindgen): device and window, mouse buttons (keyboard
 and audio via raw SDL), fonts (`window_font_load`, glyphs, atlas), textures (`window_texture_load_ex`:
