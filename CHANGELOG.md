@@ -180,6 +180,10 @@ quoted.
   `LESS_EQUAL`, so turning it on alone moves nothing: use `FRONT_TO_BACK_LESS_EQUAL`, with `KEEP_ORDER` on
   coplanar overlays.
 - A dug batch needs the 0.5.0 scene shaders; with older ones the present fails and names the shader.
+- SwiftPM hosts: 0.5.0 adds a C file to the package (`btbh_gpu_sdf_terrain_bridge.c`). After checking the
+  renderer out from 0.5 back to an older release, SwiftPM may keep its old build plan and fail with
+  "couldn't build ... btbh_gpu_sdf_terrain_bridge.c.o because of missing inputs". Deleting `.build/*.yaml` and
+  `.build/release/description.json` fixes it (found by Be The Bullet Hell).
 - Swift: nothing new. Its draws already keep out of the sun's shadow maps (`castsSunShadow`, a material's
   `castsShadow`) through the `_with_visibility` bytes; no wrapper for the sort yet.
 
