@@ -501,9 +501,15 @@ it is written down here.
   weight slots already carry the one-hot layer weights phase 4 will read.
 
 **The dig mask** (different from "Proposal, 2" in what it marks)
-- One texel per *cell column*, point-sampled. A texel holds the height (in cells above the terrain's floor) of
-  the lowest crossing in the column's top surface cell, where that cell differs from the base: the patch owns
-  that column. Elsewhere it holds 65504.
+- One texel per *cell column*, point-sampled. Where the column's top surface cell differs from the base, the
+  patch owns that column, and its texel holds the height (in cells above the terrain's floor) of the lowest point
+  of the patch's top surface over the column: the lowest crossing on the column's four vertical edges, in that
+  cell and in the cells under it that the surface still passes through and that differ from the base (and in the
+  chunk below, where the surface goes on into it). Elsewhere it holds 65504.
+- In 0.5.0 a texel took the top surface cell alone. Where a wall drops across a column (a bowl that cuts its rim),
+  that is the column's high side, and a host's floor between it and the wall stayed and stuck out over the bowl,
+  cut off at the column's edge: a sawtooth along the lip, which Be The Bullet Hell saw from its gameplay camera.
+  The same columns are marked either way; only their heights went down.
 - A dug batch's fragment is discarded unless it lies **more than a tenth of a cell under** that height. The text
   above discarded only fragments "more than a few centimetres above the dug surface", which keeps the host's
   ground wherever the patch lies at the base's height: at a mound's foot, in PAINT, at a crater's lip. Both

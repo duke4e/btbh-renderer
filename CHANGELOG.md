@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Destructible terrain: a host's floor no longer shows as a sawtooth along the top of a crater's bowl wall (found
+  by Be The Bullet Hell). Where the patch's surface drops across a cell column, as it does where a bowl cuts its
+  rim, the dig mask held the surface's height on the column's high side only. Floor between that height and the
+  wall was kept and stuck out over the bowl, cut off at the column's edge. Each texel now holds the lowest point of
+  the patch's top surface over its column, counting a wall that goes on into the chunk below.
+  - The same columns are masked as before; only their heights are lower. A zeroed batch, and a dug batch away
+    from any patch, draw as in 0.5.0. The shaders are unchanged: rebuilding the C core is enough.
+  - `Tests/Fixtures/sdf_terrain/crater.png` changes in 544 pixels, all along the bowl's inner lip: the reference
+    had the sawtooth (light ground teeth) in it, and the bowl's wall now shows there.
+  - New tests: the GPU smoke renders Be The Bullet Hell's crater from its gameplay camera (no floor pixel over
+    the bowl, no background), and the native test checks the mask over four walls, including one that crosses a
+    chunk's floor.
+
 ## [0.5.0] — 2026-11-12
 
 Opt-in additions for 0.4.0's games:
@@ -230,9 +244,6 @@ quoted.
   timed per pass.
 
 ### Known
-- The dig mask marks whole cell columns. Where a host's floor sits above a crater's lip, a sawtooth of floor one
-  cell wide shows along the top of the bowl wall. Be The Bullet Hell sees it from its gameplay camera. A
-  conservative or smoothly sampled mask would hide it; that is for 0.5.x.
 - `btbh_gpu_sdf_terrain_update` can overrun its budget, because a chunk's mesh build and upload don't split.
   Be The Bullet Hell measured up to 3.8 ms in one frame with 32-cell chunks (5.6 ms with 64-cell ones), and
   about 8 ms of work in all per 13 m crater. Meshing only the bricks near active ones (RFC 0007's next step), or

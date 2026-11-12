@@ -49,8 +49,9 @@ enum {
 
 enum {
     SDF_COLUMN_NONE = 0,       /* no surface in this chunk's part of the column: look further down */
-    SDF_COLUMN_PATCH = 1,      /* the top surface here is the patch's: the mask holds its height */
-    SDF_COLUMN_BASE = 2        /* the top surface here (or above) is the base's: the host's ground stays */
+    SDF_COLUMN_PATCH = 1,      /* the top surface here is the patch's: the mask holds its lowest point */
+    SDF_COLUMN_BASE = 2,       /* the top surface here (or above) is the base's: the host's ground stays */
+    SDF_COLUMN_PATCH_OPEN = 3  /* as PATCH, and the surface drops on into the chunk below (its patch adds to it) */
 };
 
 typedef struct SdfEdit {
@@ -2352,20 +2353,39 @@ columns:
                                 break;
                             }
                             kind = SDF_COLUMN_PATCH;
-                            const float bottom_y = sdf_lattice_coord(t, 1, box_lo[1] + y);
+                            /* The lowest point of the patch's top surface over the column: the crossings on the
+                             * column's four vertical edges in this cell and in the cells under it that the surface
+                             * still passes through and that differ from the base (a wall that drops across the
+                             * column, as a bowl does under its rim). From this cell alone, the host's ground
+                             * between the column's high and low sides would stay and stick out over the wall. */
                             height = FLT_MAX;
-                            for (int corner = 0; corner < 4; ++corner) {
-                                const int32_t ox = corner & 1;
-                                const int32_t oz = corner >> 1;
-                                const int8_t lo_q = q[SDF_SAMPLE(x + ox, y, z + oz)];
-                                const int8_t hi_q = q[SDF_SAMPLE(x + ox, y + 1, z + oz)];
-                                if ((lo_q < 0) != (hi_q < 0)) {
-                                    const float fraction = (float)lo_q / ((float)lo_q - (float)hi_q);
-                                    height = sdf_minf(height, bottom_y + fraction * t->cell);
+                            int32_t run = y;
+                            for (; run >= 0; --run) {
+                                const size_t rc = SDF_CELL(x, run, z);
+                                if (run < y && (cell_sign[rc] == 0u || cell_sign[rc] == 255u || !cell_diff[rc])) {
+                                    break;
+                                }
+                                const float bottom_y = sdf_lattice_coord(t, 1, box_lo[1] + run);
+                                for (int corner = 0; corner < 4; ++corner) {
+                                    const int32_t ox = corner & 1;
+                                    const int32_t oz = corner >> 1;
+                                    const int8_t lo_q = q[SDF_SAMPLE(x + ox, run, z + oz)];
+                                    const int8_t hi_q = q[SDF_SAMPLE(x + ox, run + 1, z + oz)];
+                                    if ((lo_q < 0) != (hi_q < 0)) {
+                                        const float fraction = (float)lo_q / ((float)lo_q - (float)hi_q);
+                                        height = sdf_minf(height, bottom_y + fraction * t->cell);
+                                    }
                                 }
                             }
-                            if (height == FLT_MAX) {
-                                height = bottom_y;
+                            if (run < 0) {
+                                /* The wall goes on under the lowest cell this chunk read: no higher than that cell's
+                                 * floor here, and the chunk below (if any) adds its part (sdf_mask_tile_update). */
+                                height = sdf_minf(height, sdf_lattice_coord(t, 1, box_lo[1]));
+                                if (box_lo[1] > 0) {
+                                    kind = SDF_COLUMN_PATCH_OPEN;
+                                }
+                            } else if (height == FLT_MAX) {
+                                height = sdf_lattice_coord(t, 1, box_lo[1] + run + 1);
                             }
                             break;
                         }
@@ -2521,23 +2541,29 @@ static void sdf_mask_tile_update(BTBHGPUSdfTerrain *t, int32_t cx, int32_t cz, u
         for (int32_t i = 0; i < n; ++i) {
             uint16_t value = (uint16_t)SDF_MASK_SENTINEL;
             if (i < width && k < depth) {
+                const size_t column = (size_t)k * (size_t)n + (size_t)i;
+                float lowest = FLT_MAX;
                 for (int32_t cy = t->chunks[1] - 1; cy >= 0; --cy) {
                     const SdfMesh *mesh = t->chunk_array[sdf_chunk_index(t, cx, cy, cz)].mesh;
-                    if (mesh == NULL || mesh->column_kind == NULL) {
+                    const uint8_t kind = mesh != NULL && mesh->column_kind != NULL
+                        ? mesh->column_kind[column]
+                        : (uint8_t)SDF_COLUMN_NONE;
+                    if (kind == SDF_COLUMN_NONE && lowest == FLT_MAX) {
                         continue;
                     }
-                    const size_t column = (size_t)k * (size_t)n + (size_t)i;
-                    const uint8_t kind = mesh->column_kind[column];
-                    if (kind == SDF_COLUMN_NONE) {
-                        continue;
-                    }
-                    if (kind == SDF_COLUMN_PATCH) {
-                        value = sdf_half_round_down((mesh->column_height[column] - t->lattice_min[1]) / t->cell);
-                        if (value == SDF_MASK_SENTINEL) {
-                            value = (uint16_t)(SDF_MASK_SENTINEL - 1u);
+                    if (kind == SDF_COLUMN_PATCH || kind == SDF_COLUMN_PATCH_OPEN) {
+                        lowest = sdf_minf(lowest, mesh->column_height[column]);
+                        if (kind == SDF_COLUMN_PATCH_OPEN) {
+                            continue;   /* the patch's surface drops on into the chunk below */
                         }
                     }
                     break;
+                }
+                if (lowest != FLT_MAX) {
+                    value = sdf_half_round_down((lowest - t->lattice_min[1]) / t->cell);
+                    if (value == SDF_MASK_SENTINEL) {
+                        value = (uint16_t)(SDF_MASK_SENTINEL - 1u);
+                    }
                 }
             }
             values[(size_t)k * (size_t)n + (size_t)i] = value;

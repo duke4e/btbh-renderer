@@ -1065,6 +1065,140 @@ static void measure(const char *name, float cell, uint32_t chunk_cells, uint8_t 
     btbh_gpu_sdf_terrain_destroy(terrain);
 }
 
+/* --------------------------------------------------------------------------------- the dig mask under walls */
+
+/* The marked columns over which the surface lies more than a fifth of a cell under the floor somewhere (at a
+ * corner): there the mask must drop the floor (discarded unless it lies more than a tenth of a cell under the
+ * mask's height), or the floor sticks out over the wall. Returns how many such columns there are. */
+static uint32_t check_floor_goes_over_walls(const BTBHGPUSdfTerrain *terrain, const BTBHGPUSdfTerrainDesc *desc,
+    float floor_y) {
+    const float cell = desc->cell_size;
+    const uint32_t cells_x = (uint32_t)ceilf((desc->bounds_max[0] - desc->bounds_min[0]) / cell);
+    const uint32_t cells_z = (uint32_t)ceilf((desc->bounds_max[2] - desc->bounds_min[2]) / cell);
+    uint32_t walls = 0u;
+    for (uint32_t z = 0u; z < cells_z; ++z) {
+        for (uint32_t x = 0u; x < cells_x; ++x) {
+            const float texel = btbh_gpu_sdf_terrain_mask_texel(terrain, x, z);
+            if (texel == 65504.0f) {
+                continue;
+            }
+            float lowest = INFINITY;
+            for (uint32_t corner = 0u; corner < 4u; ++corner) {
+                const float wx = desc->bounds_min[0] + (float)(x + (corner & 1u)) * cell;
+                const float wz = desc->bounds_min[2] + (float)(z + (corner >> 1u)) * cell;
+                lowest = fminf(lowest, btbh_gpu_sdf_terrain_height(terrain, wx, wz, floor_y + 6.0f));
+            }
+            if (lowest < floor_y - 0.2f * cell) {
+                walls += 1u;
+                const float mask_y = desc->bounds_min[1] + texel * cell;
+                if (!(floor_y > mask_y - 0.1f * cell)) {
+                    fprintf(stderr, "column (%u, %u): the surface drops to %.3f, the mask holds %.3f, the floor %.3f stays\n",
+                        x, z, lowest, mask_y, floor_y);
+                }
+                CHECK(floor_y > mask_y - 0.1f * cell);
+            }
+        }
+    }
+    return walls;
+}
+
+/* A floor (Be The Bullet Hell's floor tiles, at the top of a heightfield base) beside a crater whose bowl cuts its
+ * rim: the bowl's wall drops across the columns under the lip. In 0.5.0 the mask held the surface's height on a
+ * column's high side only, and the floor between that and the wall stuck out over the bowl: a sawtooth along the lip.
+ * Then a shaft cut through a tall rim where a chunk's floor lies between the rim's top and the floor, more than two
+ * cells over it: the chunk below holds the rest of the wall. */
+typedef struct WallCase {
+    const char *name;
+    float floor_y;
+    float x;
+    float z;
+    float bounds_min_y;
+    uint32_t chunk_cells;
+    int shaft;
+} WallCase;
+
+static void test_mask_under_walls(void) {
+    static const WallCase cases[4] = {
+        { "a bowl cut through its rim", 0.3f, 0.0f, 0.0f, -8.0f, 32u, 0 },
+        { "the same, the floor on a lattice plane", 1.0f, 0.37f, -0.21f, -8.0f, 32u, 0 },
+        { "the same, the floor mid-cell", 0.55f, -0.12f, 0.29f, -8.0f, 32u, 0 },
+        /* 8-cell chunks from -6.4: chunk floors at -2.4, 1.6 and 5.6 */
+        { "a shaft through a chunk floor", 0.3f, 0.0f, 0.0f, -6.4f, 8u, 1 },
+    };
+    static float heights[33u * 33u];
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        const WallCase *wall = &cases[scenario];
+        const float floor_y = wall->floor_y;
+        for (uint32_t index = 0u; index < 33u * 33u; ++index) {
+            heights[index] = floor_y;
+        }
+        BTBHGPUSdfTerrainDesc desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.bounds_min[0] = -16.0f;
+        desc.bounds_min[1] = wall->bounds_min_y;
+        desc.bounds_min[2] = -16.0f;
+        desc.bounds_max[0] = 16.0f;
+        desc.bounds_max[1] = desc.bounds_min[1] + 16.0f;
+        desc.bounds_max[2] = 16.0f;
+        desc.cell_size = 0.5f;
+        desc.chunk_cells = wall->chunk_cells;
+        desc.base_heights = heights;
+        desc.base_width = 32u;
+        desc.base_depth = 32u;
+        desc.base_cell = 1.0f;
+        desc.base_surface_material = 0u;
+        desc.base_subsurface_material = 1u;
+        desc.base_subsurface_depth = 0.3f;
+        BTBHGPUSdfTerrainReport report;
+        BTBHGPUSdfTerrain *terrain = btbh_gpu_sdf_terrain_create(&desc, &report);
+        CHECK(terrain != NULL);
+        BTBHGPUSdfEdit rim;
+        memset(&rim, 0, sizeof(rim));
+        rim.shape = BTBH_GPU_SDF_SHAPE_TORUS;
+        rim.operation = BTBH_GPU_SDF_OPERATION_ADD;
+        rim.smoothing = 0.6f;
+        rim.material = 1u;
+        BTBHGPUSdfEdit cut;
+        memset(&cut, 0, sizeof(cut));
+        cut.operation = BTBH_GPU_SDF_OPERATION_SUBTRACT;
+        cut.material = 2u;
+        if (!wall->shaft) {
+            /* rim top 0.6 m over the floor; the bowl cuts it 0.55 m over the floor and is 1.5 m deep */
+            rim.position[1] = floor_y - 0.3f;
+            rim.size[0] = 3.6f;
+            rim.size[1] = 0.9f;
+            cut.shape = BTBH_GPU_SDF_SHAPE_ELLIPSOID;
+            cut.position[1] = floor_y + 0.9f;
+            cut.size[0] = 3.4f;
+            cut.size[1] = 2.4f;
+            cut.size[2] = 3.4f;
+            cut.smoothing = 0.3f;
+            cut.material_band = 0.3f;
+        } else {
+            /* rim top 1.8 m (over the chunk floor at 1.6); a sheer shaft 2.5 m deep cuts it at about 1.7 m */
+            rim.position[1] = floor_y + 0.3f;
+            rim.size[0] = 3.0f;
+            rim.size[1] = 1.2f;
+            cut.shape = BTBH_GPU_SDF_SHAPE_CYLINDER;
+            cut.position[1] = floor_y;
+            cut.size[0] = 2.6f;
+            cut.size[1] = 2.5f;
+        }
+        rim.position[0] = wall->x;
+        rim.position[2] = wall->z;
+        cut.position[0] = wall->x;
+        cut.position[2] = wall->z;
+        CHECK(btbh_gpu_sdf_terrain_add_edit(terrain, &rim) != 0u);
+        CHECK(btbh_gpu_sdf_terrain_add_edit(terrain, &cut) != 0u);
+        (void)settle(terrain, 0u, NULL);
+        const uint32_t walls = check_floor_goes_over_walls(terrain, &desc, floor_y);
+        CHECK(walls >= 20u);
+        printf("dig mask under walls (%s): the floor goes over all %u columns where the surface drops under it\n",
+            wall->name, walls);
+        btbh_gpu_sdf_terrain_destroy(terrain);
+    }
+}
+
 int main(void) {
     pool_start();
     test_create_validation();
@@ -1078,6 +1212,7 @@ int main(void) {
     test_faceted();
     test_edit_cap();
     test_heightfield();
+    test_mask_under_walls();
     measure("6 m crater, 0.25 m cells, smooth", 0.25f, 96u, 0u, 2.6f, 1.4f, 0);
     measure("6 m crater, 0.25 m cells, faceted", 0.25f, 96u, 1u, 2.6f, 1.4f, 0);
     measure("20 m stomp, 0.5 m cells, faceted", 0.5f, 64u, 1u, 10.0f, 3.0f, 0);
