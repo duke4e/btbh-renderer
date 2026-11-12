@@ -213,13 +213,15 @@ bool btbh_gpu_custom_mesh_bounds(
 /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK (btbh_gpu.h says which batches it moves and by what key): the batches
    the opaque pass draws, as indices into `batches`, in the order it draws them. Writes them to `order` (room
    for batch_count) and returns how many; scratch has room for 2 * batch_count keys. `batches` must be valid
-   (as the scene draw checks them) and `instances` hold their transient instances (24 floats each). */
+   (as the scene draw checks them) and `instances` hold their transient instances (24 floats each).
+   move_less_equal: BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL, LESS_EQUAL batches move too. */
 uint32_t btbh_gpu_scene_opaque_order(
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *scene_visibility,
     uint32_t batch_count,
     const float *instances,
     const float view_projection[16],
+    bool move_less_equal,
     uint32_t *order,
     uint64_t *scratch
 );

@@ -41,7 +41,10 @@ shaders together with the C core.
   of a cell under the patch's top surface are discarded at their flat world position (so `world_curvature`
   keeps the hole under its patch), in the colour, shadow and radiance-cascade passes. The mask is one R16F
   texel per cell column over the terrain's bounds, made on the first patch; until then the batch draws exactly
-  as with NULL. A dug batch takes the shadow pipeline with a fragment stage while the mask exists.
+  as with NULL. A dug batch takes the shadow pipeline with a fragment stage while the mask exists. Shaders from
+  before 0.5.0 would draw a dug batch undug without a word, so a present with a dug batch checks that the scene's
+  fragment shader samples the mask (SPIR-V names it; Metal libraries aren't checked) and otherwise fails with
+  `BTBH_GPU_INVALID_ARGUMENT` and the shader's path. Without `dug_by`, older shaders still draw as before.
 - **All kerning pairs in one call** (CHIMERA made about 16k `btbh_gpu_font_kerning` calls per font):
   `btbh_gpu_font_kerning_pairs(font, pairs, capacity)` copies the font's nonzero pairs, sorted by left then
   right, as `BTBHGPUFontKerningPair { left, right, advance }`, with the advances `btbh_gpu_font_kerning` returns,
@@ -65,6 +68,10 @@ shaders together with the C core.
   the x-height's top edge on the grid: a horizontal stroke elsewhere or of a fractional thickness (the bar of
   'e', the cross of 't') still straddles a pixel edge, round tops still overshoot a little, capitals and
   ascenders aren't snapped, and rounding changes the size (10 px Titillium gets about 9% shorter).
+  `BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN` (asked for by CHIMERA) rounds down instead, so a face never grows
+  taller than asked. In Titillium Web, ascent - descent at 16 px is 15.2 px with either flag; at 12 px it is
+  9.1 px rounded down and 12.2 px rounded to the nearest. Under one pixel of x-height it bakes as without the
+  flag; the two snap flags together are refused.
 - Native test `btbh_gpu_font_smoke`: the pairs against `btbh_gpu_font_kerning`; the R8 atlas against the RGBA8
   one (its alpha texel for texel, a quarter of the bytes, the same drawn text); a present that needs the
   coverage shader and can't find it fails with the path; the snapped metrics; and the top row of
@@ -91,7 +98,14 @@ shaders together with the C core.
   second new flag for an order the renderer can't see (a coplanar overlay drawn with LESS, the ground left
   deliberately after the units). Transparent and refracting batches, the shadow maps and the radiance cascades'
   sources draw in the order given, as before. The picture stays the same except where two opaque surfaces have
-  exactly the same depth (with LESS the first drawn shows). An unknown value fails the present.
+  exactly the same depth (with LESS the first drawn shows). An unknown value fails the present. One key stands
+  for a whole batch, so an instanced batch spread over the view (trees across a map, tiled ground) sorts by a
+  mean that lands mid-scene; such batches gain little, and the header says so.
+- **`BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL`**: the same sort, also moving batches drawn with
+  `LESS_EQUAL`, for hosts that draw everything with it (as Tyrian3D's batch setup does, and CHIMERA after it);
+  under plain `FRONT_TO_BACK` nothing of theirs moves. With `LESS_EQUAL` the last drawn of two surfaces at the
+  same depth shows, so a coplanar overlay (a decal, a road on the ground, a selection ring) needs `KEEP_ORDER`
+  after what it covers.
 - Custom meshes measure their vertices' bounds on create and update, for that key.
 - `BTBH_GPU_SCENE_HAS_BATCH_FLAGS` and `BTBH_GPU_SCENE_HAS_OPAQUE_SORT`, defined when these exist, for hosts that
   build against several releases.
@@ -101,7 +115,10 @@ shaders together with the C core.
   slab gone with the cube's flag (those texels then match a render without shadows) while the cube is still drawn,
   and kept when the slab has the flag; the sort flipping a depth tie between two copies of a slab (so it does
   reorder), not flipping it when one of them is pinned, writes the stencil, or draws with `LESS_EQUAL` or
-  `ALWAYS`; a layered scene with see-through cubes byte for byte the same sorted; and the refusals.
+  `ALWAYS`, and flipping a `LESS_EQUAL` tie under `FRONT_TO_BACK_LESS_EQUAL` unless one is pinned; a layered
+  scene with see-through cubes byte for byte the same sorted; and the refusals. `btbh_gpu_sdf_terrain_smoke`:
+  a dug batch with a fragment shader that doesn't name the mask fails the present with its path, and a plain
+  batch still draws. `btbh_gpu_font_smoke`: the rounded-down metrics at seven sizes.
   `BTBH_SMOKE_BENCH=1` prints the timings below.
 
 ### Changed
@@ -159,6 +176,10 @@ quoted.
   every field sees `ssao_reserved` shrink by one byte in both structs.
 - To keep a hand-made "units before the ground" order and still sort the units, give the ground `KEEP_ORDER`
   and leave it last.
+- `FRONT_TO_BACK` moves only `LESS` batches. A host whose batches start from Tyrian3D's setup draws with
+  `LESS_EQUAL`, so turning it on alone moves nothing: use `FRONT_TO_BACK_LESS_EQUAL`, with `KEEP_ORDER` on
+  coplanar overlays.
+- A dug batch needs the 0.5.0 scene shaders; with older ones the present fails and names the shader.
 - Swift: nothing new. Its draws already keep out of the sun's shadow maps (`castsSunShadow`, a material's
   `castsShadow`) through the `_with_visibility` bytes; no wrapper for the sort yet.
 

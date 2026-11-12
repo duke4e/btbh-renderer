@@ -41,7 +41,8 @@ typedef struct BTBHGPUFontRasterGlyph {
 typedef BTBHGPUFontKerningPair BTBHGPUFontKern;
 
 #define BTBH_GPU_FONT_KNOWN_FLAGS \
-    ((unsigned int)BTBH_GPU_FONT_FLAG_R8_ATLAS | (unsigned int)BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT)
+    ((unsigned int)BTBH_GPU_FONT_FLAG_R8_ATLAS | (unsigned int)BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT | \
+        (unsigned int)BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN)
 
 struct BTBHGPUFont {
     BTBHGPUWindow *owner;
@@ -537,8 +538,15 @@ static const char *btbh_gpu_font_desc_problem(const BTBHGPUFontDesc *desc) {
         return "BTBHGPUFontDesc.snap_advances must be 0 or 1";
     }
     if (((unsigned int)desc->flags & ~BTBH_GPU_FONT_KNOWN_FLAGS) != 0u) {
-        return "BTBHGPUFontDesc.flags has bits other than BTBH_GPU_FONT_FLAG_R8_ATLAS and "
-            "BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT";
+        return "BTBHGPUFontDesc.flags has bits other than BTBH_GPU_FONT_FLAG_R8_ATLAS, "
+            "BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT and BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN";
+    }
+    if (
+        (desc->flags & BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT) != 0u &&
+        (desc->flags & BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN) != 0u
+    ) {
+        return "BTBHGPUFontDesc.flags has both BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT and "
+            "BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN; set one";
     }
     if (
         desc->coverage_gamma != 0.0f &&
@@ -1047,11 +1055,13 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
     /* Read now: info points into font_bytes, which is freed after the bake. */
     float x_height = btbh_gpu_font_outline_top(&info, 'x', scale);
     /* BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT: the vertical scale that puts the x-height on a whole pixel
-       (at least one), and everything vertical at that scale. */
+       (at least one), and everything vertical at that scale. _DOWN rounds down, and leaves an x-height
+       under a pixel as it is. */
     float scale_y = scale;
-    if ((desc->flags & BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT) != 0u && x_height > 0.0f) {
-        const float snapped = fmaxf(roundf(x_height), 1.0f);
-        if (snapped != x_height) {
+    const bool snap_down = (desc->flags & BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN) != 0u;
+    if (((desc->flags & BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT) != 0u || snap_down) && x_height > 0.0f) {
+        const float snapped = snap_down ? floorf(x_height) : fmaxf(roundf(x_height), 1.0f);
+        if (snapped >= 1.0f && snapped != x_height) {
             scale_y = scale * snapped / x_height;
             x_height = snapped;
         }

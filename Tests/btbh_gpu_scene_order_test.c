@@ -87,6 +87,9 @@ static void orthographic(float view_projection[16]) {
     memcpy(view_projection, matrix, sizeof(matrix));
 }
 
+/* FRONT_TO_BACK_LESS_EQUAL for order_of: LESS_EQUAL batches move too. */
+static bool move_less_equal;
+
 static uint32_t order_of(
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *visibility,
@@ -105,6 +108,7 @@ static uint32_t order_of(
         count,
         &instances[0][0],
         view_projection,
+        move_less_equal,
         order,
         scratch
     );
@@ -260,6 +264,29 @@ int main(void) {
         }
     }
 
+    /* FRONT_TO_BACK_LESS_EQUAL: LESS_EQUAL batches sort too, together with LESS ones; KEEP_ORDER and the
+       other compares still keep their place. */
+    {
+        /* far, [LESS_EQUAL near], [LESS_EQUAL far], far, near */
+        BTBHGPUSceneGeometryBatch batches[5] = {
+            opaque(far, 1u), opaque(near, 1u), opaque(far, 1u), opaque(far, 1u), opaque(near, 1u),
+        };
+        batches[1].depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        batches[2].depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        const uint32_t kept[5] = {0u, 1u, 2u, 4u, 3u};
+        assert_order(order, order_of(batches, NULL, 5u, view_projection, order), kept, 5u);
+        move_less_equal = true;
+        const uint32_t sorted[5] = {1u, 4u, 0u, 2u, 3u};
+        assert_order(order, order_of(batches, NULL, 5u, view_projection, order), sorted, 5u);
+        batches[2].flags = BTBH_GPU_SCENE_BATCH_KEEP_ORDER;
+        const uint32_t pinned[5] = {1u, 0u, 2u, 4u, 3u};
+        assert_order(order, order_of(batches, NULL, 5u, view_projection, order), pinned, 5u);
+        batches[2].flags = 0u;
+        batches[2].depth_compare = BTBH_GPU_SCENE_DEPTH_GREATER;
+        assert_order(order, order_of(batches, NULL, 5u, view_projection, order), pinned, 5u);
+        move_less_equal = false;
+    }
+
     /* Behind the camera (negative depth) comes first; an orthographic view sorts by clip z. */
     {
         const uint32_t behind = add_instance(0.0f, 0.0f, 5.0f, 1.0f);
@@ -284,7 +311,7 @@ int main(void) {
         uint32_t many_order[MANY];
         uint64_t scratch[2 * MANY];
         const uint32_t count = btbh_gpu_scene_opaque_order(
-            batches, NULL, MANY, &instances[0][0], view_projection, many_order, scratch);
+            batches, NULL, MANY, &instances[0][0], view_projection, false, many_order, scratch);
         assert(count == MANY);
         for (uint32_t index = 1u; index < MANY; ++index) {
             const uint32_t previous = many_order[index - 1u];

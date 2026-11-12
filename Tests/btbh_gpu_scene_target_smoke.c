@@ -781,6 +781,18 @@ static void check_opaque_sort(SmokeWindow *smoke) {
     assert(centre_luminance(submitted) == dark_luminance);
     assert(memcmp(sorted, submitted, bytes) == 0);
     free(sorted);
+    /* FRONT_TO_BACK_LESS_EQUAL moves them: B (nearer on average) draws first, and A, drawn last, shows. */
+    sorted = render_tie_scene(
+        smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL, &less_equal, &less_equal, &report);
+    assert(centre_luminance(sorted) == light_luminance);
+    free(sorted);
+    /* With A pinned (KEEP_ORDER), nothing crosses it: as given. */
+    BTBHGPUSceneGeometryBatch less_equal_pinned = less_equal;
+    less_equal_pinned.flags = BTBH_GPU_SCENE_BATCH_KEEP_ORDER;
+    sorted = render_tie_scene(
+        smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL, &less_equal_pinned, &less_equal, &report);
+    assert(memcmp(sorted, submitted, bytes) == 0);
+    free(sorted);
     free(submitted);
     BTBHGPUSceneGeometryBatch always = plain;
     always.depth_compare = BTBH_GPU_SCENE_DEPTH_ALWAYS;
@@ -789,7 +801,8 @@ static void check_opaque_sort(SmokeWindow *smoke) {
     assert(memcmp(sorted, submitted, bytes) == 0);
     free(sorted);
     free(submitted);
-    printf("opaque sort: reorders (a depth tie flips), keeps KEEP_ORDER, stencil, LESS_EQUAL and ALWAYS batches in place\n");
+    printf("opaque sort: reorders (a depth tie flips), keeps KEEP_ORDER, stencil, LESS_EQUAL and ALWAYS batches in place; "
+        "FRONT_TO_BACK_LESS_EQUAL moves LESS_EQUAL ones\n");
 
     /* No tie: the same picture, the same draws, sorted or not (the see-through cubes keep their order). */
     submitted = render_layered_scene(smoke, 0u, &report);
@@ -1121,7 +1134,7 @@ static void bench_opaque_sort(SmokeWindow *smoke) {
             const uint64_t started = SDL_GetTicksNS();
             for (int repeat = 0; repeat < repeats; ++repeat) {
                 count = btbh_gpu_scene_opaque_order(
-                    batches, NULL, batch_count, instances, camera.view_projection, order, scratch);
+                    batches, NULL, batch_count, instances, camera.view_projection, false, order, scratch);
             }
             const double microseconds = (double)(SDL_GetTicksNS() - started) / 1.0e3 / repeats;
             assert(count == batch_count);

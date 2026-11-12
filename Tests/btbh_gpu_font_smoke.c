@@ -229,8 +229,13 @@ static void check_validation(BTBHGPUDevice *device, BTBHGPUWindow *window) {
     desc = good;
     desc.snap_advances = 2u;
     expect_invalid(window, &desc, "snap_advances 2");
-    /* Bits other than the two flags stay invalid. */
-    const uint8_t bad_flags[] = {1u << 2, 1u << 7, 0xFFu};
+    /* Bits other than the three flags stay invalid, and so do both snaps at once. */
+    const uint8_t bad_flags[] = {
+        1u << 3,
+        1u << 7,
+        0xFFu,
+        BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT | BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN,
+    };
     for (size_t i = 0u; i < sizeof(bad_flags) / sizeof(bad_flags[0]); i += 1u) {
         desc = good;
         desc.flags = bad_flags[i];
@@ -536,6 +541,35 @@ static void check_snapped_metrics(BTBHGPUWindow *window) {
             (double)m.cap_height,
             (double)n.cap_height
         );
+        /* _DOWN: floor, so the face never grows (and nothing across changes either). */
+        BTBHGPUFontReport down_report;
+        BTBHGPUFont *down = load_ex_flags(
+            window, check_sizes[s], 3u, 0u, 0.0f, BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN, &down_report);
+        BTBHGPUFontMetrics d;
+        assert(btbh_gpu_font_metrics(down, &d) == BTBH_GPU_OK);
+        assert(d.x_height == floorf(m.x_height) && d.x_height <= m.x_height);
+        const float down_ratio = d.x_height / m.x_height;
+        assert(fabsf(d.ascent - m.ascent * down_ratio) < 1e-3f);
+        assert(fabsf(d.descent - m.descent * down_ratio) < 1e-3f);
+        assert(d.ascent - d.descent <= m.ascent - m.descent + 1e-3f);
+        assert(d.cap_height <= m.cap_height + 1e-3f);
+        for (uint32_t c = 0u; c < codepoint_count; c += 1u) {
+            BTBHGPUFontGlyph a;
+            BTBHGPUFontGlyph b;
+            assert(btbh_gpu_font_glyph(ex, codepoints[c], &a) == BTBH_GPU_OK);
+            assert(btbh_gpu_font_glyph(down, codepoints[c], &b) == BTBH_GPU_OK);
+            assert(a.advance == b.advance && a.offset_x == b.offset_x && a.width == b.width);
+            assert(b.height <= a.height + 1.0f);
+        }
+        printf(
+            "snapped down at %.1f px: x-height %.3f -> %.0f, ascent - descent %.3f -> %.3f\n",
+            (double)check_sizes[s],
+            (double)m.x_height,
+            (double)d.x_height,
+            (double)(m.ascent - m.descent),
+            (double)(d.ascent - d.descent)
+        );
+        btbh_gpu_font_destroy(down);
         btbh_gpu_font_destroy(ex);
         btbh_gpu_font_destroy(snapped);
     }

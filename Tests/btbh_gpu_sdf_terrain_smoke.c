@@ -25,6 +25,8 @@
 
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_iostream.h>
 
 #include <assert.h>
 #include <math.h>
@@ -327,6 +329,7 @@ typedef struct RenderOptions {
     int ground_casts;        /* the ground casts into the directional shadow */
     int patches;             /* the terrain's chunks are drawn */
     float curvature;
+    int expect_old_shader_refusal; /* the present must fail: dug_by with shaders that lack the dig mask */
 } RenderOptions;
 
 static float ground_colour[4] = { 0.75f, 0.75f, 0.72f, 1.0f };
@@ -395,6 +398,16 @@ static uint8_t *render(Scene *scene, RenderOptions options) {
         255u, 0u, 255u, 255u,
         &report
     );
+    if (options.expect_old_shader_refusal) {
+        printf("old shaders with dug_by: %s%s", report.message, NEWLINE);
+        assert(result == BTBH_GPU_INVALID_ARGUMENT);
+        assert(strstr(report.message, "dig mask") != NULL);
+        assert(strstr(report.message, shader_paths[7]) != NULL);
+        free(instances);
+        free(batches);
+        free(shadow_visibility);
+        return NULL;
+    }
     if (result != BTBH_GPU_OK) {
         fprintf(stderr, "render: %s\n", report.message);
     }
@@ -612,6 +625,38 @@ int main(void) {
     assert(memcmp(plain_image, no_mask_image, TARGET_SIZE * TARGET_SIZE * 4u) == 0);
     assert(pink_pixels(plain_image) == 0u);
     free(no_mask_image);
+
+    /* A dug batch with a fragment shader that doesn't sample the dig mask (shaders from before 0.5.0) fails the
+     * present, naming the shader, instead of drawing the ground undug. Stood in for by a copy of this one with
+     * the name of the mask's texture changed (SPIR-V; Metal libraries aren't checked). Without dug_by it draws. */
+    if (SMOKE_SHADER_FORMAT == BTBH_GPU_SHADER_FORMAT_SPIRV) {
+        size_t byte_count = 0u;
+        uint8_t *bytes = (uint8_t *)SDL_LoadFile(shader_paths[7], &byte_count);
+        assert(bytes != NULL);
+        static const char name[] = "dig_mask_texture";
+        uint32_t renamed = 0u;
+        for (size_t offset = 0u; offset + sizeof(name) - 1u <= byte_count; ++offset) {
+            if (memcmp(bytes + offset, name, sizeof(name) - 1u) == 0) {
+                bytes[offset] = 'x';
+                renamed += 1u;
+            }
+        }
+        assert(renamed > 0u);
+        char saved[1024];
+        memcpy(saved, shader_paths[7], sizeof(saved));
+        (void)snprintf(shader_paths[7], sizeof(shader_paths[7]), "%s/production_model_no_dig_mask.frag.spv",
+            BTBH_GPU_SMOKE_SHADER_DIR);
+        assert(SDL_SaveFile(shader_paths[7], bytes, byte_count));
+        SDL_free(bytes);
+        const RenderOptions old_dug = { 1, 1, 1, 0.0f, 1 };
+        assert(render(&scene, old_dug) == NULL);
+        uint8_t *old_plain = render(&scene, plain);
+        assert(memcmp(plain_image, old_plain, TARGET_SIZE * TARGET_SIZE * 4u) == 0);
+        free(old_plain);
+        (void)SDL_RemovePath(shader_paths[7]);
+        memcpy(shader_paths[7], saved, sizeof(saved));
+        printf("old shaders: a dug batch fails the present with the shader's path; a plain one draws%s", NEWLINE);
+    }
 
     /* The crater, its work spread over budgeted updates: no frame in between shows a hole. */
     uint32_t ids[2];

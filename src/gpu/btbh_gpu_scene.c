@@ -325,6 +325,10 @@ struct BTBHGPUSceneRuntime {
     /* Per batch of the scene being drawn: its dug_by terrain's dig mask, or a NULL texture (RFC 0007). */
     BTBHGPUSdfTerrainMaskBinding *dig_bindings;
     uint32_t dig_binding_capacity;
+    /* The fragment shader last checked for the dig mask (btbh_gpu_scene_check_dig_shader), and whether it has
+       it: checked again only when the path changes. */
+    char *dig_shader_checked_path;
+    bool dig_shader_has_mask;
     BTBHGPUTexture *fallback_texture;
     BTBHGPUTexture *normal_fallback_texture;
     BTBHGPUTexture *smaa_area_texture;
@@ -4601,13 +4605,16 @@ static bool btbh_gpu_scene_batch_draws_opaque(
 
 /* Whether the order may move an opaque batch: with depth LESS and the stencil off, what it leaves in the
    targets doesn't depend on what was drawn before it (the nearest surface shows, whoever drew first), and the
-   host didn't pin it. Its depth must be known too (btbh_gpu_scene_batch_view_depth). */
+   host didn't pin it. LESS_EQUAL too when the host asked (FRONT_TO_BACK_LESS_EQUAL: it pins coplanar overlays
+   itself). Its depth must be known too (btbh_gpu_scene_batch_view_depth). */
 static bool btbh_gpu_scene_batch_movable(
-    const BTBHGPUSceneGeometryBatch *batch
+    const BTBHGPUSceneGeometryBatch *batch,
+    bool move_less_equal
 ) {
     BTBHGPUSceneStencilVariant stencil_variant;
     return (batch->flags & BTBH_GPU_SCENE_BATCH_KEEP_ORDER) == 0u &&
-        batch->depth_compare == BTBH_GPU_SCENE_DEPTH_LESS &&
+        (batch->depth_compare == BTBH_GPU_SCENE_DEPTH_LESS ||
+         (move_less_equal && batch->depth_compare == BTBH_GPU_SCENE_DEPTH_LESS_EQUAL)) &&
         btbh_gpu_scene_stencil_variant(batch, &stencil_variant) &&
         stencil_variant == BTBH_GPU_SCENE_STENCIL_DISABLED &&
         batch->instance_buffer == NULL;
@@ -4735,6 +4742,7 @@ uint32_t btbh_gpu_scene_opaque_order(
     uint32_t batch_count,
     const float *instances,
     const float view_projection[16],
+    bool move_less_equal,
     uint32_t *order,
     uint64_t *scratch
 ) {
@@ -4762,7 +4770,7 @@ uint32_t btbh_gpu_scene_opaque_order(
             continue;
         }
         float depth = 0.0f;
-        if (btbh_gpu_scene_batch_movable(batch) &&
+        if (btbh_gpu_scene_batch_movable(batch, move_less_equal) &&
             btbh_gpu_scene_batch_view_depth(batch, instances, depth_row, &depth)) {
             /* The key: the depth's bits ordered as the floats are, then the index (stable, and unique). */
             const uint32_t bits = btbh_gpu_scene_float_bits(depth);
@@ -5562,6 +5570,67 @@ static bool btbh_gpu_scene_prepare_dig_bindings(
             !btbh_gpu_sdf_terrain_mask_binding(batches[index].dug_by, window, binding)) {
             memset(binding, 0, sizeof(*binding));
         }
+    }
+    return true;
+}
+
+/* RFC 0007: a dug batch needs the scene shaders that sample the dig mask (0.5.0's). Older ones bind and draw
+   (the mask is an extra binding they never read), and the ground would show undug over its crater patches with
+   no error. So when a batch has dug_by, the scene's fragment shader must name dig_mask_texture: SPIR-V keeps
+   the names of its resources (OpName). Metal libraries aren't checked. False, with the report set, when it
+   doesn't; the file's other faults are left to the shader load, which reports them with the path. */
+static bool btbh_gpu_scene_check_dig_shader(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    if (shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV || fragment_shader_path == NULL) {
+        return true;
+    }
+    bool dug = false;
+    for (uint32_t index = 0u; index < batch_count && !dug; ++index) {
+        dug = batches[index].dug_by != NULL;
+    }
+    if (!dug) {
+        return true;
+    }
+    if (runtime->dig_shader_checked_path == NULL ||
+        strcmp(runtime->dig_shader_checked_path, fragment_shader_path) != 0) {
+        size_t byte_count = 0u;
+        uint8_t *bytes = (uint8_t *)SDL_LoadFile(fragment_shader_path, &byte_count);
+        if (bytes == NULL) {
+            return true;
+        }
+        static const char name[] = "dig_mask_texture";
+        const size_t name_length = sizeof(name) - 1u;
+        bool found = false;
+        for (size_t offset = 0u; !found && offset + name_length <= byte_count; ++offset) {
+            found = memcmp(bytes + offset, name, name_length) == 0;
+        }
+        SDL_free(bytes);
+        const size_t path_length = strlen(fragment_shader_path);
+        char *path = (char *)malloc(path_length + 1u);
+        if (path == NULL) {
+            return true;
+        }
+        memcpy(path, fragment_shader_path, path_length + 1u);
+        free(runtime->dig_shader_checked_path);
+        runtime->dig_shader_checked_path = path;
+        runtime->dig_shader_has_mask = found;
+    }
+    if (!runtime->dig_shader_has_mask) {
+        char message[sizeof(report->message)];
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A batch has dug_by, and the scene shaders don't sample the dig mask (build them from 0.5.0 or later): %s",
+            fragment_shader_path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
     }
     return true;
 }
@@ -6817,6 +6886,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    if (!btbh_gpu_scene_check_dig_shader(
+            runtime,
+            batches,
+            batch_count,
+            fragment_shader_path,
+            shader_format,
+            report
+        )) {
+        free(bone_matrices);
+        free(bone_offsets);
+        return report->result;
+    }
     const uint64_t bones_finished_ticks = detailed_prepare_telemetry
         ? SDL_GetTicksNS()
         : 0u;
@@ -6825,10 +6906,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             (double)(bones_finished_ticks - bones_started_ticks) /
             1000000.0;
     }
-    /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK: the opaque pass draws in this order. The bone offsets stay laid
-       out as the batches were given, so it also notes where each batch's geometries start among them. */
+    /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK(_LESS_EQUAL): the opaque pass draws in this order. The bone offsets
+       stay laid out as the batches were given, so it also notes where each batch's geometries start among them. */
     const bool opaque_sorted =
-        post->opaque_sort == BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK;
+        post->opaque_sort != BTBH_GPU_SCENE_OPAQUE_SORT_SUBMITTED;
     if (opaque_sorted &&
         !btbh_gpu_scene_ensure_opaque_order(runtime, batch_count)) {
         free(bone_matrices);
@@ -6847,6 +6928,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             batch_count,
             instances,
             requested_view_projection,
+            post->opaque_sort == BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL,
             runtime->opaque_order,
             runtime->opaque_order_keys
         )
@@ -10542,6 +10624,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     free(window->scene_runtime->opaque_order);
     free(window->scene_runtime->opaque_geometry_base);
     free(window->scene_runtime->opaque_order_keys);
+    free(window->scene_runtime->dig_shader_checked_path);
     free(window->scene_runtime);
     window->scene_runtime = NULL;
 }

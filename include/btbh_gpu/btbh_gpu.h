@@ -322,11 +322,17 @@ enum {
        round tops ('o', 'n') still overshoot a little, and capitals and ascenders aren't snapped. It
        helps least with oversample_y above 1, which blurs vertically anyway. A font without an 'x'
        bakes as without the flag. */
-    BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT = 1u << 1
+    BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT = 1u << 1,
+    /* As BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT, but the x-height is rounded down: floor(x) for round(x), so
+       the face never grows taller than asked (a line that has to fit a box keeps fitting it) and loses
+       up to a pixel of x-height instead (up to about 25% at 10-14 px). Where floor(x) would be 0 (an
+       x-height under one pixel) the font bakes as without the flag. Set one of the two snap flags, not
+       both: both fail the load with BTBH_GPU_INVALID_ARGUMENT. */
+    BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN = 1u << 2
 };
 
-/* Defined when BTBHGPUFontDesc.flags, BTBH_GPU_FONT_FLAG_R8_ATLAS (and the canvas's coverage shader)
-   and BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT exist (since 0.5.0). */
+/* Defined when BTBHGPUFontDesc.flags, BTBH_GPU_FONT_FLAG_R8_ATLAS (and the canvas's coverage shader),
+   BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT and BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT_DOWN exist (since 0.5.0). */
 #define BTBH_GPU_HAS_FONT_FLAGS 1
 
 /* How btbh_gpu_window_font_load_ex bakes a font (RFC 0004, option A: readable small text). Bake one
@@ -891,11 +897,11 @@ enum {
      * A transparent batch casts no shadow either way. Where a shadow map is kept over several frames (an
      * update period above 1), a change of the flag shows at the map's next update. */
     BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW = 1u << 0,
-    /* With BTBHGPUScenePost.opaque_sort FRONT_TO_BACK: the batch keeps its place in the opaque pass and no
-     * other batch is moved across it, for an order that matters in a way the renderer can't see (a coplanar
-     * overlay drawn with depth LESS over what it lies on; the ground deliberately left after the units, so
-     * that the units before it are sorted among themselves and it still draws last). Without the sort it
-     * changes nothing. */
+    /* With BTBHGPUScenePost.opaque_sort FRONT_TO_BACK (or FRONT_TO_BACK_LESS_EQUAL): the batch keeps its
+     * place in the opaque pass and no other batch is moved across it, for an order that matters in a way the
+     * renderer can't see (a coplanar overlay drawn over what it lies on with depth LESS, or with LESS_EQUAL
+     * under FRONT_TO_BACK_LESS_EQUAL; the ground deliberately left after the units, so that the units before
+     * it are sorted among themselves and it still draws last). Without the sort it changes nothing. */
     BTBH_GPU_SCENE_BATCH_KEEP_ORDER = 1u << 1
 };
 
@@ -1046,7 +1052,10 @@ typedef enum BTBHGPUSceneOpaqueSort {
      * view depth (clip w for a perspective view-projection, clip z for an orthographic one) of the batch's
      * centre: the mean, over its instances, of the instance transform applied to the centre of its geometry's
      * bounds (a model's whole bounds, whatever its material_slot; a skinned model's in its bind pose; a custom
-     * mesh's vertices). Equal depths keep the order given.
+     * mesh's vertices). Equal depths keep the order given. One key stands for the whole batch, so it says
+     * little about an instanced batch spread over the view (trees across a map, the ground as tiles): its mean
+     * lands mid-scene however near its nearest instances are. Such batches gain little from the sort; split
+     * them by region, or pin them with KEEP_ORDER where they should draw first or last.
      * It moves only a batch whose picture can't depend on what was drawn before it: drawn in the opaque pass
      * (transparency_enabled 0, BTBH_GPU_SCENE_BLEND_ALPHA, not REFRACT), visible, depth_compare
      * BTBH_GPU_SCENE_DEPTH_LESS, the stencil off (reference 0, compare ALWAYS, KEEP, KEEP, REPLACE), transient
@@ -1061,12 +1070,21 @@ typedef enum BTBHGPUSceneOpaqueSort {
      * surface): with LESS the first drawn shows, and the sort may change which is first; pin such a batch
      * with KEEP_ORDER or draw it with LESS_EQUAL. The pass may bind pipelines more often (the batches are no
      * longer grouped as given). Costs the CPU one pass over the movable batches' instances and a sort of the
-     * batches; memory for it is kept with the window. */
+     * batches; memory for it is kept with the window.
+     * A host that draws everything with LESS_EQUAL (as Tyrian3D's batches do) sees nothing move here: see
+     * FRONT_TO_BACK_LESS_EQUAL. */
     BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK = 1,
-    BTBH_GPU_SCENE_OPAQUE_SORT_COUNT = 2
+    /* As FRONT_TO_BACK, and it also moves batches drawn with BTBH_GPU_SCENE_DEPTH_LESS_EQUAL (the same
+     * conditions otherwise), LESS and LESS_EQUAL batches sorting together. With LESS_EQUAL the last drawn of
+     * two surfaces at exactly the same depth shows, so an overlay drawn coplanar over what it lies on (a decal,
+     * a road on the ground, a selection ring) must keep its place: give it BTBH_GPU_SCENE_BATCH_KEEP_ORDER,
+     * after what it covers, or the sort may draw it first and hide it. */
+    BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL = 2,
+    BTBH_GPU_SCENE_OPAQUE_SORT_COUNT = 3
 } BTBHGPUSceneOpaqueSort;
 
-/* Defined when BTBHGPUScenePost.opaque_sort and BTBH_GPU_SCENE_BATCH_KEEP_ORDER exist (since 0.5.0). */
+/* Defined when BTBHGPUScenePost.opaque_sort (FRONT_TO_BACK and FRONT_TO_BACK_LESS_EQUAL) and
+   BTBH_GPU_SCENE_BATCH_KEEP_ORDER exist (since 0.5.0). */
 #define BTBH_GPU_SCENE_HAS_OPAQUE_SORT 1
 
 typedef struct BTBHGPUScenePost {
@@ -1417,9 +1435,9 @@ BTBHGPUFont *btbh_gpu_window_font_load_ex(
 );
 /* Vertical metrics in pixels at the font's size. For a font from btbh_gpu_window_font_load the
    ascent, descent and line gap are what its report said (the ascent rounded down, a line gap of 2);
-   x_height and cap_height are unrounded either way. With BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT they are at
-   the vertical scale the glyphs were rasterised with: x_height a whole number, the rest scaled to
-   match (see the flag); pixel_size is still the size asked for. */
+   x_height and cap_height are unrounded either way. With BTBH_GPU_FONT_FLAG_SNAP_X_HEIGHT (or _DOWN)
+   they are at the vertical scale the glyphs were rasterised with: x_height a whole number, the rest
+   scaled to match (see the flag); pixel_size is still the size asked for. */
 BTBHGPUResult btbh_gpu_font_metrics(
     const BTBHGPUFont *font,
     BTBHGPUFontMetrics *metrics
