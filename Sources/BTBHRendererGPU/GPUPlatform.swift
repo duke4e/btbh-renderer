@@ -153,6 +153,8 @@ public final class GPUPlatform: GamePlatform {
     private var sceneAdapterTelemetry: [GPUSceneAdapterTelemetrySample] = []
     private var sceneEncodeTelemetry: [GPUScenePresentationProbeReport] = []
     private var canvasPresentTelemetryMilliseconds: [Double] = []
+    /// The destructible terrain the scene draws and digs with (`setSdfTerrain`); nil draws as before.
+    public private(set) var sdfTerrain: GPUSdfTerrain?
 
     public init(
         request: GPUBackendRequest = .platformDefault,
@@ -269,6 +271,8 @@ public final class GPUPlatform: GamePlatform {
     public func closeWindow() {
         finishFrameTelemetry()
         emitFrameTelemetry()
+        sdfTerrain?.detachFromWindow()
+        sdfTerrain = nil
         window?.shutdown()
         window = nil
         gamepadState = GPUGamepadState()
@@ -303,6 +307,25 @@ public final class GPUPlatform: GamePlatform {
             swapchainPacesFrames: presentMode == .vsync
         )
         previousFrameStart = nil
+    }
+
+    /// Attaches a destructible terrain (RFC 0007) to the open window, detaching the one attached before, or with
+    /// nil detaches it. While one is attached, each scene frame draws its chunk meshes as ordinary batches (see
+    /// `GPUSdfTerrain`), and materials with `dugByTerrain` lose their geometry where it has a patch. Call it
+    /// between frames. Closing the window detaches the terrain; attach it again after reopening. The platform
+    /// keeps the terrain alive while it is attached.
+    public func setSdfTerrain(_ terrain: GPUSdfTerrain?) throws {
+        guard terrain !== sdfTerrain else { return }
+        if let terrain {
+            guard let window else { throw GPUPlatformError.windowNotOpen }
+            guard terrain.platform == nil else {
+                throw GPUSdfTerrainError.operationFailed("The SDF terrain is attached to another GPU platform")
+            }
+            try window.attachSdfTerrain(terrain.pointer)
+            terrain.didAttach(to: self)
+        }
+        sdfTerrain?.detachFromWindow()
+        sdfTerrain = terrain
     }
 
     public func pollEvents() {
@@ -689,7 +712,8 @@ public final class GPUPlatform: GamePlatform {
             logicalInstanceCount: logicalInstanceCount,
             batches: batches,
             clearColor: clearColor,
-            temporal: temporal
+            temporal: temporal,
+            sdfTerrain: sdfTerrain?.pointer
         )
         if frameTelemetryEnabled {
             sceneEncodeTelemetry.append(report)

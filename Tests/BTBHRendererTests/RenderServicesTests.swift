@@ -973,6 +973,17 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertEqual(ModelMaterialPatch(castsShadow: false).castsShadow, false)
     }
 
+    func testMaterialsAreNotDugByATerrainUnlessTheyOptIn() {
+        XCTAssertFalse(MaterialDescriptor.default.dugByTerrain)
+        XCTAssertNil(ModelMaterialPatch.identity.dugByTerrain)
+        var descriptor = MaterialDescriptor.default
+        descriptor.dugByTerrain = true
+        XCTAssertNotEqual(descriptor, MaterialDescriptor.default)
+        let floor = ModelMaterialPatch(castsShadow: false, dugByTerrain: true)
+        XCTAssertEqual(floor.dugByTerrain, true)
+        XCTAssertEqual(floor.castsShadow, false)
+    }
+
     func testSurfaceDetailIsOffUnlessAMaterialAsksForIt() {
         XCTAssertEqual(MaterialDescriptor.default.detail, .none)
         XCTAssertFalse(SurfaceDetail.none.isEnabled)

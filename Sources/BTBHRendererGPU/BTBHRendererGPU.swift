@@ -933,6 +933,8 @@ struct GPUSceneMaterialProbe: Equatable {
     var legacySortKey: GPULegacyMaterialSortKey? = nil
     var castsShadow = true
     var detail = SurfaceDetail.none
+    /// `MaterialDescriptor.dugByTerrain`: the batch's `dug_by` is the attached SDF terrain.
+    var dugByTerrain = false
 }
 
 enum GPUSceneSurfaceDetailParameters {
@@ -2202,7 +2204,8 @@ public final class GPUWindowProbe {
         logicalInstanceCount: Int? = nil,
         batches: [GPUSceneGeometryProbeBatch],
         clearColor: RenderColor,
-        temporal: GPUSceneTemporalProbe? = nil
+        temporal: GPUSceneTemporalProbe? = nil,
+        sdfTerrain: OpaquePointer? = nil
     ) throws -> GPUScenePresentationProbeReport {
         let transientInstanceCount = instances.count
         let resolvedLogicalInstanceCount =
@@ -2805,6 +2808,9 @@ public final class GPUWindowProbe {
             nativeBatch.detail_parameters = GPUSceneSurfaceDetailParameters.native(
                 material?.detail ?? .none
             )
+            if material?.dugByTerrain == true {
+                nativeBatch.dug_by = sdfTerrain
+            }
             nativeSceneBatches.append(nativeBatch)
         }
         var report = BTBHGPUSceneReport()
@@ -3720,6 +3726,26 @@ public final class GPUWindowProbe {
             )
         }
         return .init(size: actualSize, rgba8: bytes)
+    }
+
+    /// The GPU side of an SDF terrain (its chunk meshes and dig mask) on this window. Destroying the window
+    /// detaches it.
+    func attachSdfTerrain(_ terrain: OpaquePointer) throws {
+        guard let window, !isShutdown else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "attach SDF terrain",
+                stage: -1,
+                message: "GPU window probe is shut down"
+            )
+        }
+        var report = BTBHGPUSdfTerrainReport()
+        guard btbh_gpu_window_sdf_terrain_attach(window, terrain, &report) == BTBH_GPU_OK else {
+            throw GPUWindowProbeError.operationFailed(
+                operation: "attach SDF terrain",
+                stage: -1,
+                message: GPUDeviceProbe.string(from: &report.message)
+            )
+        }
     }
 
     public func shutdown() {

@@ -419,6 +419,11 @@ public struct MaterialDescriptor: Hashable, Sendable {
     public var castsShadow: Bool
     /// Procedural surface detail (off by default).
     public var detail: SurfaceDetail
+    /// Ground that a destructible terrain may dig through (RFC 0007, since 0.5.0): where the terrain attached
+    /// to the GPU platform (`GPUPlatform.setSdfTerrain`) has a patch (a crater, a mound's foot), the
+    /// geometry is not drawn and the patch shows instead. With false, with no terrain attached, or before the
+    /// terrain has a patch, the geometry draws as before. Backends without such a terrain ignore it.
+    public var dugByTerrain: Bool
 
     public init(
         albedoTexture: TextureHandle,
@@ -453,7 +458,8 @@ public struct MaterialDescriptor: Hashable, Sendable {
         unlit: Bool,
         surfaceShader: SurfaceShaderHandle,
         castsShadow: Bool = true,
-        detail: SurfaceDetail = .none
+        detail: SurfaceDetail = .none,
+        dugByTerrain: Bool = false
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -488,6 +494,7 @@ public struct MaterialDescriptor: Hashable, Sendable {
         self.surfaceShader = surfaceShader
         self.castsShadow = castsShadow
         self.detail = detail
+        self.dugByTerrain = dugByTerrain
     }
 
     public static let `default` = Self(
@@ -544,6 +551,9 @@ public struct ModelMaterialPatch: Hashable, Sendable {
     /// nil keeps the imported material's depth test. `.lessEqual` lets a second draw of the same
     /// model at the same transforms (a tint over its body) pass where the body already wrote depth.
     public var depthCompare: CompareFunction?
+    /// nil keeps the imported material's `MaterialDescriptor.dugByTerrain` (false): true makes the model ground
+    /// that the GPU platform's attached terrain digs through (floor tiles under a crater).
+    public var dugByTerrain: Bool?
 
     public init(
         albedoTexture: TextureHandle? = nil,
@@ -561,7 +571,8 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         castsShadow: Bool? = nil,
         transparency: TransparencyMode? = nil,
         detail: SurfaceDetail? = nil,
-        depthCompare: CompareFunction? = nil
+        depthCompare: CompareFunction? = nil,
+        dugByTerrain: Bool? = nil
     ) {
         self.albedoTexture = albedoTexture
         self.albedoColor = albedoColor
@@ -579,6 +590,7 @@ public struct ModelMaterialPatch: Hashable, Sendable {
         self.transparency = transparency
         self.detail = detail
         self.depthCompare = depthCompare
+        self.dugByTerrain = dugByTerrain
     }
 
     public static let identity = Self()

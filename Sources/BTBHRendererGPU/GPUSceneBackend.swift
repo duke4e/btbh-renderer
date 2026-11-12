@@ -286,6 +286,8 @@ final class GPUSceneBackend: SceneBackend {
     var pendingModelDrawCountForTesting: Int {
         pendingModelDraws.count
     }
+    /// Draws the SDF terrain's reactive second pass without FSR 3 too, so a test can compare its colour.
+    var drawsSdfTerrainReactivePassWithoutFSR3ForTesting = false
 
     init(
         platform: GPUPlatform,
@@ -921,6 +923,14 @@ final class GPUSceneBackend: SceneBackend {
                 logicalInstanceCount += draw.count
             }
         }
+        if let terrain = platform.sdfTerrain {
+            logicalInstanceCount += try appendSdfTerrainBatches(
+                terrain,
+                temporalActive: temporalActive,
+                packedInstances: &packedInstances,
+                to: &batches
+            )
+        }
         var transientDebugMesh: MeshHandle?
         defer {
             if let transientDebugMesh {
@@ -1219,6 +1229,82 @@ final class GPUSceneBackend: SceneBackend {
             modelBatchBuildSeconds +=
                 platform.monotonicElapsedSeconds - batchBuildStarted
         }
+    }
+
+    /// The attached SDF terrain's chunks: one batch per chunk with a mesh, on one identity instance (the meshes
+    /// hold world positions), culled as persistent ranges are (drawn in view, or into the sun's shadow only when
+    /// their shadow can reach the view). Under FSR 3, a chunk whose mesh changed in the last
+    /// `reactiveFrameCount` frames is drawn a second time in the transparent pass, unlit, black and additive with
+    /// `lessEqual` depth, so its colour stays exactly as it was and its pixels mark the reactive mask. Returns the
+    /// instances it added.
+    private func appendSdfTerrainBatches(
+        _ terrain: GPUSdfTerrain,
+        temporalActive: Bool,
+        packedInstances: inout [GPUInstanceRecord],
+        to batches: inout [GPUSceneGeometryProbeBatch]
+    ) throws -> Int {
+        let chunks = terrain.chunksForFrame()
+        guard !chunks.isEmpty else { return 0 }
+        var material = try resources.sceneMaterial(descriptor: terrain.material)
+        material.dugByTerrain = false
+        var reactiveMaterial: GPUSceneMaterialProbe?
+        let firstInstance = packedInstances.count
+        GPUInstanceRecordPacking.append(
+            matrix: .identity,
+            color: .white,
+            custom: GPUInstanceRecordPacking.zeroCustom,
+            to: &packedInstances
+        )
+        for chunk in chunks {
+            let geometry = GPUSceneGeometryProbe.customMesh(chunk.mesh)
+            guard intersectsFrustum(chunk.bounds) else {
+                if material.castsShadow, castsIntoSunShadow(chunk.bounds) {
+                    batches.append(.init(
+                        geometry: geometry,
+                        animation: nil,
+                        material: material,
+                        materialSlot: nil,
+                        firstInstance: firstInstance,
+                        instanceCount: 1,
+                        sceneVisible: false,
+                        shadowBounds: chunk.bounds
+                    ))
+                }
+                continue
+            }
+            batches.append(.init(
+                geometry: geometry,
+                animation: nil,
+                material: material,
+                materialSlot: nil,
+                firstInstance: firstInstance,
+                instanceCount: 1,
+                shadowBounds: chunk.bounds
+            ))
+            guard temporalActive || drawsSdfTerrainReactivePassWithoutFSR3ForTesting,
+                  chunk.changedRecently else { continue }
+            if reactiveMaterial == nil {
+                var descriptor = MaterialDescriptor.default
+                descriptor.albedoColor = .black
+                descriptor.unlit = true
+                descriptor.blend = .additive
+                descriptor.depthCompare = .lessEqual
+                descriptor.cullMode = terrain.material.cullMode
+                descriptor.castsShadow = false
+                reactiveMaterial = try resources.sceneMaterial(descriptor: descriptor)
+            }
+            batches.append(.init(
+                geometry: geometry,
+                animation: nil,
+                material: reactiveMaterial,
+                materialSlot: nil,
+                firstInstance: firstInstance,
+                instanceCount: 1,
+                directionalShadowVisible: false,
+                spotShadowVisible: false
+            ))
+        }
+        return 1
     }
 
     private static func debugVertices(

@@ -8,15 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 Opt-in additions for 0.4.0's games:
 - destructible terrain from SDF edits, phases 1 to 3 of [RFC 0007](docs/rfc/0007-destructible-terrain.md) (asked
-  for by Be The Bullet Hell and CHIMERA on #3);
+  for by Be The Bullet Hell and CHIMERA on #3), and a Swift layer for it (asked for by Be The Bullet Hell);
 - three font features, asked for by CHIMERA after it tested 0.4.0's small-text loader;
 - two scene features for CHIMERA: batches that cast no sun shadow, and a front-to-back opaque pass.
 
 Nothing changes until a game uses them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte,
 and the canvas draws what it drew; a zeroed batch, a zeroed `BTBHGPUScenePost` and a host with no terrain render
-as in 0.4.0. One shader is new (`production_canvas_coverage.frag`). The scene, unlit, shadow and radiance-cascade
-material-source shaders changed for the terrain (a dig-mask branch that a zeroed batch never takes): rebuild the
-shaders together with the C core.
+as in 0.4.0 (in Swift: a platform with no terrain set, whatever its materials say). One shader is new
+(`production_canvas_coverage.frag`). The scene, unlit, shadow and radiance-cascade material-source shaders changed
+for the terrain (a dig-mask branch that a zeroed batch never takes): rebuild the shaders together with the C core.
 
 ### Added
 - **`BTBHGPUSdfTerrain`** (`include/btbh_gpu/btbh_gpu_sdf_terrain.h`, included at the end of `btbh_gpu.h`;
@@ -45,6 +45,48 @@ shaders together with the C core.
   before 0.5.0 would draw a dug batch undug without a word, so a present with a dug batch checks that the scene's
   fragment shader samples the mask (SPIR-V names it; Metal libraries aren't checked) and otherwise fails with
   `BTBH_GPU_INVALID_ARGUMENT` and the shader's path. Without `dug_by`, older shaders still draw as before.
+- **Swift: `GPUSdfTerrain`** (BTBHRendererGPU, asked for by Be The Bullet Hell): the terrain without the C API.
+  - `GPUSdfTerrain(GPUSdfTerrainDescriptor)`: bounds, cell size, chunk cells, `maxEdits` and `editCap`, smooth or
+    faceted `normals`, a `.flat(height:)` or `.heightfield(heights:width:depth:cellSize:)` base with its surface
+    and subsurface materials and depth, up to eight `materialColors` (sRGB like every Swift colour; linearised
+    for the C core), and `concurrentJobs` (`run_jobs` over `DispatchQueue.concurrentPerform`). A flat base is a
+    one-cell heightfield. Destroyed on deinit. It needs no window, so its edits and queries work headless.
+  - `addEdit(_:) -> GPUSdfEditID?` (nil for an invalid edit, or at the cap with `.reject`), `setEdit(_:to:)` and
+    `removeEdit(_:)` (false for an id that was removed or frozen), `update(budgetMicroseconds:)` returning a
+    `GPUSdfTerrainReport` (with `isSettled`), `height(x:z:fromY:) -> Float?` (nil where the C call gives
+    -INFINITY), `raycast(origin:direction:maxDistance:) -> RenderVec3?`, `distance(at:)`, and `takeChanges()` as
+    `RenderRect`s (x and width along world x, y and height along world z). `GPUSdfEdit` takes the six shapes and
+    four operations with a `RenderQuaternion` rotation.
+  - `GPUPlatform.setSdfTerrain(_:)` attaches one to the window and detaches the one before; nil detaches it, and
+    closing the window does too (attach it again after reopening). `GPUPlatform.sdfTerrain` and
+    `GPUSdfTerrain.isAttached` say which. While one is attached, every scene frame draws each chunk that has a mesh
+    as an ordinary custom-mesh batch on one identity instance, with `GPUSdfTerrain.material`
+    (`MaterialDescriptor.default` unless set: white albedo times the vertex colour, back faces culled, casting and
+    taking shadows, bent by the world curvature like everything else). Chunks are culled like persistent ranges:
+    drawn in view, and into the sun's shadow map only when their shadow can reach the view. A frame with no other
+    draw still draws nothing.
+  - FSR 3: the reactive mask is written only by the transparent pass, and `reactive_mode` only chooses how a
+    transparent batch writes it, so an opaque chunk can't mark it. For `reactiveFrameCount` scene frames (4) after
+    a chunk's mesh changes, the chunk is drawn once more in the transparent pass, unlit, black, additive and with
+    `lessEqual` depth: it adds exactly nothing to the colour, and its alpha (1) times `BTBH_FSR3_REACTIVE_SCALE`
+    goes into the mask. Only while FSR 3 runs; 0 turns it off.
+- **Swift: `MaterialDescriptor.dugByTerrain`** and **`ModelMaterialPatch.dugByTerrain`** (BTBHRenderer, next to
+  `castsShadow`): the material's batches get `dug_by` set to the platform's attached terrain, however they are
+  submitted (models, instances, persistent range lists, transform streams, meshes). nil in a patch keeps the
+  imported material's (false). With no terrain attached, or one without a patch yet, they draw as before. Be The
+  Bullet Hell's floor tiles take `castsShadow: false, dugByTerrain: true` in their material patch.
+- Swift GPU tests `GPUSdfTerrainTests`: the handle without a window (heights, rays and distances before any
+  update and after the edits are removed, changes reported once the meshes are ready, `setEdit` keeping the id,
+  refused descriptors and edits, a heightfield base, both caps, and the same bricks, mesh and mask bytes with
+  `concurrentJobs` and a budget); chunks drawn through the platform (a mound changes the picture; a dug floor
+  with no terrain, a terrain not attached, one attached without edits, one detached and one whose edits were
+  removed all give the plain picture byte for byte; attached again, the mound frame byte for byte; closing the
+  window detaches); a `dugByTerrain` floor over a crater, drawn as instances, a persistent range list and transform
+  streams: the scorched floor shows and no background shows through, while without the flag the floor covers it
+  and far from it nothing changes; and the second draw of fresh chunks under FSR 3 (counted in batches) for
+  exactly `reactiveFrameCount` frames, never without FSR 3, never with 0, and (forced into a frame without FSR 3,
+  where pixels compare) leaving the picture byte for byte as it was. `BTBH_SDF_TERRAIN_PNG_DIR=<dir>` writes the
+  frames.
 - **All kerning pairs in one call** (CHIMERA made about 16k `btbh_gpu_font_kerning` calls per font):
   `btbh_gpu_font_kerning_pairs(font, pairs, capacity)` copies the font's nonzero pairs, sorted by left then
   right, as `BTBHGPUFontKerningPair { left, right, advance }`, with the advances `btbh_gpu_font_kerning` returns,
@@ -158,6 +200,10 @@ quoted.
   batches of 16 instances, 57-200 µs for 2048 batches of one, 0.23-0.31 ms for 1024 batches of 64 (one pass over
   the instances, then the sort). A custom mesh update of 100 000 vertices spends 0.35-0.38 ms on its bounds. The
   default order costs nothing new.
+- Swift, same CPU: while a terrain is attached, the scene backend reads every chunk once a frame
+  (`btbh_gpu_sdf_terrain_chunk`, for the meshes and their revisions): 14-24 µs a frame for 2116 chunks (Be The
+  Bullet Hell's 1440 m map at 0.5 m cells and 64-cell chunks; `testChunkWalkAtBTBHScale`, three runs). The cost
+  follows the chunk count: 32-cell chunks would make 16 562 of them on that map (two layers instead of one).
 
 ### Not added
 - A depth pre-pass. It would draw every opaque batch twice (double the vertex work and draw calls, skinned units
@@ -171,8 +217,12 @@ quoted.
 - Nothing to set: zeroed batches (`= {0}`, `..Default::default()`, Swift's `init()`) have `dug_by` NULL.
   Rebuild the shaders with the C core.
 - To adopt the terrain, see RFC 0007 ("Compatibility") and its implementation notes: a base, `dug_by` on the
-  host's ground batches, one patch batch per chunk with a mesh, `update` once a frame. The Swift layer doesn't
-  wrap the terrain yet; Swift hosts call the C API.
+  host's ground batches, one patch batch per chunk with a mesh, `update` once a frame.
+- Swift hosts: create a `GPUSdfTerrain`, call `update` once a frame and `GPUPlatform.setSdfTerrain(terrain)`; the
+  backend draws the chunks. Mark the ground with `dugByTerrain: true` in its `ModelMaterialPatch` (or
+  `MaterialDescriptor`), next to `castsShadow: false`. Before destroying the window or the terrain nothing needs
+  detaching; `setSdfTerrain(nil)` at the end of a level lets the terrain go. Existing calls compile unchanged:
+  the new initialiser parameters have defaults.
 - Nothing changes unless a game sets `BTBHGPUFontDesc.flags` or calls `btbh_gpu_font_kerning_pairs`.
 - A game that bakes R8 atlases must ship `production_canvas_coverage.frag` (`.spv` or `.metallib`) next to
   `production_canvas_textured.frag`. It is in the renderer's shader list in `CMakeLists.txt`, so build scripts
@@ -189,8 +239,8 @@ quoted.
   renderer out from 0.5 back to an older release, SwiftPM may keep its old build plan and fail with
   "couldn't build ... btbh_gpu_sdf_terrain_bridge.c.o because of missing inputs". Deleting `.build/*.yaml` and
   `.build/release/description.json` fixes it (found by Be The Bullet Hell).
-- Swift: nothing new. Its draws already keep out of the sun's shadow maps (`castsSunShadow`, a material's
-  `castsShadow`) through the `_with_visibility` bytes; no wrapper for the sort yet.
+- Swift: no wrapper for the batch flags or the sort. Its draws already keep out of the sun's shadow maps
+  (`castsSunShadow`, a material's `castsShadow`) through the `_with_visibility` bytes.
 
 ## [0.4.0] — 2026-11-12
 

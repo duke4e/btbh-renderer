@@ -1103,6 +1103,14 @@ final class GPUResourceBackend: RenderResourceBackend {
                 "Custom GPU meshes require a standalone material descriptor"
             )
         }
+        return try sceneMaterial(descriptor: descriptor)
+    }
+
+    /// A descriptor that no handle owns (the SDF terrain's chunk material), resolved as `sceneMaterial(_:)`
+    /// resolves a handle's.
+    func sceneMaterial(
+        descriptor: MaterialDescriptor
+    ) throws -> GPUSceneMaterialProbe {
         let texture = descriptor.albedoTexture.isValid
             ? try canvasTexture(descriptor.albedoTexture).pointer
             : nil
@@ -1148,6 +1156,7 @@ final class GPUResourceBackend: RenderResourceBackend {
         material.legacySortKey = .init(descriptor: descriptor)
         material.castsShadow = descriptor.castsShadow
         material.detail = descriptor.detail
+        material.dugByTerrain = descriptor.dugByTerrain
         return material
     }
 
@@ -1287,6 +1296,7 @@ final class GPUResourceBackend: RenderResourceBackend {
                 )
                 patched.castsShadow = patch.castsShadow ?? base.castsShadow
                 patched.detail = patch.detail ?? base.detail
+                patched.dugByTerrain = patch.dugByTerrain ?? base.dugByTerrain
                 material = patched
             }
             materialsBySlot[override.slot] = material
