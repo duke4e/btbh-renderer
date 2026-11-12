@@ -598,6 +598,13 @@ if(BTBH_BUILD_GPU_SPIKE)
             btbh_gpu_scene_order_test
             PRIVATE btbh_gpu SDL3::SDL3-static
         )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_order_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_order_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
         add_test(
             NAME btbh_gpu_scene_order
             COMMAND btbh_gpu_scene_order_test
