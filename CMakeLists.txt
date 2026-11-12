@@ -586,6 +586,23 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_scene_blend_test
         )
 
+        # The opaque pass's front-to-back order and the batch flags' layout (no GPU).
+        add_executable(btbh_gpu_scene_order_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_order_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_order_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_order_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_scene_order
+            COMMAND btbh_gpu_scene_order_test
+        )
+
         add_executable(btbh_gpu_gamepad_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_gamepad_test.c"
         )

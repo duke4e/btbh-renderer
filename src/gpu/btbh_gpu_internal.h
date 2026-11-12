@@ -190,7 +190,34 @@ struct BTBHGPUCustomMesh {
     uint32_t vertex_count;
     uint32_t index_count;
     uint32_t vertex_byte_count;
+    /* Its vertices' positions' bounds, measured on create and update, for the opaque pass's front-to-back
+       order (BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK); bounds_valid is false when a position isn't finite. */
+    float minimum[3];
+    float maximum[3];
+    bool bounds_valid;
 };
+
+/* The bounds of `vertex_count` custom mesh vertices' positions (the first three floats of each 24-float
+   vertex); false, leaving minimum and maximum undefined, when one isn't finite. */
+bool btbh_gpu_custom_mesh_bounds(
+    const void *vertices,
+    uint32_t vertex_count,
+    float minimum[3],
+    float maximum[3]
+);
+/* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK (btbh_gpu.h says which batches it moves and by what key): the batches
+   the opaque pass draws, as indices into `batches`, in the order it draws them. Writes them to `order` (room
+   for batch_count) and returns how many; scratch has room for 2 * batch_count keys. `batches` must be valid
+   (as the scene draw checks them) and `instances` hold their transient instances (24 floats each). */
+uint32_t btbh_gpu_scene_opaque_order(
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    uint32_t batch_count,
+    const float *instances,
+    const float view_projection[16],
+    uint32_t *order,
+    uint64_t *scratch
+);
 
 bool btbh_gpu_scene_uses_transparent_pass(
     BTBHGPUSceneBlendMode mode,

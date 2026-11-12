@@ -6,9 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Three opt-in font features, asked for by CHIMERA after it tested 0.4.0's small-text loader. Nothing changes until
-a game uses them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte, and the canvas draws
-what it drew. One shader is new; none changed.
+Opt-in additions asked for by CHIMERA: three font features after it tested 0.4.0's small-text loader, and two
+scene features (batches that cast no sun shadow, a front-to-back opaque pass). Nothing changes until a game uses
+them: a zeroed `BTBHGPUFontDesc.flags` bakes what 0.4.0 bakes, byte for byte, and the canvas draws what it drew;
+a zeroed batch and a zeroed `BTBHGPUScenePost` draw byte for byte as in 0.4.0 (the render-to-target smoke's world
+frame and portraits hash the same). One shader is new (`production_canvas_coverage.frag`); none changed.
 
 ### Added
 - **All kerning pairs in one call** (CHIMERA made about 16k `btbh_gpu_font_kerning` calls per font):
@@ -39,12 +41,76 @@ what it drew. One shader is new; none changed.
   coverage shader and can't find it fails with the path; the snapped metrics; and the top row of
   "xxx zzz uuu vvv nnn ooo eee" with and without the snap. New PNGs: `text-<size>px-ex-r8.png`,
   `text-<size>px-ex-snap.png`, `probe-<size>px-ex-vs-snap.png` and `text-extras.png` / `text-extras-x4.png`.
+- **Batches that cast no sun shadow**: `BTBHGPUSceneGeometryBatch.flags` (a byte that was `ssao_reserved[0]`, so
+  the struct keeps its size and layout) with `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`. Such a batch is drawn and
+  shadowed as usual but stays out of both directional shadow maps (the primary sun's and the secondary's), for
+  decals, ground overlays and small props whose shadow isn't worth the shadow pass. Every scene call takes it.
+  The `_with_visibility` calls' `directional_shadow_visibility` bytes already did this per batch, through those
+  calls only; a batch casts when both let it. The spot (or omni) light's shadow stays with
+  `spot_shadow_visible`, as before: 0 already casts none there, so a batch that should cast no shadow at all sets
+  the flag and leaves `spot_shadow_visible` 0. A shadow map kept over several frames shows a change of the flag
+  at its next update. An unknown bit fails the present with `BTBH_GPU_INVALID_ARGUMENT`.
+- **Front-to-back opaque pass**: `BTBHGPUScenePost.opaque_sort` (a byte that was `ssao_reserved[0]`, so the
+  struct keeps its size) with `BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK`. The opaque pass then draws its batches
+  nearest first, so the depth test throws hidden pixels away before they are shaded. The key is the view depth
+  (clip w; clip z for an orthographic view) of the batch's centre: the mean, over its instances, of the instance
+  transform applied to the centre of the model's or custom mesh's bounds. The sort is stable. It moves only a
+  batch whose picture can't depend on what was drawn before it: opaque (not transparent, the alpha blend mode,
+  not refracting), visible, `depth_compare` LESS, the stencil off, transient instances, bounds known. Every other
+  opaque batch keeps its place and nothing is moved across it: depth compares other than LESS (`LESS_EQUAL`
+  overlays, `ALWAYS`), stencil writers and testers, persistent instance buffers (their positions live on the
+  GPU), custom meshes with a position that isn't finite, and batches with `BTBH_GPU_SCENE_BATCH_KEEP_ORDER`, a
+  second new flag for an order the renderer can't see (a coplanar overlay drawn with LESS, the ground left
+  deliberately after the units). Transparent and refracting batches, the shadow maps and the radiance cascades'
+  sources draw in the order given, as before. The picture stays the same except where two opaque surfaces have
+  exactly the same depth (with LESS the first drawn shows). An unknown value fails the present.
+- Custom meshes measure their vertices' bounds on create and update, for that key.
+- `BTBH_GPU_SCENE_HAS_BATCH_FLAGS` and `BTBH_GPU_SCENE_HAS_OPAQUE_SORT`, defined when these exist, for hosts that
+  build against several releases.
+- Native test `btbh_gpu_scene_order` (no GPU): which batches sort and which keep their place, the depth they sort
+  by (bounds, instance mean, perspective and orthographic, behind the camera), stability, and the two structs'
+  sizes and offsets. In `btbh_gpu_scene_target_smoke` (GPU), read back from a render target: a cube's shadow on a
+  slab gone with the cube's flag (those texels then match a render without shadows) while the cube is still drawn,
+  and kept when the slab has the flag; the sort flipping a depth tie between two copies of a slab (so it does
+  reorder), not flipping it when one of them is pinned, writes the stencil, or draws with `LESS_EQUAL` or
+  `ALWAYS`; a layered scene with see-through cubes byte for byte the same sorted; and the refusals.
+  `BTBH_SMOKE_BENCH=1` prints the timings below.
+
+### Measured
+Windows, RTX 3070 Ti, 1920x1080 renders to a target with a heavy pixel (soft sun shadow, 40 lamps, 32 point
+lights), `BTBH_SMOKE_BENCH=1`. SDL 3.4 has no GPU timestamps, so a sample is the wall time of 20 frames rendered
+back to back and one wait for the GPU, over 20; the configurations took 8 turns each. The machine was shared
+(another game held the GPU at 100 %), so turns varied up to fivefold; the fastest turn of each of two runs is
+quoted.
+- 48 screen-filling slabs given far to near (the worst case): 125 / 133 ms a frame as given, 2.3 / 2.2 ms sorted;
+  the nearest slab alone takes 1.1 / 2.0 ms.
+- A ground slab and 1024 small units in 64 batches, seen from 45 degrees up, the ground given first: 6.3 / 7.3 ms;
+  sorted 5.9 / 5.8 ms (the ground's centre lands among the units, so it moves only part-way back); the ground
+  given last, sorted or not (`KEEP_ORDER`), 5.2 / 5.2 ms. The ground alone takes 2.4 / 3.1 ms, the units alone
+  4.1 / 4.2 ms.
+- CPU, `btbh_gpu_scene_opaque_order` alone: 17 µs for 256 batches of 16 instances, 57 µs for 2048 batches of one,
+  0.23-0.31 ms for 1024 batches of 64 (one pass over the instances, then the sort). A custom mesh update of
+  100 000 vertices spends 0.35-0.38 ms on its bounds. The default order costs nothing new.
+
+### Not added
+- A depth pre-pass. It would draw every opaque batch twice (double the vertex work and draw calls, skinned units
+  most of all), need depth-only pipelines for every vertex path (skinning, billboards, world curvature, the
+  dissolve and shatter surfaces) and alpha-tested ones, and an `EQUAL` main pass that only holds if both passes
+  produce bit-identical depth. Stencil users and depth-compare overrides would have to stay out of it. With the
+  sort, early depth already drops most hidden pixels; a pre-pass is worth measuring again once the GPU can be
+  timed per pass.
 
 ### Upgrading
 - Nothing changes unless a game sets `BTBHGPUFontDesc.flags` or calls `btbh_gpu_font_kerning_pairs`.
 - A game that bakes R8 atlases must ship `production_canvas_coverage.frag` (`.spv` or `.metallib`) next to
   `production_canvas_textured.frag`. It is in the renderer's shader list in `CMakeLists.txt`, so build scripts
   that read that list pick it up.
+- Nothing to set: a zeroed batch and post (`= {0}`, `..Default::default()`) draw as in 0.4.0. A host that names
+  every field sees `ssao_reserved` shrink by one byte in both structs.
+- To keep a hand-made "units before the ground" order and still sort the units, give the ground `KEEP_ORDER`
+  and leave it last.
+- Swift: nothing new. Its draws already keep out of the sun's shadow maps (`castsSunShadow`, a material's
+  `castsShadow`) through the `_with_visibility` bytes; no wrapper for the sort yet.
 
 ## [0.4.0] — 2026-11-12
 

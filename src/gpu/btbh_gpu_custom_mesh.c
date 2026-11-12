@@ -1,5 +1,6 @@
 #include "btbh_gpu_internal.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -225,6 +226,50 @@ static bool btbh_gpu_custom_mesh_validate_data(
     return true;
 }
 
+bool btbh_gpu_custom_mesh_bounds(
+    const void *vertices,
+    uint32_t vertex_count,
+    float minimum[3],
+    float maximum[3]
+) {
+    if (vertices == NULL || vertex_count == 0u) {
+        return false;
+    }
+    const uint8_t *vertex = (const uint8_t *) vertices;
+    float position[3];
+    memcpy(position, vertex, sizeof(position));
+    memcpy(minimum, position, sizeof(position));
+    memcpy(maximum, position, sizeof(position));
+    for (uint32_t index = 0u; index < vertex_count; index += 1u) {
+        /* (The host's bytes need not be aligned for floats.) */
+        memcpy(position, vertex, sizeof(position));
+        vertex += BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE;
+        if (!isfinite(position[0]) ||
+            !isfinite(position[1]) ||
+            !isfinite(position[2])) {
+            return false;
+        }
+        for (uint32_t axis = 0u; axis < 3u; axis += 1u) {
+            minimum[axis] = position[axis] < minimum[axis] ? position[axis] : minimum[axis];
+            maximum[axis] = position[axis] > maximum[axis] ? position[axis] : maximum[axis];
+        }
+    }
+    return true;
+}
+
+static void btbh_gpu_custom_mesh_measure(
+    BTBHGPUCustomMesh *mesh,
+    const void *vertices,
+    uint32_t vertex_count
+) {
+    mesh->bounds_valid = btbh_gpu_custom_mesh_bounds(
+        vertices,
+        vertex_count,
+        mesh->minimum,
+        mesh->maximum
+    );
+}
+
 static void btbh_gpu_custom_mesh_unlink(BTBHGPUCustomMesh *mesh) {
     BTBHGPUWindow *owner = mesh->owner;
     if (owner == NULL) {
@@ -358,6 +403,7 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
     mesh->vertex_count = vertex_count;
     mesh->index_count = index_count;
     mesh->vertex_byte_count = vertex_byte_count;
+    btbh_gpu_custom_mesh_measure(mesh, vertices, vertex_count);
 
     report->result = BTBH_GPU_OK;
     report->vertex_count = vertex_count;
@@ -473,6 +519,7 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     ) {
         return report->result;
     }
+    btbh_gpu_custom_mesh_measure(mesh, vertices, vertex_count);
 
     report->result = BTBH_GPU_OK;
     report->vertex_count = vertex_count;

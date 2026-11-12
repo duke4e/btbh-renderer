@@ -865,8 +865,34 @@ typedef struct BTBHGPUSceneGeometryBatch {
     /* How it takes part in the horizon-based ambient occlusion (ssao_enabled 2): BTBHGPUSceneSSAOMode (0:
      * fully). Procedural pixel water is never darkened by it where it is water. */
     uint8_t ssao_mode;
-    uint8_t ssao_reserved[3];
+    /* BTBH_GPU_SCENE_BATCH_* bits (since 0.5.0, in a byte that was ssao_reserved[0], so the struct keeps its
+     * size and layout). 0 draws as before; a bit the renderer doesn't know fails the present with
+     * BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t flags;
+    uint8_t ssao_reserved[2];
 } BTBHGPUSceneGeometryBatch;
+
+/* BTBHGPUSceneGeometryBatch.flags (since 0.5.0). */
+enum {
+    /* The batch is drawn, and shadowed, as usual, but casts into neither directional shadow map (the primary
+     * one, the sun's, nor the secondary one): for decals, ground overlays and small props whose shadow isn't
+     * worth the shadow pass. Every scene call takes it; with the _with_visibility calls a batch casts only
+     * where its directional_shadow_visibility byte lets it too (that array did this before, through those
+     * calls only). The spot (or omni) light's shadow is left to spot_shadow_visible, as before: 0 casts
+     * none there, so a batch that should cast no shadow at all sets this and leaves spot_shadow_visible 0.
+     * A transparent batch casts no shadow either way. Where a shadow map is kept over several frames (an
+     * update period above 1), a change of the flag shows at the map's next update. */
+    BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW = 1u << 0,
+    /* With BTBHGPUScenePost.opaque_sort FRONT_TO_BACK: the batch keeps its place in the opaque pass and no
+     * other batch is moved across it, for an order that matters in a way the renderer can't see (a coplanar
+     * overlay drawn with depth LESS over what it lies on; the ground deliberately left after the units, so
+     * that the units before it are sorted among themselves and it still draws last). Without the sort it
+     * changes nothing. */
+    BTBH_GPU_SCENE_BATCH_KEEP_ORDER = 1u << 1
+};
+
+/* Defined when BTBHGPUSceneGeometryBatch.flags and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW exist (since 0.5.0). */
+#define BTBH_GPU_SCENE_HAS_BATCH_FLAGS 1
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
@@ -1004,6 +1030,37 @@ typedef struct BTBHGPUSceneLighting {
     uint8_t directional_shadow_reserved[3];
 } BTBHGPUSceneLighting;
 
+/* The order the opaque pass draws its batches in (BTBHGPUScenePost.opaque_sort, since 0.5.0). */
+typedef enum BTBHGPUSceneOpaqueSort {
+    /* The order given (as before 0.5.0). */
+    BTBH_GPU_SCENE_OPAQUE_SORT_SUBMITTED = 0,
+    /* Nearest first, so the depth test throws hidden pixels away before they are shaded. The key is the
+     * view depth (clip w for a perspective view-projection, clip z for an orthographic one) of the batch's
+     * centre: the mean, over its instances, of the instance transform applied to the centre of its geometry's
+     * bounds (a model's whole bounds, whatever its material_slot; a skinned model's in its bind pose; a custom
+     * mesh's vertices). Equal depths keep the order given.
+     * It moves only a batch whose picture can't depend on what was drawn before it: drawn in the opaque pass
+     * (transparency_enabled 0, BTBH_GPU_SCENE_BLEND_ALPHA, not REFRACT), visible, depth_compare
+     * BTBH_GPU_SCENE_DEPTH_LESS, the stencil off (reference 0, compare ALWAYS, KEEP, KEEP, REPLACE), transient
+     * instances (instance_buffer NULL), bounds known, without BTBH_GPU_SCENE_BATCH_KEEP_ORDER. Every other
+     * opaque batch keeps its place and nothing is moved across it, so the sort runs within each run of
+     * movable batches between them: other depth compares (LESS_EQUAL overlays, ALWAYS), stencil writers and
+     * testers, persistent instance buffers (their positions live on the GPU), a custom mesh with a position
+     * that isn't finite, KEEP_ORDER.
+     * Transparent and refracting batches draw after the opaque ones in the order given, as before, and so do
+     * the shadow maps and the radiance cascades' sources.
+     * The picture stays the same, except where two opaque surfaces have exactly the same depth (copies of one
+     * surface): with LESS the first drawn shows, and the sort may change which is first; pin such a batch
+     * with KEEP_ORDER or draw it with LESS_EQUAL. The pass may bind pipelines more often (the batches are no
+     * longer grouped as given). Costs the CPU one pass over the movable batches' instances and a sort of the
+     * batches; memory for it is kept with the window. */
+    BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK = 1,
+    BTBH_GPU_SCENE_OPAQUE_SORT_COUNT = 2
+} BTBHGPUSceneOpaqueSort;
+
+/* Defined when BTBHGPUScenePost.opaque_sort and BTBH_GPU_SCENE_BATCH_KEEP_ORDER exist (since 0.5.0). */
+#define BTBH_GPU_SCENE_HAS_OPAQUE_SORT 1
+
 typedef struct BTBHGPUScenePost {
     BTBHGPUTexture *lut_texture;
     float tonemap_white;
@@ -1112,7 +1169,11 @@ typedef struct BTBHGPUScenePost {
     uint8_t ssao_contact;
     /* 1: the scene shows the occlusion alone, in grey (for tuning). */
     uint8_t ssao_debug_view;
-    uint8_t ssao_reserved[2];
+    /* The order the opaque pass draws its batches in: a BTBHGPUSceneOpaqueSort (since 0.5.0, in a byte that
+     * was ssao_reserved[0], so the struct keeps its size). 0 draws them in the order given, as before; a value
+     * past the enum fails the present with BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t opaque_sort;
+    uint8_t ssao_reserved[1];
 } BTBHGPUScenePost;
 
 typedef struct BTBHGPUSceneReport {
@@ -1542,7 +1603,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
 );
 // As btbh_gpu_window_scene_present_instances, with per-batch visibility: scene_visibility
 // (drawn in the scene) and directional_shadow_visibility (cast into the directional shadow
-// maps), one byte (0 or 1) per batch; NULL means every batch.
+// maps), one byte (0 or 1) per batch; NULL means every batch. A batch with
+// BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW casts into neither directional map, whatever its byte says.
 BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,

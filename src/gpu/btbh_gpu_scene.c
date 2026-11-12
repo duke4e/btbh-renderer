@@ -429,6 +429,13 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUTexture *temporal_previous_color;
     uint32_t temporal_previous_color_width;
     uint32_t temporal_previous_color_height;
+    /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, per frame: the opaque pass's batches in drawing order, where
+       each batch's geometries start among the prepared ones (their bone offsets), and the sort's keys (twice
+       opaque_order_capacity). */
+    uint32_t *opaque_order;
+    uint32_t *opaque_geometry_base;
+    uint64_t *opaque_order_keys;
+    uint32_t opaque_order_capacity;
 };
 
 static bool btbh_gpu_scene_shadow_resources_ready(
@@ -4466,6 +4473,10 @@ static bool btbh_gpu_scene_validate_batches(
             isfinite(batch->surface_parameters1[2]) &&
             isfinite(batch->surface_parameters1[3]) &&
             batch->ssao_mode < BTBH_GPU_SCENE_SSAO_MODE_COUNT &&
+            (batch->flags & ~(uint32_t)(
+                BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
+                BTBH_GPU_SCENE_BATCH_KEEP_ORDER
+            )) == 0u &&
             isfinite(batch->detail_parameters[0]) &&
             isfinite(batch->detail_parameters[1]) &&
             isfinite(batch->detail_parameters[2]) &&
@@ -4560,6 +4571,249 @@ static uint32_t btbh_gpu_scene_float_bits(float value) {
     uint32_t bits = 0u;
     (void)memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+/* ---- The opaque pass's front-to-back order (BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK) ---- */
+
+/* The opaque pass draws a batch that is neither transparent nor refracting (as the geometry phases sort them). */
+static bool btbh_gpu_scene_batch_draws_opaque(
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+    return batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
+        !btbh_gpu_scene_uses_transparent_pass(
+            batch->blend_mode,
+            batch->transparency_enabled != 0u
+        );
+}
+
+/* Whether the order may move an opaque batch: with depth LESS and the stencil off, what it leaves in the
+   targets doesn't depend on what was drawn before it (the nearest surface shows, whoever drew first), and the
+   host didn't pin it. Its depth must be known too (btbh_gpu_scene_batch_view_depth). */
+static bool btbh_gpu_scene_batch_movable(
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+    BTBHGPUSceneStencilVariant stencil_variant;
+    return (batch->flags & BTBH_GPU_SCENE_BATCH_KEEP_ORDER) == 0u &&
+        batch->depth_compare == BTBH_GPU_SCENE_DEPTH_LESS &&
+        btbh_gpu_scene_stencil_variant(batch, &stencil_variant) &&
+        stencil_variant == BTBH_GPU_SCENE_STENCIL_DISABLED &&
+        batch->instance_buffer == NULL;
+}
+
+/* The view depth a batch sorts by: of its geometry's bounds' centre, through each of its transient instances,
+   averaged (depth is affine in the position, so this is the depth of the instances' mean centre). False when
+   it can't be known cheaply: instances in a persistent buffer, a custom mesh without valid bounds. */
+static bool btbh_gpu_scene_batch_view_depth(
+    const BTBHGPUSceneGeometryBatch *batch,
+    const float *instances,
+    const float depth_row[4],
+    float *depth
+) {
+    const float *minimum = NULL;
+    const float *maximum = NULL;
+    if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
+        minimum = batch->model->minimum;
+        maximum = batch->model->maximum;
+    } else if (batch->custom_mesh->bounds_valid) {
+        minimum = batch->custom_mesh->minimum;
+        maximum = batch->custom_mesh->maximum;
+    }
+    if (minimum == NULL ||
+        instances == NULL ||
+        batch->instance_buffer != NULL ||
+        batch->instance_count == 0u) {
+        return false;
+    }
+    const float centre[3] = {
+        0.5f * (minimum[0] + maximum[0]),
+        0.5f * (minimum[1] + maximum[1]),
+        0.5f * (minimum[2] + maximum[2])
+    };
+    /* The instance transform is column-major (translation in 12-14), as the vertex shader reads it. */
+    const float *record =
+        instances + (size_t)batch->first_instance * BTBH_GPU_SCENE_INSTANCE_FLOATS;
+    double sum = 0.0;
+    for (uint32_t index = 0u; index < batch->instance_count; ++index) {
+        const float x = record[0] * centre[0] + record[4] * centre[1] +
+            record[8] * centre[2] + record[12];
+        const float y = record[1] * centre[0] + record[5] * centre[1] +
+            record[9] * centre[2] + record[13];
+        const float z = record[2] * centre[0] + record[6] * centre[1] +
+            record[10] * centre[2] + record[14];
+        sum += (double)(depth_row[0] * x + depth_row[1] * y +
+            depth_row[2] * z + depth_row[3]);
+        record += BTBH_GPU_SCENE_INSTANCE_FLOATS;
+    }
+    const float mean = (float)(sum / (double)batch->instance_count);
+    if (!isfinite(mean)) {
+        return false;
+    }
+    *depth = mean;
+    return true;
+}
+
+/* Sorts `count` keys ascending: insertion sort in runs of 16, then bottom-up merges through `buffer`. */
+static void btbh_gpu_scene_sort_keys(
+    uint64_t *keys,
+    uint64_t *buffer,
+    uint32_t count
+) {
+    const size_t run = 16u;
+    for (size_t start = 0u; start < count; start += run) {
+        const size_t end = SDL_min(start + run, (size_t)count);
+        for (size_t index = start + 1u; index < end; ++index) {
+            const uint64_t key = keys[index];
+            size_t slot = index;
+            while (slot > start && keys[slot - 1u] > key) {
+                keys[slot] = keys[slot - 1u];
+                slot -= 1u;
+            }
+            keys[slot] = key;
+        }
+    }
+    uint64_t *source = keys;
+    uint64_t *target = buffer;
+    for (size_t width = run; width < count; width *= 2u) {
+        for (size_t start = 0u; start < count; start += 2u * width) {
+            const size_t middle = SDL_min(start + width, (size_t)count);
+            const size_t end = SDL_min(start + 2u * width, (size_t)count);
+            size_t left = start;
+            size_t right = middle;
+            size_t out = start;
+            while (left < middle && right < end) {
+                target[out++] = source[left] <= source[right]
+                    ? source[left++]
+                    : source[right++];
+            }
+            while (left < middle) {
+                target[out++] = source[left++];
+            }
+            while (right < end) {
+                target[out++] = source[right++];
+            }
+        }
+        uint64_t *swap = source;
+        source = target;
+        target = swap;
+    }
+    if (source != keys) {
+        (void)memcpy(keys, source, sizeof(uint64_t) * count);
+    }
+}
+
+/* Sorts the run of movable batches gathered in keys[0..run_count) and appends it to the order. */
+static uint32_t btbh_gpu_scene_flush_opaque_run(
+    uint64_t *keys,
+    uint64_t *buffer,
+    uint32_t run_count,
+    uint32_t *order,
+    uint32_t order_count
+) {
+    btbh_gpu_scene_sort_keys(keys, buffer, run_count);
+    for (uint32_t index = 0u; index < run_count; ++index) {
+        order[order_count++] = (uint32_t)(keys[index] & UINT32_MAX);
+    }
+    return order_count;
+}
+
+uint32_t btbh_gpu_scene_opaque_order(
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    uint32_t batch_count,
+    const float *instances,
+    const float view_projection[16],
+    uint32_t *order,
+    uint64_t *scratch
+) {
+    /* Perspective: clip w grows with the distance in front of the camera. Orthographic (clip w constant):
+       clip z does (0 near to 1 far, as the LESS test reads it). The matrix is column-major. */
+    const uint32_t row =
+        fabsf(view_projection[3]) + fabsf(view_projection[7]) +
+            fabsf(view_projection[11]) > 0.0f
+            ? 3u
+            : 2u;
+    const float depth_row[4] = {
+        view_projection[row],
+        view_projection[4u + row],
+        view_projection[8u + row],
+        view_projection[12u + row]
+    };
+    uint64_t *keys = scratch;
+    uint64_t *buffer = scratch + batch_count;
+    uint32_t order_count = 0u;
+    uint32_t run_count = 0u;
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[index];
+        if ((scene_visibility != NULL && scene_visibility[index] == 0u) ||
+            !btbh_gpu_scene_batch_draws_opaque(batch)) {
+            continue;
+        }
+        float depth = 0.0f;
+        if (btbh_gpu_scene_batch_movable(batch) &&
+            btbh_gpu_scene_batch_view_depth(batch, instances, depth_row, &depth)) {
+            /* The key: the depth's bits ordered as the floats are, then the index (stable, and unique). */
+            const uint32_t bits = btbh_gpu_scene_float_bits(depth);
+            const uint32_t ordered =
+                (bits & 0x80000000u) != 0u ? ~bits : bits | 0x80000000u;
+            keys[run_count++] = ((uint64_t)ordered << 32u) | index;
+            continue;
+        }
+        /* It keeps its place: the run before it sorts on its own. */
+        order_count = btbh_gpu_scene_flush_opaque_run(
+            keys,
+            buffer,
+            run_count,
+            order,
+            order_count
+        );
+        run_count = 0u;
+        order[order_count++] = index;
+    }
+    return btbh_gpu_scene_flush_opaque_run(
+        keys,
+        buffer,
+        run_count,
+        order,
+        order_count
+    );
+}
+
+static bool btbh_gpu_scene_ensure_opaque_order(
+    BTBHGPUSceneRuntime *runtime,
+    uint32_t batch_count
+) {
+    if (batch_count <= runtime->opaque_order_capacity) {
+        return true;
+    }
+    if ((size_t)batch_count > SIZE_MAX / (2u * sizeof(uint64_t))) {
+        return false;
+    }
+    uint32_t *order = (uint32_t *)realloc(
+        runtime->opaque_order,
+        sizeof(uint32_t) * batch_count
+    );
+    if (order == NULL) {
+        return false;
+    }
+    runtime->opaque_order = order;
+    uint32_t *geometry_base = (uint32_t *)realloc(
+        runtime->opaque_geometry_base,
+        sizeof(uint32_t) * batch_count
+    );
+    if (geometry_base == NULL) {
+        return false;
+    }
+    runtime->opaque_geometry_base = geometry_base;
+    uint64_t *keys = (uint64_t *)realloc(
+        runtime->opaque_order_keys,
+        2u * sizeof(uint64_t) * batch_count
+    );
+    if (keys == NULL) {
+        return false;
+    }
+    runtime->opaque_order_keys = keys;
+    runtime->opaque_order_capacity = batch_count;
+    return true;
 }
 
 static bool btbh_gpu_scene_animation_sample_matches(
@@ -5192,6 +5446,7 @@ static bool btbh_gpu_scene_post_valid(
         post->anti_aliasing <= BTBH_GPU_SCENE_ANTI_ALIASING_MAX &&
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
         post->mirror_horizontal <= 1u &&
+        post->opaque_sort < BTBH_GPU_SCENE_OPAQUE_SORT_COUNT &&
         (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
          (isfinite(post->temporal_camera_near) &&
           isfinite(post->temporal_camera_far) &&
@@ -5337,11 +5592,14 @@ static bool btbh_gpu_scene_render_directional_shadow(
             const uint32_t bone_offset =
                 bone_offsets[geometry_cursor];
             geometry_cursor += 1u;
+            /* The casters: opaque batches; in the spot (or omni) map those with spot_shadow_visible, in the
+               directional ones those the visibility bytes and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW let in. */
             if (batch->transparency_enabled != 0u ||
                 (shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT
                     ? batch->spot_shadow_visible == 0u
-                    : (directional_shadow_visibility != NULL &&
-                       directional_shadow_visibility[batch_index] == 0u))) {
+                    : ((directional_shadow_visibility != NULL &&
+                        directional_shadow_visibility[batch_index] == 0u) ||
+                       (batch->flags & BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW) != 0u))) {
                 continue;
             }
             const bool animated = bone_offset != UINT32_MAX;
@@ -6473,6 +6731,32 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             (double)(bones_finished_ticks - bones_started_ticks) /
             1000000.0;
     }
+    /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK: the opaque pass draws in this order. The bone offsets stay laid
+       out as the batches were given, so it also notes where each batch's geometries start among them. */
+    const bool opaque_sorted =
+        post->opaque_sort == BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK;
+    if (opaque_sorted &&
+        !btbh_gpu_scene_ensure_opaque_order(runtime, batch_count)) {
+        free(bone_matrices);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "Could not allocate the GPU scene's opaque order"
+        );
+        return report->result;
+    }
+    const uint32_t opaque_order_count = opaque_sorted
+        ? btbh_gpu_scene_opaque_order(
+            batches,
+            scene_visibility,
+            batch_count,
+            instances,
+            requested_view_projection,
+            runtime->opaque_order,
+            runtime->opaque_order_keys
+        )
+        : 0u;
     uint32_t pipeline_geometry_cursor = 0u;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
@@ -6482,6 +6766,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
                 ? batch->model->primitive_count
                 : 1u;
+        if (opaque_sorted) {
+            runtime->opaque_geometry_base[batch_index] =
+                pipeline_geometry_cursor;
+        }
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
              ++geometry_index) {
@@ -7530,9 +7818,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     : "BTBH Forward Transparent Draws")
         );
         uint32_t geometry_cursor = 0u;
-        for (uint32_t batch_index = 0u;
-             batch_index < batch_count;
-             ++batch_index) {
+        /* Sorted, the opaque pass walks its own batches in their order, each from its first geometry's
+           place among the prepared ones; otherwise every pass walks all batches as given. */
+        const bool phase_ordered = opaque_sorted && !transparent_phase;
+        const uint32_t phase_batch_count =
+            phase_ordered ? opaque_order_count : batch_count;
+        for (uint32_t phase_index = 0u;
+             phase_index < phase_batch_count;
+             ++phase_index) {
+        const uint32_t batch_index = phase_ordered
+            ? runtime->opaque_order[phase_index]
+            : phase_index;
+        if (phase_ordered) {
+            geometry_cursor = runtime->opaque_geometry_base[batch_index];
+        }
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
         SDL_GPUBuffer *batch_instance_buffer =
             batch->instance_buffer != NULL
@@ -8284,7 +8583,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             primitive_draw_count += 1u;
         }
         }
-        if (geometry_cursor != prepared_geometry_count) {
+        if (!phase_ordered && geometry_cursor != prepared_geometry_count) {
             SDL_EndGPURenderPass(pass);
             btbh_gpu_scene_cancel_submission(window, command);
             free(bone_offsets);
@@ -10136,6 +10435,9 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     window->pending_scene_ready = false;
     free(window->scene_runtime->temporal_palettes);
     free(window->scene_runtime->temporal_palette_matrices);
+    free(window->scene_runtime->opaque_order);
+    free(window->scene_runtime->opaque_geometry_base);
+    free(window->scene_runtime->opaque_order_keys);
     free(window->scene_runtime);
     window->scene_runtime = NULL;
 }

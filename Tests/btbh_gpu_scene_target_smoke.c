@@ -13,6 +13,14 @@
  * first ones and in A as A's first, must be byte-identical: no shadow map is kept from one portrait to
  * the next, whatever the shadow update periods.
  *
+ * Then, rendered to the target and read back (0.5.0): a cube's shadow on a slab, gone when the cube has
+ * BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW while the cube is still drawn, and still there when the slab has the flag
+ * (it receives); the opaque pass sorted front to back (BTBHGPUScenePost.opaque_sort), which flips a depth tie
+ * between two copies of a slab (so it does reorder) but not when a batch is pinned (KEEP_ORDER), writes the
+ * stencil, or uses LESS_EQUAL or ALWAYS, and leaves a layered scene with see-through cubes byte for byte the
+ * same; and the refusal of an unknown sort or flag. BTBH_SMOKE_BENCH=1 also times heavy-overdraw scenes as
+ * given and sorted, and the order's CPU cost (prints only).
+ *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
 
@@ -65,6 +73,8 @@ static char shader_paths[11][1024];
 typedef struct SmokeWindow {
     BTBHGPUWindow *window;
     BTBHGPUCustomMesh *cube;
+    /* The cube wound the other way: lit on the outside (the 0.5.0 checks and the bench). */
+    BTBHGPUCustomMesh *lit_cube;
     /* Where each world frame is copied (the frame's scene is finished by the copy, not a canvas). */
     BTBHGPUTexture *frame;
     BTBHGPUTexture *portrait;
@@ -258,8 +268,10 @@ static BTBHGPUSceneGeometryBatch cube_batch(BTBHGPUCustomMesh *cube, uint32_t fi
     return batch;
 }
 
-/* A unit cube (-0.5..0.5), 24 floats a vertex: position, normal, uv, tangent, colour, joints, weights. */
-static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
+/* A unit cube (-0.5..0.5), 24 floats a vertex: position, normal, uv, tangent, colour, joints, weights.
+   Its faces are wound so that the renderer takes their outsides for back faces (and turns their normals in);
+   front_facing winds them the other way, for the checks that need the sun to light the faces it faces. */
+static BTBHGPUCustomMesh *create_cube_wound(BTBHGPUWindow *window, bool front_facing) {
     static const float faces[6][3] = {
         {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
     };
@@ -292,7 +304,8 @@ static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
         }
         const uint32_t base = face * 4u;
         const uint32_t quad[6] = {base, base + 1u, base + 2u, base, base + 2u, base + 3u};
-        memcpy(&indices[face * 6u], quad, sizeof(quad));
+        const uint32_t reversed[6] = {base, base + 2u, base + 1u, base, base + 3u, base + 2u};
+        memcpy(&indices[face * 6u], front_facing ? reversed : quad, sizeof(quad));
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
@@ -310,6 +323,10 @@ static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
     }
     assert(mesh != NULL);
     return mesh;
+}
+
+static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
+    return create_cube_wound(window, false);
 }
 
 /* The texture's bytes (4 a texel), read back through SDL_GPU. */
@@ -481,6 +498,682 @@ static BTBHGPUResult render_portrait(
     );
 }
 
+/* ---- BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW and BTBHGPUScenePost.opaque_sort (since 0.5.0) ---- */
+
+static int texel_luminance(const uint8_t *pixels, uint32_t index) {
+    const uint8_t *texel = &pixels[index * 4u];
+    return (int)texel[0] + (int)texel[1] + (int)texel[2];
+}
+
+static int texel_channel_distance(const uint8_t *a, const uint8_t *b, uint32_t index) {
+    int distance = 0;
+    for (uint32_t channel = 0u; channel < 3u; ++channel) {
+        const int difference = abs((int)a[index * 4u + channel] - (int)b[index * 4u + channel]);
+        distance = difference > distance ? difference : distance;
+    }
+    return distance;
+}
+
+/* Renders `batches` into the window's portrait target (twice its size, halved) and reads it back. */
+static uint8_t *render_aside(
+    SmokeWindow *smoke,
+    const SmokeCamera *camera,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    const BTBHGPUResult result = btbh_gpu_window_scene_render_to_target(
+        smoke->window,
+        smoke->portrait,
+        shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+        shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+        shader_paths[8], shader_paths[9], shader_paths[10],
+        SMOKE_SHADER_FORMAT,
+        2u * PORTRAIT_SIZE,
+        2u * PORTRAIT_SIZE,
+        camera->view_projection,
+        camera->right,
+        camera->up,
+        camera->position,
+        lighting,
+        post,
+        instances,
+        instance_count,
+        instance_count,
+        batches,
+        NULL,
+        NULL,
+        batch_count,
+        12u, 14u, 20u, 255u,
+        report
+    );
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "scene aside: %s\n", report->message);
+    }
+    assert(result == BTBH_GPU_OK);
+    return read_texture(smoke->window, smoke->portrait);
+}
+
+/* A cube floating over a slab under a sun from (8, 6, 3): its shadow lies on the slab, off towards -x and -z,
+   in view of a camera from +z. Two batches (cube, slab) with their flags; the cube left out when !with_cube, and
+   the sun's shadow map turned off when !shadowed. (The cube wound to be lit on the outside: with the other
+   winding the sun would light no face the camera sees, and no shadow would show.) */
+static uint8_t *render_shadow_scene(
+    SmokeWindow *smoke,
+    uint8_t cube_flags,
+    uint8_t slab_flags,
+    bool with_cube,
+    bool shadowed
+) {
+    const float eye[3] = {0.0f, 9.0f, 6.0f};
+    const float centre[3] = {-1.0f, 0.0f, -0.5f};
+    const SmokeCamera camera = look_at(eye, centre, 0.9f, 1.0f, NULL);
+    const float sun[3] = {8.0f, 6.0f, 3.0f};
+    BTBHGPUSceneLighting lighting = smoke_lighting_from(sun);
+    lighting.directional_shadow_enabled = shadowed ? 1u : 0u;
+    const BTBHGPUScenePost post = smoke_post(&camera, 0u);
+    const float gold[4] = {1.0f, 0.8f, 0.3f, 1.0f};
+    const float slate[4] = {0.5f, 0.55f, 0.6f, 1.0f};
+    float instances[2][24];
+    instance(instances[0], 0.0f, 2.1f, 0.0f, 1.4f, 1.4f, 1.4f, gold);
+    instance(instances[1], 0.0f, -0.05f, 0.0f, 8.0f, 0.1f, 8.0f, slate);
+    BTBHGPUSceneGeometryBatch batches[2] = {
+        cube_batch(smoke->lit_cube, 0u, 1u),
+        cube_batch(smoke->lit_cube, 1u, 1u),
+    };
+    batches[0].flags = cube_flags;
+    batches[1].flags = slab_flags;
+    BTBHGPUSceneReport report;
+    return render_aside(
+        smoke,
+        &camera,
+        &lighting,
+        &post,
+        &instances[0][0],
+        2u,
+        with_cube ? &batches[0] : &batches[1],
+        with_cube ? 2u : 1u,
+        &report
+    );
+}
+
+/* The cube casts its shadow on the slab; with NO_SUN_SHADOW it is drawn but casts none, and a slab with the
+   flag still receives the cube's shadow. */
+static void check_no_sun_shadow(SmokeWindow *smoke) {
+    uint8_t *casting = render_shadow_scene(smoke, 0u, 0u, true, true);
+    uint8_t *flagged = render_shadow_scene(smoke, BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW, 0u, true, true);
+    uint8_t *receiving = render_shadow_scene(smoke, 0u, BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW, true, true);
+    uint8_t *slab_only = render_shadow_scene(smoke, 0u, 0u, false, true);
+    uint8_t *unshadowed = render_shadow_scene(smoke, 0u, 0u, true, false);
+    const uint32_t texels = PORTRAIT_SIZE * PORTRAIT_SIZE;
+    uint32_t shadow_texels = 0u;
+    uint32_t darker_texels = 0u;
+    uint32_t received_texels = 0u;
+    uint32_t cube_texels = 0u;
+    int deepest_shadow = 0;
+    int farthest_from_unshadowed = 0;
+    for (uint32_t index = 0u; index < texels; ++index) {
+        const int lit = texel_luminance(flagged, index);
+        const int shaded = texel_luminance(casting, index);
+        if (lit > shaded + 24) {
+            /* The cube's shadow: brighter once the cube casts none. */
+            shadow_texels += 1u;
+            deepest_shadow = lit - shaded > deepest_shadow ? lit - shaded : deepest_shadow;
+            if (texel_channel_distance(receiving, casting, index) <= 2) {
+                received_texels += 1u;
+            }
+            const int unshadowed_distance = texel_channel_distance(flagged, unshadowed, index);
+            farthest_from_unshadowed =
+                unshadowed_distance > farthest_from_unshadowed ? unshadowed_distance : farthest_from_unshadowed;
+        } else if (shaded > lit + 6) {
+            /* Taking a caster out never darkens anything. */
+            darker_texels += 1u;
+        }
+        if (texel_channel_distance(flagged, slab_only, index) > 30) {
+            cube_texels += 1u;
+        }
+    }
+    printf(
+        "no sun shadow: %u shadow texels (deepest %d) gone with the cube's flag (there within %d of no shadows at "
+        "all), %u of them kept with the slab's; the flagged cube still covers %u texels\n",
+        shadow_texels,
+        deepest_shadow,
+        farthest_from_unshadowed,
+        received_texels,
+        cube_texels
+    );
+    (void)fflush(stdout);
+    if (getenv("BTBH_SMOKE_DUMP") != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof(path), "%s/shadow-cast.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, casting);
+        (void)snprintf(path, sizeof(path), "%s/shadow-flagged.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, flagged);
+        (void)snprintf(path, sizeof(path), "%s/shadow-received.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, receiving);
+        (void)snprintf(path, sizeof(path), "%s/shadow-off.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, unshadowed);
+    }
+    assert(shadow_texels >= 40u);
+    assert(deepest_shadow >= 60);
+    assert(darker_texels == 0u);
+    assert(farthest_from_unshadowed <= 3);
+    assert(received_texels == shadow_texels);
+    assert(cube_texels >= 40u);
+    free(casting);
+    free(flagged);
+    free(receiving);
+    free(slab_only);
+    free(unshadowed);
+}
+
+/* Two copies of one slab facing the camera at exactly the same depth: batch A (light), and batch B (dark),
+   whose second instance far off to the side and close to the camera makes its mean depth the nearer one. */
+static uint8_t *render_tie_scene(
+    SmokeWindow *smoke,
+    uint8_t opaque_sort,
+    const BTBHGPUSceneGeometryBatch *a_state,
+    const BTBHGPUSceneGeometryBatch *b_state,
+    BTBHGPUSceneReport *report
+) {
+    const float eye[3] = {0.0f, 0.0f, 5.0f};
+    const float centre[3] = {0.0f, 0.0f, 0.0f};
+    const SmokeCamera camera = look_at(eye, centre, 0.8f, 1.0f, NULL);
+    BTBHGPUSceneLighting lighting = smoke_lighting();
+    lighting.directional_shadow_enabled = 0u;
+    BTBHGPUScenePost post = smoke_post(&camera, 0u);
+    post.opaque_sort = opaque_sort;
+    const float light[4] = {0.9f, 0.9f, 0.9f, 1.0f};
+    const float dark[4] = {0.08f, 0.08f, 0.08f, 1.0f};
+    float instances[3][24];
+    instance(instances[0], 0.0f, 0.0f, 0.0f, 3.0f, 3.0f, 0.1f, light);
+    instance(instances[1], 0.0f, 0.0f, 0.0f, 3.0f, 3.0f, 0.1f, dark);
+    instance(instances[2], 40.0f, 0.0f, 3.0f, 1.0f, 1.0f, 1.0f, dark);
+    BTBHGPUSceneGeometryBatch batches[2] = {*a_state, *b_state};
+    batches[0].first_instance = 0u;
+    batches[0].instance_count = 1u;
+    batches[1].first_instance = 1u;
+    batches[1].instance_count = 2u;
+    return render_aside(smoke, &camera, &lighting, &post, &instances[0][0], 3u, batches, 2u, report);
+}
+
+/* The brightness (r + g + b) in the middle of the target, where both copies lie. */
+static int centre_luminance(const uint8_t *pixels) {
+    return texel_luminance(pixels, (PORTRAIT_SIZE / 2u) * PORTRAIT_SIZE + PORTRAIT_SIZE / 2u);
+}
+
+/* Overlapping cubes at different depths given far to near, a slab behind them and two overlapping
+   see-through cubes: sorted, the picture must stay byte for byte the same (no two opaque surfaces tie). */
+static uint8_t *render_layered_scene(SmokeWindow *smoke, uint8_t opaque_sort, BTBHGPUSceneReport *report) {
+    const float eye[3] = {1.5f, 2.0f, 7.0f};
+    const float centre[3] = {0.0f, 0.3f, 0.0f};
+    const SmokeCamera camera = look_at(eye, centre, 0.8f, 1.0f, NULL);
+    const BTBHGPUSceneLighting lighting = smoke_lighting();
+    BTBHGPUScenePost post = smoke_post(&camera, 0u);
+    post.opaque_sort = opaque_sort;
+    const float colours[6][4] = {
+        {0.5f, 0.55f, 0.6f, 1.0f},
+        {0.9f, 0.3f, 0.2f, 1.0f},
+        {0.2f, 0.8f, 0.3f, 1.0f},
+        {0.3f, 0.4f, 0.9f, 1.0f},
+        {0.9f, 0.9f, 0.2f, 0.5f},
+        {0.2f, 0.9f, 0.9f, 0.5f},
+    };
+    float instances[6][24];
+    instance(instances[0], 0.0f, -0.6f, -2.0f, 9.0f, 0.1f, 9.0f, colours[0]);
+    instance(instances[1], -0.4f, 0.2f, -1.7f, 1.3f, 1.3f, 1.3f, colours[1]);
+    instance(instances[2], 0.1f, 0.3f, -0.15f, 1.1f, 1.1f, 1.1f, colours[2]);
+    instance(instances[3], 0.5f, 0.1f, 1.35f, 0.9f, 0.9f, 0.9f, colours[3]);
+    instance(instances[4], -0.3f, 0.4f, 2.1f, 1.2f, 1.2f, 0.2f, colours[4]);
+    instance(instances[5], 0.2f, 0.2f, 2.9f, 1.2f, 1.2f, 0.2f, colours[5]);
+    BTBHGPUSceneGeometryBatch batches[6];
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        batches[index] = cube_batch(smoke->lit_cube, index, 1u);
+        batches[index].transparency_enabled = index >= 4u ? 1u : 0u;
+    }
+    return render_aside(smoke, &camera, &lighting, &post, &instances[0][0], 6u, batches, 6u, report);
+}
+
+/* The opaque pass's front-to-back order: it reorders (the tie shows who drew first), keeps the picture
+   otherwise, never moves a pinned batch or one whose picture depends on the order, and refuses unknown values. */
+static void check_opaque_sort(SmokeWindow *smoke) {
+    const size_t bytes = (size_t)PORTRAIT_SIZE * PORTRAIT_SIZE * 4u;
+    BTBHGPUSceneReport report;
+    const BTBHGPUSceneGeometryBatch plain = cube_batch(smoke->lit_cube, 0u, 1u);
+
+    /* The tie: as given A draws first and keeps the pixels (depth LESS); sorted, B (nearer on average) does. */
+    uint8_t *submitted = render_tie_scene(smoke, 0u, &plain, &plain, &report);
+    uint8_t *sorted = render_tie_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &plain, &plain, &report);
+    const int light_luminance = centre_luminance(submitted);
+    const int dark_luminance = centre_luminance(sorted);
+    printf("opaque sort: the tied copies' brightness %d as given (A first), %d sorted (B first)\n",
+        light_luminance, dark_luminance);
+    (void)fflush(stdout);
+    assert(light_luminance > dark_luminance + 150);
+    free(sorted);
+
+    /* B pinned with KEEP_ORDER, or with a stencil write: nothing moves, the same bytes as given. */
+    BTBHGPUSceneGeometryBatch pinned = plain;
+    pinned.flags = BTBH_GPU_SCENE_BATCH_KEEP_ORDER;
+    sorted = render_tie_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &plain, &pinned, &report);
+    assert(memcmp(sorted, submitted, bytes) == 0);
+    free(sorted);
+    BTBHGPUSceneGeometryBatch stencil = plain;
+    stencil.stencil_reference = 1u;
+    stencil.stencil_mask = 0xffu;
+    uint8_t *stencil_submitted = render_tie_scene(smoke, 0u, &plain, &stencil, &report);
+    sorted = render_tie_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &plain, &stencil, &report);
+    assert(memcmp(sorted, stencil_submitted, bytes) == 0);
+    assert(centre_luminance(sorted) == light_luminance);
+    free(sorted);
+    free(stencil_submitted);
+    free(submitted);
+
+    /* Both LESS_EQUAL (the later one shows), or B drawn with depth ALWAYS: kept in order, the same bytes. */
+    BTBHGPUSceneGeometryBatch less_equal = plain;
+    less_equal.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+    submitted = render_tie_scene(smoke, 0u, &less_equal, &less_equal, &report);
+    sorted = render_tie_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &less_equal, &less_equal, &report);
+    assert(centre_luminance(submitted) == dark_luminance);
+    assert(memcmp(sorted, submitted, bytes) == 0);
+    free(sorted);
+    free(submitted);
+    BTBHGPUSceneGeometryBatch always = plain;
+    always.depth_compare = BTBH_GPU_SCENE_DEPTH_ALWAYS;
+    submitted = render_tie_scene(smoke, 0u, &plain, &always, &report);
+    sorted = render_tie_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &plain, &always, &report);
+    assert(memcmp(sorted, submitted, bytes) == 0);
+    free(sorted);
+    free(submitted);
+    printf("opaque sort: reorders (a depth tie flips), keeps KEEP_ORDER, stencil, LESS_EQUAL and ALWAYS batches in place\n");
+
+    /* No tie: the same picture, the same draws, sorted or not (the see-through cubes keep their order). */
+    submitted = render_layered_scene(smoke, 0u, &report);
+    const uint32_t submitted_draws = report.primitive_draw_count;
+    sorted = render_layered_scene(smoke, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK, &report);
+    assert(report.primitive_draw_count == submitted_draws);
+    if (getenv("BTBH_SMOKE_DUMP") != NULL) {
+        char path[1024];
+        (void)snprintf(path, sizeof(path), "%s/layered.png", getenv("BTBH_SMOKE_DUMP"));
+        (void)btbh_gpu_write_png_rgba8(path, PORTRAIT_SIZE, PORTRAIT_SIZE, submitted);
+    }
+    assert(memcmp(sorted, submitted, bytes) == 0);
+    printf("opaque sort: a layered scene with see-through cubes, byte for byte the same sorted\n");
+    free(sorted);
+    free(submitted);
+
+    /* Unknown values fail the present. */
+    {
+        const SmokeCamera camera = world_camera(7u);
+        const BTBHGPUSceneLighting lighting = smoke_lighting();
+        BTBHGPUScenePost post = smoke_post(&camera, 0u);
+        const float grey[4] = {0.6f, 0.6f, 0.6f, 1.0f};
+        float instances[1][24];
+        instance(instances[0], 0.0f, 0.5f, 0.0f, 1.0f, 1.0f, 1.0f, grey);
+        BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->lit_cube, 0u, 1u);
+        for (uint32_t attempt = 0u; attempt < 4u; ++attempt) {
+            post.opaque_sort = attempt == 1u ? (uint8_t)BTBH_GPU_SCENE_OPAQUE_SORT_COUNT : 0u;
+            batch.flags = attempt == 2u
+                ? (uint8_t)0x80u
+                : (attempt == 3u
+                    ? (uint8_t)(BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW | BTBH_GPU_SCENE_BATCH_KEEP_ORDER)
+                    : 0u);
+            const BTBHGPUResult result = btbh_gpu_window_scene_render_to_target(
+                smoke->window,
+                smoke->portrait,
+                shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+                shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+                shader_paths[8], shader_paths[9], shader_paths[10],
+                SMOKE_SHADER_FORMAT,
+                PORTRAIT_SIZE,
+                PORTRAIT_SIZE,
+                camera.view_projection, camera.right, camera.up, camera.position,
+                &lighting, &post,
+                &instances[0][0], 1u, 1u,
+                &batch, NULL, NULL, 1u,
+                12u, 14u, 20u, 255u,
+                &report
+            );
+            assert(result == (attempt == 1u || attempt == 2u ? BTBH_GPU_INVALID_ARGUMENT : BTBH_GPU_OK));
+        }
+    }
+}
+
+/* ---- BTBH_SMOKE_BENCH=1: what the front-to-back order buys and costs (prints only, asserts nothing) ---- */
+
+#define BENCH_WIDTH 1920u
+#define BENCH_HEIGHT 1080u
+/* The configurations take turns for BENCH_ROUNDS rounds (so clocks and caches drift alike). A turn renders
+   BENCH_WARM_FRAMES frames, waits for the GPU, then renders BENCH_FRAMES frames back to back and waits once:
+   its sample is that time over BENCH_FRAMES, the GPU's throughput kept busy (a wait after every frame lets
+   its clocks drop). */
+#define BENCH_ROUNDS 8
+#define BENCH_WARM_FRAMES 3
+#define BENCH_FRAMES 20
+#define BENCH_SAMPLES BENCH_ROUNDS
+
+typedef struct BenchConfig {
+    const char *name;
+    uint8_t opaque_sort;
+    const BTBHGPUSceneGeometryBatch *batches;
+    uint32_t batch_count;
+    double times[BENCH_SAMPLES];
+    uint32_t sample_count;
+    double cpu_prepare_milliseconds;
+    double cpu_geometry_milliseconds;
+    uint32_t cpu_frames;
+} BenchConfig;
+
+static int compare_doubles(const void *left, const void *right) {
+    const double a = *(const double *)left;
+    const double b = *(const double *)right;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+
+/* A heavy pixel: the sun's soft shadow, 40 lamps and 32 point lights over every lit surface. */
+static BTBHGPUSceneLighting bench_lighting(void) {
+    const float sun[3] = {4.0f, 10.0f, 3.0f};
+    BTBHGPUSceneLighting lighting = smoke_lighting_from(sun);
+    lighting.directional_shadow_filter = BTBH_GPU_SCENE_SHADOW_FILTER_SOFT;
+    lighting.lamp_count = BTBH_GPU_SCENE_MAX_LAMPS;
+    lighting.lamp_core_radius = 0.5f;
+    for (uint32_t lamp = 0u; lamp < BTBH_GPU_SCENE_MAX_LAMPS; ++lamp) {
+        lighting.lamp_position_reach[lamp][0] = -12.0f + 0.6f * (float)lamp;
+        lighting.lamp_position_reach[lamp][1] = 1.5f;
+        lighting.lamp_position_reach[lamp][2] = -6.0f + 0.3f * (float)(lamp % 7u);
+        lighting.lamp_position_reach[lamp][3] = 30.0f;
+        lighting.lamp_color_energy[lamp][0] = 1.0f;
+        lighting.lamp_color_energy[lamp][1] = 0.8f;
+        lighting.lamp_color_energy[lamp][2] = 0.6f;
+        lighting.lamp_color_energy[lamp][3] = 0.05f;
+    }
+    lighting.point_light_count = BTBH_GPU_SCENE_POINT_LIGHTS;
+    for (uint32_t light = 0u; light < BTBH_GPU_SCENE_POINT_LIGHTS; ++light) {
+        float *point = lighting.point_lights[light];
+        point[0] = -10.0f + 0.65f * (float)light;
+        point[1] = 2.0f;
+        point[2] = -4.0f + 0.25f * (float)(light % 5u);
+        point[3] = 40.0f;
+        point[4] = 0.6f;
+        point[5] = 0.7f;
+        point[6] = 1.0f;
+        point[7] = 0.05f;
+    }
+    return lighting;
+}
+
+/* One turn of a configuration (BENCH_ROUNDS says how a turn is timed). */
+static void bench_turn(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const SmokeCamera *camera,
+    const BTBHGPUSceneLighting *lighting,
+    const float *instances,
+    uint32_t instance_count,
+    BenchConfig *config
+) {
+    BTBHGPUScenePost post = smoke_post(camera, 0u);
+    post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
+    post.opaque_sort = config->opaque_sort;
+    SDL_GPUDevice *device = smoke->window->device->gpu;
+    uint64_t started = 0u;
+    for (int frame = 0; frame < BENCH_WARM_FRAMES + BENCH_FRAMES; ++frame) {
+        if (frame == BENCH_WARM_FRAMES) {
+            (void)SDL_WaitForGPUIdle(device);
+            started = SDL_GetTicksNS();
+        }
+        BTBHGPUSceneReport report;
+        const BTBHGPUResult rendered = btbh_gpu_window_scene_render_to_target(
+            smoke->window,
+            target,
+            shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+            shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+            shader_paths[8], shader_paths[9], shader_paths[10],
+            SMOKE_SHADER_FORMAT,
+            BENCH_WIDTH,
+            BENCH_HEIGHT,
+            camera->view_projection, camera->right, camera->up, camera->position,
+            lighting, &post,
+            instances, instance_count, instance_count,
+            config->batches, NULL, NULL, config->batch_count,
+            12u, 14u, 20u, 255u,
+            &report
+        );
+        if (rendered != BTBH_GPU_OK) {
+            fprintf(stderr, "bench: %s\n", report.message);
+        }
+        assert(rendered == BTBH_GPU_OK);
+        if (frame >= BENCH_WARM_FRAMES) {
+            config->cpu_prepare_milliseconds += report.cpu_prepare_milliseconds;
+            config->cpu_geometry_milliseconds += report.cpu_geometry_encode_milliseconds;
+            config->cpu_frames += 1u;
+        }
+    }
+    (void)SDL_WaitForGPUIdle(device);
+    if (config->sample_count < BENCH_SAMPLES) {
+        config->times[config->sample_count++] =
+            (double)(SDL_GetTicksNS() - started) / 1.0e6 / BENCH_FRAMES;
+    }
+}
+
+static void bench_configs(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const SmokeCamera *camera,
+    const BTBHGPUSceneLighting *lighting,
+    const float *instances,
+    uint32_t instance_count,
+    BenchConfig *configs,
+    uint32_t config_count
+) {
+    for (int round = 0; round < BENCH_ROUNDS; ++round) {
+        for (uint32_t index = 0u; index < config_count; ++index) {
+            bench_turn(smoke, target, camera, lighting, instances, instance_count, &configs[index]);
+        }
+    }
+    for (uint32_t index = 0u; index < config_count; ++index) {
+        BenchConfig *config = &configs[index];
+        qsort(config->times, config->sample_count, sizeof(config->times[0]), compare_doubles);
+        printf(
+            "  %-40s %7.2f ms a frame (median of %u turns; fastest %7.2f, slowest %7.2f); CPU prepare %.3f ms, "
+            "geometry encode %.3f ms\n",
+            config->name,
+            config->times[config->sample_count / 2u],
+            config->sample_count,
+            config->times[0],
+            config->times[config->sample_count - 1u],
+            config->cpu_prepare_milliseconds / config->cpu_frames,
+            config->cpu_geometry_milliseconds / config->cpu_frames
+        );
+    }
+}
+
+static void bench_opaque_sort(SmokeWindow *smoke) {
+    BTBHGPUTextureReport texture_report;
+    BTBHGPUTexture *target = btbh_gpu_window_render_target_create(
+        smoke->window, BENCH_WIDTH, BENCH_HEIGHT, BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+    assert(target != NULL);
+    const BTBHGPUSceneLighting lighting = bench_lighting();
+    const float aspect = (float)BENCH_WIDTH / (float)BENCH_HEIGHT;
+    const char *device_name = SDL_GetStringProperty(
+        SDL_GetGPUDeviceProperties(smoke->window->device->gpu), SDL_PROP_GPU_DEVICE_NAME_STRING, "unknown");
+    printf(
+        "bench on %s, %ux%u renders to a target; the configurations take %d turns each of %d frames back to back "
+        "(GPU throughput, CPU included):\n",
+        device_name, BENCH_WIDTH, BENCH_HEIGHT, BENCH_ROUNDS, BENCH_FRAMES);
+
+    /* Worst case: 48 screen-filling slabs given far to near, one batch each. */
+    {
+        enum { LAYERS = 48 };
+        static float instances[LAYERS][24];
+        static BTBHGPUSceneGeometryBatch batches[LAYERS];
+        const float grey[4] = {0.6f, 0.6f, 0.62f, 1.0f};
+        for (uint32_t layer = 0u; layer < LAYERS; ++layer) {
+            const uint32_t depth_rank = LAYERS - 1u - layer; /* the first batch is the farthest */
+            instance(instances[layer], 0.0f, 0.0f, -0.35f * (float)depth_rank, 60.0f, 34.0f, 0.02f, grey);
+            batches[layer] = cube_batch(smoke->lit_cube, layer, 1u);
+        }
+        const float eye[3] = {0.0f, 0.0f, 8.0f};
+        const float centre[3] = {0.0f, 0.0f, 0.0f};
+        const SmokeCamera camera = look_at(eye, centre, 0.9f, aspect, NULL);
+        printf(" 48 screen-filling slabs, given far to near:\n");
+        static BenchConfig configs[3];
+        memset(configs, 0, sizeof(configs));
+        configs[0] = (BenchConfig){.name = "as given", .batches = batches, .batch_count = LAYERS};
+        configs[1] = (BenchConfig){
+            .name = "sorted front to back",
+            .opaque_sort = BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK,
+            .batches = batches,
+            .batch_count = LAYERS};
+        configs[2] = (BenchConfig){.name = "the nearest slab alone", .batches = &batches[LAYERS - 1], .batch_count = 1u};
+        bench_configs(smoke, target, &camera, &lighting, &instances[0][0], LAYERS, configs, 3u);
+    }
+
+    /* RTS-like: a ground slab and 64 batches of 16 units standing on it, seen from above at 45 degrees. */
+    {
+        enum { UNIT_BATCHES = 64, UNITS_PER_BATCH = 16, UNITS = UNIT_BATCHES * UNITS_PER_BATCH };
+        static float instances[UNITS + 1][24];
+        static BTBHGPUSceneGeometryBatch ground_first[UNIT_BATCHES + 1];
+        static BTBHGPUSceneGeometryBatch ground_last[UNIT_BATCHES + 1];
+        static BTBHGPUSceneGeometryBatch ground_pinned[UNIT_BATCHES + 1];
+        const float ground[4] = {0.35f, 0.45f, 0.3f, 1.0f};
+        const float unit[4] = {0.7f, 0.3f, 0.25f, 1.0f};
+        instance(instances[0], 0.0f, -0.1f, 0.0f, 80.0f, 0.2f, 80.0f, ground);
+        uint32_t seed = 12345u;
+        for (uint32_t index = 0u; index < UNITS; ++index) {
+            seed = seed * 1664525u + 1013904223u;
+            const float x = -14.0f + 28.0f * (float)(seed >> 8) / 16777216.0f;
+            seed = seed * 1664525u + 1013904223u;
+            const float z = -12.0f + 22.0f * (float)(seed >> 8) / 16777216.0f;
+            instance(instances[1u + index], x, 0.36f, z, 0.7f, 0.7f, 0.7f, unit);
+        }
+        ground_first[0] = cube_batch(smoke->lit_cube, 0u, 1u);
+        for (uint32_t index = 0u; index < UNIT_BATCHES; ++index) {
+            ground_first[1u + index] =
+                cube_batch(smoke->lit_cube, 1u + index * UNITS_PER_BATCH, UNITS_PER_BATCH);
+            ground_last[index] = ground_first[1u + index];
+            ground_pinned[index] = ground_first[1u + index];
+        }
+        ground_last[UNIT_BATCHES] = ground_first[0];
+        ground_pinned[UNIT_BATCHES] = ground_first[0];
+        ground_pinned[UNIT_BATCHES].flags = BTBH_GPU_SCENE_BATCH_KEEP_ORDER;
+        const float eye[3] = {0.0f, 14.0f, 14.0f};
+        const float centre[3] = {0.0f, 0.0f, -1.0f};
+        const SmokeCamera camera = look_at(eye, centre, 0.9f, aspect, NULL);
+        printf(" a ground slab and %d units in %d batches (seen from 45 degrees up):\n", UNITS, UNIT_BATCHES);
+        static BenchConfig configs[6];
+        memset(configs, 0, sizeof(configs));
+        configs[0] = (BenchConfig){
+            .name = "ground first, as given", .batches = ground_first, .batch_count = UNIT_BATCHES + 1u};
+        configs[1] = (BenchConfig){
+            .name = "ground first, sorted",
+            .opaque_sort = BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK,
+            .batches = ground_first,
+            .batch_count = UNIT_BATCHES + 1u};
+        configs[2] = (BenchConfig){
+            .name = "ground last, as given", .batches = ground_last, .batch_count = UNIT_BATCHES + 1u};
+        configs[3] = (BenchConfig){
+            .name = "ground last (KEEP_ORDER), units sorted",
+            .opaque_sort = BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK,
+            .batches = ground_pinned,
+            .batch_count = UNIT_BATCHES + 1u};
+        configs[4] = (BenchConfig){.name = "the ground alone", .batches = ground_first, .batch_count = 1u};
+        configs[5] = (BenchConfig){
+            .name = "the units alone", .batches = ground_last, .batch_count = UNIT_BATCHES};
+        bench_configs(smoke, target, &camera, &lighting, &instances[0][0], UNITS + 1u, configs, 6u);
+    }
+    btbh_gpu_texture_destroy(target);
+
+    /* The order's CPU cost on its own: btbh_gpu_scene_opaque_order over transient instances. */
+    {
+        static const uint32_t shapes[3][2] = {{256u, 16u}, {2048u, 1u}, {1024u, 64u}};
+        printf(" CPU cost of the order (btbh_gpu_scene_opaque_order):\n");
+        const float eye[3] = {0.0f, 14.0f, 14.0f};
+        const float centre[3] = {0.0f, 0.0f, -1.0f};
+        const SmokeCamera camera = look_at(eye, centre, 0.9f, 16.0f / 9.0f, NULL);
+        for (uint32_t shape = 0u; shape < 3u; ++shape) {
+            const uint32_t batch_count = shapes[shape][0];
+            const uint32_t per_batch = shapes[shape][1];
+            const uint32_t total = batch_count * per_batch;
+            float *instances = malloc(sizeof(float) * 24u * total);
+            BTBHGPUSceneGeometryBatch *batches = malloc(sizeof(*batches) * batch_count);
+            uint32_t *order = malloc(sizeof(uint32_t) * batch_count);
+            uint64_t *scratch = malloc(sizeof(uint64_t) * 2u * batch_count);
+            assert(instances != NULL && batches != NULL && order != NULL && scratch != NULL);
+            const float colour[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            uint32_t seed = 777u;
+            for (uint32_t index = 0u; index < total; ++index) {
+                seed = seed * 1664525u + 1013904223u;
+                const float x = -20.0f + 40.0f * (float)(seed >> 8) / 16777216.0f;
+                seed = seed * 1664525u + 1013904223u;
+                const float z = -20.0f + 40.0f * (float)(seed >> 8) / 16777216.0f;
+                instance(&instances[(size_t)index * 24u], x, 0.5f, z, 1.0f, 1.0f, 1.0f, colour);
+            }
+            for (uint32_t index = 0u; index < batch_count; ++index) {
+                batches[index] = cube_batch(smoke->lit_cube, index * per_batch, per_batch);
+            }
+            const int repeats = 200;
+            uint32_t count = 0u;
+            const uint64_t started = SDL_GetTicksNS();
+            for (int repeat = 0; repeat < repeats; ++repeat) {
+                count = btbh_gpu_scene_opaque_order(
+                    batches, NULL, batch_count, instances, camera.view_projection, order, scratch);
+            }
+            const double microseconds = (double)(SDL_GetTicksNS() - started) / 1.0e3 / repeats;
+            assert(count == batch_count);
+            printf("  %5u batches x %2u instances: %8.1f us a frame\n", batch_count, per_batch, microseconds);
+            free(instances);
+            free(batches);
+            free(order);
+            free(scratch);
+        }
+    }
+
+    /* What the custom mesh's bounds add to an update (they're measured on every create and update). */
+    {
+        enum { VERTICES = 100000 };
+        float *vertices = calloc((size_t)VERTICES * 24u, sizeof(float));
+        assert(vertices != NULL);
+        for (uint32_t index = 0u; index < VERTICES; ++index) {
+            vertices[(size_t)index * 24u + 0u] = (float)(index % 317u);
+            vertices[(size_t)index * 24u + 1u] = (float)(index % 13u);
+            vertices[(size_t)index * 24u + 2u] = (float)(index / 317u);
+        }
+        BTBHGPUCustomMeshReport mesh_report;
+        BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(
+            smoke->window, vertices, (uint32_t)(sizeof(float) * 24u * VERTICES), VERTICES, NULL, 0u, &mesh_report);
+        assert(mesh != NULL);
+        const int repeats = 20;
+        uint64_t started = SDL_GetTicksNS();
+        for (int repeat = 0; repeat < repeats; ++repeat) {
+            assert(btbh_gpu_custom_mesh_update(
+                mesh, vertices, (uint32_t)(sizeof(float) * 24u * VERTICES), NULL, 0u, &mesh_report) == BTBH_GPU_OK);
+        }
+        const double update_milliseconds = (double)(SDL_GetTicksNS() - started) / 1.0e6 / repeats;
+        float minimum[3];
+        float maximum[3];
+        started = SDL_GetTicksNS();
+        bool valid = false;
+        for (int repeat = 0; repeat < repeats; ++repeat) {
+            valid = btbh_gpu_custom_mesh_bounds(vertices, VERTICES, minimum, maximum);
+        }
+        const double bounds_milliseconds = (double)(SDL_GetTicksNS() - started) / 1.0e6 / repeats;
+        assert(valid);
+        printf(
+            " custom mesh update of %d vertices: %.3f ms, of which its bounds %.3f ms\n",
+            VERTICES,
+            update_milliseconds,
+            bounds_milliseconds
+        );
+        btbh_gpu_custom_mesh_destroy(mesh);
+        free(vertices);
+    }
+}
+
 static SmokeWindow open_window(BTBHGPUDevice *device, const char *title) {
     SmokeWindow smoke;
     memset(&smoke, 0, sizeof(smoke));
@@ -497,6 +1190,7 @@ static SmokeWindow open_window(BTBHGPUDevice *device, const char *title) {
     assert(smoke.window != NULL);
     assert(btbh_gpu_window_claim(device, smoke.window, &report) == BTBH_GPU_OK);
     smoke.cube = create_cube(smoke.window);
+    smoke.lit_cube = create_cube_wound(smoke.window, true);
     /* Shadows every other scene: a portrait must still draw its own. */
     assert(btbh_gpu_window_scene_set_shadow_update_periods(smoke.window, 2u, 2u, 2u) == 1u);
     BTBHGPUTextureReport texture_report;
@@ -716,12 +1410,21 @@ int main(void) {
         }
     }
 
+    /* 0.5.0: batches that cast no sun shadow, and the opaque pass sorted front to back. */
+    check_no_sun_shadow(&a);
+    check_opaque_sort(&a);
+    if (getenv("BTBH_SMOKE_BENCH") != NULL) {
+        bench_opaque_sort(&a);
+    }
+
     btbh_gpu_texture_destroy(a.frame);
     btbh_gpu_texture_destroy(a.portrait);
     btbh_gpu_texture_destroy(b.frame);
     btbh_gpu_texture_destroy(b.portrait);
     btbh_gpu_custom_mesh_destroy(a.cube);
     btbh_gpu_custom_mesh_destroy(b.cube);
+    btbh_gpu_custom_mesh_destroy(a.lit_cube);
+    btbh_gpu_custom_mesh_destroy(b.lit_cube);
     btbh_gpu_window_destroy(a.window);
     btbh_gpu_window_destroy(b.window);
     btbh_gpu_device_shutdown(device);
