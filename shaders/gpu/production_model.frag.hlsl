@@ -2180,10 +2180,11 @@ FragmentOutput shade_fragment(FragmentInput input)
             const float2 texel = float2(1.0f / texture_width, 1.0f / texture_height);
             const float3 luma = float3(0.299f, 0.587f, 0.114f);
             const float2 uv = input.texture_coordinate;
-            const float height_left = dot(albedo_texture.Sample(albedo_sampler, uv - float2(texel.x, 0.0f)).rgb, luma);
-            const float height_right = dot(albedo_texture.Sample(albedo_sampler, uv + float2(texel.x, 0.0f)).rgb, luma);
-            const float height_up = dot(albedo_texture.Sample(albedo_sampler, uv - float2(0.0f, texel.y)).rgb, luma);
-            const float height_down = dot(albedo_texture.Sample(albedo_sampler, uv + float2(0.0f, texel.y)).rgb, luma);
+            // With the albedo's own mip bias (FSR 3's), so the relief reads the mip the albedo shows.
+            const float height_left = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(texel.x, 0.0f), lod_bias).rgb, luma);
+            const float height_right = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(texel.x, 0.0f), lod_bias).rgb, luma);
+            const float height_up = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(0.0f, texel.y), lod_bias).rgb, luma);
+            const float height_down = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(0.0f, texel.y), lod_bias).rgb, luma);
             const float strength = -material_factors.x;
             lit_normal = normalize(float3(
                 -(height_right - height_left) * strength,

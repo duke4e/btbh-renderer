@@ -112,6 +112,14 @@ shaders together with the C core.
   texture and a uniform buffer; `production_shadow.vert` and `production_animated_shadow.vert` pass the world
   position on. Shader file names are unchanged.
 
+### Fixed
+- Under FSR 3, the relief from brightness (an unlit material with a negative `normal_scale`) sampled its four
+  albedo taps without the negative mip bias the albedo itself uses, so it read a blurrier mip and looked flatter
+  than at native resolution. The taps now take the same bias. Without FSR 3 the bias is 0 and nothing changes.
+  Found by `testFSR3PicksTextureDetailForTheOutputSize`; it dates from the tyrian3d merge (`1021d8b1`).
+- Swift GPU tests: the 10 cases that failed on 0.3.0 and 0.4.0 (stale source checks, and three that ignored
+  `BTBH_GPU_SHADER_DIR`) check today's renderer; the suite passes.
+
 ### Measured
 Windows, RTX 3070 Ti, 1920x1080 renders to a target with a heavy pixel (soft sun shadow, 40 lamps, 32 point
 lights), `BTBH_SMOKE_BENCH=1`. SDL 3.4 has no GPU timestamps, so a sample is the wall time of 20 frames rendered
