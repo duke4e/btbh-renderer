@@ -6,6 +6,83 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`btbh_gpu_window_scene_prewarm`** (asked for by Be The Bullet Hell v2, whose runs stalled for 22–32 ms about
+  0.3 s in): makes at load what a window's scene presents would make the first time they draw. A host calls it
+  before its first frame with the shader paths, render size, lighting, post settings and batches the frames will
+  present. Those frames then make no shader, pipeline or target.
+  - It makes each batch's model pipelines for those settings (the sun's, the omni or no shadow; the radiance
+    cascades or not; FSR 3's and the SSAO/SSR outputs or not; skinned or not; per blend, depth compare, cull mode
+    and stencil use; the fast unlit shader). Also the shadow maps and their pipelines, the radiance cascades' and
+    FSR 3's pipelines and resources, SMAA's or FXAA's, the scene's targets, the post chain's pipelines, the
+    distance pass and the refraction copy.
+  - It runs the present's own steps, so the two can't drift apart. It draws nothing and leaves every frame's
+    state alone (FSR 3's history and jitter, the retained shadow maps, the cascades' history): the frames are the
+    same to the byte with or without it.
+  - The batches are taken as the present takes them, without their instances. A second call with the same
+    arguments makes nothing. Settings change the pipelines: call it once per quality preset the game uses, and
+    again with the batches a level adds.
+  - It refuses what the present refuses, and a call while a scene waits for its canvas, with
+    `BTBH_GPU_INVALID_ARGUMENT`. A missing shader fails it as it would fail the present, with the path.
+  - It covers the window's frames, at its size now. A resize or another render size makes the targets anew at the
+    next present (the pipelines stay). `btbh_gpu_window_scene_render_to_target` keeps its own.
+- `BTBH_GPU_HAS_SCENE_PREWARM`, defined with it.
+- GPU smoke `btbh_gpu_scene_prewarm_smoke` (hidden windows, a debug device). A scene like v2's (FSR 3, the sun's
+  shadow, SSAO, SSR, bloom, fog, vignette, a skinned unit, an x-ray stencil wall) draws its effects from frame 6:
+  a decal, an additive unlit flash, a premultiplied soft particle, the x-ray ghost and a refraction strip.
+  - Cold, its first frame makes 35 shaders and 40 pipelines, and frame 6 makes 22 shaders and 11 pipelines.
+    Prewarmed, the window makes exactly those in the call, and none of its 16 frames makes any. Each frame matches
+    the cold window's to the byte.
+  - The same with the radiance cascades and an omni spot shadow (69 shaders, 65 pipelines).
+  - A second prewarm makes nothing. A prewarm for FSR 1 makes what FSR 1 needs, and the FSR 1 frame makes nothing.
+  - The refusals: each argument, a scene waiting for its canvas, a missing shader.
+  - `BTBH_SMOKE_BENCH=cold` or `=prewarm` times one sequence at 1080p. `BTBH_PREWARM_SMOKE_DUMP` and `_REFERENCE`
+    compare the cold frames of two builds.
+- Internal: the renderer makes every shader and pipeline through `btbh_gpu_create_shader`,
+  `btbh_gpu_create_graphics_pipeline` and `btbh_gpu_create_compute_pipeline`, which count them and the time they
+  take (`btbh_gpu_creation_stats`).
+
+### Changed
+- The present's setup, model pipeline and target steps are three functions now, which the prewarm shares. A frame
+  with a refracting batch makes the refraction copy with its other targets, before its passes. No pixel changes:
+  the smoke's 16 FSR 3 frames and the world detail smoke's eight gallery scenes match 0.6.0's core to the byte.
+
+### Measured
+Windows, RTX 3070 Ti (driver 621.14), Vulkan, the driver's shader cache warm. `BTBH_SMOKE_BENCH` at 1920x1080
+rendered at 960x540 with FSR 3, six runs of each, alternating, in separate processes. CPU milliseconds of the
+present call, median (range):
+
+| | Without the prewarm | With it |
+| --- | --- | --- |
+| The prewarm call | – | 45.4 (43.4–46.7) |
+| First present | 41.8 (37.3–55.5) | 5.4 (4.9–5.6) |
+| Second present | 2.1 (1.8–2.3) | 2.2 (1.9–2.5) |
+| First present with the effects (frame 6) | 10.9 (10.5–15.6) | 0.34 (0.24–0.40) |
+| Later presents | 0.3 | 0.3 |
+
+- The cold first present is what it makes. The creation calls for its 35 shaders and 40 pipelines take 14–20 ms.
+  Reading the shader files and creating the targets, FSR 3's resources and the shadow maps take most of the rest.
+  A quieter series measured 25–31 ms, 10–11 of them in the creation calls.
+- The effects' first frame makes 22 shaders and 11 pipelines (5–8 ms in the calls) and reads their files.
+- The first two prewarmed frames still cost 5 and 2 ms more than later ones (cold frames pay the same): the GPU
+  API's first use of render passes, descriptor pools and uniform buffers, which only drawing makes.
+- The first run after the shaders were built (a debug device) took 1.9 s for the first frame's creations and 3.0
+  s with the cascades: the driver compiled them. Later runs take 10–20 ms: its shader cache.
+- Nothing persists between runs but the driver's cache. SDL 3.4 makes its Vulkan pipelines without a pipeline
+  cache and has no API for one.
+- A Steam Deck isn't measured.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (23/23), the Swift build and the full Swift suite (301
+tests, 2 skipped, 0 failures). macOS (Metal) isn't verified.
+
+### Upgrading
+- Nothing to set: a host that never calls it presents as before.
+- Rust hosts with bindgen: regenerate the bindings; a build script can gate on `BTBH_GPU_HAS_SCENE_PREWARM`.
+- To adopt it (v2): after loading the models and textures, call it once per quality preset with the arguments of
+  the first present, and with batches for everything a stage will draw: each blend, depth compare, cull mode and
+  stencil use, skinned or not, the effects and the refraction strips. No instance data is needed.
+- Swift: no API yet.
+
 ## [0.6.0] — 2026-11-20
 
 An opt-in addition for Be The Bullet Hell v2: the world detail, phase 1 of
