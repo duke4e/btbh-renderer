@@ -6469,6 +6469,560 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     return geometry_cursor == prepared_geometry_count;
 }
 
+/* What a scene frame turns on, worked out from its settings and batches by btbh_gpu_scene_prepare_frame. */
+typedef struct BTBHGPUSceneFrameSetup {
+    bool radiance_cascades_active;
+    bool radiance_cascades_fallback_debug;
+    bool temporal_active;
+    int temporal_window_width;
+    uint8_t upscale_mode;
+    uint8_t anti_aliasing;
+    bool ambient_occlusion_active;
+    bool hbao_active;
+    bool ssr_active;
+    bool ssao_resolve_active;
+    bool bloom_active;
+    bool hdr_composite_active;
+    bool soft_particles_active;
+    bool refraction_active;
+    bool auxiliary_geometry_outputs;
+    uint32_t shadow_enabled[3];
+    bool omni_shadows_active;
+    bool shadows_active;
+} BTBHGPUSceneFrameSetup;
+
+/* The first part of a scene frame, a step of its own so that another caller can make the same
+   things as the present: the window's scene runtime and BRDF lookup, the radiance cascades' and FSR 3's pipelines and
+   resources, the shadow maps and their pipelines, SMAA's or FXAA's, and what the frame turns on (`setup`). It
+   draws nothing and leaves a frame's state alone (FSR 3's jitter and history, the retained shadow maps).
+   output_width: 0 for the window's frame, else a render target's width (never temporal). False, with the report
+   set, when it failed (a failed shadow setup releases the window's scene). */
+static bool btbh_gpu_scene_prepare_frame(
+    BTBHGPUWindow *window,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    uint32_t batch_count,
+    BTBHGPUSceneFrameSetup *setup,
+    BTBHGPUSceneReport *report
+) {
+    if (!btbh_gpu_scene_ensure_runtime(
+            window,
+            report
+        )) {
+        return false;
+    }
+    if (!btbh_gpu_scene_ensure_brdf_lookup(
+            window,
+            fragment_shader_path,
+            report
+        )) {
+        return false;
+    }
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    char radiance_cascades_message[256];
+    radiance_cascades_message[0] = '\0';
+    const bool radiance_cascades_ready =
+        btbh_gpu_radiance_cascades_runtime_prepare(
+            window->device->gpu,
+            &runtime->radiance_cascades,
+            &post->radiance_cascades,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            runtime->scene_color_format,
+            render_width,
+            render_height,
+            radiance_cascades_message,
+            sizeof(radiance_cascades_message)
+        );
+    if (!radiance_cascades_ready &&
+        !runtime->radiance_cascades.logged_failure) {
+        SDL_LogWarn(
+            SDL_LOG_CATEGORY_RENDER,
+            "Radiance Cascades disabled: %s",
+            radiance_cascades_message[0] != '\0'
+                ? radiance_cascades_message
+                : "unknown setup failure"
+        );
+        runtime->radiance_cascades.logged_failure = true;
+    }
+    const bool radiance_cascades_active =
+        radiance_cascades_ready &&
+        btbh_gpu_radiance_cascades_effective_tier(
+            &runtime->radiance_cascades.state
+        ) != BTBH_GPU_SCENE_RC_OFF;
+    const bool radiance_cascades_fallback_debug =
+        !radiance_cascades_ready &&
+        post->radiance_cascades.debug_view ==
+            BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON &&
+        runtime->radiance_cascades.compose_pipeline != NULL &&
+        runtime->radiance_cascades.sampler != NULL &&
+        runtime->radiance_cascades.composed_texture != NULL;
+    const bool radiance_cascades_debug_output =
+        (radiance_cascades_active ||
+         radiance_cascades_fallback_debug) &&
+        post->radiance_cascades.debug_view !=
+            BTBH_GPU_SCENE_RC_DEBUG_NONE;
+    /* Temporal upscaling (FSR 3.1): the projection takes a sub-pixel jitter, the opaque pass writes
+       motion vectors and the transparent pass a reactive mask, and the upscaler replaces FXAA and
+       FSR 1 after the post chain. A device without its storage formats or shaders keeps FSR 1. */
+    int temporal_window_width = 0;
+    int temporal_window_height = 0;
+    const bool temporal_requested =
+        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 &&
+        !radiance_cascades_debug_output &&
+        output_width == 0u &&
+        SDL_GetWindowSizeInPixels(
+            window->window,
+            &temporal_window_width,
+            &temporal_window_height
+        ) &&
+        temporal_window_width > 0 &&
+        temporal_window_height > 0;
+    bool temporal_active = false;
+    if (temporal_requested) {
+        char temporal_message[256];
+        temporal_active = btbh_gpu_fsr3_prepare(
+            window->device->gpu,
+            &runtime->fsr3,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            (uint32_t)temporal_window_width,
+            (uint32_t)temporal_window_height,
+            temporal_message,
+            sizeof(temporal_message)
+        );
+        if (!temporal_active && !runtime->fsr3.logged_failure) {
+            SDL_LogWarn(
+                SDL_LOG_CATEGORY_RENDER,
+                "FSR 3 upscaling unavailable, using FSR 1: %s",
+                temporal_message
+            );
+            runtime->fsr3.logged_failure = true;
+        }
+    }
+    const uint8_t upscale_mode =
+        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 && !temporal_active
+            ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
+            : post->upscale_mode;
+    const uint8_t anti_aliasing = temporal_active ? 0u : post->anti_aliasing;
+    const bool ambient_occlusion_active =
+        post->ssao_enabled == 1u &&
+        !radiance_cascades_debug_output;
+    /* ssao_enabled 2: the horizon-based occlusion (its own passes, laid over the opaque scene). */
+    const bool hbao_active =
+        post->ssao_enabled == 2u &&
+        !radiance_cascades_debug_output;
+    /* Reflections ride the SSAO resolve, which then runs without the occlusion passes too. */
+    const bool ssr_active =
+        post->ssr_intensity > 0.0f &&
+        post->ssr_max_roughness > 0.0f &&
+        post->ssr_max_distance > 0.0f &&
+        !radiance_cascades_debug_output;
+    const bool ssao_resolve_active =
+        ambient_occlusion_active || ssr_active;
+    /* RC debug views show raw buffers, so they skip the HDR composite. */
+    const bool bloom_active =
+        post->bloom_enabled != 0u &&
+        !radiance_cascades_debug_output;
+    const bool hdr_composite_active =
+        (post->fog_enabled != 0u ||
+         post->bloom_enabled != 0u ||
+         post->vignette_enabled != 0u) &&
+        !radiance_cascades_debug_output;
+    const bool soft_particles_active =
+        batch_count > 0u &&
+        batches != NULL &&
+        btbh_gpu_scene_batches_have_soft_particles(batches, batch_count);
+    const bool refraction_active =
+        batch_count > 0u &&
+        batches != NULL &&
+        btbh_gpu_scene_batches_have_refraction(
+            batches,
+            batch_count,
+            scene_visibility
+        );
+    const bool auxiliary_geometry_outputs =
+        ssao_resolve_active || hbao_active || radiance_cascades_active ||
+        temporal_active;
+    uint32_t shadow_enabled[3] = {
+        lighting->directional_shadow_enabled,
+        lighting->secondary_directional_shadow_enabled,
+        lighting->spot_shadow_enabled
+    };
+    const bool requested_shadows_active =
+        shadow_enabled[0] != 0u ||
+        shadow_enabled[1] != 0u ||
+        shadow_enabled[2] != 0u;
+    if (requested_shadows_active &&
+        !btbh_gpu_scene_ensure_shadow_resources(
+            window,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
+            shadow_vertex_shader_path,
+            animated_shadow_vertex_shader_path,
+            shadow_fragment_shader_path,
+            shader_format,
+            report
+        )) {
+        return false;
+    }
+    const bool omni_shadow_requested =
+        shadow_enabled[2] != 0u &&
+        lighting->spot_shadow_is_omni != 0u;
+    const bool omni_shadows_active =
+        omni_shadow_requested &&
+        btbh_gpu_scene_ensure_omni_shadow_texture(window);
+    if (omni_shadow_requested && !omni_shadows_active) {
+        shadow_enabled[2] = 0u;
+    }
+    const bool shadows_active =
+        shadow_enabled[0] != 0u ||
+        shadow_enabled[1] != 0u ||
+        shadow_enabled[2] != 0u;
+
+    if (anti_aliasing >= 1u &&
+        anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
+        !btbh_gpu_scene_ensure_smaa_resources(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            anti_aliasing,
+            report
+        )) {
+        return false;
+    }
+    if (anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA &&
+        !btbh_gpu_scene_ensure_fxaa_pipeline(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            report
+        )) {
+        return false;
+    }
+
+    SDL_zerop(setup);
+    setup->radiance_cascades_active = radiance_cascades_active;
+    setup->radiance_cascades_fallback_debug = radiance_cascades_fallback_debug;
+    setup->temporal_active = temporal_active;
+    setup->temporal_window_width = temporal_window_width;
+    setup->upscale_mode = upscale_mode;
+    setup->anti_aliasing = anti_aliasing;
+    setup->ambient_occlusion_active = ambient_occlusion_active;
+    setup->hbao_active = hbao_active;
+    setup->ssr_active = ssr_active;
+    setup->ssao_resolve_active = ssao_resolve_active;
+    setup->bloom_active = bloom_active;
+    setup->hdr_composite_active = hdr_composite_active;
+    setup->soft_particles_active = soft_particles_active;
+    setup->refraction_active = refraction_active;
+    setup->auxiliary_geometry_outputs = auxiliary_geometry_outputs;
+    (void)memcpy(setup->shadow_enabled, shadow_enabled, sizeof(setup->shadow_enabled));
+    setup->omni_shadows_active = omni_shadows_active;
+    setup->shadows_active = shadows_active;
+    return true;
+}
+
+/* The model pipelines a frame's batches need (each geometry's, and a transparent one's without the auxiliary
+   outputs too), made where missing (a step of the present of its own). bone_offsets is
+   btbh_gpu_scene_prepare_bones' (UINT32_MAX for a geometry drawn without bones). opaque_geometry_base, when not
+   NULL, gets where each batch's geometries start among them (for the opaque order). */
+static bool btbh_gpu_scene_ensure_model_pipelines(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUSceneFrameSetup *setup,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const uint32_t *bone_offsets,
+    uint32_t prepared_geometry_count,
+    uint32_t *opaque_geometry_base,
+    BTBHGPUSceneReport *report
+) {
+    uint32_t pipeline_geometry_cursor = 0u;
+    for (uint32_t batch_index = 0u;
+         batch_index < batch_count;
+         ++batch_index) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        const uint32_t geometry_count =
+            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
+                ? batch->model->primitive_count
+                : 1u;
+        if (opaque_geometry_base != NULL) {
+            opaque_geometry_base[batch_index] =
+                pipeline_geometry_cursor;
+        }
+        for (uint32_t geometry_index = 0u;
+             geometry_index < geometry_count;
+             ++geometry_index) {
+            if (!btbh_gpu_scene_batch_uses_geometry(
+                    batch,
+                    geometry_index
+                )) {
+                continue;
+            }
+            const bool animated =
+                bone_offsets[pipeline_geometry_cursor] != UINT32_MAX;
+            pipeline_geometry_cursor += 1u;
+            if (!btbh_gpu_scene_ensure_model_pipeline(
+                    window,
+                    vertex_shader_path,
+                    animated_vertex_shader_path,
+                    fragment_shader_path,
+                    unshadowed_fragment_shader_path,
+                    shader_format,
+                    setup->auxiliary_geometry_outputs,
+                    setup->temporal_active,
+                    setup->radiance_cascades_active,
+                    setup->shadows_active,
+                    setup->omni_shadows_active,
+                    animated,
+                    batch,
+                    report
+                )) {
+                return false;
+            }
+            if (
+                setup->auxiliary_geometry_outputs &&
+                btbh_gpu_scene_uses_transparent_pass(
+                    batch->blend_mode,
+                    batch->transparency_enabled != 0u
+                ) &&
+                !btbh_gpu_scene_ensure_model_pipeline(
+                    window,
+                    vertex_shader_path,
+                    animated_vertex_shader_path,
+                    fragment_shader_path,
+                    unshadowed_fragment_shader_path,
+                    shader_format,
+                    false,
+                    setup->temporal_active,
+                    setup->radiance_cascades_active,
+                    setup->shadows_active,
+                    setup->omni_shadows_active,
+                    animated,
+                    batch,
+                    report
+                )
+            ) {
+                return false;
+            }
+        }
+    }
+    if (pipeline_geometry_cursor != prepared_geometry_count) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            "GPU scene pipeline preparation changed during submission"
+        );
+        return false;
+    }
+    return true;
+}
+
+/* The frame's targets at its render (and drawable) size and the post chain's pipelines, made where missing (a step
+   of the present of its own). The drawable size is output_width x output_height, or the
+   window's in pixels when output_width is 0. scene_distance_ready says whether the soft particles' and the
+   refraction's distance pass can run (a missing pass never fails the frame). False when a target or a pipeline is
+   missing, with the report set where it said why. */
+static bool btbh_gpu_scene_ensure_frame_targets(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneFrameSetup *setup,
+    const BTBHGPUScenePost *post,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint32_t output_width,
+    uint32_t output_height,
+    uint32_t *drawable_width_out,
+    uint32_t *drawable_height_out,
+    bool *scene_distance_ready,
+    BTBHGPUSceneReport *report
+) {
+    int drawable_width_value = (int)output_width;
+    int drawable_height_value = (int)output_height;
+    const bool drawable_size_available =
+        (output_width != 0u ||
+         SDL_GetWindowSizeInPixels(
+             window->window,
+             &drawable_width_value,
+             &drawable_height_value
+         )) &&
+        drawable_width_value > 0 &&
+        drawable_height_value > 0;
+    const uint32_t drawable_width =
+        drawable_size_available
+            ? (uint32_t)drawable_width_value
+            : 0u;
+    const uint32_t drawable_height =
+        drawable_size_available
+            ? (uint32_t)drawable_height_value
+            : 0u;
+    *drawable_width_out = drawable_width;
+    *drawable_height_out = drawable_height;
+    const bool targets_ready =
+        drawable_size_available &&
+        drawable_width != 0u &&
+        drawable_height != 0u &&
+        btbh_gpu_scene_ensure_depth(
+            window,
+            render_width,
+            render_height,
+            report
+        ) &&
+        btbh_gpu_scene_ensure_color(
+            window,
+            render_width,
+            render_height,
+            report
+        ) &&
+        btbh_gpu_scene_ensure_anti_aliasing_targets(
+            window,
+            render_width,
+            render_height,
+            setup->anti_aliasing != 0u ||
+                post->mirror_horizontal != 0u,
+            setup->anti_aliasing >= 1u &&
+                setup->anti_aliasing <=
+                    BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
+            report
+        ) &&
+        (!setup->temporal_active ||
+         btbh_gpu_scene_ensure_temporal_targets(
+             window,
+             render_width,
+             render_height,
+             report
+         )) &&
+        (setup->upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR ||
+         (!setup->temporal_active &&
+          render_width == drawable_width &&
+          render_height == drawable_height) ||
+         (btbh_gpu_scene_ensure_upscale_pipelines(
+              window,
+              setup->temporal_active
+                  ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
+                  : setup->upscale_mode,
+              post_vertex_shader_path,
+              post_fragment_shader_path,
+              shader_format,
+              report
+          ) &&
+          btbh_gpu_scene_ensure_upscaled_color_target(
+              window,
+              drawable_width,
+              drawable_height,
+              setup->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 ||
+                  setup->temporal_active,
+              report
+          ))) &&
+        (!setup->ssao_resolve_active ||
+         btbh_gpu_scene_ensure_ssao_resolve_pipeline(
+             window,
+             post_vertex_shader_path,
+             post_fragment_shader_path,
+             shader_format,
+              report
+          )) &&
+        (!setup->hbao_active ||
+         (btbh_gpu_scene_ensure_hbao_pipelines(
+              window,
+              post_vertex_shader_path,
+              post_fragment_shader_path,
+              shader_format,
+              report
+          ) &&
+          btbh_gpu_scene_ensure_hbao_targets(
+              window,
+              render_width,
+              render_height,
+              report
+          ))) &&
+        btbh_gpu_scene_ensure_post_stage_pipelines(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            report
+        ) &&
+        (!setup->hdr_composite_active ||
+         btbh_gpu_scene_ensure_hdr_composite_pipelines(
+             window,
+             post_vertex_shader_path,
+             post_fragment_shader_path,
+             shader_format,
+             report
+         )) &&
+        (!setup->bloom_active ||
+         btbh_gpu_scene_ensure_bloom_targets(
+             window,
+             render_width,
+             render_height,
+             report
+         )) &&
+        btbh_gpu_scene_ensure_post_pipeline(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            report
+        ) &&
+        /* The refracting batches' copy of the scene. */
+        (!setup->refraction_active ||
+         btbh_gpu_scene_ensure_refraction_target(
+             window,
+             render_width,
+             render_height,
+             report
+         ));
+    /* Without the distance pass soft particles simply draw unfaded; a missing pass never fails
+       the frame. */
+    BTBHGPUSceneReport scene_distance_report;
+    SDL_zero(scene_distance_report);
+    /* Refraction reads the distance too: a displaced sample nearer than the refracting surface (a unit in
+       front of it) falls back to the undisplaced one. */
+    *scene_distance_ready =
+        (setup->soft_particles_active || setup->refraction_active) &&
+        btbh_gpu_scene_ensure_scene_distance_pipeline(
+            window,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            &scene_distance_report
+        ) &&
+        btbh_gpu_scene_ensure_scene_distance_target(
+            window,
+            render_width,
+            render_height,
+            &scene_distance_report
+        );
+    return targets_ready;
+}
+
 static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -6622,106 +7176,52 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     }
     window->radiance_cascades_telemetry_enabled =
         post->radiance_cascades.tier == BTBH_GPU_SCENE_RC_AUTO;
-    if (!btbh_gpu_scene_ensure_runtime(
+    BTBHGPUSceneFrameSetup setup;
+    if (!btbh_gpu_scene_prepare_frame(
             window,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
+            shadow_vertex_shader_path,
+            animated_shadow_vertex_shader_path,
+            shadow_fragment_shader_path,
+            fragment_shader_path,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            output_width,
+            lighting,
+            post,
+            batches,
+            scene_visibility,
+            batch_count,
+            &setup,
             report
         )) {
         return report->result;
     }
     BTBHGPUSceneTelemetryReport *telemetry =
         &window->scene_telemetry;
-    if (!btbh_gpu_scene_ensure_brdf_lookup(
-            window,
-            fragment_shader_path,
-            report
-        )) {
-        return report->result;
-    }
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
-    char radiance_cascades_message[256];
-    radiance_cascades_message[0] = '\0';
-    const bool radiance_cascades_ready =
-        btbh_gpu_radiance_cascades_runtime_prepare(
-            window->device->gpu,
-            &runtime->radiance_cascades,
-            &post->radiance_cascades,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            runtime->scene_color_format,
-            render_width,
-            render_height,
-            radiance_cascades_message,
-            sizeof(radiance_cascades_message)
-        );
-    if (!radiance_cascades_ready &&
-        !runtime->radiance_cascades.logged_failure) {
-        SDL_LogWarn(
-            SDL_LOG_CATEGORY_RENDER,
-            "Radiance Cascades disabled: %s",
-            radiance_cascades_message[0] != '\0'
-                ? radiance_cascades_message
-                : "unknown setup failure"
-        );
-        runtime->radiance_cascades.logged_failure = true;
-    }
-    const bool radiance_cascades_active =
-        radiance_cascades_ready &&
-        btbh_gpu_radiance_cascades_effective_tier(
-            &runtime->radiance_cascades.state
-        ) != BTBH_GPU_SCENE_RC_OFF;
+    const bool radiance_cascades_active = setup.radiance_cascades_active;
     const bool radiance_cascades_fallback_debug =
-        !radiance_cascades_ready &&
-        post->radiance_cascades.debug_view ==
-            BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON &&
-        runtime->radiance_cascades.compose_pipeline != NULL &&
-        runtime->radiance_cascades.sampler != NULL &&
-        runtime->radiance_cascades.composed_texture != NULL;
-    const bool radiance_cascades_debug_output =
-        (radiance_cascades_active ||
-         radiance_cascades_fallback_debug) &&
-        post->radiance_cascades.debug_view !=
-            BTBH_GPU_SCENE_RC_DEBUG_NONE;
-    /* Temporal upscaling (FSR 3.1): the projection takes a sub-pixel jitter, the opaque pass writes
-       motion vectors and the transparent pass a reactive mask, and the upscaler replaces FXAA and
-       FSR 1 after the post chain. A device without its storage formats or shaders keeps FSR 1. */
-    int temporal_window_width = 0;
-    int temporal_window_height = 0;
-    const bool temporal_requested =
-        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 &&
-        !radiance_cascades_debug_output &&
-        output_width == 0u &&
-        SDL_GetWindowSizeInPixels(
-            window->window,
-            &temporal_window_width,
-            &temporal_window_height
-        ) &&
-        temporal_window_width > 0 &&
-        temporal_window_height > 0;
-    bool temporal_active = false;
-    if (temporal_requested) {
-        char temporal_message[256];
-        temporal_active = btbh_gpu_fsr3_prepare(
-            window->device->gpu,
-            &runtime->fsr3,
-            post_fragment_shader_path,
-            shader_format,
-            render_width,
-            render_height,
-            (uint32_t)temporal_window_width,
-            (uint32_t)temporal_window_height,
-            temporal_message,
-            sizeof(temporal_message)
-        );
-        if (!temporal_active && !runtime->fsr3.logged_failure) {
-            SDL_LogWarn(
-                SDL_LOG_CATEGORY_RENDER,
-                "FSR 3 upscaling unavailable, using FSR 1: %s",
-                temporal_message
-            );
-            runtime->fsr3.logged_failure = true;
-        }
-    }
+        setup.radiance_cascades_fallback_debug;
+    const bool temporal_active = setup.temporal_active;
+    const int temporal_window_width = setup.temporal_window_width;
+    const uint8_t upscale_mode = setup.upscale_mode;
+    const uint8_t anti_aliasing = setup.anti_aliasing;
+    const bool ambient_occlusion_active = setup.ambient_occlusion_active;
+    const bool hbao_active = setup.hbao_active;
+    const bool ssr_active = setup.ssr_active;
+    const bool ssao_resolve_active = setup.ssao_resolve_active;
+    const bool bloom_active = setup.bloom_active;
+    const bool hdr_composite_active = setup.hdr_composite_active;
+    const bool refraction_active = setup.refraction_active;
+    const bool auxiliary_geometry_outputs = setup.auxiliary_geometry_outputs;
+    const uint32_t *shadow_enabled = setup.shadow_enabled;
+    const bool omni_shadows_active = setup.omni_shadows_active;
+    const bool shadows_active = setup.shadows_active;
     if (!runtime->temporal_debug_view_read) {
         /* BTBH_DEBUG_MOTION_VECTORS=1 shows the upscaler's inputs, =2 the motion vectors' reprojection
            error; BTBH_FSR3_DEBUG_VIEW=1 AMD's view. */
@@ -6755,11 +7255,6 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
         runtime->temporal_debug_view_read = true;
     }
-    const uint8_t upscale_mode =
-        post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 && !temporal_active
-            ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
-            : post->upscale_mode;
-    const uint8_t anti_aliasing = temporal_active ? 0u : post->anti_aliasing;
     /* Under FSR 3 the material textures and the procedural surface detail pick their detail for the
        output size, not the render size (AMD's guide: log2(render width / display width) - 1, so -1 at
        a render scale of 1 and -2 at 50 %): the upscaler accumulates the jittered frames into that
@@ -6843,103 +7338,6 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
             return report->result;
         }
-    }
-    const bool ambient_occlusion_active =
-        post->ssao_enabled == 1u &&
-        !radiance_cascades_debug_output;
-    /* ssao_enabled 2: the horizon-based occlusion (its own passes, laid over the opaque scene). */
-    const bool hbao_active =
-        post->ssao_enabled == 2u &&
-        !radiance_cascades_debug_output;
-    /* Reflections ride the SSAO resolve, which then runs without the occlusion passes too. */
-    const bool ssr_active =
-        post->ssr_intensity > 0.0f &&
-        post->ssr_max_roughness > 0.0f &&
-        post->ssr_max_distance > 0.0f &&
-        !radiance_cascades_debug_output;
-    const bool ssao_resolve_active =
-        ambient_occlusion_active || ssr_active;
-    /* RC debug views show raw buffers, so they skip the HDR composite. */
-    const bool bloom_active =
-        post->bloom_enabled != 0u &&
-        !radiance_cascades_debug_output;
-    const bool hdr_composite_active =
-        (post->fog_enabled != 0u ||
-         post->bloom_enabled != 0u ||
-         post->vignette_enabled != 0u) &&
-        !radiance_cascades_debug_output;
-    const bool soft_particles_active =
-        batch_count > 0u &&
-        batches != NULL &&
-        btbh_gpu_scene_batches_have_soft_particles(batches, batch_count);
-    const bool refraction_active =
-        batch_count > 0u &&
-        batches != NULL &&
-        btbh_gpu_scene_batches_have_refraction(
-            batches,
-            batch_count,
-            scene_visibility
-        );
-    const bool auxiliary_geometry_outputs =
-        ssao_resolve_active || hbao_active || radiance_cascades_active ||
-        temporal_active;
-    uint32_t shadow_enabled[3] = {
-        lighting->directional_shadow_enabled,
-        lighting->secondary_directional_shadow_enabled,
-        lighting->spot_shadow_enabled
-    };
-    const bool requested_shadows_active =
-        shadow_enabled[0] != 0u ||
-        shadow_enabled[1] != 0u ||
-        shadow_enabled[2] != 0u;
-    if (requested_shadows_active &&
-        !btbh_gpu_scene_ensure_shadow_resources(
-            window,
-            fast_shadow_vertex_shader_path,
-            fast_shadow_fragment_shader_path,
-            shadow_vertex_shader_path,
-            animated_shadow_vertex_shader_path,
-            shadow_fragment_shader_path,
-            shader_format,
-            report
-        )) {
-        return report->result;
-    }
-    const bool omni_shadow_requested =
-        shadow_enabled[2] != 0u &&
-        lighting->spot_shadow_is_omni != 0u;
-    const bool omni_shadows_active =
-        omni_shadow_requested &&
-        btbh_gpu_scene_ensure_omni_shadow_texture(window);
-    if (omni_shadow_requested && !omni_shadows_active) {
-        shadow_enabled[2] = 0u;
-    }
-    const bool shadows_active =
-        shadow_enabled[0] != 0u ||
-        shadow_enabled[1] != 0u ||
-        shadow_enabled[2] != 0u;
-
-    if (anti_aliasing >= 1u &&
-        anti_aliasing <= BTBH_GPU_SCENE_SMAA_QUALITY_COUNT &&
-        !btbh_gpu_scene_ensure_smaa_resources(
-            window,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            anti_aliasing,
-            report
-        )) {
-        return report->result;
-    }
-    if (anti_aliasing == BTBH_GPU_SCENE_ANTI_ALIASING_FXAA &&
-        !btbh_gpu_scene_ensure_fxaa_pipeline(
-            window,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            report
-        )) {
-        return report->result;
     }
 
     uint32_t *bone_offsets = NULL;
@@ -7030,88 +7428,23 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->opaque_order_keys
         )
         : 0u;
-    uint32_t pipeline_geometry_cursor = 0u;
-    for (uint32_t batch_index = 0u;
-         batch_index < batch_count;
-         ++batch_index) {
-        const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
-        const uint32_t geometry_count =
-            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
-                ? batch->model->primitive_count
-                : 1u;
-        if (opaque_sorted) {
-            runtime->opaque_geometry_base[batch_index] =
-                pipeline_geometry_cursor;
-        }
-        for (uint32_t geometry_index = 0u;
-             geometry_index < geometry_count;
-             ++geometry_index) {
-            if (!btbh_gpu_scene_batch_uses_geometry(
-                    batch,
-                    geometry_index
-                )) {
-                continue;
-            }
-            const bool animated =
-                bone_offsets[pipeline_geometry_cursor] != UINT32_MAX;
-            pipeline_geometry_cursor += 1u;
-            if (!btbh_gpu_scene_ensure_model_pipeline(
-                    window,
-                    vertex_shader_path,
-                    animated_vertex_shader_path,
-                    fragment_shader_path,
-                    unshadowed_fragment_shader_path,
-                    shader_format,
-                    auxiliary_geometry_outputs,
-                    temporal_active,
-                    radiance_cascades_active,
-                    shadows_active,
-                    omni_shadows_active,
-                    animated,
-                    batch,
-                    report
-                )) {
-                free(bone_matrices);
-                free(bone_offsets);
-                return report->result;
-            }
-            if (
-                auxiliary_geometry_outputs &&
-                btbh_gpu_scene_uses_transparent_pass(
-                    batch->blend_mode,
-                    batch->transparency_enabled != 0u
-                ) &&
-                !btbh_gpu_scene_ensure_model_pipeline(
-                    window,
-                    vertex_shader_path,
-                    animated_vertex_shader_path,
-                    fragment_shader_path,
-                    unshadowed_fragment_shader_path,
-                    shader_format,
-                    false,
-                    temporal_active,
-                    radiance_cascades_active,
-                    shadows_active,
-                    omni_shadows_active,
-                    animated,
-                    batch,
-                    report
-                )
-            ) {
-                free(bone_matrices);
-                free(bone_offsets);
-                return report->result;
-            }
-        }
-    }
-    if (pipeline_geometry_cursor != prepared_geometry_count) {
+    if (!btbh_gpu_scene_ensure_model_pipelines(
+            window,
+            vertex_shader_path,
+            animated_vertex_shader_path,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            &setup,
+            batches,
+            batch_count,
+            bone_offsets,
+            prepared_geometry_count,
+            opaque_sorted ? runtime->opaque_geometry_base : NULL,
+            report
+        )) {
         free(bone_matrices);
         free(bone_offsets);
-        btbh_gpu_scene_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            "GPU scene pipeline preparation changed during submission"
-        );
         return report->result;
     }
     const uint64_t pipelines_finished_ticks = detailed_prepare_telemetry
@@ -7465,155 +7798,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
 
-    int drawable_width_value = (int)output_width;
-    int drawable_height_value = (int)output_height;
-    const bool drawable_size_available =
-        (output_width != 0u ||
-         SDL_GetWindowSizeInPixels(
-             window->window,
-             &drawable_width_value,
-             &drawable_height_value
-         )) &&
-        drawable_width_value > 0 &&
-        drawable_height_value > 0;
-    const uint32_t drawable_width =
-        drawable_size_available
-            ? (uint32_t)drawable_width_value
-            : 0u;
-    const uint32_t drawable_height =
-        drawable_size_available
-            ? (uint32_t)drawable_height_value
-            : 0u;
+    uint32_t drawable_width = 0u;
+    uint32_t drawable_height = 0u;
+    bool scene_distance_ready = false;
     report->cpu_swapchain_acquire_milliseconds = 0.0;
     const uint64_t target_ensure_started_ticks = SDL_GetTicksNS();
-    const bool targets_ready =
-        drawable_size_available &&
-        drawable_width != 0u &&
-        drawable_height != 0u &&
-        btbh_gpu_scene_ensure_depth(
-            window,
-            render_width,
-            render_height,
-            report
-        ) &&
-        btbh_gpu_scene_ensure_color(
-            window,
-            render_width,
-            render_height,
-            report
-        ) &&
-        btbh_gpu_scene_ensure_anti_aliasing_targets(
-            window,
-            render_width,
-            render_height,
-            anti_aliasing != 0u ||
-                post->mirror_horizontal != 0u,
-            anti_aliasing >= 1u &&
-                anti_aliasing <=
-                    BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
-            report
-        ) &&
-        (!temporal_active ||
-         btbh_gpu_scene_ensure_temporal_targets(
-             window,
-             render_width,
-             render_height,
-             report
-         )) &&
-        (upscale_mode == BTBH_GPU_SCENE_UPSCALE_LINEAR ||
-         (!temporal_active &&
-          render_width == drawable_width &&
-          render_height == drawable_height) ||
-         (btbh_gpu_scene_ensure_upscale_pipelines(
-              window,
-              temporal_active
-                  ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
-                  : upscale_mode,
-              post_vertex_shader_path,
-              post_fragment_shader_path,
-              shader_format,
-              report
-          ) &&
-          btbh_gpu_scene_ensure_upscaled_color_target(
-              window,
-              drawable_width,
-              drawable_height,
-              upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 ||
-                  temporal_active,
-              report
-          ))) &&
-        (!ssao_resolve_active ||
-         btbh_gpu_scene_ensure_ssao_resolve_pipeline(
-             window,
-             post_vertex_shader_path,
-             post_fragment_shader_path,
-             shader_format,
-              report
-          )) &&
-        (!hbao_active ||
-         (btbh_gpu_scene_ensure_hbao_pipelines(
-              window,
-              post_vertex_shader_path,
-              post_fragment_shader_path,
-              shader_format,
-              report
-          ) &&
-          btbh_gpu_scene_ensure_hbao_targets(
-              window,
-              render_width,
-              render_height,
-              report
-          ))) &&
-        btbh_gpu_scene_ensure_post_stage_pipelines(
-            window,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            report
-        ) &&
-        (!hdr_composite_active ||
-         btbh_gpu_scene_ensure_hdr_composite_pipelines(
-             window,
-             post_vertex_shader_path,
-             post_fragment_shader_path,
-             shader_format,
-             report
-         )) &&
-        (!bloom_active ||
-         btbh_gpu_scene_ensure_bloom_targets(
-             window,
-             render_width,
-             render_height,
-             report
-         )) &&
-        btbh_gpu_scene_ensure_post_pipeline(
-            window,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            report
-        );
-    /* Without the distance pass soft particles simply draw unfaded; a missing pass never fails
-       the frame. */
-    BTBHGPUSceneReport scene_distance_report;
-    SDL_zero(scene_distance_report);
-    /* Refraction reads the distance too: a displaced sample nearer than the refracting surface (a unit in
-       front of it) falls back to the undisplaced one. */
-    const bool scene_distance_ready =
-        (soft_particles_active || refraction_active) &&
-        btbh_gpu_scene_ensure_scene_distance_pipeline(
-            window,
-            post_vertex_shader_path,
-            post_fragment_shader_path,
-            shader_format,
-            &scene_distance_report
-        ) &&
-        btbh_gpu_scene_ensure_scene_distance_target(
-            window,
-            render_width,
-            render_height,
-            &scene_distance_report
-        );
+    const bool targets_ready = btbh_gpu_scene_ensure_frame_targets(
+        window,
+        &setup,
+        post,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        output_width,
+        output_height,
+        &drawable_width,
+        &drawable_height,
+        &scene_distance_ready,
+        report
+    );
     report->cpu_target_ensure_milliseconds =
         (double)(SDL_GetTicksNS() - target_ensure_started_ticks) /
         1000000.0;
