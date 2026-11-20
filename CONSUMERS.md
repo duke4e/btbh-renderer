@@ -55,8 +55,9 @@ instanced model batches with vertex colours, one albedo/normal/ORM set per batch
 `4ff0e1b3`), the built-in procedural surface variants, skinned kaiju (glTF), transparent and additive effects,
 refraction strips, decals and ground scars, x-ray stencil masks, cascaded sun shadows, SSAO, SSR, glass, cloud
 shadows, water normals, rain and wetness, bloom, vignette, LUT grading, FSR 1, and FSR 3.1 with motion vectors and
-a reactive mask. Requested: a world-projected second texture set per batch for its kit's coarse relief, then BC
-texture formats (RFC 0008, draft).
+a reactive mask. Adopting with 0.6.0: the world detail (RFC 0008 phase 1), a world-projected second texture set
+per batch for its kit's coarse relief. Requested: BC texture formats (RFC 0008 phase 2), a detail chosen per
+vertex for merged distance models, and the facade's street-level darkening and wall wetness without its grain.
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,

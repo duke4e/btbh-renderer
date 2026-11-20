@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-20
+
 An opt-in addition for Be The Bullet Hell v2: the world detail, phase 1 of
 [RFC 0008](docs/rfc/0008-world-projected-detail.md). Nothing changes until a game sets it: a zeroed batch renders
 byte for byte as in 0.5.1. The scene fragment shaders changed (three more textures and a bigger second uniform
@@ -16,6 +18,21 @@ tests, 2 skipped, 0 failures). With nothing set, 0 pixels differ from 0.5.1's co
 scenes through every scene shader variant (131,072 pixels) and `btbh_gpu_scene_target_smoke`'s nine images (an FSR
 3 frame among them, 90,368 pixels), each written by a build of 0.5.1 and by this one. macOS (Metal) isn't
 verified.
+
+Be The Bullet Hell v2 (Rust, bindgen) tested it on its stage 3 by day, on a desktop RTX, with all 70 shaders
+rebuilt and its macro sets bound per class (packed, the lot's index as the seed): no errors, nothing broken. GPU
+medians of two passes, in ms:
+
+| Preset | 0.5.1 | 0.6.0, unset | Detail | Detail and the facade grain |
+| --- | --- | --- | --- | --- |
+| Deck | 1.301 / 1.300 | 1.290 / 1.296 | 1.322 / 1.340 | 1.327 / 1.331 |
+| Low | 1.606 / 1.601 | 1.612 / 1.619 | 1.691 / 1.706 | 1.702 / 1.694 |
+| Medium | 2.690 / 2.665 | 2.663 / 2.658 | 2.651 / 2.651 | 2.779 / 2.765 |
+| High | 3.036 / 3.030 | 3.036 / 3.034 | 2.932 / 2.953 | 3.210 / 3.208 |
+
+Unset costs nothing measurable in its frame. The detail costs 0.03–0.05 ms on the Deck preset and 0.08–0.09 ms
+on Low, and is cheaper than the triplanar facade grain it replaces on Medium and High. A Steam Deck isn't
+measured yet.
 
 ### Added
 - **`BTBHGPUSceneGeometryBatch.world_detail`** (appended at offset 264: the batch grows from 264 to 272 bytes on

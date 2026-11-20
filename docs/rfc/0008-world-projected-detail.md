@@ -1,6 +1,7 @@
 # RFC 0008: World-projected detail
 
-- **Status:** Accepted on 2026-11-20 (phase 1 for 0.6.0; phase 2 later). See "Decisions" and "Phases"
+- **Status:** Phase 1 implemented in v0.6.0 (see "Implementation notes"). Accepted on 2026-11-20. Phase 2
+  (compressed textures) comes later, when v2's tools write DDS. See "Decisions" and "Phases"
 - **Requested by:** Be The Bullet Hell v2 (its coordinator session, 2026-11-20). The spec is
   `Be-The-Bullet-Hell/v2/assets/kit/textures/macro/macro.json`, made by `v2/tools/kit/textures_macro.py`
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D:
