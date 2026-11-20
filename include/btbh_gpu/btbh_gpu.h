@@ -1732,6 +1732,64 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 );
+/* Makes at load what the window's scene presents would make the first time they draw (since 0.7.0, asked for by
+   Be The Bullet Hell v2). Without it, the first frame of a scene makes every pipeline, shader and target it needs,
+   and a later frame stalls where it first draws a new kind of batch or turns a setting on. Call it with the shader
+   paths, render size, lighting, post settings and batches the frames will present: those frames then make nothing.
+   What it makes:
+   - each batch's model pipelines for these settings: with the sun's shadow, the omni spot shadow or none; with the
+     radiance cascades or not; with FSR 3's and the SSAO/SSR outputs or not; skinned or not; per blend, depth
+     compare, cull mode and stencil use; the fast unlit shader where a batch takes it;
+   - the shadow maps and their pipelines; the radiance cascades' and FSR 3's pipelines and resources; SMAA's or
+     FXAA's. A device without one falls back as the present would;
+   - the scene's targets at render_width x render_height and the window's drawable size; the post chain's pipelines
+     (upscaling, SSAO resolve, HBAO, HDR composite and bloom, LUT, CAS, tilt-shift, the final pass); the distance
+     pass and the refraction copy where a batch needs them.
+   It runs the present's own steps, so the two make the same things. It draws nothing and leaves every frame's
+   state alone (FSR 3's history and jitter, the retained shadow maps, the radiance cascades' history): the frames
+   are the same to the byte with or without it. What exists is kept, so a second call with the same arguments makes
+   nothing.
+   - Settings change what a frame needs: call it once for each set the game presents (each quality preset), and
+     again with the batches a level adds.
+   - A batch is taken as the present takes it, but its instances aren't read: any first_instance and
+     instance_count, an empty instance_buffer. Every batch counts, as with a scene_visibility of NULL.
+   - The window's frames only, at its drawable size now: after a resize, or at another render size, the next
+     present makes its targets anew (the pipelines stay). btbh_gpu_window_scene_render_to_target keeps its own
+     targets and pipelines.
+   - The first frame or two after it still cost a few milliseconds more than the next ones: the GPU API's first
+     use of the new pipelines' render passes, descriptor pools and uniform buffers, which only drawing makes.
+   - Nothing is kept between runs: SDL 3.4 makes its Vulkan pipelines without a pipeline cache. The driver's own
+     shader cache is what makes a later run's creations faster.
+   Call it between frames. While a scene waits for its canvas it returns BTBH_GPU_INVALID_ARGUMENT and leaves the
+   frame as it was. Arguments the present would refuse, NULL paths, lighting, post or batches, batch_count 0 or a
+   size of 0 return BTBH_GPU_INVALID_ARGUMENT. A shader that can't be loaded, or a pipeline the device refuses,
+   returns the present's error with the path or SDL's message; what was made before it stays. On success the
+   report holds drawable_width/height, batch_count, prepared_geometry_count and upscale_mode (what the frames will
+   run: FSR 1 where FSR 3 is unavailable); its timings stay 0. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+);
+/* Defined when btbh_gpu_window_scene_prewarm exists (since 0.7.0). */
+#define BTBH_GPU_HAS_SCENE_PREWARM 1
 // The primary directional shadow map's size in texels (256-8192 each way; by default 2048 x 2048), for
 // a light-space region that isn't square. Taken at the next scene presented (the map is made anew).
 uint8_t btbh_gpu_window_scene_set_directional_shadow_size(

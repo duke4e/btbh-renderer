@@ -4417,13 +4417,16 @@ static bool btbh_gpu_scene_ensure_motion_buffer(
     return true;
 }
 
+/* check_instances false (btbh_gpu_window_scene_prewarm, which reads no instances): the instance ranges go
+   unchecked. */
 static bool btbh_gpu_scene_validate_batches(
     BTBHGPUWindow *window,
     uint32_t transient_instance_count,
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *scene_visibility,
     const uint8_t *directional_shadow_visibility,
-    uint32_t batch_count
+    uint32_t batch_count,
+    bool check_instances
 ) {
     for (uint32_t index = 0u; index < batch_count; ++index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[index];
@@ -4568,10 +4571,11 @@ static bool btbh_gpu_scene_validate_batches(
             !valid_stencil ||
             !valid_material_slot ||
             !valid_instance_buffer ||
-            batch->instance_count == 0u ||
-            batch->first_instance > available_instance_count ||
-            batch->instance_count >
-                available_instance_count - batch->first_instance) {
+            (check_instances &&
+             (batch->instance_count == 0u ||
+              batch->first_instance > available_instance_count ||
+              batch->instance_count >
+                  available_instance_count - batch->first_instance))) {
             return false;
         }
     }
@@ -6491,8 +6495,8 @@ typedef struct BTBHGPUSceneFrameSetup {
     bool shadows_active;
 } BTBHGPUSceneFrameSetup;
 
-/* The first part of a scene frame, a step of its own so that another caller can make the same
-   things as the present: the window's scene runtime and BRDF lookup, the radiance cascades' and FSR 3's pipelines and
+/* The first part of a scene frame, shared by the present and btbh_gpu_window_scene_prewarm so that the two make
+   the same things: the window's scene runtime and BRDF lookup, the radiance cascades' and FSR 3's pipelines and
    resources, the shadow maps and their pipelines, SMAA's or FXAA's, and what the frame turns on (`setup`). It
    draws nothing and leaves a frame's state alone (FSR 3's jitter and history, the retained shadow maps).
    output_width: 0 for the window's frame, else a render target's width (never temporal). False, with the report
@@ -6743,7 +6747,7 @@ static bool btbh_gpu_scene_prepare_frame(
 }
 
 /* The model pipelines a frame's batches need (each geometry's, and a transparent one's without the auxiliary
-   outputs too), made where missing (a step of the present of its own). bone_offsets is
+   outputs too), made where missing: shared by the present and btbh_gpu_window_scene_prewarm. bone_offsets is
    btbh_gpu_scene_prepare_bones' (UINT32_MAX for a geometry drawn without bones). opaque_geometry_base, when not
    NULL, gets where each batch's geometries start among them (for the opaque order). */
 static bool btbh_gpu_scene_ensure_model_pipelines(
@@ -6842,8 +6846,8 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
     return true;
 }
 
-/* The frame's targets at its render (and drawable) size and the post chain's pipelines, made where missing (a step
-   of the present of its own). The drawable size is output_width x output_height, or the
+/* The frame's targets at its render (and drawable) size and the post chain's pipelines, made where missing: shared
+   by the present and btbh_gpu_window_scene_prewarm. The drawable size is output_width x output_height, or the
    window's in pixels when output_width is 0. scene_distance_ready says whether the soft particles' and the
    refraction's distance pass can run (a missing pass never fails the frame). False when a target or a pipeline is
    missing, with the report set where it said why. */
@@ -7135,7 +7139,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             batches,
             scene_visibility,
             directional_shadow_visibility,
-            batch_count
+            batch_count,
+            true
         )) {
         btbh_gpu_scene_error(
             report,
@@ -10007,6 +10012,204 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         0u,
         report
     );
+}
+
+/* Makes what the window's next scene presents would make the first time they draw these batches with these
+   settings, through the present's own steps (btbh_gpu_scene_prepare_frame, btbh_gpu_scene_ensure_model_pipelines,
+   btbh_gpu_scene_ensure_frame_targets), and draws nothing. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->claimed ||
+        vertex_shader_path == NULL ||
+        animated_vertex_shader_path == NULL ||
+        fast_shadow_vertex_shader_path == NULL ||
+        fast_shadow_fragment_shader_path == NULL ||
+        shadow_vertex_shader_path == NULL ||
+        animated_shadow_vertex_shader_path == NULL ||
+        shadow_fragment_shader_path == NULL ||
+        fragment_shader_path == NULL ||
+        unshadowed_fragment_shader_path == NULL ||
+        post_vertex_shader_path == NULL ||
+        post_fragment_shader_path == NULL ||
+        render_width == 0u ||
+        render_height == 0u ||
+        !btbh_gpu_scene_lighting_valid(lighting) ||
+        !btbh_gpu_scene_post_valid(post) ||
+        batches == NULL ||
+        batch_count == 0u ||
+        btbh_gpu_scene_shader_format(shader_format) ==
+            SDL_GPU_SHADERFORMAT_INVALID ||
+        !btbh_gpu_scene_validate_batches(
+            window,
+            0u,
+            batches,
+            NULL,
+            NULL,
+            batch_count,
+            false
+        )) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU scene prewarm"
+        );
+        return report->result;
+    }
+    if (window->pending_scene_ready || window->pending_command != NULL) {
+        /* The frame's scene waits for its canvas: its targets must stay as they are until then. */
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene prewarm while the frame's scene waits for its canvas"
+        );
+        return report->result;
+    }
+    if (!btbh_gpu_scene_validate_world_details(window, batches, batch_count, report)) {
+        return report->result;
+    }
+    BTBHGPUSceneFrameSetup setup;
+    if (!btbh_gpu_scene_prepare_frame(
+            window,
+            fast_shadow_vertex_shader_path,
+            fast_shadow_fragment_shader_path,
+            shadow_vertex_shader_path,
+            animated_shadow_vertex_shader_path,
+            shadow_fragment_shader_path,
+            fragment_shader_path,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            0u,
+            lighting,
+            post,
+            batches,
+            NULL,
+            batch_count,
+            &setup,
+            report
+        )) {
+        return report->result;
+    }
+    /* Which geometries are skinned, as the present finds them (the poses are sampled and dropped; no temporal
+       palette is kept). */
+    uint32_t *bone_offsets = NULL;
+    uint32_t prepared_geometry_count = 0u;
+    float *bone_matrices = NULL;
+    uint32_t bone_count = 0u;
+    BTBHGPUSceneTelemetryReport telemetry;
+    SDL_zero(telemetry);
+    if (!btbh_gpu_scene_prepare_bones(
+            batches,
+            batch_count,
+            &bone_offsets,
+            &prepared_geometry_count,
+            &bone_matrices,
+            &bone_count,
+            false,
+            &telemetry,
+            NULL
+        )) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Could not prepare GPU animation pose"
+        );
+        return report->result;
+    }
+    free(bone_matrices);
+    if (!btbh_gpu_scene_check_scene_shader(
+            window->scene_runtime,
+            batches,
+            batch_count,
+            fragment_shader_path,
+            shader_format,
+            report
+        ) ||
+        !btbh_gpu_scene_ensure_model_pipelines(
+            window,
+            vertex_shader_path,
+            animated_vertex_shader_path,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            &setup,
+            batches,
+            batch_count,
+            bone_offsets,
+            prepared_geometry_count,
+            NULL,
+            report
+        )) {
+        free(bone_offsets);
+        return report->result;
+    }
+    free(bone_offsets);
+    uint32_t drawable_width = 0u;
+    uint32_t drawable_height = 0u;
+    bool scene_distance_ready = false;
+    if (!btbh_gpu_scene_ensure_frame_targets(
+            window,
+            &setup,
+            post,
+            post_vertex_shader_path,
+            post_fragment_shader_path,
+            shader_format,
+            render_width,
+            render_height,
+            0u,
+            0u,
+            &drawable_width,
+            &drawable_height,
+            &scene_distance_ready,
+            report
+        )) {
+        if (report->result == BTBH_GPU_OK) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_WINDOW_FAILURE,
+                SDL_GetError()
+            );
+        }
+        return report->result;
+    }
+    report->result = BTBH_GPU_OK;
+    report->drawable_width = drawable_width;
+    report->drawable_height = drawable_height;
+    report->batch_count = batch_count;
+    report->prepared_geometry_count = prepared_geometry_count;
+    report->upscale_mode = setup.upscale_mode;
+    report->message[0] = '\0';
+    return report->result;
 }
 
 /* A scene drawn into a render target apart from the window's frame (a unit's portrait). It renders
