@@ -5556,6 +5556,7 @@ static bool btbh_gpu_scene_post_valid(
           post->temporal_reset <= 1u)) &&
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL) &&
+        !btbh_gpu_texture_is_array(post->lut_texture) &&
         post->fog_enabled <= 1u &&
         post->bloom_enabled <= 1u &&
         post->vignette_enabled <= 1u &&
@@ -10284,6 +10285,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         target->owner != window ||
         target->texture == NULL ||
         !target->color_target ||
+        btbh_gpu_texture_is_array(target) ||
         target->width == 0u ||
         target->height == 0u) {
         btbh_gpu_scene_error(
@@ -10601,6 +10603,7 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         destination == NULL ||
         destination->owner != window ||
         destination->texture == NULL ||
+        btbh_gpu_texture_is_array(destination) ||
         destination->width != window->scene_runtime->composite_width ||
         destination->height != window->scene_runtime->composite_height ||
         destination->format != SDL_GetGPUSwapchainTextureFormat(

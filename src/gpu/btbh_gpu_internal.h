@@ -132,6 +132,9 @@ struct BTBHGPUTexture {
     uint32_t width;
     uint32_t height;
     uint32_t mip_count;
+    /* 0: a 2D texture. Otherwise a 2D array texture of this many layers (btbh_gpu_window_texture_array_*, RFC 0009),
+       which only the slots that take an array accept (btbh_gpu_texture_is_array). */
+    uint32_t layer_count;
     /* Made with SDL_GPU_TEXTUREUSAGE_COLOR_TARGET (a render target): a scene can be drawn into it. */
     bool color_target;
     /* Set while models share it (BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES): the share owns it,
@@ -473,6 +476,11 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
     BTBHGPUTextureWrap wrap,
     BTBHGPUTextureReport *report
 );
+
+/* Whether a texture is a 2D array (btbh_gpu_window_texture_array_*): a 2D slot refuses one (RFC 0009). */
+static inline bool btbh_gpu_texture_is_array(const BTBHGPUTexture *texture) {
+    return texture != NULL && texture->layer_count != 0u;
+}
 
 /* Every shader and pipeline the renderer makes goes through these three (since 0.7.0): they count what was made
    and the time it took, process-wide, so a test can tell whether a present made any (the prewarm smoke) and a

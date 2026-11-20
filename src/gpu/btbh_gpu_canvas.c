@@ -463,7 +463,8 @@ static bool btbh_gpu_canvas_validate_batches(
             batch->blend_mode >
                 BTBH_GPU_CANVAS_BLEND_PREMULTIPLIED_ALPHA ||
             (batch->texture != NULL &&
-             batch->texture->owner != window) ||
+             (batch->texture->owner != window ||
+              btbh_gpu_texture_is_array(batch->texture))) ||
             (batch->scissor_enabled != 0u &&
              (batch->scissor_width <= 0 ||
               batch->scissor_height <= 0))
@@ -488,6 +489,7 @@ static bool btbh_gpu_canvas_validate_passes(
             pass->batch_count > batch_count - expected_first_batch ||
             (pass->target != NULL &&
              (pass->target->owner != window ||
+              btbh_gpu_texture_is_array(pass->target) ||
               pass->target->format !=
                 SDL_GetGPUSwapchainTextureFormat(
                     window->device->gpu,
