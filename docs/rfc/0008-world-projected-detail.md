@@ -560,6 +560,120 @@ to the estimate above and the analyser's register count.
 - **Model loading.** It is unchanged: imported glTF textures stay RGBA8. A loader for `MSFT_texture_dds` or KTX2
   in glTF is a later request.
 
+## Implementation notes (phase 1, 2026-11-20)
+
+Phase 1 is implemented for 0.6.0:
+- the header (`BTBHGPUSceneWorldDetail`, `world_detail`, the packed flag, `BTBH_GPU_SCENE_HAS_WORLD_DETAIL`);
+- `shaders/gpu/production_world_detail.hlsli` and its C copy, `src/gpu/btbh_gpu_world_detail.h`;
+- the branch in `production_model.frag`, and the checks, bindings and uniforms in `src/gpu/btbh_gpu_scene.c`;
+- `Tests/btbh_gpu_world_detail_test.c` (native) and `Tests/btbh_gpu_world_detail_smoke.c` (GPU, with the bench).
+
+The API is the one above. Where the implementation differs from the text, or measured what the text estimated,
+it is written down here. The version macros stay at 0.5.1 until the release commit.
+
+**The C copy is a header.** `btbh_gpu_world_detail.h` is static inline: the scene and the tests include it. The
+games compile `src/gpu/*.c`, so a new `.c` file would have been harmless to them, but a header leaves the C core's
+source list and the Swift package's bridge files as they are.
+
+**Which details count** (different from "Implementation, Phase 1")
+- A detail is *active* on a batch when it has a texture and the batch doesn't refract. Only an active detail
+  leaves the fast unlit pipeline, sets the uniforms and binds its textures, and only an active one needs 0.6.0's
+  shaders (the name check).
+- The text says a batch "with a world detail" leaves the fast unlit pipeline. Taken literally, a detail without
+  textures would have moved an unlit see-through batch to the full shader. That one isn't the fast shader byte
+  for byte, so the batch would no longer draw "exactly as before", as "Zero values" promises.
+
+**Checks**
+- Every detail is checked, also one without textures or on a refracting batch: a zero tile is a mistake wherever
+  it is.
+- They run per batch, in order. A batch whose detail is the same one as the batch before it is skipped. The text
+  says "once per distinct pointer a frame". That would need a set kept per frame, and the check is a dozen
+  compares. v2 draws a class as one batch or a few, so a frame costs it a few hundred compares at most.
+- The refusal names the batch and the fault, for example "GPU scene batch 2: world_detail: level_tile must be
+  finite and above 0". The text says "like the other batch checks", but those name neither.
+- Two refusals were added to the text's list:
+  - a scale that isn't finite (NaN would reach every pixel);
+  - a texture of another window or a destroyed one, as for the batch's own textures.
+- Negative scales are allowed: a negative `normal_scale` turns the relief inside out.
+
+**The shader**
+- It follows "The blend", inside `if (world_detail_mode.x != 0u)`. The order is the ORM sample (and the packed
+  albedo), then the albedo, then the normal. The tilt goes in as `normal - detail_gradient - world_gradient`.
+- The face normal is `cross(ddx(P), ddy(P))`, turned to the vertex normal's side.
+  - The text says the camera decides where that dot product is "near zero". The threshold is 0.05 (the cosine
+    between the two normals).
+  - A zero cross product (no derivatives) takes the vertex normal.
+- The seed:
+  - It is rounded half to even: HLSL's `round`, and `rintf` in the C copy.
+  - It is then clamped to ±(2^31 − 128), the floats that convert to a 32-bit int. Beyond that the conversion is
+    undefined.
+  - With component 0 the offset is (0, 0): the pattern is anchored at the world's origin.
+- The fast unlit shader is pushed only the dig mask's 32 bytes; the other scene shaders get the 80.
+- The dig mask's name check became one check for both names. It reads the shader file once per path, as before.
+
+**Tests** (different from "Platforms and testing")
+- **Orientation: no reference image.** `Tests/Fixtures/world_detail/orientation.png` (an arrow and an "F") isn't
+  there. The smoke reads every pixel back instead.
+  - Unlit white boxes carry a code texture: the column in red, the row in green, nearest filtering, no mips. The
+    target holds sRGB of the albedo multiplier (Reinhard with a white point of 1 is the identity), so each
+    pixel's texel decodes exactly.
+  - Each pixel is compared with what the C copy gives at the point its ray hits. That covers the arrow and the F
+    numerically: upright and unmirrored walls, north on roofs, the top up the slope, and the tile per class.
+  - Four cameras show roofs, the ground, a floating slab's underside, four walls, a 45° wall and a 30° pitch.
+    All 85,653 interior pixels show the C copy's texel, within a texel either way (a sample on a texel's edge
+    may round either way).
+  - The C copy is checked against the RFC's examples natively, so the GPU and the text agree through it.
+- **Seeds.** Two touching boxes with one seed continue one pattern; a third with another seed doesn't. Box A drawn
+  with seeds 7 and 99 shows another texel on all 1,945 of its pixels.
+- **Packed against separate.** Byte for byte the same, through the 2D-shadow, omni, unshadowed and radiance-cascade
+  variants.
+- **Neutral.** The text asks for "within 1/255" with a flat normal. An ORM of (1, 0.8, 0.8) with both scales 1.25
+  is byte for byte as no detail, packed or with a separate albedo of 0.8. A flat normal map adds up to 3/255 on
+  lit pixels: a texel's 128 decodes to a tilt of 1/255, not 0. The test allows that.
+- **Not done on the GPU:**
+  - curvature: the shader reads `input.world_position`, which both vertex shaders pass flat, as the dig mask and
+    the lighting do;
+  - FSR 3's mip: the detail's samples take `procedural_controls.w`, as the first set's do;
+  - a skinned batch: no fixture has a skinned mesh (`blended-animation.gltf` and `root-after-children-skin.gltf`
+    have joints and no geometry).
+- **Unset, byte for byte.** The smoke's gallery has eight scenes through every scene shader variant:
+  - the sun's tent shadow, and its soft one with lamps, point lights, the spot light, rain, wetness and the
+    procedural detail;
+  - the omni shadow, no shadow with image-based light, unlit batches (one through the fast unlit pipeline),
+    see-through batches, the surface variants, and the radiance cascades.
+  - It renders the same with `world_detail` NULL, with a detail without textures, and with 0.5.1's compiled
+    shaders under this core. Built against 0.5.1's header and core, it also wrote the gallery before any change:
+    0 pixels of 131,072 differ from this build's.
+  - `btbh_gpu_scene_target_smoke`'s nine images (`BTBH_SMOKE_DUMP`, an FSR 3 frame among them), written by the
+    0.5.1 build and by this one: 0 pixels of 90,368 differ. `btbh_gpu_sdf_terrain_smoke` with
+    `BTBH_SDF_TERRAIN_BASELINE_SHADER_DIR` at 0.5.1's shaders: 0 pixels differ.
+
+**Measured** (the bench, `BTBH_SMOKE_BENCH=1` with `BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR`)
+- Windows, RTX 3070 Ti. Eight coplanar screen-filling layers drawn with `LESS_EQUAL`, so every layer shades every
+  pixel, and 512² maps with mips like v2's. The configurations take 10 interleaved turns of 20 frames. The table
+  gives the fastest turn's difference over 8, two runs: the cost per screen of detailed surface.
+- The heavy pixel is the opaque-sort bench's (soft sun shadow, 40 lamps, 32 point lights), with every light in
+  front of the layers. It takes about 1.6 ms a screen at 1080p. The light one is the sun without a shadow.
+
+  | Per screen | Heavy, 1920 × 1080 | Heavy, 960 × 600 | Light, 1920 × 1080 | Light, 960 × 600 |
+  | --- | --- | --- | --- | --- |
+  | Packed (two samples) | 0.042 / 0.042 ms | 0.005 / 0.005 ms | 0.045 / 0.046 ms | 0.012 / 0.012 ms |
+  | Three maps | 0.043 / 0.027 ms | 0.008 / 0.008 ms | 0.052 / 0.054 ms | 0.012 / 0.012 ms |
+  | Unset, against 0.5.1's shaders | +0.037 / +0.030 ms | +0.005 / +0.005 ms | −0.008 / −0.003 ms | −0.001 / 0.000 ms |
+
+- **Set.** Packed, a 1080p screen of detail costs 0.04–0.05 ms. That is the top of the estimate (0.02–0.04 ms)
+  or just above it. The third map adds little on this GPU.
+- **Unset.** Under the light pixel the branch costs nothing measurable. Under the heavy one it costs 0.03–0.04 ms
+  a 1080p screen (about 2 %) and 0.005 ms at 960 × 600 (about 1 %). That is the risk "Keeping unset free" names:
+  the longer path's registers, paid by every pixel of the full shader.
+- **Not measured.** Radeon GPU Analyzer isn't installed here, so the register counts on gfx1033 and gfx1030 are
+  still open, and so is the Deck. If the owner's Deck test shows the unset cost, the fallback stands: a define
+  and pipeline variants for the full shadow set.
+- **A trap for timing it.** In a first run the bench's lamps stood behind the layers. A flat surface then skips
+  their light, and a bumped one takes some of it. The "cost" of the detail came out at 0.18 ms a screen, mostly
+  that extra light. A game that times the detail on lamp-lit ground sees the same: part of the difference is the
+  relief catching lamps it didn't before.
+
 ## Compatibility
 
 - **Versioning:** minor (0.6.0): additive and opt-in.

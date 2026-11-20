@@ -6,6 +6,92 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+An opt-in addition for Be The Bullet Hell v2: the world detail, phase 1 of
+[RFC 0008](docs/rfc/0008-world-projected-detail.md). Nothing changes until a game sets it: a zeroed batch renders
+byte for byte as in 0.5.1. The scene fragment shaders changed (three more textures and a bigger second uniform
+buffer): rebuild the shaders together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (22/22), the Swift build and the full Swift suite (301
+tests, 2 skipped, 0 failures). With nothing set, 0 pixels differ from 0.5.1's core and shaders: a gallery of eight
+scenes through every scene shader variant (131,072 pixels) and `btbh_gpu_scene_target_smoke`'s nine images (an FSR
+3 frame among them, 90,368 pixels), each written by a build of 0.5.1 and by this one. macOS (Metal) isn't
+verified.
+
+### Added
+- **`BTBHGPUSceneGeometryBatch.world_detail`** (appended at offset 264: the batch grows from 264 to 272 bytes on
+  64-bit) pointing at a **`BTBHGPUSceneWorldDetail`** (64 bytes): a second texture set for a batch, projected from
+  its flat world position instead of read through TEXCOORD_0. NULL draws as before. One detail can serve any
+  number of batches; the renderer reads it during the present call only.
+  - Up to three textures: albedo, normal, ORM. The albedo's rgb times `albedo_scale` multiplies the albedo. The
+    normal's tilt (OpenGL +Y, xy read, z rebuilt) times `normal_scale` is added to the first set's. The ORM's r
+    multiplies the occlusion, its g times `roughness_scale` the roughness. Metalness and emission don't change.
+  - `BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE`: a grey albedo in the ORM's blue (linear). Two textures and
+    two samples instead of three. v2's layout.
+  - The projection uses the face's own normal, so a face never switches halfway across. Level faces (within
+    `level_degrees` of flat, 18 by default) are projected straight down: u along +x, v to the north (-z), every
+    `level_tile`. Other faces run along the face: u to the right seen from the front, v up the face (the height
+    on walls, the distance up the slope on pitched faces), every `wall_tile`. The image is upright on walls and
+    has its top to the north on roofs.
+  - It uses the position before `world_curvature` bends it, so the pattern stays put as the camera moves. It is
+    for static geometry: on anything that moves (skinned units, wind, billboards) it slides.
+  - `seed_component` (1..4) names an instance custom float holding a whole number, such as a lot's index. It
+    offsets the pattern, so neighbouring buildings don't share their streaks. Give all of a building's
+    instances the same one. 0 shares one pattern for all.
+  - Zeroed scales mean 1 and a zeroed angle 18 degrees. The tiles have no default.
+  - Load the textures with `BTBH_GPU_TEXTURE_WRAP_REPEAT`.
+  - A detail whose three textures are NULL, or one on a refracting batch, draws as without one.
+- **Refusals**: the present fails with `BTBH_GPU_INVALID_ARGUMENT`, naming the batch, for a tile that isn't
+  finite and above 0, a scale that isn't finite, `level_degrees` outside [0, 90), `seed_component` above 4, an
+  unknown flag, `reserved` not 0, `ALBEDO_IN_ORM_BLUE` with an albedo texture or without an ORM texture, or a
+  texture of another window.
+- `BTBH_GPU_SCENE_HAS_WORLD_DETAIL`, defined with it.
+- Native test `btbh_gpu_world_detail` (no GPU): the projection's C copy (`src/gpu/btbh_gpu_world_detail.h`) against
+  the RFC's examples, the seed's hash, the uniforms and the refusals. `btbh_gpu_scene_order` checks the layout.
+- GPU smoke `btbh_gpu_world_detail_smoke`:
+  - unset: the gallery byte for byte the same with `world_detail` NULL, with a detail without textures, and with
+    an earlier release's shaders (`BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR`); `BTBH_WORLD_DETAIL_DUMP` and
+    `BTBH_WORLD_DETAIL_REFERENCE` compare builds of two releases;
+  - every pixel of roofs, the ground, an underside, walls, a 45 degree wall and a 30 degree pitch, read back
+    against the C copy (all match);
+  - two seeds giving two offsets, packed against separate (byte for byte), a neutral detail, the refusals and
+    old shaders.
+
+### Changed
+- Shaders: `production_model.frag` and its five variants take three more textures after the dig mask (t11–t13,
+  t10–t12 or t6–t8). Their second fragment uniform buffer grows from 32 to 80 bytes (`BatchExtension`, was
+  `DigMask`). They include a new file, `production_world_detail.hlsli`. No shader file is new or renamed. The
+  unlit, radiance-cascade source and shadow shaders don't change.
+- A batch drawing a world detail never takes the fast unlit pipeline (its shader samples none).
+- Shaders from before 0.6.0 would draw a detailed batch without its detail, without a word. So a present with
+  one checks that the scene's fragment shader names `world_detail_normal_texture` (SPIR-V; Metal libraries
+  aren't checked). Otherwise it fails with `BTBH_GPU_INVALID_ARGUMENT` and the shader's path. Without a detail,
+  0.5.x shaders still draw as before under this core.
+
+### Measured
+Windows, RTX 3070 Ti, `BTBH_SMOKE_BENCH=1`: eight coplanar screen-filling layers drawn with `LESS_EQUAL`, 512²
+maps with mips, 10 interleaved turns of 20 frames, the fastest turn of each of two runs. Per screen of detailed
+surface:
+- Packed (two samples): 0.042 ms at 1920x1080 and 0.005 ms at 960x600 under a heavy pixel (soft sun shadow, 40
+  lamps, 32 point lights); 0.045 ms and 0.012 ms under a light one. Three maps: 0.027–0.054 ms and 0.008–0.012
+  ms. RFC 0008 estimated 0.02–0.04 ms at 1080p.
+- Unset, against 0.5.1's shaders: nothing measurable under the light pixel. Under the heavy one, 0.03–0.04 ms a
+  1080p screen (about 2 %) and 0.005 ms at 960x600 (about 1 %): the price of the longer path's registers. The
+  Deck's figure (and the register count on its GPU) is still to measure.
+- The CPU pushes 48 more bytes per batch and binds three more textures (the same fallbacks for every batch
+  without a detail).
+
+### Upgrading
+- Nothing to set: zeroed batches (`= {0}`, `..Default::default()`, Swift's `init()`) have `world_detail` NULL.
+- Rebuild the shaders with the C core. 0.5.x shaders still draw under this core as long as no batch has a
+  detail. 0.6.0's shaders don't work under an older core: its pipelines declare three samplers too few.
+- Rust hosts with bindgen (Be The Bullet Hell v2, CHIMERA): regenerate the bindings for the bigger batch. A build
+  script can gate on `BTBH_GPU_SCENE_HAS_WORLD_DETAIL`.
+- To adopt it (v2): load each macro set with `WRAP_REPEAT` (packed: the normal, and the ORM with the albedo in its
+  blue, linear), keep one `BTBHGPUSceneWorldDetail` per class with `ALBEDO_IN_ORM_BLUE`, the class's tiles and
+  scales of 1.25, set `world_detail` on the class's batches, and write each building's lot index into the custom
+  float `seed_component` names (v2: 4, float 23 of the instance record). See RFC 0008, "Compatibility".
+- Swift: no API yet. The layer builds batches zeroed, so nothing changes.
+
 ## [0.5.1] — 2026-11-12
 
 0.5.0 plus a fix for its destructible terrain, found by Be The Bullet Hell. No API changed and no shader changed:
