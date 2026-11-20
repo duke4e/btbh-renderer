@@ -1005,6 +1005,31 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_prewarm_smoke COMMAND btbh_gpu_scene_prewarm_smoke)
         set_tests_properties(btbh_gpu_scene_prewarm_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # A measurement, not a test: a frame like Be The Bullet Hell v2's city (RFC 0009's follow-up); see the file
+        # and tools/frame_bench_summary.py.
+        add_executable(btbh_gpu_frame_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_frame_bench.c"
+        )
+        target_compile_definitions(btbh_gpu_frame_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_frame_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_frame_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_frame_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_frame_bench btbh_gpu_shaders)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
