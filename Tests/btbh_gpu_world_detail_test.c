@@ -12,7 +12,14 @@
  * - The seed: PCG's values, whole numbers (an ulp either way, and a value rounded to it, give the same offset),
  *   component 0 none, and offsets spread over [0, 1).
  * - The tilt: a flat normal adds none; a tilted one is tangent-space normal mapping in the frame.
- * - The packed uniforms and the refusals. */
+ * - The packed uniforms and the refusals.
+ *
+ * RFC 0009 phase 2, the world-detail table:
+ * - The vertex's index: rounded to even on a tie, 0 below 0, 255 above, 255 for NaN; the entry slot min(index, 7);
+ *   a map applies below the count and with a layer that isn't 255.
+ * - The table's block: 400 bytes at the shader's offsets; each entry's floats to the bit as a detail with the same
+ *   floats packs them; the entries past the count zero; the batch extension's mode 16 and the table's seed.
+ * - Every refusal of a table and an entry, and what a table without map_layers still checks. */
 #undef NDEBUG
 
 #include "btbh_gpu_world_detail.h"
@@ -20,6 +27,7 @@
 #include <assert.h>
 #include <float.h>
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -465,12 +473,262 @@ static void test_packing(void) {
            "refraction ignores it\n");
 }
 
+/* ------------------------------------------------------------------------------------- RFC 0009: the table */
+
+_Static_assert(sizeof(BTBHGPUWorldDetailTableUniforms) == 400u, "the table's block is 400 bytes");
+_Static_assert(offsetof(BTBHGPUWorldDetailTableUniforms, tiles) == 0u, "float4 tiles[8] at 0");
+_Static_assert(offsetof(BTBHGPUWorldDetailTableUniforms, controls) == 128u, "float4 controls[8] at 128");
+_Static_assert(offsetof(BTBHGPUWorldDetailTableUniforms, layers) == 256u, "uint4 layers[8] at 256");
+_Static_assert(offsetof(BTBHGPUWorldDetailTableUniforms, count) == 384u, "uint4 count at 384");
+
+static void test_table_index(void) {
+    static const struct {
+        float joint;
+        uint32_t index;
+    } cases[] = {
+        { 0.0f, 0u }, { 1.0f, 1u }, { 7.0f, 7u }, { 8.0f, 8u }, { 254.0f, 254u }, { 255.0f, 255u },
+        { 0.4f, 0u }, { 0.5f, 0u }, { 1.5f, 2u }, { 2.5f, 2u }, { 2.6f, 3u }, { 7.6f, 8u }, { 254.5f, 254u },
+        { 254.6f, 255u }, { 256.0f, 255u }, { 1.0e6f, 255u }, { -0.0f, 0u }, { -0.4f, 0u }, { -0.6f, 0u },
+        { -2.0f, 0u }, { -1.0e6f, 0u },
+    };
+    for (size_t index = 0u; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        const uint32_t got = btbh_gpu_world_detail_table_index(cases[index].joint);
+        if (got != cases[index].index) {
+            fprintf(stderr, "index of %g: %u, expected %u\n", (double)cases[index].joint, got, cases[index].index);
+        }
+        assert(got == cases[index].index);
+        checks += 1;
+    }
+    assert(btbh_gpu_world_detail_table_index(INFINITY) == 255u);
+    assert(btbh_gpu_world_detail_table_index(-INFINITY) == 0u);
+    assert(btbh_gpu_world_detail_table_index(NAN) == 255u);
+    checks += 3;
+    /* The slot read and whether a map applies. */
+    for (uint32_t index = 0u; index < 300u; ++index) {
+        const uint32_t slot = btbh_gpu_world_detail_table_slot(index);
+        assert(slot == (index < 8u ? index : 7u));
+        for (uint32_t count = 1u; count <= 8u; ++count) {
+            assert(btbh_gpu_world_detail_table_applies(index, count, 3u) == (index < count));
+            assert(!btbh_gpu_world_detail_table_applies(index, count, BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER));
+        }
+        checks += 1;
+    }
+    printf("table index: rounded to even on a tie, 0 below 0, 255 above and for NaN; slot min(index, 7); a map "
+           "applies below the count with a layer that isn't 255\n");
+}
+
+static BTBHGPUSceneWorldDetailTableEntry valid_entry(uint8_t normal_layer, uint8_t orm_layer) {
+    BTBHGPUSceneWorldDetailTableEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.level_tile[0] = 4.0f;
+    entry.level_tile[1] = 4.0f;
+    entry.wall_tile[0] = 2.0f;
+    entry.wall_tile[1] = 1.4f;
+    entry.normal_layer = normal_layer;
+    entry.orm_layer = orm_layer;
+    return entry;
+}
+
+static void table_refused(
+    const BTBHGPUSceneWorldDetailTable *table,
+    uint32_t layer_count,
+    uint32_t expected_entry,
+    const char *what
+) {
+    uint32_t entry = 12345u;
+    const char *problem = btbh_gpu_world_detail_table_problem(table, layer_count, &entry);
+    if (problem == NULL || entry != expected_entry) {
+        fprintf(stderr, "%s: %s (entry %u)\n", what, problem != NULL ? problem : "accepted", entry);
+    }
+    assert(problem != NULL);
+    assert(entry == expected_entry);
+    checks += 1;
+}
+
+static void test_table_refusals(void) {
+    /* A stand-in for map_layers: the checks here never look inside it (the scene checks its kind and owner). */
+    static int array_stand_in;
+    BTBHGPUSceneWorldDetailTableEntry entries[8];
+    for (uint32_t index = 0u; index < 8u; ++index) {
+        entries[index] = valid_entry((uint8_t)(2u * index), (uint8_t)(2u * index + 1u));
+    }
+    BTBHGPUSceneWorldDetailTable table;
+    memset(&table, 0, sizeof(table));
+    table.map_layers = (BTBHGPUTexture *)(void *)&array_stand_in;
+    table.entries = entries;
+    table.entry_count = 8u;
+    table.seed_component = 4u;
+    uint32_t entry = 0u;
+    assert(btbh_gpu_world_detail_table_problem(&table, 16u, &entry) == NULL && entry == UINT32_MAX);
+    /* An absent map (255) and the last layer are fine; v2's eight classes over 16 layers. */
+    entries[3].normal_layer = BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER;
+    entries[5].orm_layer = BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER;
+    entries[7].orm_layer = 15u;
+    entries[2].level_degrees = 89.9f;
+    entries[2].albedo_scale = -1.0f;
+    assert(btbh_gpu_world_detail_table_problem(&table, 16u, &entry) == NULL);
+    checks += 2;
+    /* The table's own fields. */
+    BTBHGPUSceneWorldDetailTable bad = table;
+    bad.entry_count = 0u;
+    table_refused(&bad, 16u, UINT32_MAX, "entry_count 0");
+    bad.entry_count = 9u;
+    table_refused(&bad, 16u, UINT32_MAX, "entry_count 9");
+    bad = table;
+    bad.entries = NULL;
+    table_refused(&bad, 16u, UINT32_MAX, "entries NULL");
+    bad = table;
+    bad.seed_component = 5u;
+    table_refused(&bad, 16u, UINT32_MAX, "seed_component 5");
+    bad = table;
+    bad.flags = 1u;
+    table_refused(&bad, 16u, UINT32_MAX, "flags");
+    bad = table;
+    bad.reserved[1] = 1u;
+    table_refused(&bad, 16u, UINT32_MAX, "reserved");
+    /* Without map_layers it draws as none: the entries go unchecked, the seed, flags and reserved bytes don't. */
+    bad = table;
+    bad.map_layers = NULL;
+    bad.entries = NULL;
+    bad.entry_count = 0u;
+    assert(btbh_gpu_world_detail_table_problem(&bad, 0u, &entry) == NULL);
+    checks += 1;
+    bad.seed_component = 7u;
+    table_refused(&bad, 0u, UINT32_MAX, "seed_component 7 without map_layers");
+    /* An entry's fields: each fault names the entry. */
+    for (uint32_t fault = 0u; fault < 14u; ++fault) {
+        BTBHGPUSceneWorldDetailTableEntry broken[8];
+        memcpy(broken, entries, sizeof(broken));
+        BTBHGPUSceneWorldDetailTableEntry *e = &broken[6];
+        const char *what = "";
+        switch (fault) {
+            case 0u: e->level_tile[0] = 0.0f; what = "level_tile 0"; break;
+            case 1u: e->level_tile[1] = -1.0f; what = "level_tile negative"; break;
+            case 2u: e->wall_tile[0] = NAN; what = "wall_tile NaN"; break;
+            case 3u: e->wall_tile[1] = INFINITY; what = "wall_tile infinite"; break;
+            case 4u: e->albedo_scale = NAN; what = "albedo_scale NaN"; break;
+            case 5u: e->normal_scale = INFINITY; what = "normal_scale infinite"; break;
+            case 6u: e->roughness_scale = -INFINITY; what = "roughness_scale infinite"; break;
+            case 7u: e->level_degrees = 90.0f; what = "level_degrees 90"; break;
+            case 8u: e->level_degrees = -1.0f; what = "level_degrees -1"; break;
+            case 9u: e->normal_layer = 16u; what = "normal_layer 16 of 16"; break;
+            case 10u: e->orm_layer = 254u; what = "orm_layer 254 of 16"; break;
+            case 11u: e->flags = 1u; what = "flags"; break;
+            case 12u: e->reserved = 1u; what = "reserved"; break;
+            default: e->level_degrees = NAN; what = "level_degrees NaN"; break;
+        }
+        BTBHGPUSceneWorldDetailTable with = table;
+        with.entries = broken;
+        table_refused(&with, 16u, 6u, what);
+    }
+    /* An entry past the count isn't checked. */
+    BTBHGPUSceneWorldDetailTableEntry past[8];
+    memcpy(past, entries, sizeof(past));
+    past[7].level_tile[0] = 0.0f;
+    BTBHGPUSceneWorldDetailTable shorter = table;
+    shorter.entries = past;
+    shorter.entry_count = 7u;
+    assert(btbh_gpu_world_detail_table_problem(&shorter, 16u, &entry) == NULL);
+    /* A layer is checked against the array's count: 16 layers take 15, one layer takes only 0 and 255. */
+    BTBHGPUSceneWorldDetailTableEntry single = valid_entry(0u, BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER);
+    shorter.entries = &single;
+    shorter.entry_count = 1u;
+    assert(btbh_gpu_world_detail_table_problem(&shorter, 1u, &entry) == NULL);
+    single.orm_layer = 1u;
+    table_refused(&shorter, 1u, 0u, "orm_layer 1 of 1");
+    checks += 2;
+    printf("table refusals: entry_count 0 and 9, entries NULL, seed 5, flags, reserved; per entry tiles 0, negative, "
+           "NaN, infinite, scales NaN and infinite, angles 90, -1 and NaN, layers past the count, flags, reserved "
+           "(naming the entry); none without map_layers but its seed, flags and reserved\n");
+}
+
+static void test_table_packing(void) {
+    static int array_stand_in;
+    static int texture_stand_in;
+    BTBHGPUSceneWorldDetailTableEntry entries[3] = {
+        valid_entry(0u, 1u), valid_entry(2u, 3u), valid_entry(BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER, 5u),
+    };
+    entries[1].albedo_scale = 1.25f;
+    entries[1].normal_scale = 0.5f;
+    entries[1].roughness_scale = 1.25f;
+    entries[1].level_degrees = 30.0f;
+    entries[1].wall_tile[1] = 0.7f;
+    entries[2].level_tile[0] = 3.0f;
+    BTBHGPUSceneWorldDetailTable table;
+    memset(&table, 0, sizeof(table));
+    table.map_layers = (BTBHGPUTexture *)(void *)&array_stand_in;
+    table.entries = entries;
+    table.entry_count = 3u;
+    table.seed_component = 4u;
+    BTBHGPUWorldDetailTableUniforms block;
+    memset(&block, 0xa5, sizeof(block));
+    btbh_gpu_world_detail_table_pack(&table, &block);
+    assert(block.count[0] == 3u && block.count[1] == 0u && block.count[2] == 0u && block.count[3] == 0u);
+    for (uint32_t index = 0u; index < 8u; ++index) {
+        /* Each entry as btbh_gpu_world_detail_pack packs a detail with the same floats, to the bit. */
+        if (index < 3u) {
+            BTBHGPUSceneWorldDetail detail;
+            memset(&detail, 0, sizeof(detail));
+            memcpy(&detail.level_tile[0], &entries[index], 32u);  /* the entry's first 32 bytes are the detail's 24..55 */
+            detail.orm_texture = (BTBHGPUTexture *)(void *)&texture_stand_in;
+            detail.flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
+            BTBHGPUSceneGeometryBatch batch;
+            memset(&batch, 0, sizeof(batch));
+            batch.world_detail = &detail;
+            float tiles_out[4];
+            float controls[4];
+            uint32_t mode[4];
+            btbh_gpu_world_detail_pack(&batch, tiles_out, controls, mode);
+            assert(memcmp(block.tiles[index], tiles_out, sizeof(tiles_out)) == 0);
+            assert(memcmp(block.controls[index], controls, sizeof(controls)) == 0);
+            assert(block.layers[index][0] == entries[index].normal_layer);
+            assert(block.layers[index][1] == entries[index].orm_layer);
+            assert(block.layers[index][2] == 0u && block.layers[index][3] == 0u);
+        } else {
+            static const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            static const uint32_t zero_layers[4] = { 0u, 0u, 0u, 0u };
+            assert(memcmp(block.tiles[index], zero, sizeof(zero)) == 0);
+            assert(memcmp(block.controls[index], zero, sizeof(zero)) == 0);
+            assert(memcmp(block.layers[index], zero_layers, sizeof(zero_layers)) == 0);
+        }
+        checks += 1;
+    }
+    expect_near(block.controls[1][3], 0.8660254f, 1.0e-6f, "entry 1's cos 30");
+    expect_near(block.tiles[1][3], 1.0f / 0.7f, 0.0f, "entry 1's 1 / wall_tile v");
+    expect_near(block.controls[0][0], 1.0f, 0.0f, "a zero scale means 1");
+    /* The batch extension: mode 16 and the table's seed, the single detail's floats zero; a table without
+       map_layers, or on a refracting batch, packs nothing. */
+    BTBHGPUSceneGeometryBatch batch;
+    memset(&batch, 0, sizeof(batch));
+    batch.world_detail_table = &table;
+    float tiles_out[4];
+    float controls[4];
+    uint32_t mode[4];
+    btbh_gpu_world_detail_pack(&batch, tiles_out, controls, mode);
+    assert(btbh_gpu_world_detail_table_active(&batch));
+    assert(mode[0] == BTBH_GPU_WORLD_DETAIL_MAP_TABLE && mode[1] == 4u && mode[2] == 0u && mode[3] == 0u);
+    assert(tiles_out[0] == 0.0f && controls[0] == 0.0f);
+    table.map_layers = NULL;
+    btbh_gpu_world_detail_pack(&batch, tiles_out, controls, mode);
+    assert(!btbh_gpu_world_detail_table_active(&batch) && mode[0] == 0u);
+    table.map_layers = (BTBHGPUTexture *)(void *)&array_stand_in;
+    batch.surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
+    btbh_gpu_world_detail_pack(&batch, tiles_out, controls, mode);
+    assert(!btbh_gpu_world_detail_table_active(&batch) && mode[0] == 0u);
+    checks += 3;
+    printf("table packing: 400 bytes at the shader's offsets, each entry to the bit as a detail with its floats, "
+           "the rest zero; mode 16 with the table's seed; nothing without map_layers or when refracting\n");
+}
+
 int main(void) {
     test_faces();
     test_seed();
     test_gradient();
     test_refusals();
     test_packing();
+    test_table_index();
+    test_table_refusals();
+    test_table_packing();
     printf("world detail: %d checks passed\n", checks);
     return 0;
 }
