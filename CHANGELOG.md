@@ -4,12 +4,11 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] (0.8.0)
+## [Unreleased]
 
-The 0.8.0 candidate, apart from 0.7.0's entry below (still `[Unreleased]` on this branch): one opt-in addition
-requested by Be The Bullet Hell v2, the world-detail table chosen per vertex (phase 2 of
-[RFC 0009](docs/rfc/0009-world-detail-table.md)), with the 2D array textures RFC 0001 drafted. Nothing changes until
-a game sets it: a batch without a table, and every existing feature, renders byte for byte as in 0.7.0. The batch
+One opt-in addition requested by Be The Bullet Hell v2: the world-detail table chosen per vertex (phase 2 of
+[RFC 0009](docs/rfc/0009-world-detail-table.md)), with the 2D array textures RFC 0001 drafted. Nothing changes until a
+game sets it: a batch without a table, and every existing feature, renders byte for byte as in 0.7.0. The batch
 grows from 272 to 280 bytes, and the scene shaders changed (one more vertex attribute, sampler and uniform buffer):
 rebuild the shaders and regenerate the bindings together with the C core.
 
@@ -121,8 +120,6 @@ way). Per screen of detailed surface:
   index), leaving `world_detail` NULL. Then the eight 2D detail sets and `BTBH_LOD1_SPLIT` can go. See RFC 0009,
   "Implementation notes (phase 2)".
 - Swift: no API.
-
-## [Unreleased]
 
 ## [0.7.0] — 2026-11-20
 
