@@ -1,5 +1,5 @@
 /* RFC 0008's GPU smoke: the world detail (BTBHGPUSceneGeometryBatch.world_detail), rendered into a target and read
- * back (hidden windows, a debug device).
+ * back (hidden windows, a debug device). Also RFC 0009's phase 1: the procedural detail's pattern 7.
  *
  * Unset. This part also builds against 0.5.1's header, which has no world detail: there it only renders (and
  * writes) the gallery, so that a build of the earlier release and a build of this one can be compared.
@@ -8,6 +8,10 @@
  *   unlit batches (one through the fast unlit pipeline), see-through batches, the surface variants (water,
  *   dissolve, shatter, glitter, rim), and the radiance cascades where they run. Each is rendered twice and must
  *   come out the same (no state carried from one render to the next).
+ * - Then the procedural surface detail's patterns 0..6 together (ground, grass, facade, paving, glass, a lamp's
+ *   lens and none, some on the first set's textures) through each of the six scene fragment shaders: the sun's
+ *   shadow, the sun's and the omni shadow, no shadow, and the three again with the radiance cascades, wet in the
+ *   rain at night (lit windows); and once more dry by day with the sun's soft shadow.
  * - Each renders byte for byte the same with world_detail NULL and with a detail whose three textures are NULL.
  * - BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR=<dir> (an earlier release's compiled shaders and assets): the gallery
  *   renders byte for byte the same with those shaders too (in another window, whose pipelines are made from them).
@@ -38,6 +42,17 @@
  *   1920x1080 and 960x600, in interleaved turns: no detail, packed, three maps, and (with
  *   BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR) no detail with those shaders. The difference over eight is the cost
  *   per screen of detailed surface.
+ *
+ * Pattern 7, the facade's weather (RFC 0009 phase 1, 0.7.0):
+ * - Equal: pattern 7 ([0, 0, 0, 7]) renders byte for byte as pattern 3 with x and y at 0, at z 6 and at z 0.37,
+ *   through the six scene fragment shaders, dry by day and soaked at night: the pattern scenes with every batch
+ *   but the lens on it, some on the first set's textures, the ground and a box with a packed world detail too
+ *   (v2's combination). And it changes them: the street darkens dry, and the walls get wet.
+ * - Refusals: x, y or z set with pattern 7, and a pattern past 7, fail the present with BTBH_GPU_INVALID_ARGUMENT.
+ * - Old shaders (BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR at 0.6.0's): pattern 7 draws without its weather (prints).
+ * - BTBH_SMOKE_BENCH=1 (or =weather, this bench only): the eight layers again, dry and soaked, under the heavy and
+ *   the light pixel at both sizes: pattern 0 against 7 and against 3 (x 0.07, y 0, z 6), and (with the baseline
+ *   shaders) pattern 0 with those.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -598,6 +613,108 @@ static void add_city(Scene *scene, const SmokeWindow *smoke, uint8_t unlit) {
     scene_add(scene, pitched, batch);
 }
 
+/* The procedural surface detail's patterns 0..6 on the city and five more boxes (pattern_scene). */
+#define PATTERN_GALLERY_FIRST 8u
+#define PATTERN_VARIANTS 7u
+#define PATTERN_LENS 7u
+static const char *const pattern_scene_names[PATTERN_VARIANTS] = {
+    "patterns-tent", "patterns-omni", "patterns-unshadowed", "patterns-rc", "patterns-rc-omni",
+    "patterns-rc-unshadowed", "patterns-dry",
+};
+
+static void add_pattern_city(Scene *scene, const SmokeWindow *smoke) {
+    static const float lawn[4] = { 0.35f, 0.55f, 0.25f, 1.0f };
+    add_city(scene, smoke, 0u);                    /* 0 the ground, 1 a box, 2 one turned, 3 one pitched */
+    const BTBHGPUSceneGeometryBatch plain = cube_batch(smoke->cube, 0u, 1u);
+    scene_add(scene, make_box(-2.6f, 0.05f, 1.9f, 1.8f, 0.1f, 1.4f, lawn), plain);    /* 4 a lawn */
+    scene_add(scene, make_box(2.5f, 0.04f, 1.6f, 1.6f, 0.08f, 1.8f, stone), plain);   /* 5 a sidewalk */
+    scene_add(scene, make_box(0.1f, 0.2f, 2.5f, 1.2f, 0.4f, 0.5f, brick), plain);     /* 6 a low wall */
+    scene_add(scene, make_box(-1.0f, 0.3f, 2.4f, 0.3f, 0.3f, 0.3f, white), plain);    /* 7 a lens */
+    scene_add(scene, make_box(-3.2f, 0.6f, -2.6f, 1.0f, 1.2f, 1.0f, stone), plain);   /* 8 none */
+}
+
+/* Variant 0..5: the sun's shadow (production_model_2d_shadows.frag), the sun's and the omni shadow
+   (production_model.frag), no shadow (production_model_unshadowed.frag), then the same three with the radiance
+   cascades (production_model_rc_2d_shadows, _rc, _rc_unshadowed), wet in the rain at night; 6: the sun's soft
+   shadow, dry by day. Lamps and point lights in each. */
+static void pattern_scene(uint32_t variant, const SmokeWindow *smoke, Scene *scene) {
+    scene->name = pattern_scene_names[variant];
+    const uint32_t shadows = variant == 6u ? 0u : variant % 3u; /* 0 the sun's, 1 and the omni, 2 none */
+    scene->lighting = base_lighting(shadows != 2u);
+    BTBHGPUSceneLighting *lighting = &scene->lighting;
+    if (variant == 6u) {
+        lighting->directional_shadow_filter = BTBH_GPU_SCENE_SHADOW_FILTER_SOFT;
+    } else {
+        lighting->surface_wetness = 0.7f;
+        lighting->rain = 0.5f;
+        lighting->window_glow = 0.8f;
+    }
+    if (shadows == 1u) {
+        lighting->spot_position_x = -0.5f;
+        lighting->spot_position_y = 2.6f;
+        lighting->spot_position_z = 1.5f;
+        lighting->spot_range = 8.0f;
+        lighting->spot_direction_y = -1.0f;
+        lighting->spot_energy = 3.0f;
+        lighting->spot_red = 1.0f;
+        lighting->spot_green = 0.7f;
+        lighting->spot_blue = 0.4f;
+        lighting->spot_inner_cutoff = 0.2f;
+        lighting->spot_outer_cutoff = -1.0f;
+        lighting->spot_shadow_enabled = 1u;
+        lighting->spot_shadow_is_omni = 1u;
+        lighting->spot_shadow_softness = 1.0f;
+        lighting->spot_shadow_near = 0.1f;
+    }
+    lighting->lamp_count = 4u;
+    lighting->lamp_core_radius = 0.4f;
+    for (uint32_t lamp = 0u; lamp < 4u; ++lamp) {
+        lighting->lamp_position_reach[lamp][0] = -3.0f + 2.0f * (float)lamp;
+        lighting->lamp_position_reach[lamp][1] = 1.2f;
+        lighting->lamp_position_reach[lamp][2] = 2.8f;
+        lighting->lamp_position_reach[lamp][3] = 5.0f;
+        lighting->lamp_color_energy[lamp][0] = 1.0f;
+        lighting->lamp_color_energy[lamp][1] = 0.8f;
+        lighting->lamp_color_energy[lamp][2] = 0.6f;
+        lighting->lamp_color_energy[lamp][3] = 0.6f;
+    }
+    lighting->point_light_count = 3u;
+    for (uint32_t light = 0u; light < 3u; ++light) {
+        float *point = lighting->point_lights[light];
+        point[0] = -2.0f + 2.0f * (float)light;
+        point[1] = 1.0f;
+        point[2] = 0.0f;
+        point[3] = 3.0f;
+        point[4] = 0.4f;
+        point[5] = 0.6f;
+        point[6] = 1.0f;
+        point[7] = 0.8f;
+    }
+    if (variant >= 3u && variant <= 5u) {
+        scene->post.radiance_cascades.tier = BTBH_GPU_SCENE_RC_LOW;
+        scene->post.radiance_cascades.auto_frame_budget_milliseconds = 16.0f;
+        scene->post.radiance_cascades.indirect_intensity = 0.8f;
+        scene->post.radiance_cascades.hero_omni_emitter_index = -1;
+        scene->post.radiance_cascades.invalidate = 1u;
+    }
+    add_pattern_city(scene, smoke);
+    static const float patterns[9][4] = {
+        { 0.2f, 0.02f, 3.0f, 1.0f },   /* the ground */
+        { 0.3f, 0.03f, 4.0f, 3.0f },   /* a facade, on the first set's textures */
+        { 0.2f, 0.02f, 2.0f, 4.0f },   /* paving */
+        { 0.3f, 0.0f, 3.0f, 5.0f },    /* glass, pitched */
+        { 0.25f, 0.004f, 3.0f, 2.0f }, /* grass */
+        { 0.15f, 0.01f, 2.5f, 4.0f },  /* paving */
+        { 0.07f, 0.02f, 6.0f, 3.0f },  /* a facade at street level */
+        { 0.0f, 0.0f, 1.0f, 6.0f },    /* a lamp's lens */
+        { 0.0f, 0.0f, 0.0f, 0.0f },    /* none */
+    };
+    for (uint32_t batch = 0u; batch < scene->batch_count; ++batch) {
+        memcpy(scene->batches[batch].detail_parameters, patterns[batch], sizeof(patterns[batch]));
+        scene->batches[batch].surface_time = 1.3f;
+    }
+}
+
 static SmokeCamera gallery_camera(void) {
     const float eye[3] = { 3.6f, 3.0f, 4.6f };
     const float centre[3] = { -0.2f, 0.5f, -0.2f };
@@ -605,7 +722,7 @@ static SmokeCamera gallery_camera(void) {
 }
 
 /* Gallery scene `index` (0..GALLERY_COUNT-1). */
-#define GALLERY_COUNT 8u
+#define GALLERY_COUNT (PATTERN_GALLERY_FIRST + PATTERN_VARIANTS)
 static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene) {
     memset(scene, 0, sizeof(*scene));
     scene->camera = gallery_camera();
@@ -819,7 +936,7 @@ static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene
             scene_add(scene, falling, shatter);
             break;
         }
-        default: { /* The radiance cascades (production_model_rc*.frag), where they run: an emissive box and an
+        case 7u: { /* The radiance cascades (production_model_rc*.frag), where they run: an emissive box and an
                       unlit source. */
             scene->name = "rc";
             scene->lighting = base_lighting(true);
@@ -840,6 +957,9 @@ static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene
             scene->post.radiance_cascades.invalidate = 1u;
             break;
         }
+        default: /* The procedural surface detail's patterns through each variant. */
+            pattern_scene(index - PATTERN_GALLERY_FIRST, smoke, scene);
+            break;
     }
 }
 
@@ -1744,6 +1864,7 @@ typedef struct BenchConfig {
     const char *name;
     SmokeWindow *smoke;
     const BTBHGPUSceneWorldDetail *detail;
+    float detail_parameters[4];        /* the procedural detail; zero: none */
     double times[BENCH_ROUNDS];
     uint32_t sample_count;
 } BenchConfig;
@@ -1817,6 +1938,7 @@ static void bench_turn(BenchConfig *config, BTBHGPUTexture *target, const BTBHGP
         batches[layer] = cube_batch(smoke->cube, 0u, 1u);
         batches[layer].depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
         batches[layer].world_detail = config->detail;
+        memcpy(batches[layer].detail_parameters, config->detail_parameters, sizeof(config->detail_parameters));
     }
     BTBHGPUScenePost post = base_post();
     SDL_GPUDevice *device = smoke->window->device->gpu;
@@ -1931,8 +2053,221 @@ static void run_world_detail_checks(BTBHGPUDevice *device, SmokeWindow *smoke, S
     SmokeWindow other = open_window(device, "BTBH world detail smoke (another window)", BTBH_GPU_SMOKE_SHADER_DIR);
     check_refusals(smoke, &other);
     close_window(&other);
-    if (SDL_getenv("BTBH_SMOKE_BENCH") != NULL) {
+    const char *bench = SDL_getenv("BTBH_SMOKE_BENCH");
+    if (bench != NULL && strcmp(bench, "weather") != 0) {
         bench_world_detail(smoke, baseline);
+    }
+}
+#endif
+
+#if defined(BTBH_GPU_SCENE_HAS_FACADE_WEATHER)
+/* ------------------------------------------------------------ RFC 0009 phase 1: pattern 7, the facade's weather */
+
+/* Pattern scene `variant` (0..5) with every batch but the lens on `detail`, dry by day or soaked in the rain at
+   night, and `world_detail` on the ground and the turned box. */
+static void weather_scene(
+    uint32_t variant,
+    bool wet,
+    const SmokeWindow *smoke,
+    const float detail[4],
+    const BTBHGPUSceneWorldDetail *world_detail,
+    Scene *scene
+) {
+    gallery_scene(PATTERN_GALLERY_FIRST + variant, smoke, scene);
+    scene->lighting.surface_wetness = wet ? 1.0f : 0.0f;
+    scene->lighting.rain = wet ? 0.6f : 0.0f;
+    scene->lighting.window_glow = wet ? 0.8f : 0.0f;
+    for (uint32_t batch = 0u; batch < scene->batch_count; ++batch) {
+        if (batch != PATTERN_LENS) {
+            memcpy(scene->batches[batch].detail_parameters, detail, 4u * sizeof(float));
+        }
+    }
+    scene->batches[0].world_detail = world_detail;
+    scene->batches[2].world_detail = world_detail;
+}
+
+static uint8_t *render_weather(
+    SmokeWindow *smoke,
+    uint32_t variant,
+    bool wet,
+    const float detail[4],
+    const BTBHGPUSceneWorldDetail *world_detail,
+    bool *radiance_cascades
+) {
+    static Scene scene;
+    weather_scene(variant, wet, smoke, detail, world_detail, &scene);
+    BTBHGPUSceneReport report;
+    uint8_t *image = render_scene(smoke, NULL, smoke->gallery, &scene, NULL, BTBH_GPU_OK, &report);
+    if (radiance_cascades != NULL) {
+        *radiance_cascades = report.radiance_cascades.active_tier != BTBH_GPU_SCENE_RC_OFF;
+    }
+    return image;
+}
+
+static void check_facade_weather(SmokeWindow *smoke, SmokeWindow *baseline) {
+    const uint32_t texels = GALLERY_SIZE * GALLERY_SIZE;
+    BTBHGPUTexture *normal = detail_texture(smoke, detail_normal_texel);
+    BTBHGPUTexture *orm = detail_texture(smoke, detail_orm_packed_texel);
+    BTBHGPUSceneWorldDetail packed = v2_detail();
+    packed.normal_texture = normal;
+    packed.orm_texture = orm;
+    packed.flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
+    const float weather[4] = { 0.0f, 0.0f, 0.0f, (float)BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER };
+    const float facade[2][4] = {
+        { 0.0f, 0.0f, 6.0f, (float)BTBH_GPU_SCENE_DETAIL_FACADE },   /* v2's preview on 0.6.0 */
+        { 0.0f, 0.0f, 0.37f, (float)BTBH_GPU_SCENE_DETAIL_FACADE },
+    };
+    const float none[4] = { 0.0f, 0.0f, 0.0f, (float)BTBH_GPU_SCENE_DETAIL_NONE };
+    static const char *const variant_names[6] = {
+        "sun shadow", "sun and omni shadow", "no shadow", "RC, sun shadow", "RC, sun and omni shadow", "RC, no shadow",
+    };
+    uint64_t compared = 0u;
+    for (uint32_t variant = 0u; variant < 6u; ++variant) {
+        uint8_t *dry_weather = NULL;
+        for (uint32_t wet = 0u; wet < 2u; ++wet) {
+            bool rc = false;
+            uint8_t *seven = render_weather(smoke, variant, wet != 0u, weather, &packed, &rc);
+            uint32_t differing[2];
+            for (uint32_t z = 0u; z < 2u; ++z) {
+                uint8_t *three = render_weather(smoke, variant, wet != 0u, facade[z], &packed, NULL);
+                differing[z] = differing_pixels(seven, three, texels, 0, NULL);
+                compared += texels;
+                free(three);
+            }
+            uint8_t *plain = render_weather(smoke, variant, wet != 0u, none, &packed, NULL);
+            const uint32_t changed = differing_pixels(seven, plain, texels, 0, NULL);
+            printf("pattern 7 (%s%s, %s): against pattern 3 with x = y = 0, %u pixels differ at z 6 and %u at z "
+                   "0.37; it changes %u pixels of no pattern", variant_names[variant],
+                variant >= 3u && !rc ? " (the cascades didn't run)" : "", wet != 0u ? "soaked" : "dry", differing[0],
+                differing[1],
+                changed);
+            assert(differing[0] == 0u && differing[1] == 0u);
+            /* The ground and every wall's foot darken (most of the image); soaked, the walls darken more. */
+            assert(changed >= texels / 4u);
+            if (wet == 0u) {
+                dry_weather = seven;
+                printf("\n");
+            } else {
+                const uint32_t wetted = differing_pixels(dry_weather, seven, texels, 0, NULL);
+                printf("; %u pixels differ from dry\n", wetted);
+                assert(wetted >= texels / 8u);
+                free(dry_weather);
+                free(seven);
+            }
+            free(plain);
+        }
+    }
+    printf("pattern 7: byte for byte pattern 3 with x = y = 0 (z 6 and 0.37) through six shaders, dry and soaked, "
+           "%llu pixels compared\n", (unsigned long long)compared);
+    (void)fflush(stdout);
+
+    /* Refusals: pattern 7 takes x, y and z at 0; nothing past 7 is a pattern. */
+    {
+        static Scene scene;
+        gallery_scene(0u, smoke, &scene);
+        BTBHGPUSceneGeometryBatch batches[MAX_BOXES];
+        memcpy(batches, scene.batches, sizeof(batches));
+        BTBHGPUSceneReport report;
+        memcpy(batches[1].detail_parameters, weather, sizeof(weather));
+        uint8_t *accepted = render_scene(smoke, NULL, smoke->gallery, &scene, batches, BTBH_GPU_OK, &report);
+        free(accepted);
+        static const float refused[5][4] = {
+            { 0.0f, 0.0f, 6.0f, 7.0f }, { 0.07f, 0.0f, 0.0f, 7.0f }, { 0.0f, 0.01f, 0.0f, 7.0f },
+            { 0.0f, 0.0f, 0.0f, 8.0f }, { 0.0f, 0.0f, 1.0f, 7.25f },
+        };
+        for (uint32_t refusal = 0u; refusal < 5u; ++refusal) {
+            memcpy(batches[1].detail_parameters, refused[refusal], sizeof(refused[refusal]));
+            uint8_t *image = render_scene(smoke, NULL, smoke->gallery, &scene, batches, BTBH_GPU_INVALID_ARGUMENT,
+                &report);
+            assert(image == NULL);
+        }
+        printf("refusals: [0, 0, 0, 7] draws; [0, 0, 6, 7], [0.07, 0, 0, 7], [0, 0.01, 0, 7], [0, 0, 0, 8] and "
+               "[0, 0, 1, 7.25] fail the present (\"%s\")\n", report.message);
+    }
+
+    /* Old shaders: 0.6.0's take pattern 7 for the ground's with x and y at 0 (no darkening, no wet walls). */
+    if (baseline != NULL) {
+        uint8_t *old_weather = render_weather(baseline, 0u, true, weather, NULL, NULL);
+        uint8_t *old_none = render_weather(baseline, 0u, true, none, NULL, NULL);
+        uint8_t *new_weather = render_weather(smoke, 0u, true, weather, NULL, NULL);
+        const uint32_t as_none = differing_pixels(old_weather, old_none, texels, 0, NULL);
+        const uint32_t as_new = differing_pixels(old_weather, new_weather, texels, 0, NULL);
+        printf("old shaders: pattern 7 differs from no pattern on %u pixels and from these shaders' pattern 7 on %u\n",
+            as_none, as_new);
+        assert(as_new >= texels / 4u);
+        free(old_weather);
+        free(old_none);
+        free(new_weather);
+    }
+    btbh_gpu_texture_destroy(normal);
+    btbh_gpu_texture_destroy(orm);
+}
+
+/* BTBH_SMOKE_BENCH: pattern 7 against none and against pattern 3, per screen of facade. */
+static void bench_facade_weather(SmokeWindow *smoke, SmokeWindow *baseline) {
+    const char *device_name = SDL_GetStringProperty(
+        SDL_GetGPUDeviceProperties(smoke->window->device->gpu), SDL_PROP_GPU_DEVICE_NAME_STRING, "unknown");
+    static const uint32_t sizes[2][2] = { { 1920u, 1080u }, { 960u, 600u } };
+    for (uint32_t pixel = 0u; pixel < 2u; ++pixel) {
+        for (uint32_t wet = 0u; wet < 2u; ++wet) {
+            BTBHGPUSceneLighting lighting = bench_lighting();
+            if (pixel == 1u) {
+                lighting = base_lighting(false);
+                lighting.ambient_energy = 0.5f;
+            }
+            lighting.surface_wetness = wet != 0u ? 1.0f : 0.0f;
+            for (uint32_t size = 0u; size < 2u; ++size) {
+                BTBHGPUTextureReport texture_report;
+                BTBHGPUTexture *target = btbh_gpu_window_render_target_create(smoke->window, sizes[size][0],
+                    sizes[size][1], BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+                assert(target != NULL);
+                BTBHGPUTexture *baseline_target = NULL;
+                if (baseline != NULL) {
+                    baseline_target = btbh_gpu_window_render_target_create(baseline->window, sizes[size][0],
+                        sizes[size][1], BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+                    assert(baseline_target != NULL);
+                }
+                BenchConfig configs[4];
+                memset(configs, 0, sizeof(configs));
+                configs[0] = (BenchConfig){ .name = "pattern 0 (none)", .smoke = smoke };
+                configs[1] = (BenchConfig){ .name = "pattern 7 (weather)", .smoke = smoke,
+                    .detail_parameters = { 0.0f, 0.0f, 0.0f, 7.0f } };
+                configs[2] = (BenchConfig){ .name = "pattern 3 (x 0.07, y 0, z 6)", .smoke = smoke,
+                    .detail_parameters = { 0.07f, 0.0f, 6.0f, 3.0f } };
+                configs[3] = (BenchConfig){ .name = "pattern 0, baseline shaders", .smoke = baseline };
+                const uint32_t config_count = baseline != NULL ? 4u : 3u;
+                for (int round = 0; round < BENCH_ROUNDS; ++round) {
+                    for (uint32_t index = 0u; index < config_count; ++index) {
+                        bench_turn(&configs[index], index == 3u ? baseline_target : target, &lighting);
+                    }
+                }
+                printf("weather bench on %s, %ux%u, %s pixel, %s, %u coplanar screen-filling walls (LESS_EQUAL), %d "
+                       "turns of %d frames:\n", device_name, sizes[size][0], sizes[size][1],
+                    pixel == 0u ? "a heavy" : "a light", wet != 0u ? "soaked" : "dry", BENCH_LAYERS, BENCH_ROUNDS,
+                    BENCH_FRAMES);
+                double fastest[4];
+                for (uint32_t index = 0u; index < config_count; ++index) {
+                    BenchConfig *config = &configs[index];
+                    qsort(config->times, config->sample_count, sizeof(config->times[0]), compare_doubles);
+                    fastest[index] = config->times[0];
+                    printf("  %-30s fastest %7.3f ms, median %7.3f ms a frame\n", config->name, config->times[0],
+                        config->times[config->sample_count / 2u]);
+                }
+                printf("  per screen of facade (the difference over %u): pattern 7 %+.4f ms, pattern 3 %+.4f ms, 7 "
+                       "against 3 %+.4f ms", BENCH_LAYERS, (fastest[1] - fastest[0]) / BENCH_LAYERS,
+                    (fastest[2] - fastest[0]) / BENCH_LAYERS, (fastest[1] - fastest[2]) / BENCH_LAYERS);
+                if (config_count == 4u) {
+                    printf("; pattern 0 against the baseline shaders %+.4f ms", (fastest[0] - fastest[3]) /
+                        BENCH_LAYERS);
+                }
+                printf("\n");
+                (void)fflush(stdout);
+                btbh_gpu_texture_destroy(target);
+                if (baseline_target != NULL) {
+                    btbh_gpu_texture_destroy(baseline_target);
+                }
+            }
+        }
     }
 }
 #endif
@@ -1988,6 +2323,12 @@ int main(void) {
 
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
     run_world_detail_checks(device, &smoke, with_baseline ? &baseline : NULL);
+#endif
+#if defined(BTBH_GPU_SCENE_HAS_FACADE_WEATHER)
+    check_facade_weather(&smoke, with_baseline ? &baseline : NULL);
+    if (SDL_getenv("BTBH_SMOKE_BENCH") != NULL) {
+        bench_facade_weather(&smoke, with_baseline ? &baseline : NULL);
+    }
 #endif
 
     if (with_baseline) {

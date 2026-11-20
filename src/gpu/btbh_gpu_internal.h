@@ -226,6 +226,11 @@ uint32_t btbh_gpu_scene_opaque_order(
     uint64_t *scratch
 );
 
+/* BTBHGPUSceneGeometryBatch.detail_parameters as the present accepts them: finite; a pattern in [0, 7], rounded
+   to the nearest whole number as the shader rounds it; patterns 1..6 with z above 0; pattern 7
+   (BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER) with x, y and z at 0. */
+bool btbh_gpu_scene_detail_parameters_valid(const float detail_parameters[4]);
+
 bool btbh_gpu_scene_uses_transparent_pass(
     BTBHGPUSceneBlendMode mode,
     bool transparency_enabled

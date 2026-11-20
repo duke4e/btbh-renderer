@@ -993,6 +993,10 @@ final class RenderServicesTests: XCTestCase {
         XCTAssertFalse(SurfaceDetail(pattern: .ground, albedoVariation: 0, bumpHeight: 0, frequency: 9).isEnabled)
         XCTAssertFalse(SurfaceDetail(pattern: .ground, albedoVariation: 0.1, bumpHeight: 0, frequency: 0).isEnabled)
         XCTAssertFalse(SurfaceDetail(pattern: .none, albedoVariation: 0.1, bumpHeight: 0.01, frequency: 4).isEnabled)
+        // The facade's weather needs nothing but its pattern (it ignores the rest).
+        XCTAssertTrue(SurfaceDetail.facadeWeather.isEnabled)
+        XCTAssertEqual(SurfaceDetail.facadeWeather.pattern.rawValue, 7)
+        XCTAssertTrue(SurfaceDetail(pattern: .facadeWeather, albedoVariation: 0, bumpHeight: 0, frequency: 0).isEnabled)
         var descriptor = MaterialDescriptor.default
         descriptor.detail = grass
         XCTAssertNotEqual(descriptor, MaterialDescriptor.default)

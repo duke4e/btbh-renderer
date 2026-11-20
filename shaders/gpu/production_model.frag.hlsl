@@ -134,7 +134,7 @@ cbuffer MaterialPBR : register(b0, space3)
     float4 procedural_controls;
     // x albedo variation, y bump height (render units), z noise cells per render unit,
     // w pattern (0 none, 1 ground, 2 grass, 3 facade, 4 paving, 5 glass: y is the share of panes lit at
-    // night instead and z panes per render unit, 6 a lamp's lens)
+    // night instead and z panes per render unit, 6 a lamp's lens, 7 the facade's weather: x, y, z are 0)
     float4 detail_parameters;
     // x surface wetness, 0 dry ... 1 soaked (apply_surface_wetness); y the lit windows' energy (the glass
     // detail's panes, 0 by day); z the rain, 0 dry ... 1 a downpour (btbh_rain_ripples); w reserved
@@ -1868,6 +1868,14 @@ float3 btbh_window_light(float2 cell)
     return color * energy * (0.5f + 0.5f * btbh_detail_hash(cell + float2(11.0f, 61.0f)));
 }
 
+// The facade's street darkening (patterns 3 and 7): faces darken toward the street, 0.8 at the flat world height
+// 0 to 1 at a quarter of a render unit up, which grounds buildings on it. One function for both patterns, so
+// pattern 7 draws byte for byte as pattern 3 with x and y at 0.
+float btbh_street_darkening(float height)
+{
+    return lerp(0.8f, 1.0f, saturate(height * 4.0f));
+}
+
 // Procedural surface detail (SurfaceDetail): albedo grain, broad stains and a bump, all from world-space
 // noise. Returns the bump as a surface gradient (Mikkelsen) built from screen-space derivatives, so it
 // needs no tangent frame. The frame and the triplanar weights use the face normal of the position
@@ -1884,6 +1892,13 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     if (pattern == 6u)
     {
         emission += albedo.rgb * surface_wetness.y * btbh_lamp_lens_gain;
+        return float3(0.0f, 0.0f, 0.0f);
+    }
+    if (pattern == 7u)
+    {
+        // The facade's weather (RFC 0009): pattern 3 with x and y at 0, without the noise. There its tint is
+        // exactly 1 times the darkening and its bump 0; apply_surface_wetness wets both alike.
+        albedo.rgb *= btbh_street_darkening(input.world_position.y);
         return float3(0.0f, 0.0f, 0.0f);
     }
     const float3 position = input.world_position * detail_parameters.z;
@@ -1956,8 +1971,7 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     }
     else if (pattern == 3u)
     {
-        // Walls darken over their lowest render unit fifth, which grounds buildings on the street.
-        tint *= lerp(0.8f, 1.0f, saturate(input.world_position.y * 4.0f));
+        tint *= btbh_street_darkening(input.world_position.y);
     }
     else if (pattern == 4u)
     {
@@ -2046,7 +2060,8 @@ float3 btbh_rain_ripples(FragmentInput input)
 // Wet ground (surface_wetness.x, the game's city at night): the ground and paving details turn glossy and a
 // shade darker, in soft puddles a few render units across more than between them, so lights glint on the
 // street. Only level faces get wet: the face normal from the position's derivatives, as the surface detail
-// takes it (the interpolated normal does not say which way the ground faces). Returns the wet roughness.
+// takes it (the interpolated normal does not say which way the ground faces). The facade's (patterns 3 and 7)
+// steep faces turn a shade darker and semi-gloss instead. Returns the wet roughness.
 float apply_surface_wetness(
     FragmentInput input,
     inout float4 albedo,
@@ -2055,14 +2070,14 @@ float apply_surface_wetness(
 {
     const float wetness = saturate(surface_wetness.x);
     const uint pattern = (uint)(detail_parameters.w + 0.5f);
-    if (wetness <= 0.0f || (pattern != 1u && pattern != 3u && pattern != 4u))
+    if (wetness <= 0.0f || (pattern != 1u && pattern != 3u && pattern != 4u && pattern != 7u))
     {
         return roughness;
     }
     const float3 face = cross(ddx(input.world_position), ddy(input.world_position));
     const float face_area = length(face);
     const float level = face_area > 0.0f ? abs(face.y) / face_area : 0.0f;
-    if (pattern == 3u)
+    if (pattern == 3u || pattern == 7u)
     {
         // Walls darken a little and turn semi-gloss, the steep faces most.
         const float wall_wet = wetness * 0.5f * (1.0f - level);
