@@ -922,9 +922,9 @@ typedef struct BTBHGPUSceneGeometryBatch {
     float surface_time;
     float surface_parameters0[4];
     float surface_parameters1[4];
-    /* Procedural surface detail: albedo variation, bump height (render units),
-     * noise cells per render unit, pattern (0 none, 1 ground, 2 grass, 3 facade).
-     * A zeroed batch has none. */
+    /* Procedural surface detail: x albedo variation, y bump height (render units), z noise cells per render
+     * unit, w the pattern (BTBH_GPU_SCENE_DETAIL_*). Patterns 1..6 need z above 0; pattern 7 needs x, y and z at
+     * 0. A zeroed batch has none. */
     float detail_parameters[4];
     /* How it takes part in the horizon-based ambient occlusion (ssao_enabled 2): BTBHGPUSceneSSAOMode (0:
      * fully). Procedural pixel water is never darkened by it where it is water. */
@@ -967,12 +967,36 @@ enum {
     BTBH_GPU_SCENE_BATCH_KEEP_ORDER = 1u << 1
 };
 
+/* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
+ * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
+enum {
+    BTBH_GPU_SCENE_DETAIL_NONE = 0,
+    BTBH_GPU_SCENE_DETAIL_GROUND = 1,      /* grain, stains, wet puddles, rain rings */
+    BTBH_GPU_SCENE_DETAIL_GRASS = 2,       /* grain, stains, a warm-to-cool drift */
+    BTBH_GPU_SCENE_DETAIL_FACADE = 3,      /* triplanar grain, stains, street darkening, wet walls */
+    BTBH_GPU_SCENE_DETAIL_PAVING = 4,      /* slabs, joints, grain, wet puddles, rain rings */
+    BTBH_GPU_SCENE_DETAIL_GLASS = 5,       /* panes; y the share lit at night, z panes per render unit */
+    BTBH_GPU_SCENE_DETAIL_LAMP_LENS = 6,   /* its colour shines with BTBHGPUSceneLighting.window_glow */
+    /* Pattern 3's weather without its grain (RFC 0009): every face darkens toward the street (0.8 at y = 0 to 1
+     * at 0.25 render units, the flat world height) and, with BTBHGPUSceneLighting.surface_wetness, steep faces
+     * turn darker and semi-gloss. No noise, no stains, no bump. x, y and z mean nothing yet and must be 0
+     * (detail_parameters = { 0, 0, 0, 7 }); with any of them set the present fails with
+     * BTBH_GPU_INVALID_ARGUMENT. It draws byte for byte as pattern 3 with x and y at 0 (whatever its z), without
+     * the noise's cost. Be The Bullet Hell v2's facades where the world detail replaces the grain, and on its Low
+     * and Deck presets. */
+    BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER = 7
+};
+
 /* Defined when BTBHGPUSceneGeometryBatch.flags and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW exist (since 0.5.0). */
 #define BTBH_GPU_SCENE_HAS_BATCH_FLAGS 1
 
 /* Defined when BTBHGPUSceneGeometryBatch.world_detail, BTBHGPUSceneWorldDetail and
    BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE exist (since 0.6.0). */
 #define BTBH_GPU_SCENE_HAS_WORLD_DETAIL 1
+
+/* Defined when BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER (pattern 7) and the BTBH_GPU_SCENE_DETAIL_* names exist (since
+   0.7.0). */
+#define BTBH_GPU_SCENE_HAS_FACADE_WEATHER 1
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
@@ -1054,7 +1078,8 @@ typedef struct BTBHGPUSceneLighting {
     float sun_size_radians;
     float sun_curve;
     /* 0 dry ... 1 soaked: the ground and paving surface details (patterns 1 and 4) turn glossy and a
-       shade darker, in puddles more than between them (the game's city at night). */
+       shade darker, in puddles more than between them (the game's city at night); the facade's (patterns 3 and
+       7) steep faces turn a shade darker and semi-gloss. */
     float surface_wetness;
     /* The night's lit windows (the glass surface detail, pattern 5): their light's energy, 0 by day. */
     float window_glow;

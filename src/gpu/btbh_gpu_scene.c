@@ -4417,6 +4417,29 @@ static bool btbh_gpu_scene_ensure_motion_buffer(
     return true;
 }
 
+bool btbh_gpu_scene_detail_parameters_valid(const float detail_parameters[4]) {
+    const float pattern = detail_parameters[3];
+    if (!isfinite(detail_parameters[0]) ||
+        !isfinite(detail_parameters[1]) ||
+        !isfinite(detail_parameters[2]) ||
+        !isfinite(pattern) ||
+        pattern < 0.0f ||
+        pattern > (float)BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER) {
+        return false;
+    }
+    if (pattern < 0.5f) {
+        return true;
+    }
+    if (pattern < 6.5f) {
+        /* Ground, grass, facade, paving, glass, a lamp's lens: noise cells (or panes) per render unit. */
+        return detail_parameters[2] > 0.0f;
+    }
+    /* The facade's weather: x, y and z mean nothing yet, so they stay free for later. */
+    return detail_parameters[0] == 0.0f &&
+        detail_parameters[1] == 0.0f &&
+        detail_parameters[2] == 0.0f;
+}
+
 static bool btbh_gpu_scene_validate_batches(
     BTBHGPUWindow *window,
     uint32_t transient_instance_count,
@@ -4509,15 +4532,7 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER
             )) == 0u &&
-            isfinite(batch->detail_parameters[0]) &&
-            isfinite(batch->detail_parameters[1]) &&
-            isfinite(batch->detail_parameters[2]) &&
-            isfinite(batch->detail_parameters[3]) &&
-            /* SurfaceDetail.Pattern: none, ground, grass, facade, paving. */
-            batch->detail_parameters[3] >= 0.0f &&
-            batch->detail_parameters[3] <= 6.0f &&
-            (batch->detail_parameters[3] < 0.5f ||
-             batch->detail_parameters[2] > 0.0f) &&
+            btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
               batch->albedo_texture->texture != NULL &&

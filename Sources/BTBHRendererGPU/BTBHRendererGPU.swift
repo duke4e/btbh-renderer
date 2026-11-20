@@ -940,9 +940,13 @@ struct GPUSceneMaterialProbe: Equatable {
 enum GPUSceneSurfaceDetailParameters {
     /// (albedo variation, bump height, cells per render unit, pattern); disabled detail is all zero
     /// but for a frequency of one, so the shader's pattern test skips it. Glass takes no bump: its second
-    /// value is the share of panes lit at night.
+    /// value is the share of panes lit at night. The facade's weather is (0, 0, 0, 7): the native batch check
+    /// refuses anything else with it.
     static func native(_ detail: SurfaceDetail) -> (Float, Float, Float, Float) {
         guard detail.isEnabled else { return (0, 0, 1, 0) }
+        if detail.pattern == .facadeWeather {
+            return (0, 0, 0, Float(detail.pattern.rawValue))
+        }
         let second = detail.pattern == .glass ? min(max(detail.litShare, 0), 1) : detail.bumpHeight
         return (detail.albedoVariation, second, detail.frequency, Float(detail.pattern.rawValue))
     }

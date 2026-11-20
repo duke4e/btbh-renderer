@@ -3392,10 +3392,31 @@ final class GPUWindowProbeTests: XCTestCase {
             contentsOf: packageRoot.appendingPathComponent("src/gpu/btbh_gpu_scene.c"),
             encoding: .utf8
         )
-        XCTAssertTrue(nativeScene.contains("batch->detail_parameters[3] <= 6.0f"))
-        // A lamp's lens (6, the last pattern) needs nothing but its pattern and shines its colour at night.
+        XCTAssertTrue(nativeScene.contains("pattern > (float)BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER"))
+        // A lamp's lens (6) needs nothing but its pattern and shines its colour at night.
         XCTAssertTrue(SurfaceDetail.lampLens.isEnabled)
         XCTAssertEqual(GPUSceneSurfaceDetailParameters.native(.lampLens).3, 6)
+        // The facade's weather (7, the last pattern, RFC 0009) needs nothing but its pattern, and goes native as
+        // (0, 0, 0, 7) whatever else the detail says: the native check refuses x, y or z set with it.
+        XCTAssertTrue(SurfaceDetail.facadeWeather.isEnabled)
+        for weather in [
+            SurfaceDetail.facadeWeather,
+            SurfaceDetail(pattern: .facadeWeather, albedoVariation: 0.07, bumpHeight: 0.02, frequency: 6),
+        ] {
+            let native = GPUSceneSurfaceDetailParameters.native(weather)
+            XCTAssertEqual([native.0, native.1, native.2, native.3], [0, 0, 0, 7])
+        }
+        // The Swift patterns are the native ones.
+        let nativePatterns: [(SurfaceDetail.Pattern, Int)] = [
+            (.none, Int(BTBH_GPU_SCENE_DETAIL_NONE)), (.ground, Int(BTBH_GPU_SCENE_DETAIL_GROUND)),
+            (.grass, Int(BTBH_GPU_SCENE_DETAIL_GRASS)), (.facade, Int(BTBH_GPU_SCENE_DETAIL_FACADE)),
+            (.paving, Int(BTBH_GPU_SCENE_DETAIL_PAVING)), (.glass, Int(BTBH_GPU_SCENE_DETAIL_GLASS)),
+            (.lamp, Int(BTBH_GPU_SCENE_DETAIL_LAMP_LENS)),
+            (.facadeWeather, Int(BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER)),
+        ]
+        for (pattern, value) in nativePatterns {
+            XCTAssertEqual(Int(pattern.rawValue), value, "\(pattern)")
+        }
 
         // The fragment uniform block carries the detail right after the procedural sky controls, the surface
         // wetness right after the detail and the street lamps after the wetness, in the shader and in the native
@@ -3461,9 +3482,10 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains(
             "const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)\n"
         ))
-        // The wetness is the environment's, clamped to 0...1, and only the ground and paving details take it.
+        // The wetness is the environment's, clamped to 0...1, and only the ground, paving and facade details (the
+        // facade's weather too) take it.
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
-        XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u)"))
+        XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u && pattern != 7u)"))
         XCTAssertTrue(shader.contains("1.0f + 2.5f * saturate(surface_wetness.x)"))
         XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
         // The clouds sit right after the wetness and shade the sun in both shadow variants.

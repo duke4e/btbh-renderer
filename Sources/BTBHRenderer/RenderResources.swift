@@ -249,6 +249,12 @@ public struct SurfaceDetail: Hashable, Sendable {
         /// A lamp's lens (car head and tail lights, beacons): its own colour shines at night, as strongly as the
         /// windows' light (`EnvironmentDescriptor.windowGlow`) rises. Nothing else.
         case lamp
+        /// The facade's weather without its grain (RFC 0009, since 0.7.0): every face darkens toward the street
+        /// (to 0.8 at height 0, none from a quarter of a render unit up) and, with
+        /// `EnvironmentDescriptor.surfaceWetness`, steep faces turn darker and semi-gloss. No noise, no stains, no
+        /// bump: `facade` with no variation and no bump, without the noise's cost. `albedoVariation`, `bumpHeight`
+        /// and `frequency` are ignored.
+        case facadeWeather
     }
 
     public var pattern: Pattern
@@ -271,15 +277,22 @@ public struct SurfaceDetail: Hashable, Sendable {
 
     public static let none = Self(pattern: .none, albedoVariation: 0, bumpHeight: 0, frequency: 1)
 
-    /// Glass changes the surface's reflection even without variation or lit panes, and a lens shines at night.
+    /// Glass changes the surface's reflection even without variation or lit panes, a lens shines at night, and the
+    /// facade's weather needs nothing but its pattern.
     public var isEnabled: Bool {
-        pattern != .none && frequency > 0 && frequency.isFinite
+        if pattern == .facadeWeather {
+            return true
+        }
+        return pattern != .none && frequency > 0 && frequency.isFinite
             && albedoVariation.isFinite && bumpHeight.isFinite && litShare.isFinite
             && (albedoVariation != 0 || bumpHeight != 0 || pattern == .glass || pattern == .lamp)
     }
 
     /// A lamp's lens (`Pattern.lamp`).
     public static let lampLens = Self(pattern: .lamp, albedoVariation: 0, bumpHeight: 0, frequency: 1)
+
+    /// The facade's weather (`Pattern.facadeWeather`).
+    public static let facadeWeather = Self(pattern: .facadeWeather, albedoVariation: 0, bumpHeight: 0, frequency: 0)
 }
 
 /// Cloud shadows: a layer of soft clouds `height` render units up, drifted `offset` render units by the wind so
@@ -1231,7 +1244,7 @@ public struct EnvironmentDescriptor: Sendable {
     public let radianceCascades: RadianceCascadesDescriptor
     public let fog: FogDescriptor
     /// 0 dry ... 1 soaked: the ground and paving surface details turn glossy and a shade darker, in puddles
-    /// more than between them.
+    /// more than between them; the facade's (`facade`, `facadeWeather`) steep faces a shade darker and semi-gloss.
     public let surfaceWetness: Float
     /// Street lamps, nearest first (`LampLightDescriptor.maximumCount` at most), and the radius within which each
     /// lamp's light stays near full (render units).
