@@ -78,7 +78,8 @@
  * - BTBH_SMOKE_BENCH=1 (or =table, this bench only): eight screen-filling walls under the heavy and the light pixel
  *   at both sizes: no detail, the single packed detail, a table of one entry, a table whose strips alternate two
  *   entries, and (with the baseline shaders) no detail with those; the CPU of 200 merged batches against 1,000
- *   split ones; and 20,000 small boxes against the baseline shaders (the extra vertex attribute).
+ *   split ones; and 20,000 small boxes against the baseline shaders (the extra vertex attribute). In interleaved
+ *   turns, 10 or BTBH_SMOKE_BENCH_ROUNDS (up to 40).
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -3455,13 +3456,22 @@ static void check_table_refusals(SmokeWindow *smoke, SmokeWindow *other) {
 
 /* ------------------------------------------------- BTBH_SMOKE_BENCH=1 or =table: the table's cost */
 
+/* The table bench's turns: BTBH_SMOKE_BENCH_ROUNDS (1..40), else BENCH_ROUNDS. More turns find quiet ones when
+   another process shares the GPU. */
+#define TABLE_BENCH_MAX_ROUNDS 40
+static int table_bench_rounds(void) {
+    const char *text = SDL_getenv("BTBH_SMOKE_BENCH_ROUNDS");
+    const int rounds = text != NULL ? atoi(text) : 0;
+    return rounds >= 1 && rounds <= TABLE_BENCH_MAX_ROUNDS ? rounds : BENCH_ROUNDS;
+}
+
 typedef struct TableBenchConfig {
     const char *name;
     SmokeWindow *smoke;
     BTBHGPUCustomMesh *mesh;
     const BTBHGPUSceneWorldDetail *detail;
     const BTBHGPUSceneWorldDetailTable *table;
-    double times[BENCH_ROUNDS];
+    double times[TABLE_BENCH_MAX_ROUNDS];
     uint32_t sample_count;
 } TableBenchConfig;
 
@@ -3508,7 +3518,7 @@ static void table_bench_turn(TableBenchConfig *config, BTBHGPUTexture *target, c
         assert(rendered == BTBH_GPU_OK);
     }
     (void)SDL_WaitForGPUIdle(device);
-    if (config->sample_count < BENCH_ROUNDS) {
+    if (config->sample_count < TABLE_BENCH_MAX_ROUNDS) {
         config->times[config->sample_count++] = (double)(SDL_GetTicksNS() - started) / 1.0e6 / BENCH_FRAMES;
     }
 }
@@ -3554,8 +3564,9 @@ static BTBHGPUCustomMesh *create_strip_wall(BTBHGPUWindow *window, float first, 
 }
 
 /* The CPU side: 200 merged batches with one table against 1,000 split ones (five classes, each with its own single
-   detail), each a tiny box far from the others; the encode time from the report, fastest and median of 10 turns. */
+   detail), each a tiny box far from the others; the encode time from the report, fastest and median of the turns. */
 static void bench_table_encode(SmokeWindow *smoke, const LitTable *lit, BTBHGPUSceneWorldDetail *five) {
+    const int rounds = table_bench_rounds();
     BTBHGPUTextureReport texture_report;
     BTBHGPUTexture *target = btbh_gpu_window_render_target_create(smoke->window, 960u, 600u,
         BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
@@ -3594,9 +3605,9 @@ static void bench_table_encode(SmokeWindow *smoke, const LitTable *lit, BTBHGPUS
     const SmokeCamera camera = look_at(eye, centre, 0.9f, 1.6f);
     const BTBHGPUSceneLighting lighting = base_lighting(false);
     BTBHGPUScenePost post = base_post();
-    double encode[2][BENCH_ROUNDS];
-    double total[2][BENCH_ROUNDS];
-    for (int round = 0; round < BENCH_ROUNDS; ++round) {
+    double encode[2][TABLE_BENCH_MAX_ROUNDS];
+    double total[2][TABLE_BENCH_MAX_ROUNDS];
+    for (int round = 0; round < rounds; ++round) {
         for (uint32_t which = 0u; which < 2u; ++which) {
             double sum = 0.0;
             double wall = 0.0;
@@ -3627,15 +3638,15 @@ static void bench_table_encode(SmokeWindow *smoke, const LitTable *lit, BTBHGPUS
         }
     }
     for (uint32_t which = 0u; which < 2u; ++which) {
-        qsort(encode[which], BENCH_ROUNDS, sizeof(double), compare_doubles);
-        qsort(total[which], BENCH_ROUNDS, sizeof(double), compare_doubles);
+        qsort(encode[which], rounds, sizeof(double), compare_doubles);
+        qsort(total[which], rounds, sizeof(double), compare_doubles);
     }
     printf("table CPU bench: %d merged batches with a table against %d split ones with single details, %d turns of "
-           "%d frames:\n", MERGED_BATCHES, SPLIT_BATCHES, BENCH_ROUNDS, BENCH_FRAMES);
+           "%d frames:\n", MERGED_BATCHES, SPLIT_BATCHES, rounds, BENCH_FRAMES);
     printf("  merged: prepare and geometry encode fastest %.3f ms, median %.3f ms; the call %.3f / %.3f ms\n",
-        encode[0][0], encode[0][BENCH_ROUNDS / 2], total[0][0], total[0][BENCH_ROUNDS / 2]);
+        encode[0][0], encode[0][rounds / 2], total[0][0], total[0][rounds / 2]);
     printf("  split:  prepare and geometry encode fastest %.3f ms, median %.3f ms; the call %.3f / %.3f ms\n",
-        encode[1][0], encode[1][BENCH_ROUNDS / 2], total[1][0], total[1][BENCH_ROUNDS / 2]);
+        encode[1][0], encode[1][rounds / 2], total[1][0], total[1][rounds / 2]);
     (void)fflush(stdout);
     for (uint32_t k = 0u; k < 5u; ++k) {
         btbh_gpu_custom_mesh_destroy(split[k]);
@@ -3645,6 +3656,7 @@ static void bench_table_encode(SmokeWindow *smoke, const LitTable *lit, BTBHGPUS
 }
 
 static void bench_table(SmokeWindow *smoke, SmokeWindow *baseline) {
+    const int rounds = table_bench_rounds();
     const char *device_name = SDL_GetStringProperty(
         SDL_GetGPUDeviceProperties(smoke->window->device->gpu), SDL_PROP_GPU_DEVICE_NAME_STRING, "unknown");
     /* v2's maps: 512^2 with mips, noise; in an array of four (two classes) and as 2D textures. */
@@ -3720,14 +3732,14 @@ static void bench_table(SmokeWindow *smoke, SmokeWindow *baseline) {
             configs[4] = (TableBenchConfig){ .name = "no detail, baseline shaders", .smoke = baseline,
                 .mesh = baseline_wall };
             const uint32_t config_count = baseline != NULL ? 5u : 4u;
-            for (int round = 0; round < BENCH_ROUNDS; ++round) {
+            for (int round = 0; round < rounds; ++round) {
                 for (uint32_t index = 0u; index < config_count; ++index) {
                     table_bench_turn(&configs[index], index == 4u ? baseline_target : target, lighting);
                 }
             }
             printf("table bench on %s, %ux%u, %s pixel, %u coplanar screen-filling walls (LESS_EQUAL), %d turns of %d "
                    "frames:\n", device_name, sizes[size][0], sizes[size][1], pixel == 0u ? "a heavy" : "a light",
-                BENCH_LAYERS, BENCH_ROUNDS, BENCH_FRAMES);
+                BENCH_LAYERS, rounds, BENCH_FRAMES);
             double fastest[5];
             for (uint32_t index = 0u; index < config_count; ++index) {
                 TableBenchConfig *config = &configs[index];
@@ -3776,6 +3788,7 @@ static void bench_table(SmokeWindow *smoke, SmokeWindow *baseline) {
 /* Unset with many small instances: 20,000 tiny boxes (the static vertex shader's extra attribute and flat output)
    against the baseline shaders, interleaved. */
 static void bench_table_unset_vertices(SmokeWindow *smoke, SmokeWindow *baseline) {
+    const int rounds = table_bench_rounds();
     if (baseline == NULL) {
         return;
     }
@@ -3788,7 +3801,7 @@ static void bench_table_unset_vertices(SmokeWindow *smoke, SmokeWindow *baseline
         box_instance(&at, &instances[(size_t)index * 24u]);
     }
     const BTBHGPUSceneLighting lighting = base_lighting(false);
-    double times[2][BENCH_ROUNDS];
+    double times[2][TABLE_BENCH_MAX_ROUNDS];
     SmokeWindow *windows[2] = { smoke, baseline };
     BTBHGPUTexture *targets[2];
     BTBHGPUTextureReport texture_report;
@@ -3797,7 +3810,7 @@ static void bench_table_unset_vertices(SmokeWindow *smoke, SmokeWindow *baseline
             BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
         assert(targets[which] != NULL);
     }
-    for (int round = 0; round < BENCH_ROUNDS; ++round) {
+    for (int round = 0; round < rounds; ++round) {
         for (uint32_t which = 0u; which < 2u; ++which) {
             SmokeWindow *window = windows[which];
             BTBHGPUSceneGeometryBatch batch = cube_batch(window->cube, 0u, BOXES);
@@ -3831,12 +3844,12 @@ static void bench_table_unset_vertices(SmokeWindow *smoke, SmokeWindow *baseline
         }
     }
     for (uint32_t which = 0u; which < 2u; ++which) {
-        qsort(times[which], BENCH_ROUNDS, sizeof(double), compare_doubles);
+        qsort(times[which], rounds, sizeof(double), compare_doubles);
         btbh_gpu_texture_destroy(targets[which]);
     }
     printf("unset vertex bench, %d small boxes in one draw at 1920x1080, %d turns of %d frames: these shaders fastest "
-           "%.3f ms (median %.3f), the baseline shaders %.3f ms (median %.3f): %+.4f ms\n", BOXES, BENCH_ROUNDS,
-        BENCH_FRAMES, times[0][0], times[0][BENCH_ROUNDS / 2], times[1][0], times[1][BENCH_ROUNDS / 2],
+           "%.3f ms (median %.3f), the baseline shaders %.3f ms (median %.3f): %+.4f ms\n", BOXES, rounds,
+        BENCH_FRAMES, times[0][0], times[0][rounds / 2], times[1][0], times[1][rounds / 2],
         times[0][0] - times[1][0]);
     (void)fflush(stdout);
     free(instances);
