@@ -3,16 +3,16 @@
 The games that build on btbh-renderer, how each one gets it and what it uses. The coordinator keeps
 this current; a game's session asks (an issue) when something here changes. Rules: [`COORDINATION.md`](COORDINATION.md).
 
-| | Be The Bullet Hell | CHIMERA | Tyrian3D |
-| --- | --- | --- | --- |
-| Language | Swift (SwiftPM) | Rust | C (OpenTyrian fork) |
-| Platforms | Windows, macOS 12+, Linux (Steam Deck) | Windows (Vulkan) | macOS (Metal), Windows (Vulkan) |
-| Repository | `Be-The-Bullet-Hell`, branch `main` | `RTS`, branch `main` | `Tyrian3D`, branch `tyrian3d/m1-tools` |
-| Machine / session | Windows PC, BTBH session | Windows PC, CHIMERA session in `RTS/` | Mac and Windows PC, Tyrian3D sessions |
-| Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` |
-| Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib |
-| Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) |
+| | Be The Bullet Hell | CHIMERA | Tyrian3D | Be The Bullet Hell v2 |
+| --- | --- | --- | --- | --- |
+| Language | Swift (SwiftPM) | Rust | C (OpenTyrian fork) | Rust (a rewrite in `v2/`) |
+| Platforms | Windows, macOS 12+, Linux (Steam Deck) | Windows (Vulkan) | macOS (Metal), Windows (Vulkan) | Windows (Vulkan); Linux and Steam Deck planned (`tools/build-linux.sh`), not yet run on them |
+| Repository | `Be-The-Bullet-Hell`, branch `main` | `RTS`, branch `main` | `Tyrian3D`, branch `tyrian3d/m1-tools` | `Be-The-Bullet-Hell`, folder `v2/`, branch `main` |
+| Machine / session | Windows PC, BTBH session | Windows PC, CHIMERA session in `RTS/` | Mac and Windows PC, Tyrian3D sessions | Windows PC, BTBH v2 session |
+| Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
+| Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
+| Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.5.1` (tag `v0.5.1`; BTBH `5cd39d5c`, 2026-11-19) |
 
 ## Features used
 
@@ -50,6 +50,14 @@ drawn before it. `opaque_sort` and the floored snap are wired but off. `build.rs
 `docs/rfc/`): layered terrain (0001), height fog and water at RTS scale (0002), light regions (0003); its
 lamps should move to `lamp_*` (in v0.1.0).
 
+**Be The Bullet Hell v2** (`v2/crates/v2-platform/src/gpu.rs`, bindgen; it took over CHIMERA's sys crate):
+instanced model batches with vertex colours, one albedo/normal/ORM set per batch (kit detail maps since BTBH
+`4ff0e1b3`), the built-in procedural surface variants, skinned kaiju (glTF), transparent and additive effects,
+refraction strips, decals and ground scars, x-ray stencil masks, cascaded sun shadows, SSAO, SSR, glass, cloud
+shadows, water normals, rain and wetness, bloom, vignette, LUT grading, FSR 1, and FSR 3.1 with motion vectors and
+a reactive mask. Requested: a world-projected second texture set per batch for its kit's coarse relief, then BC
+texture formats (RFC 0008, draft).
+
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
 mip caps), models (`window_model_load`, material info), custom meshes,
@@ -64,5 +72,5 @@ the tag `archive/tyrian3d`.
 ## Contacts
 
 There is no direct channel between the machines: open a GitHub issue on this repository and name the
-game in its title (`[BTBH]`, `[CHIMERA]`, `[Tyrian3D]`). The coordinator answers there and links the
+game in its title (`[BTBH]`, `[BTBH v2]`, `[CHIMERA]`, `[Tyrian3D]`). The coordinator answers there and links the
 release that resolves it.
