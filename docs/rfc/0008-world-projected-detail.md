@@ -1,6 +1,6 @@
 # RFC 0008: World-projected detail
 
-- **Status:** Draft (2026-11-20)
+- **Status:** Draft (2026-11-20). v2 answered 2026-11-20; awaiting acceptance (see "Decisions")
 - **Requested by:** Be The Bullet Hell v2 (its coordinator session, 2026-11-20). The spec is
   `Be-The-Bullet-Hell/v2/assets/kit/textures/macro/macro.json`, made by `v2/tools/kit/textures_macro.py`
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D:
@@ -56,38 +56,46 @@ Medium and High if it costs more than 0.1 ms on the Deck. Nothing is blocked on 
 
 | Field | What it says | For the renderer |
 | --- | --- | --- |
-| `projection` | Faces within 18° of level: u = x / tile_u, v = north / tile_v (north = −z in glTF), tangent +x, bitangent north. Other faces: T = normalize(cross(up, N)), u = dot(P, T) / tile_u, v = height / tile_v, bitangent up. Add a per-lot offset to u and v | Section 2. v grows toward the image's top (OpenGL), so the sampled t is −v |
+| `projection` | Faces within 18° of level: u = x / tile_u, v = north / tile_v (north = −z in glTF), tangent +x, bitangent north. Other faces: T = normalize(cross(up, N)), u = dot(P, T) / tile_u, v = height / tile_v, bitangent up. Add a per-lot offset to u and v | Section 2. v grows toward the image's top (OpenGL), so the sampled t is −v. On faces that aren't level, v runs up the face: height on vertical walls, the distance up the slope on pitched faces (Decisions) |
 | `normal` | Tangent space in the projection's frame, linear, OpenGL +Y; add its tilt to the fine normal's | xy read, z rebuilt, as the first set's |
-| `orm` | Linear. R occlusion (multiply); G a roughness factor stored × 0.8 (0.8 keeps it); B 0 | `roughness_scale` = 1.25 |
-| `albedo` | An sRGB grey multiplier with a linear mean of 0.8; scale by 1.25 and multiply | `albedo_scale` = 1.25. A UNORM texture can't hold a multiplier above 1 |
+| `orm` | Linear. R occlusion (multiply); G a roughness factor stored × 0.8 (0.8 keeps it); B 0 | `roughness_scale` = 1.25. B will carry the albedo (Decisions) |
+| `albedo` | An sRGB grey multiplier with a linear mean of 0.8; scale by 1.25 and multiply | `albedo_scale` = 1.25. A UNORM texture can't hold a multiplier above 1. It moves into the ORM's B, linear (Decisions) |
 | `tile_cells` | Walls (brick, tiles, concrete, glass) 2 × 1.4; ground (asphalt, paving, grass, roof) 4 × 4. One pair per class, for both projections | `level_tile` and `wall_tile`, in world units (v2: 1 unit = 1 cell) |
 | `relief_cells` | The relief height the generator bakes into the normals (`textures.py` `normal_map`) | Not needed: the renderer takes a `normal_scale` |
-| `materials` | Which kit materials take which class | v2's. The fine `brick` class holds the `tiles` material, which has its own macro class (Open questions) |
+| `materials` | Which kit materials take which class | v2's. The fine `brick` class holds the `tiles` material, which has its own macro class; v2 splits it into a ninth draw class (Decisions) |
 
 ## Proposal
 
 Three parts:
 
-1. **`BTBHGPUSceneWorldDetail`.** A plain struct the host fills and keeps (three textures, two tile sizes, three
-   scales, the seed's source), and a pointer to it appended to `BTBHGPUSceneGeometryBatch`: `world_detail`.
-   NULL draws as before.
+1. **`BTBHGPUSceneWorldDetail`.** A plain struct the host fills and keeps (up to three textures, two tile sizes,
+   three scales, the seed's source, a flag for the packed layout), and a pointer to it appended to
+   `BTBHGPUSceneGeometryBatch`: `world_detail`. NULL draws as before.
 2. **The scene fragment shader.** A uniform branch projects the flat world position by the face normal, samples
-   the three maps and blends them into the first set. A batch without a world detail takes no extra sample.
+   the maps and blends them into the first set. That is two samples in the packed layout v2 uses (the grey albedo
+   in the ORM's blue), three with a separate albedo. A batch without a world detail takes no extra sample.
 3. **Phase 2: block-compressed textures.** BC1, BC4, BC5 and BC7 from data the host compressed offline, as raw
    blocks or a `.dds` file, with its mips. It is independent of 1 and 2.
 
 ### Where this differs from the request
+
+v2 accepted every point below on 2026-11-20 (Decisions).
 
 - **The offset is one seed, not two floats.** It is one custom float, a whole number (a lot's index), which the
   shader hashes into a 2D offset.
   - It leaves three of the four floats free.
   - A single free float exists whatever surface variant a building takes later: DISSOLVE reads x, y and z,
     SHATTER reads y, z and w, GLITTER reads x. A free pair doesn't (section 2, "The seed").
-  - A host that wants exact offsets can't have them; ask on the issue if that matters.
-- **Pitched faces.** `macro.json`'s "bitangent up" isn't in the plane of a sloped face, so the normal map can't
-  use it there. The shader uses B = cross(N, T), which is up on vertical walls. The texture coordinate v still
-  follows height, as `macro.json` says. That stretches a pitched face along its slope by 1 / sin(pitch), twice at
-  30°. Open questions ask whether v should follow the face instead.
+  - A host that wants exact offsets can't have them. v2 doesn't need them.
+- **Pitched faces: v runs up the face.** `macro.json` says v = height and bitangent up on every face that isn't
+  level.
+  - On a sloped face "bitangent up" isn't in the face's plane, so the normal map can't use it. The shader uses
+    B = cross(N, T), which is up on vertical walls and runs up the slope on a pitched face.
+  - v = dot(P, B) follows it. On vertical walls that is the height, as `macro.json` says. On a pitched face it is
+    the distance up the slope, so the image isn't stretched.
+  - v = height would have stretched it by 1 / sin(pitch), twice at 30°, which v2 says would show.
+  - The cost is a seam where a pitched face meets a wall. In v2 the eaves already are a seam between two macro
+    classes (roof tiles and walls).
 - **The image's top.** `macro.json`'s v and its normals' +Y both grow toward the image's top. The renderer
   samples with row 0 at the top, so the texture coordinate is (u, −v).
   - Walls show the image upright: the rain streaks, which the generator draws fading down the rows, run down.
@@ -99,9 +107,10 @@ Three parts:
   `production_model.frag` already reads only the normal map's xy and rebuilds z
   (`mapped_normal.z = sqrt(1 - dot(xy, xy))`, after `normal_scale`). A one-channel albedo (BC4) does need one
   (phase 2).
-- **An optional packed layout.** v2's albedo is grey and its ORM's blue is unused, so both fit in one texture: two
-  samples instead of three. `BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE` ships in phase 1 only if v2 regenerates
-  its sets that way (Open questions).
+- **A packed layout.** v2's albedo is grey and its ORM's blue is unused, so both fit in one texture: two samples
+  instead of three, and a third less cost.
+  - `BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE` ships in phase 1, and v2's baker writes its sets that way.
+  - A separate `albedo_texture` stays for a host whose detail albedo has colour.
 
 ### 1. API (phase 1)
 
@@ -116,10 +125,12 @@ Three parts:
  * normal):
  * - Level faces (N within level_degrees of straight up or down): u = x / level_tile[0], v = -z / level_tile[1]
  *   (north), seen from above; a face that looks down takes v = +z (it is seen from below). Tangent +x.
- * - Other faces: T = normalize(cross(up, N)) (to the right seen from the front), u = dot(P, T) / wall_tile[0],
- *   v = y / wall_tile[1]. On vertical walls the bitangent is up.
+ * - Other faces: T = normalize(cross(up, N)) (to the right seen from the front), B = cross(N, T) (up the face),
+ *   u = dot(P, T) / wall_tile[0], v = dot(P, B) / wall_tile[1]: the height on vertical walls, the distance up
+ *   the slope on pitched faces (not stretched).
  * - The frame is (T, cross(N, T), N). The image's top lies toward +v (as an OpenGL normal map's +Y): upright on
- *   walls, to the north on level faces. The texture coordinate is (u, -v) plus the seed's offset.
+ *   walls, up the slope on pitched faces, to the north on level faces. The texture coordinate is (u, -v) plus the
+ *   seed's offset.
  * Wrap the textures with BTBH_GPU_TEXTURE_WRAP_REPEAT. */
 typedef struct BTBHGPUSceneWorldDetail {
     /* Its rgb times albedo_scale multiplies the albedo; alpha unused. NULL: no albedo change. */
@@ -127,8 +138,8 @@ typedef struct BTBHGPUSceneWorldDetail {
     /* Tangent space in the frame above, OpenGL +Y, linear: xy are read and z is rebuilt (two channels are
      * enough). Its tilt times normal_scale is added to the first set's. NULL: no tilt. */
     BTBHGPUTexture *normal_texture;
-    /* Linear. r multiplies the occlusion; g times roughness_scale multiplies the roughness; b unused (or the
-     * albedo, with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE). NULL: neither changes. */
+    /* Linear. r multiplies the occlusion; g times roughness_scale multiplies the roughness; b unused, or the
+     * grey albedo multiplier with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE. NULL: neither changes. */
     BTBHGPUTexture *orm_texture;
     /* World units one repeat of the textures covers, along u and v; each must be above 0. */
     float level_tile[2];
@@ -147,8 +158,9 @@ typedef struct BTBHGPUSceneWorldDetail {
 } BTBHGPUSceneWorldDetail;
 
 enum {
-    /* Only if v2 takes it (Open questions): the grey albedo multiplier is the ORM texture's blue channel, so
-     * the set is two textures and two samples. albedo_texture must be NULL and orm_texture set. */
+    /* The grey albedo multiplier is the ORM texture's blue channel, linear like the rest of it (times
+     * albedo_scale, as albedo_texture's rgb would be): the set is two textures and two samples. albedo_texture
+     * must be NULL and orm_texture set. Be The Bullet Hell v2's layout. */
     BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE = 1u << 0
 };
 
@@ -201,19 +213,26 @@ at it.
 - **Level faces** (|N.y| ≥ cos `level_degrees`).
   - They are projected straight down: u = x, v = −z (north). Two nearly level faces at different slopes still
     share one pattern across their edge: the ground runs on across tiles and pieces.
+  - The price is a stretch along a level face's slope of at most 1 / cos 18°, 5 %.
   - A face that looks down (an awning's underside, a bridge's soffit) takes v = +z. Its frame stays right-handed
     (T × B = N), so its relief isn't inverted. The camera rarely sees these.
   - The frame is +x made orthogonal to N, and B = cross(N, T): north on a flat roof.
-- **Walls** (everything else).
+- **Walls and pitched faces** (everything else).
   - T = normalize(N.z, 0, −N.x) = normalize(cross(up, N)). Its length is at least sin 18° (0.31), so it never
-    degenerates. u = dot(P, T), v = y.
-  - On a vertical wall B is up. On v2's 45° facades T runs along the facade: a blended triplanar would show two
-    copies there, the split shows one.
-  - On a pitched face (between 18° and vertical), B = cross(N, T) runs up the slope. v follows height, so the
-    image is stretched along the slope by 1 / sin(pitch) (Open questions).
+    degenerates. B = cross(N, T), a unit vector in the face.
+  - u = dot(P, T) and v = dot(P, B).
+  - On a vertical wall B is up and v is the height, as `macro.json` says. On v2's 45° facades T runs along the
+    facade: a blended triplanar would show two copies there, the split shows one.
+  - On a pitched face (between 18° and vertical), B runs up the slope and v is the distance along it. The image
+    keeps its proportions: a tile of 2 × 1.4 world units on a 30° roof covers 1.4 units up the slope, not 2.8.
+  - Where a pitched face meets a vertical wall, both keep u (same T when they face the same way), but v jumps:
+    the wall's v is its height, the roof's is its distance up the slope. In v2 the eaves already are a class
+    seam (roof tiles against walls).
 - **Image orientation.** The texture coordinate is (u + offset.x, −v + offset.y). The image's top lies toward +v,
   as in `macro.json`, and T is the image's right.
   - A wall seen from the front shows the image upright and unmirrored.
+  - A pitched face shows it unmirrored with its top up the slope: the generator's streaks on tile roofs run
+    down the slope, as its comment intends ("v runs up a pitched face").
   - A flat roof seen from above, north up on the screen, shows it unmirrored with its top to the north.
   - The green of a normal texel then tilts toward B, as an OpenGL +Y map's should.
 - **The seed.**
@@ -236,7 +255,7 @@ at it.
 
   What the games put there:
   - **v2:** zero on every kit instance (`instance_trs`). It uses no variant that reads them (RIM, WATER,
-    REFRACT). All four are free; w is a good choice.
+    REFRACT), so all four are free. It will put the lot's index in w (Decisions).
   - **Be The Bullet Hell v1:** fills all four on city buildings (x the destructable level, y the shatter time, z
     a seed, w the shatter's scale; `CityRenderer.swift`). Its dissolving enemy ghosts use x, y and z.
   - **CHIMERA:** writes none in production (`batch.rs` sets only the colour); a dissolve test sets x.
@@ -250,7 +269,8 @@ In `production_model.frag`, inside one branch on a uniform (the batch has a worl
 ```hlsl
 // After the first set's four samples and before apply_surface, so derivatives are valid (SHATTER's
 // apply_surface can discard) and a surface variant that replaces the albedo, normal or ORM (water) wins.
-albedo_sample.rgb *= detail_albedo.rgb * albedo_scale;         // grey: rrr; packed: orm.b
+// Packed (v2): two samples, normal and ORM; the albedo is detail_orm.b. Otherwise a third sample's rgb.
+albedo_sample.rgb *= (packed ? detail_orm.bbb : detail_albedo.rgb) * albedo_scale;
 orm.r *= detail_orm.r;                                         // occlusion
 orm.g *= detail_orm.g * roughness_scale;                       // before saturate, wetness and material_factors
 float3 m = detail_normal.xyz * 2 - 1;  m.xy *= normal_scale;  m.z = sqrt(1 - saturate(dot(m.xy, m.xy)));
@@ -264,7 +284,7 @@ normal = stable_normalize(normal - detail_gradient - world_gradient, normal);
   frame. Otherwise the two tilts add, as `macro.json` asks.
 - **Albedo, occlusion, roughness.** These are multiplied in before the procedural detail's tints, its wetness and
   `material_factors`, so they act on the first set's values as those do. Metalness and emission are untouched.
-- **All three samples** use `SampleBias(..., procedural_controls.w)`, the bias the first set's samples use: FSR 3's
+- **Every sample** (two or three) uses `SampleBias(..., procedural_controls.w)`, the bias the first set's samples use: FSR 3's
   negative bias, 0 otherwise. 0.5.0 fixed the relief-from-brightness taps for the same reason. Without it, under
   FSR 3 the detail would read the render size's mip and look softer than the first set.
 
@@ -347,21 +367,23 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_dds(
     the feature. Phase 2 starts by settling this with the validation layers on. If sampling a BC image needs the
     feature, the device is created with it where supported, and that path gets its own test.
   - `BTBH_GPU_FEATURE_TEXTURE_BC` is set only when both the format query and the feature agree.
-- **Memory.** A 512² map with its mips is 1.33 MiB in RGBA8, 0.33 MiB in BC5 or BC7 and 0.17 MiB in BC1 or BC4. v2's
-  fine sets (21 maps) go from 28 MiB to about 6 MiB, and the macro sets (24 maps) from 32 MiB to about 7 MiB.
+- **Memory.** A 512² map with its mips is 1.33 MiB in RGBA8, 0.33 MiB in BC5 or BC7 and 0.17 MiB in BC1 or BC4.
+  - v2's fine sets (21 maps) go from 28 MiB to about 6 MiB.
+  - v2's packed macro sets (16 maps) go from 21 MiB to about 5 MiB: the normal in BC5, the ORM with its albedo in
+    BC7 (linear). BC1's 5:6:5 endpoints are too coarse for three unrelated channels.
 
 ## Minimal example
 
 ```c
-/* v2's concrete class (macro.json: tile_cells 2 x 1.4, the same for both projections). */
+/* v2's concrete class (macro.json: tile_cells 2 x 1.4, the same for both projections), packed: the ORM's blue
+ * holds the grey albedo multiplier, linear. */
 BTBHGPUTextureReport tr;
 BTBHGPUSceneWorldDetail concrete = {0};
-concrete.albedo_texture = btbh_gpu_window_texture_load_ex(window, "macro/concrete_albedo.png", 1,
-    BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_WRAP_REPEAT, BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB, &tr);
 concrete.normal_texture = btbh_gpu_window_texture_load_ex(window, "macro/concrete_normal.png", 1,
     BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_WRAP_REPEAT, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR, &tr);
 concrete.orm_texture = btbh_gpu_window_texture_load_ex(window, "macro/concrete_orm.png", 1,
     BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_WRAP_REPEAT, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR, &tr);
+concrete.flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
 concrete.level_tile[0] = concrete.wall_tile[0] = 2.0f;
 concrete.level_tile[1] = concrete.wall_tile[1] = 1.4f;
 concrete.albedo_scale = 1.25f;
@@ -375,9 +397,11 @@ instance[23] = (float)lot_index;
 batch.world_detail = &concrete;                 /* NULL on everything else */
 ```
 
-In v2's Rust this is `world_detail: set.map_or(std::ptr::null(), |d| d as *const _)` in `batch_of`. The eight
-descriptors live in `KitLibrary` next to `textures`. `KitPiece` gains the lot's index, from v2-city's
-`KitInstance`, and `place_cell` writes it into float 23.
+In v2's Rust this is `world_detail: set.map_or(std::ptr::null(), |d| d as *const _)` in `batch_of`.
+- The eight descriptors, one per macro class, live in `KitLibrary` next to `textures`.
+- The nine fine draw classes point at them: `brick` and the split-off `tiles` share the fine brick set and take
+  the brick and tiles details.
+- `KitPiece` gains the lot's index, from v2-city's `KitInstance`, and `place_cell` writes it into float 23.
 
 ## Implementation
 
@@ -389,8 +413,8 @@ descriptors live in `KitLibrary` next to `textures`. `KitPiece` gains the lot's 
   - Validation, with the refusals above. Many batches point at one detail, so it is checked once per distinct
     pointer a frame.
   - The uniforms: section "Bindings" below.
-  - Three more sampler bindings after the dig mask: the detail's textures, or the existing fallbacks when it has
-    none (they are never sampled then).
+  - Three more sampler bindings after the dig mask: the detail's textures, or the existing fallbacks for the
+    ones it lacks (never sampled then). A packed detail binds the fallback in the albedo slot.
   - Every model fragment shader is created with three more samplers: 14, 13 and 9 instead of 11, 10 and 6.
   - `btbh_gpu_scene_uses_fast_unlit_pipeline` returns false for a batch with a world detail, so
     `production_model_unlit.frag` stays as it is.
@@ -424,7 +448,8 @@ descriptors live in `KitLibrary` next to `textures`. `KitPiece` gains the lot's 
   | Unshadowed | t0–t4, mask t5 | t6–t8 | 7 |
 
   - RFC 0001's two control textures, if it goes ahead in the same shader, would take the full variant to 16:
-    the limit. The packed layout would leave one slot.
+    the limit. The albedo slot stays declared even though v2 packs its albedo, for hosts with a coloured one. If
+    the slots run out, it is the one to drop.
   - The uniforms join b1 rather than a third buffer: one push per batch, as now, of 80 bytes instead of 32.
 
   ```hlsl
@@ -460,28 +485,31 @@ descriptors live in `KitLibrary` next to `textures`. `KitPiece` gains the lot's 
 
 ### Cost
 
-These are estimates, to measure in the prototype.
+These are estimates, to measure in the prototype. v2's packed layout (two samples) is the main path. The
+three-sample layout (a separate albedo texture) is in parentheses.
 
 | Item | Estimate |
 | --- | --- |
-| Per pixel, with a detail | 3 trilinear samples (2 packed) and about 40 ALU instructions (derivatives, the frame, the hash, the gradient) |
+| Per pixel, with a detail | 2 trilinear samples (3) and about 40 ALU instructions (derivatives, the frame, the hash, the gradient) |
 | Per pixel, without | One uniform compare, plus whatever the longer path costs in registers (to measure) |
-| Desktop GPU (RTX 3070 Ti, the bench machine), 1080p | 0.03–0.05 ms |
-| Same, 1440p | 0.05–0.09 ms |
-| Steam Deck preset (960 × 600) on a Deck | 0.06–0.19 ms (packed 0.04–0.12 ms) |
-| CPU per batch | One pointer, 48 more bytes pushed. SDL's Vulkan backend rewrites a fragment descriptor set only when a binding changes, so three more samplers cost three more writes on those draws only |
-| GPU memory, RGBA8 with mips | 1.33 MiB a map: v2's 24 maps 32 MiB (16 packed: 21 MiB) |
-| GPU memory, phase 2 | about 7 MiB for the 24 maps (BC5 normal, BC5 ORM, BC4 albedo), about 5 MiB packed (BC5 and BC7) |
+| Desktop GPU (RTX 3070 Ti, the bench machine), 1080p | 0.02–0.04 ms (0.03–0.05 ms) |
+| Same, 1440p | 0.03–0.06 ms (0.05–0.09 ms) |
+| Steam Deck preset (960 × 600) on a Deck | 0.04–0.12 ms (0.06–0.19 ms) |
+| CPU per batch | One pointer, 48 more bytes pushed. SDL's Vulkan backend rewrites a fragment descriptor set only when a binding changes, so the new samplers cost three more writes on those draws only |
+| GPU memory, RGBA8 with mips | 1.33 MiB a map: v2's 16 packed maps 21 MiB (24 maps: 32 MiB) |
+| GPU memory, phase 2 | about 5 MiB for v2's 16 packed maps (BC5 normal, BC7 ORM with albedo); about 7 MiB for 24 maps (BC5 normal, BC5 ORM, BC4 albedo) |
 
 **How the GPU rows were reached.**
 - The Deck has 8 RDNA 2 compute units at 1.0–1.6 GHz, each with four texture filter units. Trilinear runs at half
   rate, so the Deck filters 16–26 billion trilinear samples a second.
-- At 960 × 600, 0.5–1 million kit fragments a frame (screen share times overdraw, guessed) take 1.5–3 million
-  samples: 0.06–0.19 ms.
+- At 960 × 600, 0.5–1 million kit fragments a frame (screen share times overdraw, guessed) take 1–2 million
+  samples packed: 0.04–0.12 ms. Three maps take 1.5–3 million: 0.06–0.19 ms.
 - The RTX 3070 Ti filters about 170 billion trilinear samples a second (192 units at 1.77 GHz). At 1080p it shades
-  1.5–3 million kit fragments: 0.03–0.05 ms.
+  1.5–3 million kit fragments: 3–6 million samples packed, 0.02–0.04 ms.
 - These are texture-bound costs. The real cost is lower when the shader's heavy ALU (soft shadows, 40 lamps, 32
   point lights) hides the fetches. It is higher if the longer path lowers occupancy.
+- Packed, the Deck's upper estimate lands just above v2's 0.1 ms line and its lower one well under it. The
+  measurement decides whether the detail stays on Low and the Deck.
 
 **What the Deck number hinges on**, in order:
 1. **Occupancy.** The register count of `production_model.frag` on gfx1033 (the Deck's GPU) before and after,
@@ -490,32 +518,32 @@ These are estimates, to measure in the prototype.
    to back (`opaque_sort`).
 3. **What the detail replaces.**
    - On High, v2 still runs the procedural facade grain on textured kit surfaces, for its tint
-     (`SurfaceLook::detailed`, pattern 3). That is a triplanar fbm: about 40 hashes a pixel, against three
-     fetches here.
+     (`SurfaceLook::detailed`, pattern 3). That is a triplanar fbm: about 40 hashes a pixel, against two
+     fetches here (packed).
    - v2's Low and Deck looks already drop the grain as "the dear part".
    - So the detail in place of the grain may cost nothing, or save time. v2 should measure that pair, not the
      detail on top of everything.
-4. **The packed layout** (two samples) and phase 2's formats. BC lowers bandwidth and cache misses, not the filter
-   rate. At mips 1 to 3, where the classic camera reads these maps, the textures mostly stay in cache anyway.
+4. **Phase 2's formats**, later. BC lowers bandwidth and cache misses, not the filter rate. At mips 1 to 3, where
+   the classic camera reads these maps, the textures mostly stay in cache anyway.
 
-A real Deck number needs a real Deck. v2's Deck figures so far are its Deck preset on the desktop GPU
-(`v2/docs/plan-v2.md` §15: "A real Deck and Linux have not been tried"), and that scales by neither the Deck's
-texture rate nor its occupancy. Until a Deck run exists, the rule "Medium and High only above 0.1 ms on the Deck"
-can only be applied to the estimate above and the analyser's register count.
+A real Deck number needs a real Deck. v2's Deck figures so far are its Deck preset measured on the desktop GPU,
+and that scales by neither the Deck's texture rate nor its occupancy. The real numbers will come from the owner's
+Deck test (Decisions). Until then, the rule "Medium and High only above 0.1 ms on the Deck" can only be applied
+to the estimate above and the analyser's register count.
 
 **How to measure it.**
 - **Bench.** SDL 3.4 has no GPU timestamps. The bench therefore times 20 frames back to back, as in
   `BTBH_SMOKE_BENCH` (CHANGELOG 0.5.0, "Measured"), and makes the detail's share large: eight coplanar
   screen-filling layers drawn with `LESS_EQUAL` so every layer shades every pixel, with the heavy pixel of the
   opaque-sort bench.
-  - Four configurations: no detail, detail, packed, and no detail against 0.5.1's shaders (the branch's own
-    cost).
+  - Four configurations: no detail, packed (v2's), three maps, and no detail against 0.5.1's shaders (the
+    branch's own cost).
   - At 1920 × 1080 and 960 × 600, in interleaved turns, quoting the fastest turn.
   - The difference over eight is the cost per screen of detailed surface.
 - **Registers.** Radeon GPU Analyzer on `production_model.frag.spv` (all five variants) for gfx1033 and gfx1030:
   VGPRs and waves per SIMD, before and after.
 - **v2.** An A/B of its kit with and without the detail, and with the detail in place of the grain, from its frame
-  telemetry. On a Deck if anyone has one at hand.
+  telemetry. Then the same on the owner's Deck.
 
 ### Phase 2
 
@@ -549,11 +577,13 @@ can only be applied to the estimate above and the analyser's register count.
     ends in `..Default::default()`, so `world_detail` is null.
   - To adopt it:
     - bump `renderer.pin` to the 0.6.0 checkout;
-    - keep eight descriptors in `KitLibrary`;
+    - rebake the macro sets packed (the albedo, linear, in the ORM's blue) and update `macro.json`'s projection
+      text (v up the face);
+    - split `tiles` out of the fine `brick` class into a ninth draw class;
+    - keep eight descriptors in `KitLibrary`, flagged `ALBEDO_IN_ORM_BLUE`;
     - set `world_detail` on the kit's class batches, lod1 included if it wants;
-    - write each building's lot index into float 23 of its pieces' instances.
-  - Two choices are its own: the `tiles` split (Open questions), and whether the detail replaces the facade grain.
-  - It should be added to `CONSUMERS.md`.
+    - write each building's lot index into float 23 (custom w) of its pieces' instances.
+  - One choice is still its own: whether the detail replaces the facade grain.
   - A side note from reading its loader. `kit.rs` `load_tile` scales the fine albedo by 1.25 in linear light and
     clamps at 1 (`(lin * gain).min(1.0)`). Every texel brighter than the set's mean is clipped, so the fine sets
     lose their bright half (brick's 95th percentile is 1.068 of the mean).
@@ -581,18 +611,24 @@ can only be applied to the estimate above and the analyser's register count.
   - A C copy of the projection, kept in step with `production_world_detail.hlsli`:
     - the up and down faces, four walls, a 45° wall, a 30° pitch, and faces at 17° and 19°;
     - T × B = N on each;
-    - the image's top up on walls and north on roofs;
+    - the image's top up on walls, up the slope on the pitch, and north on roofs;
+    - on the pitch, a world unit up the slope moves v by 1 / `wall_tile[1]`, the same as a unit of height on a
+      wall: no stretch;
     - the seed's offsets stable and spread.
-  - The refusals: a zero tile, NaN, `seed_component` 5, an unknown flag, packed with an albedo texture.
+  - The refusals: a zero tile, NaN, `seed_component` 5, an unknown flag, packed with an albedo texture or without
+    an ORM texture.
 - **GPU smoke** (`btbh_gpu_scene_target_smoke`, or a new `btbh_gpu_world_detail_smoke`; Windows/Vulkan):
   - **Unset:** the existing scenes render byte for byte the same with `world_detail` NULL, with a detail whose
     textures are all NULL, and against 0.5.1's references.
-  - **Neutral:** an albedo of 0.8 with scale 1.25, a flat normal and an ORM of (1, 0.8) render within 1/255 of no
-    detail.
+  - **Neutral:** a flat normal and an ORM of (1, 0.8, 0.8) packed, with both scales 1.25, render within 1/255 of
+    no detail. So does the same with a separate albedo of 0.8.
+  - **Packed against separate:** the same grey multiplier in the ORM's blue and in an albedo texture renders the
+    same, within 1/255.
   - **Orientation, with a reference image** (`Tests/Fixtures/world_detail/orientation.png`). A test texture (an
     arrow and an "F") on a box with four walls, one 45° wall, a 30° pitched face and a flat roof, over ground.
     The readback also checks it numerically:
     - on every wall the arrow points up and the F reads unmirrored from outside;
+    - on the pitched face the arrow points up the slope and is as long as on the walls (no stretch);
     - on the roof and the ground the arrow points north.
   - **Continuity:** two touching boxes with the same seed continue the pattern across their seam; with different
     seeds they don't.
@@ -633,44 +669,63 @@ can only be applied to the estimate above and the analyser's register count.
 | **An opaque handle** (`btbh_gpu_window_world_detail_create` / `destroy`) | It would validate once, but adds create and destroy calls and a lifetime to manage. Checking a 64-byte struct once per distinct pointer a frame is cheap |
 | **Pipeline variants instead of a branch** | Double the pipeline arrays and five more shader files in every game's list. Kept as the fallback if the unset path's register cost shows on the Deck |
 | **A two-float offset** (as asked) | Two of the four custom floats, and no free pair exists under DISSOLVE or SHATTER. A seed of one whole number per building gives the same "neighbours differ" |
-| **One texture array for all classes** (a layer per class) | A batch could then carry several classes (brick and tiles in one mesh). But v2 already draws per class, arrays need every layer the same size and format, and RFC 0001's terrain arrays are a different binding. Later, if a game needs mixed classes in one draw |
+| **One texture array for all classes** (a layer per class) | A batch could then carry several classes (brick and tiles in one mesh). But v2 already draws per class and splits `tiles` into its own draw class. Arrays need every layer the same size and format, and RFC 0001's terrain arrays are a different binding. Later, if a game needs mixed classes in one draw |
+| **v = height on pitched faces** (`macro.json` as first written) | It joins a wall at the eaves, but stretches the image along the slope by 1 / sin(pitch), twice at 30°. v2 chose v up the face: its eaves are a class seam anyway |
 | **Object-space projection** | The detail would follow moving objects, but restart on every piece, which is the opposite of what v2 needs. Possible later as a mode bit |
 | **Compressing at load** (phase 2) | An encoder in the core, slow loads (BC7 especially), worse quality than offline tools, and nothing gained over shipping DDS |
 | **KTX2** (phase 2) | Its point is Basis or Zstd supercompression, which needs decoders. Plain KTX2 is DDS with more parsing. A host that wants it can use the raw-block call |
 
-## Open questions
+## Decisions (v2, 2026-11-20)
 
-For v2:
+v2 accepted every point in "Where this differs from the request": one seed float, the (u, −v) coordinate,
+cross(N, T) on slopes, BC5 normals with no flag, and phase 2 later. Its answers to the open questions:
 
-1. **The seed.** One whole number per building (its lot's index) in one custom float, hashed by the renderer,
-   instead of a two-float offset. Is w the float you want? Do you need exact offsets, for instance a pattern
-   aligned to a lot's corner?
-2. **Pitched faces.** Should v follow height, as `macro.json` says? It joins the wall at the eaves, but is stretched
-   by 1 / sin(pitch), twice at 30°. Or should v run up the face: no stretch, a seam at the eaves? The shading
-   frame is right either way.
-3. **Packing.** Will you regenerate the sets with the grey albedo in the ORM's blue? Two samples instead of three,
-   a third less cost, one slot fewer. If yes, `ALBEDO_IN_ORM_BLUE` ships in phase 1; if not, it's left out.
-4. **`tiles` against `brick`.** The fine `brick` class holds the `tiles` material, which has its own macro class.
-   With one world detail per batch, those meshes split into a ninth surface class, one more draw where both
-   occur. Or tiles take brick's macro set.
-5. **Phase 2's priority.** Phase 1 doesn't need it: 28 + 32 MiB fits every target, the Deck included. Do you need
-   BC now for load time or memory, or can it wait for your asset tools to write DDS?
+1. **The seed.** One whole number per building, its lot's index, in whichever custom float `seed_component`
+   names. v2 uses w and fills it per instance. It doesn't need exact offsets.
+2. **Pitched faces: v runs up the face.** No stretch, a seam at the eaves.
+   - In v2, pitched roofs are a different macro class (roof tiles) from the walls, so the eaves already are a seam.
+   - A 2× stretch at 30° would show.
+   - The projection above says so everywhere: on faces that aren't level, v = dot(P, cross(N, T)). That is the
+     height on vertical walls, as before.
+   - v2 updates `macro.json`'s projection text to match.
+3. **Packed: two samples.** The grey albedo goes in the ORM's blue channel, linear.
+   - `BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE` ships in phase 1, unconditionally.
+   - v2's baker writes the sets that way once this RFC is accepted.
+   - The three-texture layout stays for hosts whose detail albedo has colour.
+4. **`tiles` becomes a ninth draw class.** v2 splits it out of the fine `brick` class, so pitched roofs get the
+   tiles macro set and brick keeps its own. Nothing changes in the renderer: it is one more batch, with its own
+   `world_detail`.
+5. **BC waits.** It waits until v2's tools write DDS. Phase 1 is what v2 needs; phase 2 stays in this RFC, later
+   and independent.
+6. **Deck numbers.** Real ones come from the owner's Deck test. So far only the Deck preset was measured, on the
+   desktop GPU.
+
+Still open, for the implementation:
+
+- **The unset path's register cost** on gfx1033 (the Deck's GPU), from Radeon GPU Analyzer and the bench. If
+  occupancy drops for batches without a detail, the branch becomes pipeline variants for the full shadow set
+  (Implementation, "Keeping unset free").
+- **Low and the Deck.** Whether the detail stays on Low and the Deck preset, against v2's 0.1 ms line. The packed
+  estimate straddles it (0.04–0.12 ms); the owner's Deck test decides. v2 may also measure it in place of the
+  facade grain.
+- **Phase 2 only:** whether sampling BC images on Vulkan needs `textureCompressionBC` enabled on the device, which
+  SDL 3.4.2 doesn't ask for by default.
 
 ## Phases
 
 1. **Phase 1, the world detail (0.6.0).**
-   - The struct, the pointer, the branch in `production_model.frag`, the tests and the bench.
-   - It works on today's RGBA8 textures (`btbh_gpu_window_texture_load_ex` with `WRAP_REPEAT`), so v2 can use its
-     PNGs as they are.
-   - The packed flag goes in only if v2 answers yes to question 3.
-2. **Phase 2, compressed textures (its own release).**
+   - The struct, the pointer, the packed flag, the branch in `production_model.frag`, the tests and the bench.
+   - It works on today's RGBA8 textures (`btbh_gpu_window_texture_load_ex` with `WRAP_REPEAT`). v2 rebakes its
+     PNGs packed and loads them as they are.
+2. **Phase 2, compressed textures (later, its own release).**
    - 2a: raw BC blocks and DDS, the capability bit and the Vulkan feature. No shader change.
    - 2b: one-channel colour slots (BC4 and R8). Three shaders change.
+   - It comes when v2's asset tools write DDS (Decisions, 5).
 
-**Can phase 2 come first, or separately?** Yes, either way.
+**Can phase 2 come first, or separately?** Separately, yes; first isn't needed.
 - Neither phase uses the other. Phase 1 is complete on RGBA8, and phase 2 serves every texture slot, not only the
   detail.
-- Recommended order: phase 1 first, because it is what v2 asked for and it is small. Phase 2 when v2's asset
-  tools can write DDS, since the encoder lives in the game's tools, not the renderer.
-- Nothing about memory forces the order: 60 MiB of textures is not a problem on any target. BC's gains are load
-  time (no PNG decode, no GPU mip generation) and some cache.
+- The order is phase 1 now and phase 2 when v2's tools write DDS, since the encoder lives in the game's tools,
+  not the renderer.
+- Nothing about memory forces it: v2's textures stay near 50 MiB with the packed sets, which is not a problem on
+  any target. BC's gains are load time (no PNG decode, no GPU mip generation) and some cache.
