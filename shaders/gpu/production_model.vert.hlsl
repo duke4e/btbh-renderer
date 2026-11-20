@@ -1,5 +1,6 @@
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
+#include "production_world_detail.hlsli"
 
 #ifndef BTBH_RC_SOURCE_PROJECTION
 #define BTBH_RC_SOURCE_PROJECTION 0
@@ -51,6 +52,11 @@ struct VertexInput
     float2 texture_coordinate : TEXCOORD2;
     float3 normal : TEXCOORD3;
     float4 tangent : TEXCOORD6;
+#if !BTBH_RC_SOURCE_PROJECTION
+    // RFC 0009: the first float of the vertex's joint slot (byte 64), its world-detail table index. Declared after
+    // the tangent, so it takes location 5 and locations 0..4 stay where 0.7.0's shader had them.
+    float detail_index : TEXCOORD7;
+#endif
 };
 
 struct VertexOutput
@@ -67,6 +73,10 @@ struct VertexOutput
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
+#if !BTBH_RC_SOURCE_PROJECTION
+    // RFC 0009: the triangle's world-detail table entry (flat: all three vertices must carry the same index).
+    nointerpolation uint detail_index : TEXCOORD11;
+#endif
 };
 
 // Only a zero vector takes the fallback: a normal through the cofactor of an instance at the city's 0.002 scale
@@ -263,5 +273,8 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.world_bitangent = world_bitangent;
     output.surface_data = surface.data;
     output.animated_model = 0.0f;
+#if !BTBH_RC_SOURCE_PROJECTION
+    output.detail_index = btbh_world_detail_table_index(input.detail_index);
+#endif
     return output;
 }

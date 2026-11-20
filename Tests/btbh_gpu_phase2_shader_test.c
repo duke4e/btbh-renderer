@@ -163,6 +163,24 @@ int main(void)
             BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 4"
         ) ||
+        /* RFC 0009: the joint slot's first float after the tangent, at location 5 (0..4 as in 0.7.0), and the
+           world-detail table index out of both model vertex shaders, flat, at location 11. */
+        !require_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD7\", \"type\": \"float\", \"location\": 5"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "\"name\": \"out.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH,
+            "\"name\": \"out.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+        ) ||
         !require_text(
             BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 6"
@@ -213,7 +231,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 14"
+            "\"samplers\": 15"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
@@ -221,11 +239,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 13"
+            "\"samplers\": 14"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
+            "\"samplers\": 10"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
@@ -233,15 +251,15 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 14"
+            "\"samplers\": 15"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 13"
+            "\"samplers\": 14"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9"
+            "\"samplers\": 10"
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH,
@@ -316,11 +334,12 @@ int main(void)
             "\"samplers\": 3, \"storage_textures\": 0"
         ) ||
         /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer (RFC 0008: with the
-           world detail's after it, in the scene shaders; the scene shaders' samplers above end with the dig mask
-           and the world detail's three). */
+           world detail's after it, in the scene shaders; the scene shaders' samplers above end with the dig mask,
+           the world detail's three and RFC 0009's table array). RFC 0009: the table's entries are the scene
+           shaders' third; the fast unlit and RC source shaders keep two. */
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 2"
+            "\"uniform_buffers\": 3"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
@@ -332,15 +351,15 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 2"
+            "\"uniform_buffers\": 3"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 2"
+            "\"uniform_buffers\": 3"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 2"
+            "\"uniform_buffers\": 3"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH,

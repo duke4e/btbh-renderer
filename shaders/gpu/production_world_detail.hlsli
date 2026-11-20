@@ -4,13 +4,20 @@
 // RFC 0008: a batch's world detail (BTBHGPUSceneGeometryBatch.world_detail), a second texture set projected from
 // the flat world position by the face's own normal. The projection, its frame, the seed's hash and the normal map's
 // tilt live here, apart from the scene shader, so that their C copy (src/gpu/btbh_gpu_world_detail.h) can be
-// tested natively: keep the two in step.
+// tested natively: keep the two in step. RFC 0009's table (world_detail_table) adds a vertex's index and the
+// entry it picks.
 
 // world_detail_mode.x: the maps the batch samples (0: none, the whole path is skipped).
 static const uint btbh_world_detail_map_albedo = 1u;
 static const uint btbh_world_detail_map_normal = 2u;
 static const uint btbh_world_detail_map_orm = 4u;
 static const uint btbh_world_detail_map_albedo_in_orm_blue = 8u;
+// RFC 0009: the batch draws its table (the WorldDetailTable block, the world_detail_maps array); y is then the
+// table's seed component.
+static const uint btbh_world_detail_map_table = 16u;
+static const uint btbh_world_detail_table_max_entries = 8u;
+// An entry's layer that is absent; the vertex index that means "no detail".
+static const uint btbh_world_detail_no_layer = 255u;
 
 // Where the face normal and the vertex normal are this close to perpendicular, the face normal is turned toward
 // the camera instead of to the vertex normal's side.
@@ -118,6 +125,27 @@ float3 btbh_world_detail_gradient(BTBHWorldDetailFrame frame, float2 normal_xy)
 {
     const float z = sqrt(1.0f - saturate(dot(normal_xy, normal_xy)));
     return -(normal_xy.x * frame.tangent + normal_xy.y * frame.bitangent) / max(z, 1.0e-3f);
+}
+
+// RFC 0009: a vertex's table index from the first float of its joint slot: rounded to the nearest whole number,
+// 0 below 0, 255 above 255, and 255 (none) for NaN (neither comparison holds).
+uint btbh_world_detail_table_index(float joint)
+{
+    const float rounded = round(joint);
+    return rounded >= 0.0f ? (uint)min(rounded, 255.0f) : (rounded < 0.0f ? 0u : btbh_world_detail_no_layer);
+}
+
+// The entry whose block an index reads: min(index, 7). Past the count it is read and thrown away.
+uint btbh_world_detail_table_slot(uint index)
+{
+    return min(index, btbh_world_detail_table_max_entries - 1u);
+}
+
+// Whether a map of the entry an index picks changes the pixel: the index is below the count and the map's layer
+// isn't 255.
+bool btbh_world_detail_table_applies(uint index, uint count, uint layer)
+{
+    return index < count && layer != btbh_world_detail_no_layer;
 }
 
 #endif

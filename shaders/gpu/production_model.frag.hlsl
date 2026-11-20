@@ -85,6 +85,19 @@ SamplerState world_detail_normal_sampler : register(s7, space2);
 Texture2D<float4> world_detail_orm_texture : register(t8, space2);
 SamplerState world_detail_orm_sampler : register(s8, space2);
 #endif
+// RFC 0009: the batch's world-detail table's maps, one 2D array (BTBHGPUSceneWorldDetailTable.map_layers), after
+// the world detail's three; a one-layer fallback never sampled when the batch has no table (world_detail_mode.x
+// says so). The full variant's 15th of 16 samplers.
+#if BTBH_DIRECTIONAL_SHADOWS && BTBH_OMNI_SHADOWS
+Texture2DArray<float4> world_detail_maps : register(t14, space2);
+SamplerState world_detail_maps_sampler : register(s14, space2);
+#elif BTBH_DIRECTIONAL_SHADOWS
+Texture2DArray<float4> world_detail_maps : register(t13, space2);
+SamplerState world_detail_maps_sampler : register(s13, space2);
+#else
+Texture2DArray<float4> world_detail_maps : register(t9, space2);
+SamplerState world_detail_maps_sampler : register(s9, space2);
+#endif
 
 // The batch's second fragment uniform buffer (DigMask until 0.6.0, the same slot): the dig mask's placement, then
 // the world detail's.
@@ -96,9 +109,23 @@ cbuffer BatchExtension : register(b1, space3)
     float4 world_detail_tiles;
     // the albedo, normal and roughness scales, cos(level angle)
     float4 world_detail_controls;
-    // x the maps (1 albedo, 2 normal, 4 ORM, 8 the albedo in the ORM's blue; 0 none: the path is skipped);
-    // y the seed's custom float (0 none, 1..4 x..w); zw 0
+    // x the maps (1 albedo, 2 normal, 4 ORM, 8 the albedo in the ORM's blue, 16 the table instead; 0 none: the
+    // path is skipped); y the seed's custom float (0 none, 1..4 x..w); zw 0
     uint4 world_detail_mode;
+};
+
+// RFC 0009: the batch's world-detail table (BTBHGPUSceneWorldDetailTable), the third uniform buffer, pushed only for
+// a batch that draws one (world_detail_mode.x has 16): per entry, as BatchExtension's for one detail.
+cbuffer WorldDetailTable : register(b2, space3)
+{
+    // 1 / level_tile (u, v), 1 / wall_tile (u, v)
+    float4 world_detail_table_tiles[8];
+    // the albedo, normal and roughness scales, cos(level angle)
+    float4 world_detail_table_controls[8];
+    // x the normal's layer, y the ORM's (255: absent); zw 0
+    uint4 world_detail_table_layers[8];
+    // x the entry count; yzw 0
+    uint4 world_detail_table_count;
 };
 
 cbuffer MaterialPBR : register(b0, space3)
@@ -177,6 +204,8 @@ struct FragmentInput
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
+    // RFC 0009: the triangle's world-detail table index (production_model.vert; 0 from a skinned vertex).
+    nointerpolation uint detail_index : TEXCOORD11;
     bool is_front_face : SV_IsFrontFace;
 };
 
@@ -2151,6 +2180,51 @@ float3 apply_world_detail(FragmentInput input, float lod_bias, inout float4 albe
     return gradient;
 }
 
+// RFC 0009: the batch's world-detail table, taken instead of apply_world_detail when world_detail_mode.x has 16 (a
+// uniform). The triangle's index (flat, from its vertices' joint slots) picks an entry: its tiles, scales, angle
+// and two layers of one array, packed (the grey albedo in the ORM's blue). The frame, the seed's offset and the
+// coordinate are apply_world_detail's, and so is the arithmetic: one entry draws to the bit as a packed detail
+// with the same maps and floats. Every pixel samples both layers; an index at or past the count, or a layer of
+// 255, swaps that map's change for none with a select, not a branch, so the derivatives and the mip choice are
+// those of one entry within a triangle.
+float3 apply_world_detail_table(FragmentInput input, float lod_bias, inout float4 albedo, inout float3 orm)
+{
+    const uint index = input.detail_index;
+    const uint slot = btbh_world_detail_table_slot(index);
+    const float4 tiles = world_detail_table_tiles[slot];
+    const float4 controls = world_detail_table_controls[slot];
+    const uint4 layers = world_detail_table_layers[slot];
+    const float3 position = input.world_position;
+    const BTBHWorldDetailFrame frame = btbh_world_detail_frame(
+        position,
+        cross(ddx(position), ddy(position)),
+        input.world_normal,
+        camera_position.xyz - position,
+        controls.w,
+        tiles
+    );
+    const float2 coordinate = btbh_world_detail_coordinate(
+        frame,
+        btbh_world_detail_offset(input.instance_custom, world_detail_mode.y)
+    );
+    const bool orm_on = btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.y);
+    const bool normal_on = btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.x);
+    const float3 detail_orm = world_detail_maps.SampleBias(
+        world_detail_maps_sampler,
+        float3(coordinate, (float)layers.y),
+        lod_bias
+    ).rgb;
+    orm.r *= orm_on ? detail_orm.r : 1.0f;
+    orm.g *= orm_on ? detail_orm.g * controls.z : 1.0f;
+    albedo.rgb *= orm_on ? detail_orm.b * controls.x : 1.0f;
+    const float2 tilt = (world_detail_maps.SampleBias(
+        world_detail_maps_sampler,
+        float3(coordinate, (float)layers.x),
+        lod_bias
+    ).xy * 2.0f - 1.0f) * controls.y;
+    return normal_on ? btbh_world_detail_gradient(frame, tilt) : float3(0.0f, 0.0f, 0.0f);
+}
+
 FragmentOutput shade_fragment(FragmentInput input)
 {
     // Taken before any derivative, and discarded with the alpha cut-off below.
@@ -2201,7 +2275,14 @@ FragmentOutput shade_fragment(FragmentInput input)
     float3 world_gradient = float3(0.0f, 0.0f, 0.0f);
     if (world_detail_mode.x != 0u)
     {
-        world_gradient = apply_world_detail(input, lod_bias, albedo_sample, orm);
+        if ((world_detail_mode.x & btbh_world_detail_map_table) != 0u)
+        {
+            world_gradient = apply_world_detail_table(input, lod_bias, albedo_sample, orm);
+        }
+        else
+        {
+            world_gradient = apply_world_detail(input, lod_bias, albedo_sample, orm);
+        }
     }
     apply_surface(
         input,

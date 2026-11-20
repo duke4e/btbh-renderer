@@ -70,6 +70,10 @@ struct VertexOutput
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
+#if !BTBH_RC_SOURCE_PROJECTION
+    // RFC 0009: the world-detail table entry. A skinned vertex's joints are bones: entry 0 everywhere.
+    nointerpolation uint detail_index : TEXCOORD11;
+#endif
 };
 
 // Only a zero vector takes the fallback: a normal through the cofactor of an instance at the city's 0.002 scale
@@ -249,5 +253,8 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.world_bitangent = world_bitangent;
     output.surface_data = surface.data;
     output.animated_model = 1.0f;
+#if !BTBH_RC_SOURCE_PROJECTION
+    output.detail_index = 0u;
+#endif
     return output;
 }
