@@ -961,6 +961,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             PRIVATE
                 SDL_MAIN_HANDLED
                 BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
         )
         target_link_libraries(
             btbh_gpu_world_detail_smoke

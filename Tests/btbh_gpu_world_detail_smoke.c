@@ -113,12 +113,20 @@ typedef struct ShaderSet {
 typedef struct SmokeWindow {
     BTBHGPUWindow *window;
     BTBHGPUCustomMesh *cube;      /* lit on its outside (front faces outward) */
+    BTBHGPUCustomMesh *jointed;   /* the same cube with values in every vertex's joint and weight slots */
+    BTBHGPUModel *skinned;        /* Tests/Fixtures/skinned-quad.gltf */
+    BTBHGPUAnimationLibrary *animation;
     BTBHGPUTexture *gallery;      /* GALLERY_SIZE^2 */
     BTBHGPUTexture *projection;   /* PROJECTION_SIZE^2 */
     BTBHGPUTexture *checker;      /* the first set's albedo */
     BTBHGPUTexture *bumps;        /* the first set's normal map */
     BTBHGPUTexture *orm;          /* the first set's ORM */
     BTBHGPUTexture *glow;         /* the first set's emission */
+    /* World-detail maps for the gallery's detail scenes (64^2, mips, linear). */
+    BTBHGPUTexture *detail_normal;
+    BTBHGPUTexture *detail_orm_packed;
+    BTBHGPUTexture *detail_orm_plain;
+    BTBHGPUTexture *detail_albedo;
     ShaderSet shaders;
 } SmokeWindow;
 
@@ -258,8 +266,12 @@ static BTBHGPUSceneGeometryBatch cube_batch(BTBHGPUCustomMesh *cube, uint32_t fi
 }
 
 /* A unit cube (-0.5..0.5), 24 floats a vertex: position, normal, uv, tangent, colour, joints, weights; wound so the
-   renderer takes its outsides for front faces. */
-static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
+   renderer takes its outsides for front faces. With `jointed`, each face's vertices carry a value in joints.x (0, 3,
+   7.6, 255, -2, 1e6: an index, past a table's count, "none", below 0, far past) and others in the rest of the joint
+   and weight slots, which no static draw reads before 0.8.0 and which only a batch with a world-detail table reads
+   from 0.8.0 (RFC 0009). */
+static BTBHGPUCustomMesh *create_cube_with(BTBHGPUWindow *window, bool jointed) {
+    static const float joint_x[6] = { 0.0f, 3.0f, 7.6f, 255.0f, -2.0f, 1.0e6f };
     static const float faces[6][3] = {
         { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 },
     };
@@ -287,6 +299,16 @@ static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
                 vertex[channel] = 1.0f;
             }
             vertex[20] = 1.0f;
+            if (jointed) {
+                vertex[16] = joint_x[face];
+                vertex[17] = 2.0f + (float)corner;
+                vertex[18] = -7.5f;
+                vertex[19] = 1.0e3f;
+                vertex[20] = 0.25f * (float)(corner + 1u);
+                vertex[21] = 0.5f;
+                vertex[22] = -1.0f;
+                vertex[23] = 3.0f;
+            }
         }
         const uint32_t base = face * 4u;
         const uint32_t reversed[6] = { base, base + 2u, base + 1u, base, base + 3u, base + 2u };
@@ -301,6 +323,10 @@ static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
     }
     assert(mesh != NULL);
     return mesh;
+}
+
+static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
+    return create_cube_with(window, false);
 }
 
 typedef uint8_t (*TexelFunction)(uint32_t x, uint32_t y, uint32_t channel);
@@ -433,6 +459,13 @@ static uint32_t differing_pixels(const uint8_t *a, const uint8_t *b, uint32_t te
     return count;
 }
 
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+static uint8_t detail_normal_texel(uint32_t x, uint32_t y, uint32_t channel);
+static uint8_t detail_orm_packed_texel(uint32_t x, uint32_t y, uint32_t channel);
+static uint8_t detail_orm_plain_texel(uint32_t x, uint32_t y, uint32_t channel);
+static uint8_t detail_albedo_texel(uint32_t x, uint32_t y, uint32_t channel);
+#endif
+
 static void set_shaders(ShaderSet *set, const char *directory) {
     for (int index = 0; index < 11; ++index) {
         (void)snprintf(set->paths[index], sizeof(set->paths[index]), "%s/%s%s", directory, shader_names[index],
@@ -471,6 +504,30 @@ static SmokeWindow open_window(BTBHGPUDevice *device, const char *title, const c
         BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
     smoke.glow = make_texture(smoke.window, 64u, glow_texel, 1u, BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
         BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB);
+    smoke.jointed = create_cube_with(smoke.window, true);
+    BTBHGPUModelReport model_report;
+    memset(&model_report, 0, sizeof(model_report));
+    smoke.skinned = btbh_gpu_window_model_load(smoke.window, BTBH_GPU_SMOKE_FIXTURE_DIR "/skinned-quad.gltf",
+        &model_report);
+    if (smoke.skinned == NULL) {
+        fprintf(stderr, "skinned-quad.gltf: %s\n", model_report.message);
+    }
+    assert(smoke.skinned != NULL);
+    BTBHGPUAnimationLibraryReport animation_report;
+    memset(&animation_report, 0, sizeof(animation_report));
+    smoke.animation = btbh_gpu_animation_library_load(BTBH_GPU_SMOKE_FIXTURE_DIR "/skinned-quad.gltf",
+        &animation_report);
+    assert(smoke.animation != NULL);
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+    smoke.detail_normal = make_texture(smoke.window, 64u, detail_normal_texel, 1u, BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
+        BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
+    smoke.detail_orm_packed = make_texture(smoke.window, 64u, detail_orm_packed_texel, 1u,
+        BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
+    smoke.detail_orm_plain = make_texture(smoke.window, 64u, detail_orm_plain_texel, 1u,
+        BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
+    smoke.detail_albedo = make_texture(smoke.window, 64u, detail_albedo_texel, 1u, BTBH_GPU_TEXTURE_FILTER_TRILINEAR,
+        BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
+#endif
     set_shaders(&smoke.shaders, shader_directory);
     return smoke;
 }
@@ -482,7 +539,13 @@ static void close_window(SmokeWindow *smoke) {
     btbh_gpu_texture_destroy(smoke->bumps);
     btbh_gpu_texture_destroy(smoke->orm);
     btbh_gpu_texture_destroy(smoke->glow);
+    btbh_gpu_texture_destroy(smoke->detail_normal);
+    btbh_gpu_texture_destroy(smoke->detail_orm_packed);
+    btbh_gpu_texture_destroy(smoke->detail_orm_plain);
+    btbh_gpu_texture_destroy(smoke->detail_albedo);
     btbh_gpu_custom_mesh_destroy(smoke->cube);
+    btbh_gpu_custom_mesh_destroy(smoke->jointed);
+    btbh_gpu_animation_library_destroy(smoke->animation);
     btbh_gpu_window_destroy(smoke->window);
     memset(smoke, 0, sizeof(*smoke));
 }
@@ -566,6 +629,10 @@ typedef struct Scene {
     uint32_t box_count;
     BTBHGPUSceneGeometryBatch batches[MAX_BOXES];
     uint32_t batch_count;
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+    /* The gallery's world details (detail_scene): packed, three maps. */
+    BTBHGPUSceneWorldDetail details[2];
+#endif
 } Scene;
 
 static void scene_add(Scene *scene, Box box, BTBHGPUSceneGeometryBatch batch) {
@@ -721,8 +788,120 @@ static SmokeCamera gallery_camera(void) {
     return look_at(eye, centre, 0.9f, 1.0f);
 }
 
+/* World details (RFC 0008) on the pattern scenes through each variant (added for RFC 0009 phase 2, whose static
+   vertex shader reads the joint slot and whose scene shaders gain the table's branch): packed and three-map details
+   with seeds, on level, vertical, turned and pitched faces; two cubes whose vertices carry values in their joint
+   and weight slots (one with a detail); an unlit box with a detail (it leaves the fast unlit pipeline) and an unlit
+   see-through box without one (the fast unlit pipeline). */
+#define DETAIL_GALLERY_FIRST (PATTERN_GALLERY_FIRST + PATTERN_VARIANTS)
+#define DETAIL_VARIANTS 7u
+static const char *const detail_scene_names[DETAIL_VARIANTS] = {
+    "details-tent", "details-omni", "details-unshadowed", "details-rc", "details-rc-omni",
+    "details-rc-unshadowed", "details-dry",
+};
+/* A skinned model (the animated vertex shader) and the same model unanimated (the static one, its joints from the
+   file), beside the omni shadow (the full shader) and without shadows. */
+#define SKINNED_GALLERY_FIRST (DETAIL_GALLERY_FIRST + DETAIL_VARIANTS)
+#define SKINNED_VARIANTS 2u
+#define GALLERY_COUNT (SKINNED_GALLERY_FIRST + SKINNED_VARIANTS)
+
+static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene);
+
+static void detail_scene(uint32_t variant, const SmokeWindow *smoke, Scene *scene) {
+    pattern_scene(variant, smoke, scene);
+    scene->name = detail_scene_names[variant];
+    BTBHGPUSceneGeometryBatch jointed = cube_batch(smoke->jointed, 0u, 1u);
+    jointed.detail_parameters[0] = 0.07f;
+    jointed.detail_parameters[1] = 0.02f;
+    jointed.detail_parameters[2] = 6.0f;
+    jointed.detail_parameters[3] = 3.0f;
+    scene_add(scene, make_box(2.6f, 0.5f, -1.0f, 0.9f, 1.0f, 0.9f, brick), jointed);    /* 9 jointed, a detail */
+    Box second = make_box(-0.4f, 0.45f, -1.6f, 0.8f, 0.9f, 0.8f, stone);
+    second.yaw = 0.6f;
+    scene_add(scene, second, cube_batch(smoke->jointed, 0u, 1u));                       /* 10 jointed, none */
+    BTBHGPUSceneGeometryBatch unlit = cube_batch(smoke->cube, 0u, 1u);
+    unlit.unlit_enabled = 1u;
+    scene_add(scene, make_box(0.9f, 1.9f, 1.4f, 0.5f, 0.5f, 0.5f, white), unlit);       /* 11 unlit, a detail */
+    BTBHGPUSceneGeometryBatch glass = cube_batch(smoke->cube, 0u, 1u);
+    glass.unlit_enabled = 1u;
+    glass.transparency_enabled = 1u;
+    glass.albedo_texture = smoke->checker;
+    const float tint[4] = { 0.4f, 0.8f, 1.0f, 0.5f };
+    scene_add(scene, make_box(-1.8f, 1.2f, 1.0f, 0.7f, 0.7f, 0.7f, tint), glass);       /* 12 the fast unlit */
+    for (uint32_t box = 0u; box < scene->box_count; ++box) {
+        scene->boxes[box].custom[3] = (float)(box * 17u + 3u);
+        box_instance(&scene->boxes[box], scene->instances[box]);
+    }
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+    BTBHGPUSceneWorldDetail *packed = &scene->details[0];
+    memset(packed, 0, sizeof(*packed));
+    packed->normal_texture = smoke->detail_normal;
+    packed->orm_texture = smoke->detail_orm_packed;
+    packed->level_tile[0] = 2.0f;
+    packed->level_tile[1] = 2.5f;
+    packed->wall_tile[0] = 1.2f;
+    packed->wall_tile[1] = 0.9f;
+    packed->albedo_scale = 1.25f;
+    packed->normal_scale = 0.8f;
+    packed->roughness_scale = 1.25f;
+    packed->seed_component = 4u;
+    packed->flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
+    BTBHGPUSceneWorldDetail *three = &scene->details[1];
+    memset(three, 0, sizeof(*three));
+    three->albedo_texture = smoke->detail_albedo;
+    three->normal_texture = smoke->detail_normal;
+    three->orm_texture = smoke->detail_orm_plain;
+    three->level_tile[0] = 3.0f;
+    three->level_tile[1] = 3.0f;
+    three->wall_tile[0] = 1.5f;
+    three->wall_tile[1] = 1.0f;
+    three->level_degrees = 25.0f;
+    three->seed_component = 4u;
+    /* 0 none, 1 packed, 2 three maps: the ground, the checker box, the turned and the pitched box, the lawn, the
+       sidewalk, the low wall, the lens, the plain box, the two jointed cubes, the unlit box, the glass. */
+    static const uint8_t which[13] = { 1u, 2u, 1u, 2u, 1u, 2u, 1u, 0u, 1u, 1u, 0u, 2u, 0u };
+    for (uint32_t batch = 0u; batch < scene->batch_count; ++batch) {
+        scene->batches[batch].world_detail = which[batch] != 0u ? &scene->details[which[batch] - 1u] : NULL;
+    }
+#endif
+}
+
+static void skinned_scene(uint32_t variant, const SmokeWindow *smoke, Scene *scene) {
+    gallery_scene(variant == 0u ? 2u : 3u, smoke, scene);
+    scene->name = variant == 0u ? "skinned-omni" : "skinned-unshadowed";
+    BTBHGPUSceneGeometryBatch unit = cube_batch(smoke->cube, 0u, 1u);
+    unit.kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+    unit.custom_mesh = NULL;
+    unit.model = smoke->skinned;
+    unit.albedo_texture = smoke->checker;
+    unit.animation_library = smoke->animation;
+    unit.animation_index = 0u;
+    unit.animation_time = 0.3f;
+    Box quad = make_box(0.4f, 0.0f, 2.4f, 1.6f, 1.6f, 1.6f, white);
+    quad.yaw = 0.5f;
+    scene_add(scene, quad, unit);
+    BTBHGPUSceneGeometryBatch still = unit;
+    still.animation_library = NULL;
+    still.animation_time = 0.0f;
+    Box quad2 = make_box(-1.6f, 0.0f, 2.2f, 1.2f, 1.2f, 1.2f, brick);
+    quad2.yaw = 0.3f;
+    scene_add(scene, quad2, still);
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+    if (variant == 0u) {
+        BTBHGPUSceneWorldDetail *packed = &scene->details[0];
+        memset(packed, 0, sizeof(*packed));
+        packed->normal_texture = smoke->detail_normal;
+        packed->orm_texture = smoke->detail_orm_packed;
+        packed->level_tile[0] = packed->level_tile[1] = 2.0f;
+        packed->wall_tile[0] = packed->wall_tile[1] = 0.8f;
+        packed->flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
+        scene->batches[scene->batch_count - 2u].world_detail = packed;
+        scene->batches[scene->batch_count - 1u].world_detail = packed;
+    }
+#endif
+}
+
 /* Gallery scene `index` (0..GALLERY_COUNT-1). */
-#define GALLERY_COUNT (PATTERN_GALLERY_FIRST + PATTERN_VARIANTS)
 static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene) {
     memset(scene, 0, sizeof(*scene));
     scene->camera = gallery_camera();
@@ -957,8 +1136,14 @@ static void gallery_scene(uint32_t index, const SmokeWindow *smoke, Scene *scene
             scene->post.radiance_cascades.invalidate = 1u;
             break;
         }
-        default: /* The procedural surface detail's patterns through each variant. */
-            pattern_scene(index - PATTERN_GALLERY_FIRST, smoke, scene);
+        default:
+            if (index >= SKINNED_GALLERY_FIRST) {
+                skinned_scene(index - SKINNED_GALLERY_FIRST, smoke, scene);
+            } else if (index >= DETAIL_GALLERY_FIRST) {
+                detail_scene(index - DETAIL_GALLERY_FIRST, smoke, scene);
+            } else { /* The procedural surface detail's patterns through each variant. */
+                pattern_scene(index - PATTERN_GALLERY_FIRST, smoke, scene);
+            }
             break;
     }
 }
@@ -1044,7 +1229,7 @@ static void check_gallery(SmokeWindow *smoke, SmokeWindow *baseline, uint32_t *r
         printf("gallery %-12s rendered%s", scene.name, rc ? " (radiance cascades on)" : "");
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
         {
-            /* A detail without textures on every batch: as with none. */
+            /* A detail without textures on every batch that has none: as with none. */
             BTBHGPUSceneWorldDetail empty;
             memset(&empty, 0, sizeof(empty));
             empty.level_tile[0] = empty.level_tile[1] = 2.0f;
@@ -1053,7 +1238,9 @@ static void check_gallery(SmokeWindow *smoke, SmokeWindow *baseline, uint32_t *r
             BTBHGPUSceneGeometryBatch batches[MAX_BOXES];
             memcpy(batches, scene.batches, sizeof(batches));
             for (uint32_t batch = 0u; batch < scene.batch_count; ++batch) {
-                batches[batch].world_detail = &empty;
+                if (batches[batch].world_detail == NULL) {
+                    batches[batch].world_detail = &empty;
+                }
             }
             uint8_t *empty_image = render_scene(smoke, NULL, smoke->gallery, &scene, batches, BTBH_GPU_OK, &report);
             const uint32_t differing = differing_pixels(plain, empty_image, texels, 0, NULL);
