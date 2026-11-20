@@ -18,6 +18,34 @@ _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, dug_by) == 256u, "dug_by is a
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_mode) == 252u, "ssao_mode keeps its place");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u, "flags is the old ssao_reserved[0]");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_reserved) == 254u, "the rest stays reserved");
+/* RFC 0008 appends world_detail after 0.5.0's 264 bytes; dug_by keeps its place. */
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail) == 264u, "world_detail is appended at 264");
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 272u, "the batch grows from 264 to 272 bytes");
+_Static_assert(sizeof(BTBHGPUSceneWorldDetail) == 64u, "BTBHGPUSceneWorldDetail is 64 bytes");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, albedo_texture) == 0u, "albedo_texture");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, normal_texture) == 8u, "normal_texture");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, orm_texture) == 16u, "orm_texture");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, level_tile) == 24u, "level_tile");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, wall_tile) == 32u, "wall_tile");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, albedo_scale) == 40u, "albedo_scale");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, normal_scale) == 44u, "normal_scale");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, roughness_scale) == 48u, "roughness_scale");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, level_degrees) == 52u, "level_degrees");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, seed_component) == 56u, "seed_component");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, flags) == 57u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetail, reserved) == 58u, "reserved");
+#endif
+/* On any target: the pointer follows dug_by, and the packed flag is bit 0. */
+_Static_assert(
+    offsetof(BTBHGPUSceneGeometryBatch, world_detail) ==
+        offsetof(BTBHGPUSceneGeometryBatch, dug_by) + sizeof(void *),
+    "world_detail follows dug_by"
+);
+_Static_assert(BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE == 1u, "the packed layout is bit 0");
+#if !defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
+#error "BTBH_GPU_SCENE_HAS_WORLD_DETAIL is defined with the world detail"
+#endif
+#if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(BTBHGPUScenePost) == 432u, "BTBHGPUScenePost keeps its size");
 _Static_assert(offsetof(BTBHGPUScenePost, ssao_debug_view) == 425u, "ssao_debug_view keeps its place");
 _Static_assert(offsetof(BTBHGPUScenePost, opaque_sort) == 426u, "opaque_sort is the old ssao_reserved[0]");

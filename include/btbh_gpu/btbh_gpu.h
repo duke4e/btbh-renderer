@@ -808,6 +808,62 @@ typedef struct BTBHGPUSceneRadianceCascadesStatus {
     BTBHGPUSceneRadianceCascadesPassTelemetry pass_telemetry;
 } BTBHGPUSceneRadianceCascadesStatus;
 
+/* A second texture set for a batch (BTBHGPUSceneGeometryBatch.world_detail, RFC 0008, since 0.6.0), projected
+ * from the batch's flat world position (before world_curvature bends it) instead of read through the mesh's
+ * TEXCOORD_0. It multiplies the albedo, adds its normal's tilt to the first set's, and scales the occlusion and
+ * the roughness; metalness and emission are untouched. The host owns it; the renderer reads it during the present
+ * call only, so one detail can serve any number of batches. A batch with world_detail NULL, or one whose three
+ * textures are NULL, draws exactly as before; so does a refracting batch (BTBH_GPU_SCENE_SURFACE_REFRACT), which
+ * samples no material.
+ *
+ * The projection, by the face's own normal N (from the position's screen derivatives, turned to the side of the
+ * vertex normal; to the camera's where the vertex normal lies in the face's plane):
+ * - Level faces (N within level_degrees of straight up or down): u = x / level_tile[0], v = -z / level_tile[1]
+ *   (north), seen from above; a face that looks down takes v = +z (it is seen from below). The tangent is +x made
+ *   orthogonal to N.
+ * - Other faces: T = normalize(cross(up, N)) (to the right seen from the front), B = cross(N, T) (up the face),
+ *   u = dot(P, T) / wall_tile[0], v = dot(P, B) / wall_tile[1]: the height on vertical walls, the distance up
+ *   the slope on pitched faces (not stretched). Where a pitched face meets a wall, v jumps.
+ * - The frame is (T, cross(N, T), N). The image's top lies toward +v (as an OpenGL normal map's +Y): upright on
+ *   walls, up the slope on pitched faces, to the north on level faces. The texture coordinate is (u, -v) plus the
+ *   seed's offset.
+ * Load the textures with BTBH_GPU_TEXTURE_WRAP_REPEAT. Static geometry only: on anything that moves (skinned
+ * units, billboards, wind, a dissolve's drift) the pattern slides. */
+typedef struct BTBHGPUSceneWorldDetail {
+    /* Its rgb times albedo_scale multiplies the albedo; alpha unused. NULL: no albedo change (or the albedo in
+     * the ORM's blue, BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE). */
+    BTBHGPUTexture *albedo_texture;
+    /* Tangent space in the frame above, OpenGL +Y, linear: xy are read and z is rebuilt (two channels are
+     * enough). Its tilt times normal_scale is added to the first set's (as surface gradients). NULL: no tilt. */
+    BTBHGPUTexture *normal_texture;
+    /* Linear. r multiplies the occlusion; g times roughness_scale multiplies the roughness; b unused, or the
+     * grey albedo multiplier with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE. NULL: neither changes. */
+    BTBHGPUTexture *orm_texture;
+    /* World units one repeat of the textures covers, along u and v; each must be finite and above 0. */
+    float level_tile[2];
+    float wall_tile[2];
+    float albedo_scale;        /* 0 means 1. Be The Bullet Hell v2: 1.25 (a linear mean of 0.8 to 1) */
+    float normal_scale;        /* 0 means 1 */
+    float roughness_scale;     /* 0 means 1. Be The Bullet Hell v2: 1.25 (its g of 0.8 keeps the roughness) */
+    float level_degrees;       /* 0 means 18; below 90 */
+    /* Which of the instance's four custom floats seeds an offset of the pattern: 0 none (every instance shares
+     * it, anchored at the world's origin), 1..4 x..w. The seed is rounded to a whole number (exact up to 2^24);
+     * different whole numbers give unrelated offsets in [0, 1) of a repeat along u and v. Give every instance of
+     * a building the same seed (its lot's index). The surface variants that read custom floats (DISSOLVE x y z,
+     * SHATTER y z w, GLITTER x) leave the others free. */
+    uint8_t seed_component;
+    uint8_t flags;             /* BTBH_GPU_SCENE_WORLD_DETAIL_* bits; 0 */
+    uint8_t reserved[2];       /* 0 */
+} BTBHGPUSceneWorldDetail;
+
+/* BTBHGPUSceneWorldDetail.flags (since 0.6.0). */
+enum {
+    /* The grey albedo multiplier is the ORM texture's blue channel, linear like the rest of it (times
+     * albedo_scale, as albedo_texture's rgb would be): the set is two textures and two samples. albedo_texture
+     * must be NULL and orm_texture set. Be The Bullet Hell v2's layout. */
+    BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE = 1u << 0
+};
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -884,6 +940,12 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * Until the terrain has a dig mask (it is attached to this window and a patch exists), the batch draws
      * exactly as with NULL. */
     const BTBHGPUSdfTerrain *dug_by;
+    /* NULL: drawn as before. Otherwise the batch's second texture set, projected from the world position
+     * (BTBHGPUSceneWorldDetail, RFC 0008, since 0.6.0). Several batches may point at one. A detail that isn't
+     * valid fails the present with BTBH_GPU_INVALID_ARGUMENT, naming the batch. A batch whose detail has a
+     * texture leaves the fast unlit pipeline, and needs the scene shaders from 0.6.0: with SPIR-V shaders that
+     * don't sample it, the present fails with the shader's path. */
+    const BTBHGPUSceneWorldDetail *world_detail;
 } BTBHGPUSceneGeometryBatch;
 
 /* BTBHGPUSceneGeometryBatch.flags (since 0.5.0). */
@@ -907,6 +969,10 @@ enum {
 
 /* Defined when BTBHGPUSceneGeometryBatch.flags and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW exist (since 0.5.0). */
 #define BTBH_GPU_SCENE_HAS_BATCH_FLAGS 1
+
+/* Defined when BTBHGPUSceneGeometryBatch.world_detail, BTBHGPUSceneWorldDetail and
+   BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE exist (since 0.6.0). */
+#define BTBH_GPU_SCENE_HAS_WORLD_DETAIL 1
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
