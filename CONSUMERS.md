@@ -56,9 +56,9 @@ instanced model batches with vertex colours, one albedo/normal/ORM set per batch
 refraction strips, decals and ground scars, x-ray stencil masks, cascaded sun shadows, SSAO, SSR, glass, cloud
 shadows, water normals, rain and wetness, bloom, vignette, LUT grading, FSR 1, and FSR 3.1 with motion vectors and
 a reactive mask. Since 0.6.0: the world detail (RFC 0008 phase 1), a world-projected second texture set per batch
-for its kit's coarse relief. Requested: BC texture formats (RFC 0008 phase 2), a detail chosen per vertex for
-merged distance models, the facade's street-level darkening and wall wetness without its grain, and a way to
-create the model pipelines at load.
+for its kit's coarse relief. Adopting with 0.7.0: the scene prewarm and pattern 7 (RFC 0009 phase 1). Requested:
+the world-detail table chosen per vertex for merged distance models (RFC 0009 phase 2, for 0.8.0), BC texture
+formats (RFC 0008 phase 2), and descriptor pools made before the first frames.
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,

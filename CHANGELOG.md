@@ -6,18 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-20
+
 Two opt-in additions requested by Be The Bullet Hell v2: `btbh_gpu_window_scene_prewarm`, which makes the
 scene's pipelines, shaders and targets at load, and pattern 7 of the procedural surface detail, the facade's
 weather without its grain (phase 1 of [RFC 0009](docs/rfc/0009-world-detail-table.md)). Nothing changes until a
 game uses them: every other pattern, and a zeroed batch, renders byte for byte as in 0.6.0. The scene fragment
 shaders changed: rebuild the shaders together with the C core.
 
-Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (22/22), the Swift build and the full Swift suite
-(301 tests, 2 skipped, 0 failures). With pattern 7 unused, 0 pixels differ from 0.6.0's core and shaders: a
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (23/23), the Swift build and the full Swift suite
+(301 tests, 2 skipped, 0 failures), on the two features together. With pattern 7 unused, 0 pixels differ from 0.6.0's core and shaders: a
 gallery of 15 scenes, patterns 0–6 among them, through every scene shader variant (245,760 pixels), and
 `btbh_gpu_scene_target_smoke`'s nine images (90,368 pixels), each written by a build of 0.6.0 and by this one.
 Pattern 7 renders byte for byte as pattern 3 with x and y at 0 through the six scene shaders, dry and soaked
-(393,216 pixels). macOS (Metal) isn't verified.
+(393,216 pixels). The prewarm's smoke shows that its frames make nothing and match a cold window's to the byte.
+macOS (Metal) isn't verified.
+
+Be The Bullet Hell v2 tested it (bindgen regenerated, all 70 shaders rebuilt):
+- The same v2 source against 0.6.0 and this release gives byte-identical frames at frame 900 in six scenes (day,
+  dusk, storm and night, the Deck preset by day, Low in the storm), with the prewarm on or off and pattern 7 off.
+- Its storm stage on High (about 2,120 batches): the prewarm takes 1.88 s the first run after a shader build, then
+  23–36 ms. Frame 0's present goes from 93–121 ms to 67–89 ms, of which the scene's preparation from 22.8 to
+  0.3 ms.
+- Pattern 7 on Low and the Deck preset: nothing measurable dry, about 0.01 ms in the rain. The street darkening and
+  the wet walls are subtle from its classic camera but visible.
 
 ### Added
 - **Pattern 7, `BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER`**: a host sets `detail_parameters` to `{ 0, 0, 0, 7 }`
@@ -130,17 +142,22 @@ the present call, median (range):
 - Rebuild the shaders with the C core. 0.6.0's shaders still work under this core, but draw a pattern-7 batch as
   no pattern, without its weather, and nothing detects that (pattern 7 adds no named resource to check for). This
   release's shaders under 0.6.0's core draw as before, and that core refuses pattern 7.
-- No struct changed. Rust hosts with bindgen get the new constants when they regenerate the bindings. A build
-  script can gate on `BTBH_GPU_SCENE_HAS_FACADE_WEATHER`.
-- To adopt it (v2): `detail: [0.0, 0.0, 0.0, 7.0]` where `kit_surface` replaces the grain, and for
+- No struct changed. Rust hosts with bindgen get the new function and constants when they regenerate the bindings.
+  A build script can gate on `BTBH_GPU_HAS_SCENE_PREWARM` and `BTBH_GPU_SCENE_HAS_FACADE_WEATHER`.
+- To adopt pattern 7 (v2): `detail: [0.0, 0.0, 0.0, 7.0]` where `kit_surface` replaces the grain, and for
   `SurfaceLook::flat()`'s facade. See RFC 0009, "Compatibility".
+- To adopt the prewarm (v2): after loading the models and textures, call it once per quality preset with the
+  arguments of the first present, and with batches for everything a stage will draw: each blend, depth compare,
+  cull mode and stencil use, skinned or not, the effects and the refraction strips. No instance data is needed.
 - Swift: `SurfaceDetail.facadeWeather` on a material. A `switch` over `SurfaceDetail.Pattern` without a `default`
-  needs the new case.
-- Rust hosts with bindgen: regenerate the bindings; a build script can gate on `BTBH_GPU_HAS_SCENE_PREWARM`.
-- To adopt it (v2): after loading the models and textures, call it once per quality preset with the arguments of
-  the first present, and with batches for everything a stage will draw: each blend, depth compare, cull mode and
-  stencil use, skinned or not, the effects and the refraction strips. No instance data is needed.
-- Swift: no API yet.
+  needs the new case. The prewarm has no Swift API yet.
+
+### Known
+- The prewarm can't remove what SDL makes while drawing. In v2's storm stage (about 2,100 draws) one frame between
+  the 6th and the 10th still takes 25–28 ms, 24–25 of them in encoding the geometry at an unchanged draw count:
+  most likely SDL creating a command buffer's descriptor pools on first use. Not fixed in this release.
+- v2's first presented frame after frame 0 takes 1.3–1.5 s off-screen with or without the prewarm (the scene's
+  encoding is 19 ms of it): the window's first canvas and swapchain present. Not investigated yet.
 
 ## [0.6.0] — 2026-11-20
 
