@@ -1,12 +1,12 @@
 # RFC 0009: A world-detail table chosen per vertex; the facade's weather without its grain
 
-- **Status:** Phase 1 accepted on 2026-11-20 (for 0.7.0; the owner left the decision to the coordinator). Phase 2
-  awaits v2's answers to questions 1–5.
+- **Status:** Phase 1 accepted on 2026-11-20 for 0.7.0, phase 2 on 2026-11-20 for 0.8.0 (the owner left both
+  decisions to the coordinator). See "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-20, after it adopted 0.6.0; `CONSUMERS.md`,
   "Requested")
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in. They rebuild the scene shaders with the C core, as for 0.6.0
-- **Issue:** none. v2 answered questions 6–8 (phase 1) through its session on 2026-11-20 (see "Decisions")
+- **Issue:** none. v2 answered all eight questions through its session on 2026-11-20 (see "Decisions")
 - **Depends on:** RFC 0008 phase 1 (0.6.0). Phase 2 brings the texture-array functions RFC 0001 drafted, unchanged
 
 ## Need
@@ -806,12 +806,40 @@ comment said "a fifth"; the function's comment says a quarter, as the code ramps
    table too, so the macro maps are loaded once as one array instead of twice (21 MiB more)?
 5. **Untextured triangles in a merged draw** (metal, awnings, plain trim): no detail (index 255), or one of the
    classes?
-Questions 6–8, on phase 1, are answered: see "Decisions".
+All eight are answered: see "Decisions".
 
 ## Decisions (v2, 2026-11-20)
 
-v2 answered questions 6–8, the ones on phase 1. The owner left the decision to the coordinator, who accepted
-phase 1 for 0.7.0 on these answers. Questions 1–5, on phase 2, are still open.
+v2 answered all eight questions on 2026-11-20. The owner left the decision to the coordinator, who accepted phase 1
+for 0.7.0 on answers 6–8, and phase 2 for 0.8.0 on answers 1–5.
+
+1. **Eight entries are enough.**
+   - v2 has exactly eight macro classes: brick, tiles, concrete, roof, asphalt, glass, paving, grass. Signs reuse
+     concrete.
+   - A merged distance draw holds at most five (brick, tiles, concrete, roof, asphalt). All eight fit even with
+     every kit draw on one table.
+   - Size it for 8. If a future kit needs more, a second table per piece type will do.
+2. **One array, as drafted.**
+   - All sixteen maps are 512², linear, with mips: RGB PNGs loaded as RGBA8 (`textures_macro.py`, `macro.json`
+     size 512). They stay so: it is coarse relief for the classic camera.
+   - BC7 normals are acceptable when BC comes: low-frequency, seen far off.
+   - Keep the full variant's last sampler free rather than use two arrays.
+3. **`joints[0]` is free, and no vertex needs splitting.**
+   - From a scan of all 1,325 GLBs under `assets/kit`, `assets/props` and `tools/kit/nyc`: none has `JOINTS` or
+     `WEIGHTS`, so `joints.x` is free on every mesh lod1 merges.
+   - No mesh shares a vertex between two materials: every primitive has one material and its own `POSITION`
+     accessor.
+4. **The merge is the lod1 `Plain` draw per node, and the full models move to the table too.**
+   - `surface_class` splits off only glass, paving, grass and signs. Everything else lands in `Plain`: brick,
+     tiles, concrete, roof, asphalt and the untextured materials.
+   - The full models stay one draw per class, each binding its own fine set. They, the landmarks and the set
+     pieces move to the same table, with a constant index per class mesh.
+   - The macro maps then load once, as one array. The eight 2D detail sets go away, and the Deck saves the 21 MiB.
+   - v2's GLB loader writes the class's entry into `joints[0]` for every kit vertex.
+5. **Untextured triangles: 255, no detail.**
+   - v2's classes already absorb most trim: trim and coping map to brick or concrete.
+   - What stays `Plain` is metal, awnings, frames, spandrels, bark, tyres and car paints, which are small or thin.
+   - v2 decides this in its own classifier and needs nothing beyond 255.
 
 6. **Mixed merged draws: few, and pattern 7 at street level is fine as drafted.**
    - Ground pieces never merge with walls. `road/`, `plaza/`, `water/`, `bridge/`, `rubble/` and `shared/marking`
@@ -842,11 +870,8 @@ phase 1 for 0.7.0 on these answers. Questions 1–5, on phase 2, are still open.
 - So "byte for byte pattern 3 with x = y = 0" compares `[0, 0, 0, 7]` with `[0, 0, z, 3]` for z above 0, at more
   than one z.
 
-Still open:
-
-- **Phase 2:** questions 1–5.
-- **Phase 1, for the implementation:** whether the compilers keep pattern 7 byte for byte pattern 3 (FMA
-  contraction). The test reports a difference rather than hiding it.
+Nothing is open. The FMA-contraction question for phase 1 is settled: the equality test found no difference
+("Implementation notes (phase 1)").
 
 ## Phases
 
@@ -855,7 +880,7 @@ Still open:
    answers on phase 2.
 2. **Phase 2, the world-detail table (0.8.0; Decisions, 8).** Texture arrays (RFC 0001's functions), the
    table and its entries, the static vertex's index, one more sampler and a third uniform buffer, the refusals, the
-   tests and the bench. It starts once v2 has answered questions 1–5.
+   tests and the bench. v2 answered questions 1–5 (Decisions).
 
 **Can phase 2 come first, or alone?** Alone, yes: neither phase uses the other. First isn't needed: phase 1 is
 smaller, and on its own it gives Low and the Deck their walls' weather back.
