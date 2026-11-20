@@ -699,6 +699,147 @@ comment said "a fifth"; the function's comment says a quarter, as the code ramps
   facade would cost it about 0.01–0.03 ms dry and up to about 0.09 ms soaked. v2's 0.2–0.5 million facade pixels a
   frame are a third to most of that. Pattern 3 scaled the same way is 0.6–0.8 ms a screen.
 
+## Implementation notes (phase 2, 2026-11-20)
+
+Phase 2 is implemented for 0.8.0, on `feature/0.8.0-detail-table` (cut from `release/0.7.0` at a40d908a):
+- the header: the two array functions, the two structs, the macros, the appended pointer, the vertex layout;
+- `BTBHGPUTexture.layer_count` and the array functions in `src/gpu/btbh_gpu_texture.c`, and the refusal of an array
+  in every 2D slot;
+- the table's checks, packing and the C copy of the shader's index and entry choice in
+  `src/gpu/btbh_gpu_world_detail.h`;
+- the static vertex attribute, the samplers, the third uniform buffer, the fallback array, the refusals and the name
+  check in `src/gpu/btbh_gpu_scene.c`;
+- `production_model.vert`, `production_animated_model.vert`, `production_model.frag` (and so its five variants) and
+  `production_world_detail.hlsli`;
+- the tests: `btbh_gpu_scene_order` (layouts), `btbh_gpu_world_detail` (native) and `btbh_gpu_world_detail_smoke`
+  (GPU, with the bench).
+
+The API is the one above. Where the implementation differs from the text, or measured what the text estimated,
+it is written down here. The version macros stay at 0.6.0 until the release commit (0.7.0's included).
+
+**The index.** As drafted, rounded and clamped to 0..255 in the vertex shader (`btbh_world_detail_table_index` in
+`production_world_detail.hlsli`, which the static vertex shader now includes). Not in the text:
+- the rounding is HLSL's `round`, to even on a tie (2.5 is 2), as the seed's;
+- below 0 is 0 (entry 0), as the clamp says; NaN is 255 (none), since neither comparison holds. The C copy
+  (`btbh_gpu_world_detail_table_index`) matches, and the native test checks both ends.
+
+**Table and `world_detail` together.** Refused, as the text says: a batch with a table whose `map_layers` is set
+and a `world_detail` with a texture fails the present, naming the batch. A `world_detail` without textures may
+stay (it draws nothing), as may a table without `map_layers` beside a detail with textures.
+
+**The checks** (more than "Refusals" says)
+- A table without `map_layers` draws as none, and only its seed component, flags and reserved bytes are checked
+  then: the text qualified the entry checks "with map_layers set", not those three.
+- An array in a batch's four 2D slots is refused with a message naming the batch and the slot
+  (`"GPU scene batch 2: albedo_texture: is a 2D array texture ..."`); in a world detail's three, under
+  `world_detail`. The batch-level checks before them give no names, as before.
+- An entry's fault names the entry too: `"GPU scene batch 2: world_detail_table entry 1: level_tile must be ..."`.
+- The array functions refuse with the reason in the report, for every bad argument; the 2D functions return NULL
+  without one. They also refuse an unknown filter, wrap or colour space, which RFC 0001 left open. A file that
+  can't be read or decoded fails as `btbh_gpu_window_texture_load_ex` fails (`BTBH_GPU_DEVICE_FAILURE`), naming the
+  path; a layer of another size is `BTBH_GPU_INVALID_ARGUMENT`, as drafted.
+- `SDL_GPUTextureSupportsFormat` is asked for `SDL_GPU_TEXTURETYPE_2D_ARRAY` with the usage the texture gets
+  (`SAMPLER`, and `COLOR_TARGET` when it has mips): `BTBH_GPU_MISSING_CAPABILITY` if not. SDL 3.4's Vulkan backend
+  blits each layer's chain in `SDL_GenerateMipmapsForGPUTexture`, and Metal's `generateMipmapsForTexture` covers
+  every slice, so one call makes every layer's mips.
+
+**The shader.** As drafted: `apply_world_detail_table` beside `apply_world_detail`, taken on bit 16 of
+`world_detail_mode.x` (an `if`, not a ternary: both functions write `inout` arguments). The entry is read at
+`min(index, 7)`; both layers are sampled on every pixel and each change is chosen by a select. The table function
+repeats the single path's arithmetic in the same order, so one entry draws to the bit as a packed detail with its
+floats (tested, not assumed: no FMA contraction showed). Register use isn't measured (Radeon GPU Analyzer isn't
+installed).
+
+**Pipelines.** The fast unlit fragment shader keeps two uniform buffers and three samplers; the core creates the
+scene fragment shaders with three uniform buffers, 0.7.0's included (their slot 2 goes unread). The static model
+pipeline binds location 5 for every shader; 0.7.0's static vertex shader doesn't declare it.
+
+**The name check** (more than the text says). A table batch needs `world_detail_maps`, as drafted. 0.6.0's check
+read only the host's `production_model.frag`; the present draws with the variant for its shadows and the radiance
+cascades. Now both are read, the host's fragment shader and that variant (`production_model_2d_shadows`, the
+unshadowed one, `production_model_rc*`) when it is another file, and either refuses. The selection moved into one
+function (`btbh_gpu_scene_variant_fragment_shader_path`) that the pipeline choice uses too. Each path is read once
+and kept (eight per runtime), so a present that switches variants reads no file twice; the cost is a few string
+compares per present with a dug, detailed or table batch. The dug and detailed batches gain the variant
+check too: a stale variant beside a current `production_model.frag` was missed before. Metal libraries and the fast
+unlit shader still aren't checked.
+
+**Tests** (where the text put them)
+- **Native:** the layouts in `btbh_gpu_scene_order` as listed; the index, slot, entry choice, the block's offsets
+  and packing (each entry to the bit as `btbh_gpu_world_detail_pack` packs a detail with the same floats) and 22
+  refusals of a table and its entries in `btbh_gpu_world_detail` (662 checks in all).
+- **GPU, in `btbh_gpu_world_detail_smoke`**, not a new smoke:
+  - **Merged against split** (as drafted, with more): one mesh of six boxes (the ground on 0, a box on 1.4 and a
+    turned one on 2.5, which round to 1 and 2, a pitched one on 255, one whose faces mix 0, 1, 2, 255 and 5 past a
+    count of 3, and a small one mixing 0, 1 and 2) against the same faces in four draws (one per class with its
+    single packed detail over 2D textures of the same pixels, and none). Through the six scene shaders and the dry
+    soft shadow, on pattern 7: 0 pixels differ.
+  - **One entry against the single detail** is done as v2's full models: the same six boxes with every vertex on
+    0, 1 or 2, against the single detail; on 255 and on 4 (past the count), against none. 0 pixels differ.
+  - **Skinned:** the skinned quad animated and still (its joints, 0, from the file) with a table, against entry 0's
+    single detail: 0 pixels differ.
+  - **Per pixel against the C copy** (not in the text): a merged mesh like the projection scene, unlit, its ORM
+    layers' blue the albedo multiplier, from the projection's four cameras. Three arrays: each layer its own value
+    (which entry, or none, every pixel took), then the code texture's columns and rows (the texel, with the entry's
+    tiles and angle and the table's seed). Every interior pixel of every class matches (85,653 a render).
+  - **Arrays and refusals** as listed, and the render-to-target target; 21 faults through the present.
+  - **Old shaders:** a copy of the shader directory with `world_detail_maps` renamed in `production_model.frag`,
+    then only in `production_model_2d_shadows.frag`. Both refuse a table batch with the stale file's path; without
+    a table they draw as the current shaders; an omni-shadowed present beside the stale 2D-shadow variant draws.
+  - Phase 1's check of old shaders now accepts a baseline that has pattern 7 (0.7.0's), and prints which.
+- **Unset, byte for byte against 0.7.0** (a40d908a):
+  - The gallery grew from 15 to 24 scenes: packed and three-map world details on the pattern scenes through the six
+    shaders and the dry soft shadow (with values in two cubes' joint and weight slots, an unlit box with a detail
+    and a fast-unlit one), and the skinned quad animated and still beside the omni shadow and without shadows.
+  - A build of a40d908a's core and shaders with this smoke wrote the gallery (`BTBH_WORLD_DETAIL_DUMP`); this build
+    compared it (`BTBH_WORLD_DETAIL_REFERENCE`): 0 of 393,216 pixels differ. With 0.7.0's shaders under this core
+    (`BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR`): 0 pixels differ in each of the 24. With a table without `map_layers`
+    on every batch: 0.
+  - `btbh_gpu_scene_target_smoke`'s nine images (`BTBH_SMOKE_DUMP`, 90,368 pixels) and `btbh_gpu_font_smoke`'s 25
+    (6,549,120 pixels), written by 0.7.0's executables and by this build: 0 differ. `btbh_gpu_scene_prewarm_smoke`'s
+    16 cold frames (`BTBH_PREWARM_SMOKE_REFERENCE`, 921,600 pixels, a skinned unit among them): 0 bytes differ.
+    `btbh_gpu_sdf_terrain_smoke` with 0.7.0's shaders (its chunks carry layer weights in the joint slot): 0.
+- **Not done:** Metal (`check.sh` on the Mac), the Vulkan validation layers (not installed here: SDL's debug mode
+  ran without them), a register count, the Deck.
+
+**Measured**
+Windows, RTX 3070 Ti (driver 621.14). `BTBH_SMOKE_BENCH=table` with 0.7.0's shaders as the baseline
+(`BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR`): the world detail's eight coplanar screen-filling walls drawn with
+`LESS_EQUAL`, here a custom mesh of 480 strips, the heavy and the light pixel. Five runs (three of 10 and two of 30
+interleaved turns of 20 frames, `BTBH_SMOKE_BENCH_ROUNDS`); the fastest turn's difference over 8. Another session
+benchmarked Be The Bullet Hell v2 on the same GPU throughout (two `v2-game` processes, up to 99 % load and 88 °C):
+medians ran up to three times the fastest turns, run 3's light pass ran at half speed, and the heavy pass at
+1920 x 1080 is lost in that noise (−0.14 to +0.20 ms per screen, either sign, for every configuration). The ranges
+below are of the quieter runs: 1, 4 and 5 for the light pass at 1920 x 1080, 4 and 5 for the light pass at 960 x 600
+(0.37 ms frames; runs 1–3 had 0.52–0.66 ms ones), all five for the heavy pass at 960 x 600.
+
+| Per screen | Light, 1920 x 1080 | Light, 960 x 600 | Heavy, 960 x 600 |
+| --- | --- | --- | --- |
+| Single packed detail (RFC 0008) | +0.053 to +0.056 ms | +0.015 ms | −0.004 to +0.014 ms |
+| Table, one entry | +0.053 to +0.060 ms | +0.014 to +0.015 ms | +0.005 to +0.014 ms |
+| Table, two entries in alternate strips (17 pixels at 1080p) | +0.054 to +0.063 ms | +0.015 ms | +0.006 to +0.014 ms |
+| Table against the single detail | −0.001 to +0.007 ms | −0.001 to 0.000 ms | 0.000 to +0.010 ms |
+| No table, against 0.7.0's shaders | −0.008 to −0.001 ms | 0.000 ms | +0.003 to +0.008 ms |
+
+- **Per screen,** a table costs what the packed detail costs, within the noise, as estimated (0.04–0.05 ms at 1080p
+  and 0.005–0.012 ms at 960 x 600, "plus a few percent"). Two entries in one wave cost the same as one: no
+  divergence showed.
+- **CPU** (the same bench's 200 merged batches, each a mesh of five boxes over three entries, against 1,000 split ones
+  with single details; prepare and geometry encode from the report, the fastest turn): 0.082–0.112 ms merged,
+  0.481–0.660 ms split; the present call 0.128–0.176 against 0.533–0.728 ms. The 800 extra batches cost 0.40–0.55
+  ms, 0.5–0.7 µs each; v2 measured +0.6–0.85 ms a frame for its split.
+- **Unset, many vertices** (`BTBH_SMOKE_BENCH=vertices`, not in the text's plan beyond "many small instances"):
+  20,000 boxes in one instanced draw (480,000 vertices) at 1920 x 1080 take +0.016 to +0.023 ms against 0.7.0's
+  shaders, on a 0.52 ms frame, in the four quieter runs (+0.05 to +0.09 ms in three contended ones). That is the
+  cost the text expected none of: the sixth attribute. A test build that carried the index in the existing flat
+  `animated_model` varying (negative for static vertices, so its `> 0.5` test is unchanged) instead of its own
+  `TEXCOORD11` measured the same (+0.002 ms against this build, two runs), so the varying isn't it, and the shaders
+  keep `TEXCOORD11` as drafted. Only a static vertex shader without the attribute for batches without a table
+  would take it back: a new shader file, which the text ruled out. Screen-filling surfaces show nothing
+  measurable unset.
+- **Memory:** as estimated, the sixteen 512² maps with mips are 21.3 MiB as one array.
+- **Not measured:** register use (Radeon GPU Analyzer isn't installed), the Deck, v2's frames.
+
 ## Compatibility
 
 - **Versioning.** Both phases are minor and opt-in: an enum value appended, new functions, new structs, a pointer

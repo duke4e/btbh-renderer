@@ -4,6 +4,124 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] (0.8.0)
+
+The 0.8.0 candidate, apart from 0.7.0's entry below (still `[Unreleased]` on this branch): one opt-in addition
+requested by Be The Bullet Hell v2, the world-detail table chosen per vertex (phase 2 of
+[RFC 0009](docs/rfc/0009-world-detail-table.md)), with the 2D array textures RFC 0001 drafted. Nothing changes until
+a game sets it: a batch without a table, and every existing feature, renders byte for byte as in 0.7.0. The batch
+grows from 272 to 280 bytes, and the scene shaders changed (one more vertex attribute, sampler and uniform buffer):
+rebuild the shaders and regenerate the bindings together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (23/23), the Swift build and the full Swift suite
+(301 tests, 2 skipped, 0 failures). With no table, 0 pixels differ from 0.7.0's core and shaders (a40d908a): the
+world detail smoke's gallery of 24 scenes through every scene shader variant (393,216 pixels; world details, values
+in the joint slots and a skinned model among them), `btbh_gpu_scene_target_smoke`'s nine images (90,368 pixels),
+`btbh_gpu_font_smoke`'s 25 (6,549,120 pixels) and `btbh_gpu_scene_prewarm_smoke`'s 16 frames (921,600 pixels), each
+written by a build of 0.7.0 and by this one; and the gallery and `btbh_gpu_sdf_terrain_smoke` with 0.7.0's shaders
+under this core. A table draws byte for byte as the same faces split into one draw per class with single packed
+details, through the six scene shaders. macOS (Metal), the Vulkan validation layers and a Steam Deck aren't
+verified.
+
+### Added
+- **`BTBHGPUSceneGeometryBatch.world_detail_table`** (appended at byte 272): up to eight world details in one batch,
+  chosen per vertex (`BTBHGPUSceneWorldDetailTable`, `BTBHGPUSceneWorldDetailTableEntry`, 24 and 36 bytes).
+  - The table holds one 2D array texture (`map_layers`), the entries and their count (1..8), and one seed component
+    for all of them. Each entry is `BTBHGPUSceneWorldDetail`'s eight floats (its bytes 24..55, so a host can copy
+    them across) and the array layers of its normal and its packed ORM (the grey albedo in blue). 255
+    (`BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER`) leaves that map out.
+  - Each vertex's index is the first float of its joint slot (`BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT`, byte 64),
+    rounded and clamped to 0..255 (NaN is 255). A triangle takes `entries[index]`, projected and blended as a
+    packed world detail. At or past the count (255 by convention), it has no detail. All three vertices of a
+    triangle must carry the same index.
+  - A skinned batch takes entry 0 everywhere (its joints are bones), and so does a model loaded without joints.
+  - One draw per merged distance model instead of one per class: v2 measured +0.6–0.85 ms a frame on its Deck preset
+    for the split. Its full models can use the same table with a constant index, so the macro maps load once.
+  - The present refuses, with `BTBH_GPU_INVALID_ARGUMENT` naming the batch (and the entry): an entry count of 0 or
+    above 8, NULL entries, a tile not finite and above 0, a scale not finite, an angle outside [0, 90), a layer
+    neither 255 nor below the array's count, a seed component above 4, flags or reserved bytes set, `map_layers`
+    that is 2D, of another window or destroyed, and a batch with both a table with `map_layers` and a
+    `world_detail` with a texture (refused, not one winning; a `world_detail` without textures may stay).
+  - A table without `map_layers`, or on a refracting batch, draws as none.
+- **2D array textures** (RFC 0001's functions, unchanged): `btbh_gpu_window_texture_array_create_rgba8_ex` and
+  `btbh_gpu_window_texture_array_load_ex`. 1..256 layers (`BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS`) of one size and
+  colour space, each with its own mips. The report gives one layer's size and mips.
+  - Refused, with the reason: 0 or more than 256 layers, NULL layers, a zero size, an unknown filter, wrap or
+    colour space, more than 4 GiB, and (loading) a layer of another size than the first, naming its path. A device
+    that can't sample a 2D array of the format: `BTBH_GPU_MISSING_CAPABILITY`.
+  - Every 2D slot refuses an array: a batch's four textures and a world detail's three (naming the batch), the
+    canvas's texture and target, the post LUT, the render-to-target target, the capture destination and
+    `btbh_gpu_texture_update_rgba8`.
+- The custom-mesh vertex is documented: `BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS` (24) and
+  `BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT` (16).
+- `BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE` and `BTBH_GPU_HAS_TEXTURE_ARRAYS`, defined with them.
+- Tests:
+  - `btbh_gpu_scene_order` (no GPU): the batch's, the table's and the entry's layouts, the entry's floats at the
+    detail's offsets minus 24.
+  - `btbh_gpu_world_detail` (no GPU): the C copy of the vertex index, the entry choice and the 400-byte block, and
+    every refusal of a table and an entry.
+  - `btbh_gpu_world_detail_smoke`: merged against split, constant-index full models against single details, none
+    and past the count against no detail, a skinned and a still model, through the six scene shaders (0 pixels
+    differ); a merged mesh read back pixel by pixel against the C copy (the entry each pixel took, and the texel);
+    arrays and their refusals; 21 refusals through the present; stale shaders. The unset gallery grows from 15 to
+    24 scenes. The bench: `BTBH_SMOKE_BENCH=1`, or `=table` for this one only (`=vertices` for the unset vertex
+    bench alone; `BTBH_SMOKE_BENCH_ROUNDS` up to 40 turns).
+
+### Changed
+- Shaders: `production_model.vert` reads the joint slot's first float (location 5, after the tangent, so 0..4 stay)
+  and passes the index flat; `production_animated_model.vert` passes 0. `production_model.frag` and its five
+  variants take the table's array after the world detail's three (15, 14 and 10 samplers) and its entries in a third
+  uniform buffer, pushed only for a table batch; a batch without one binds a 1x1 array. The single detail's code is
+  unchanged. The unlit, radiance-cascade source and shadow shaders don't change, and no shader file is new.
+- The static model pipeline binds six vertex attributes (five before).
+- The stale-shader check: a table batch needs `world_detail_maps` in the scene fragment shader. And it now reads
+  the variant the present draws with (`production_model_2d_shadows`, the unshadowed one, `production_model_rc*`)
+  as well as the host's `production_model.frag`, each path once. 0.6.0 and 0.7.0 read only the latter, so a stale
+  variant beside a current fragment shader went unnoticed for a dug or detailed batch.
+
+### Measured
+Windows, RTX 3070 Ti (driver 621.14), Vulkan. `BTBH_SMOKE_BENCH=table` with 0.7.0's shaders as the baseline: eight
+coplanar screen-filling walls drawn with `LESS_EQUAL`, the heavy pixel (soft sun shadow, 40 lamps, 32 point lights)
+and a light one; five runs of 10 or 30 interleaved turns of 20 frames, the fastest turn of each configuration.
+Another session benchmarked Be The Bullet Hell v2 on the same GPU throughout (up to 99 % load, 88 °C): medians ran up
+to three times the fastest turns, and the heavy pass at 1920x1080 is lost in that noise (−0.14 to +0.20 ms either
+way). Per screen of detailed surface:
+
+| | Light, 1920x1080 | Light, 960x600 | Heavy, 960x600 |
+| --- | --- | --- | --- |
+| Single packed detail (0.6.0's) | +0.053 to +0.056 ms | +0.015 ms | −0.004 to +0.014 ms |
+| Table, one entry | +0.053 to +0.060 ms | +0.014 to +0.015 ms | +0.005 to +0.014 ms |
+| Table, two entries in alternate 17-pixel strips | +0.054 to +0.063 ms | +0.015 ms | +0.006 to +0.014 ms |
+| Table against the single detail | −0.001 to +0.007 ms | −0.001 to 0.000 ms | 0.000 to +0.010 ms |
+| No table, against 0.7.0's shaders | −0.008 to −0.001 ms | 0.000 ms | +0.003 to +0.008 ms |
+
+- A table costs what the single packed detail costs, within the bench's noise; two entries in one wave cost the
+  same. RFC 0009 estimated 0.04–0.05 ms a 1080p screen and the packed detail plus a few percent.
+- **CPU:** 200 merged batches with one table take 0.08–0.11 ms to prepare and encode; 1,000 split ones with single
+  details 0.48–0.66 ms (the present call: 0.13–0.18 against 0.53–0.73 ms). The split's 800 extra batches cost
+  0.40–0.55 ms, 0.5–0.7 µs each: v2 measured +0.6–0.85 ms a frame for its split.
+- **Unset, many vertices:** 20,000 small boxes in one instanced draw (480,000 vertices) at 1920x1080 take 0.016–
+  0.023 ms more than with 0.7.0's shaders on a 0.52 ms frame (four quieter runs; up to +0.09 ms under the other
+  load).
+  The sixth vertex attribute costs it: the index carried in the existing flat varying instead of its own made no
+  difference (+0.002 ms). Screen-filling surfaces show nothing measurable.
+- **Memory:** v2's sixteen 512² maps with mips are 21.3 MiB as one array, as they are as sixteen 2D textures.
+- Not measured: a Steam Deck, register use (Radeon GPU Analyzer isn't installed), v2's frames.
+
+### Upgrading
+- Nothing to set: a zeroed batch has no table.
+- Rebuild the shaders with the C core. 0.7.0's shaders still work under this core and draw everything as before
+  (the extra attribute, sampler and uniform buffer go unread); with them a table batch fails the present with the
+  shader's path. This release's shaders don't work under an older core.
+- The batch is 280 bytes: Rust hosts with bindgen regenerate the bindings (`..Default::default()` leaves the table
+  NULL); a build script can gate on `BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE`.
+- To adopt it (v2): load the sixteen macro maps as one array (`btbh_gpu_window_texture_array_load_ex`, linear,
+  repeat, mips), fill eight entries, write each kit vertex's entry into `joints[0]` (255 for the untextured
+  materials), and set `world_detail_table` on the merged distance models (and on the full models, with a constant
+  index), leaving `world_detail` NULL. Then the eight 2D detail sets and `BTBH_LOD1_SPLIT` can go. See RFC 0009,
+  "Implementation notes (phase 2)".
+- Swift: no API.
+
 ## [Unreleased]
 
 ## [0.7.0] — 2026-11-20
