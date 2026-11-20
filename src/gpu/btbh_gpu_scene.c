@@ -1130,7 +1130,7 @@ static SDL_GPUShader *btbh_gpu_scene_load_shader(
     info.num_storage_buffers = storage_buffer_count;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = SDL_CreateGPUShader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_scene_error(
@@ -1517,7 +1517,7 @@ static bool btbh_gpu_scene_create_model_pipeline(
         color_targets[1].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         color_targets[1].blend_state.color_write_mask = 0x01u;
     }
-    *pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
+    *pipeline = btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment_shader);
     SDL_ReleaseGPUShader(device, vertex_shader);
     if (*pipeline == NULL) {
@@ -1598,7 +1598,7 @@ static bool btbh_gpu_scene_ensure_post_pipeline(
     info.target_info.color_target_descriptions = &color_target;
     info.target_info.num_color_targets = 1u;
     runtime->post_pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
+        btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment_shader);
     SDL_ReleaseGPUShader(device, vertex_shader);
     if (runtime->post_pipeline == NULL) {
@@ -1714,7 +1714,7 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.target_info.color_target_descriptions = &color_target;
     info.target_info.num_color_targets = 1u;
-    *pipeline = SDL_CreateGPUGraphicsPipeline(device, &info);
+    *pipeline = btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment_shader);
     SDL_ReleaseGPUShader(device, vertex_shader);
     if (*pipeline == NULL) {
@@ -3264,18 +3264,18 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         info.fragment_shader = shadow_fragment_shader;
         info.vertex_input_state.num_vertex_attributes = 1u;
         window->scene_runtime->shadow_pipelines[cull_index] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
+            btbh_gpu_create_graphics_pipeline(device, &info);
         info.fragment_shader = fast_shadow_fragment_shader;
         window->scene_runtime
             ->non_discard_shadow_pipelines[cull_index] =
-                SDL_CreateGPUGraphicsPipeline(device, &info);
+                btbh_gpu_create_graphics_pipeline(device, &info);
         info.vertex_shader = fast_shadow_vertex_shader;
         info.vertex_input_state.num_vertex_buffers = 2u;
         info.vertex_input_state.vertex_attributes =
             fast_shadow_attributes;
         info.vertex_input_state.num_vertex_attributes = 5u;
         window->scene_runtime->fast_shadow_pipelines[cull_index] =
-            SDL_CreateGPUGraphicsPipeline(device, &info);
+            btbh_gpu_create_graphics_pipeline(device, &info);
         info.vertex_shader = animated_shadow_vertex_shader;
         info.fragment_shader = shadow_fragment_shader;
         info.vertex_input_state.num_vertex_buffers = 1u;
@@ -3283,11 +3283,11 @@ static bool btbh_gpu_scene_create_shadow_pipelines(
         info.vertex_input_state.num_vertex_attributes = 3u;
         window->scene_runtime
             ->animated_shadow_pipelines[cull_index] =
-                SDL_CreateGPUGraphicsPipeline(device, &info);
+                btbh_gpu_create_graphics_pipeline(device, &info);
         info.fragment_shader = fast_shadow_fragment_shader;
         window->scene_runtime
             ->animated_non_discard_shadow_pipelines[cull_index] =
-                SDL_CreateGPUGraphicsPipeline(device, &info);
+                btbh_gpu_create_graphics_pipeline(device, &info);
         if (
             window->scene_runtime->shadow_pipelines[cull_index] == NULL ||
             window->scene_runtime

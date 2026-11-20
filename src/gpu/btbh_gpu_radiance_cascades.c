@@ -714,7 +714,7 @@ btbh_gpu_radiance_cascades_create_compute_pipeline(
     info.threadcount_y = 8u;
     info.threadcount_z = 1u;
     SDL_GPUComputePipeline *pipeline =
-        SDL_CreateGPUComputePipeline(device, &info);
+        btbh_gpu_create_compute_pipeline(device, &info);
     SDL_free(bytes);
     if (pipeline == NULL) {
         btbh_gpu_radiance_cascades_message(
@@ -759,7 +759,7 @@ static SDL_GPUShader *btbh_gpu_radiance_cascades_create_shader(
     info.num_storage_buffers = storage_buffer_count;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = SDL_CreateGPUShader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_radiance_cascades_message(
@@ -835,7 +835,7 @@ btbh_gpu_radiance_cascades_create_compose_pipeline(
     info.target_info.color_target_descriptions = &color_target;
     info.target_info.num_color_targets = 1u;
     SDL_GPUGraphicsPipeline *pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
+        btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment);
     SDL_ReleaseGPUShader(device, vertex);
     if (pipeline == NULL) {
@@ -920,7 +920,7 @@ btbh_gpu_radiance_cascades_create_source_pipeline(
     info.target_info.color_target_descriptions = &target;
     info.target_info.num_color_targets = 1u;
     SDL_GPUGraphicsPipeline *pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
+        btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment);
     SDL_ReleaseGPUShader(device, vertex);
     if (pipeline == NULL) {
@@ -1052,7 +1052,7 @@ btbh_gpu_radiance_cascades_create_material_source_pipeline(
     info.target_info.color_target_descriptions = &target;
     info.target_info.num_color_targets = 1u;
     SDL_GPUGraphicsPipeline *pipeline =
-        SDL_CreateGPUGraphicsPipeline(device, &info);
+        btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment);
     SDL_ReleaseGPUShader(device, vertex);
     if (pipeline == NULL) {

@@ -469,4 +469,27 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
     BTBHGPUTextureReport *report
 );
 
+/* Every shader and pipeline the renderer makes goes through these three (since 0.7.0): they count what was made
+   and the time it took, process-wide, so a test can tell whether a present made any (the prewarm smoke) and a
+   measurement can tell how much of a frame went into making them. */
+typedef struct BTBHGPUCreationStats {
+    uint64_t shaders;
+    uint64_t graphics_pipelines;
+    uint64_t compute_pipelines;
+    uint64_t nanoseconds;
+} BTBHGPUCreationStats;
+SDL_GPUShader *btbh_gpu_create_shader(
+    SDL_GPUDevice *device,
+    const SDL_GPUShaderCreateInfo *info
+);
+SDL_GPUGraphicsPipeline *btbh_gpu_create_graphics_pipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUGraphicsPipelineCreateInfo *info
+);
+SDL_GPUComputePipeline *btbh_gpu_create_compute_pipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUComputePipelineCreateInfo *info
+);
+void btbh_gpu_creation_stats(BTBHGPUCreationStats *stats);
+
 #endif

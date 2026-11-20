@@ -286,3 +286,56 @@ void btbh_gpu_device_destroy(BTBHGPUDevice *device) {
     btbh_gpu_device_shutdown(device);
     free(device);
 }
+
+static SDL_SpinLock btbh_gpu_creation_lock;
+static BTBHGPUCreationStats btbh_gpu_creation_totals;
+
+static void btbh_gpu_count_creation(
+    uint64_t *counter,
+    uint64_t started_ticks
+) {
+    const uint64_t elapsed = SDL_GetTicksNS() - started_ticks;
+    SDL_LockSpinlock(&btbh_gpu_creation_lock);
+    *counter += 1u;
+    btbh_gpu_creation_totals.nanoseconds += elapsed;
+    SDL_UnlockSpinlock(&btbh_gpu_creation_lock);
+}
+
+SDL_GPUShader *btbh_gpu_create_shader(
+    SDL_GPUDevice *device,
+    const SDL_GPUShaderCreateInfo *info
+) {
+    const uint64_t started_ticks = SDL_GetTicksNS();
+    SDL_GPUShader *shader = SDL_CreateGPUShader(device, info);
+    btbh_gpu_count_creation(&btbh_gpu_creation_totals.shaders, started_ticks);
+    return shader;
+}
+
+SDL_GPUGraphicsPipeline *btbh_gpu_create_graphics_pipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUGraphicsPipelineCreateInfo *info
+) {
+    const uint64_t started_ticks = SDL_GetTicksNS();
+    SDL_GPUGraphicsPipeline *pipeline = SDL_CreateGPUGraphicsPipeline(device, info);
+    btbh_gpu_count_creation(&btbh_gpu_creation_totals.graphics_pipelines, started_ticks);
+    return pipeline;
+}
+
+SDL_GPUComputePipeline *btbh_gpu_create_compute_pipeline(
+    SDL_GPUDevice *device,
+    const SDL_GPUComputePipelineCreateInfo *info
+) {
+    const uint64_t started_ticks = SDL_GetTicksNS();
+    SDL_GPUComputePipeline *pipeline = SDL_CreateGPUComputePipeline(device, info);
+    btbh_gpu_count_creation(&btbh_gpu_creation_totals.compute_pipelines, started_ticks);
+    return pipeline;
+}
+
+void btbh_gpu_creation_stats(BTBHGPUCreationStats *stats) {
+    if (stats == NULL) {
+        return;
+    }
+    SDL_LockSpinlock(&btbh_gpu_creation_lock);
+    *stats = btbh_gpu_creation_totals;
+    SDL_UnlockSpinlock(&btbh_gpu_creation_lock);
+}

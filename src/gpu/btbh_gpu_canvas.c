@@ -100,7 +100,7 @@ static SDL_GPUShader *btbh_gpu_canvas_load_shader(
     info.stage = stage;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = SDL_CreateGPUShader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_canvas_error(
@@ -434,7 +434,7 @@ static bool btbh_gpu_canvas_create_pipelines(
             (BTBHGPUCanvasBlendMode)index,
             &color_target.blend_state
         );
-        pipelines[index] = SDL_CreateGPUGraphicsPipeline(device, &info);
+        pipelines[index] = btbh_gpu_create_graphics_pipeline(device, &info);
         if (pipelines[index] == NULL) {
             for (uint32_t made = 0u; made < index; ++made) {
                 SDL_ReleaseGPUGraphicsPipeline(device, pipelines[made]);

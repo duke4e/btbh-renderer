@@ -1,4 +1,5 @@
 #include "btbh_gpu_fsr3.h"
+#include "btbh_gpu_internal.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -144,7 +145,7 @@ static SDL_GPUComputePipeline *btbh_gpu_fsr3_create_pipeline(
     info.threadcount_x = spec->threads_x;
     info.threadcount_y = spec->threads_y;
     info.threadcount_z = 1u;
-    SDL_GPUComputePipeline *pipeline = SDL_CreateGPUComputePipeline(device, &info);
+    SDL_GPUComputePipeline *pipeline = btbh_gpu_create_compute_pipeline(device, &info);
     SDL_free(bytes);
     if (pipeline == NULL) {
         btbh_gpu_fsr3_message(message, message_capacity, spec->name, SDL_GetError());
