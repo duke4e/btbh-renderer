@@ -2183,12 +2183,17 @@ float3 apply_world_detail(FragmentInput input, float lod_bias, inout float4 albe
 // uniform). The triangle's index (flat, from its vertices' joint slots) picks an entry: its tiles, scales, angle
 // and two layers of one array, packed (the grey albedo in the ORM's blue). The frame, the seed's offset and the
 // coordinate are apply_world_detail's, and so is the arithmetic: one entry draws to the bit as a packed detail
-// with the same maps and floats. Every pixel samples both layers; an index at or past the count, or a layer of
-// 255, swaps that map's change for none with a select, not a branch, so the derivatives and the mip choice are
-// those of one entry within a triangle.
+// with the same maps and floats. An index at or past the count (255: v2's metal, frames and awnings) does none of
+// it, and a layer of 255 isn't sampled. These are branches on the flat index and the entry's layers: the same for
+// a whole triangle, so for every pixel of a 2x2 quad (its helpers too), and the derivatives and the mip choice
+// inside them are those of one entry.
 float3 apply_world_detail_table(FragmentInput input, float lod_bias, inout float4 albedo, inout float3 orm)
 {
     const uint index = btbh_world_detail_table_unpack(input.animated_model);
+    if (index >= world_detail_table_count.x)
+    {
+        return float3(0.0f, 0.0f, 0.0f);
+    }
     const uint slot = btbh_world_detail_table_slot(index);
     const float4 tiles = world_detail_table_tiles[slot];
     const float4 controls = world_detail_table_controls[slot];
@@ -2206,22 +2211,28 @@ float3 apply_world_detail_table(FragmentInput input, float lod_bias, inout float
         frame,
         btbh_world_detail_offset(input.instance_custom, world_detail_mode.y)
     );
-    const bool orm_on = btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.y);
-    const bool normal_on = btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.x);
-    const float3 detail_orm = world_detail_maps.SampleBias(
-        world_detail_maps_sampler,
-        float3(coordinate, (float)layers.y),
-        lod_bias
-    ).rgb;
-    orm.r *= orm_on ? detail_orm.r : 1.0f;
-    orm.g *= orm_on ? detail_orm.g * controls.z : 1.0f;
-    albedo.rgb *= orm_on ? detail_orm.b * controls.x : 1.0f;
-    const float2 tilt = (world_detail_maps.SampleBias(
-        world_detail_maps_sampler,
-        float3(coordinate, (float)layers.x),
-        lod_bias
-    ).xy * 2.0f - 1.0f) * controls.y;
-    return normal_on ? btbh_world_detail_gradient(frame, tilt) : float3(0.0f, 0.0f, 0.0f);
+    if (btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.y))
+    {
+        const float3 detail_orm = world_detail_maps.SampleBias(
+            world_detail_maps_sampler,
+            float3(coordinate, (float)layers.y),
+            lod_bias
+        ).rgb;
+        orm.r *= detail_orm.r;
+        orm.g *= detail_orm.g * controls.z;
+        albedo.rgb *= detail_orm.b * controls.x;
+    }
+    float3 gradient = float3(0.0f, 0.0f, 0.0f);
+    if (btbh_world_detail_table_applies(index, world_detail_table_count.x, layers.x))
+    {
+        const float2 tilt = (world_detail_maps.SampleBias(
+            world_detail_maps_sampler,
+            float3(coordinate, (float)layers.x),
+            lod_bias
+        ).xy * 2.0f - 1.0f) * controls.y;
+        gradient = btbh_world_detail_gradient(frame, tilt);
+    }
+    return gradient;
 }
 
 FragmentOutput shade_fragment(FragmentInput input)

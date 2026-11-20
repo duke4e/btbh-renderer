@@ -149,7 +149,7 @@ uint btbh_world_detail_table_unpack(float animated_model)
     return animated_model < -0.5f ? (uint)(-animated_model) - 1u : 0u;
 }
 
-// The entry whose block an index reads: min(index, 7). Past the count it is read and thrown away.
+// The entry whose block an index reads: min(index, 7) (the scene shader reads none past the count).
 uint btbh_world_detail_table_slot(uint index)
 {
     return min(index, btbh_world_detail_table_max_entries - 1u);
