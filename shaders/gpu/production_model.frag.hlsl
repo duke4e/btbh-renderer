@@ -201,11 +201,10 @@ struct FragmentInput
     float4 instance_custom : TEXCOORD5;
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
+    // 0 static, 1 skinned; RFC 0009: below 0, a world-detail table index (btbh_world_detail_table_unpack).
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
-    // RFC 0009: the triangle's world-detail table index (production_model.vert; 0 from a skinned vertex).
-    nointerpolation uint detail_index : TEXCOORD11;
     bool is_front_face : SV_IsFrontFace;
 };
 
@@ -2189,7 +2188,7 @@ float3 apply_world_detail(FragmentInput input, float lod_bias, inout float4 albe
 // those of one entry within a triangle.
 float3 apply_world_detail_table(FragmentInput input, float lod_bias, inout float4 albedo, inout float3 orm)
 {
-    const uint index = input.detail_index;
+    const uint index = btbh_world_detail_table_unpack(input.animated_model);
     const uint slot = btbh_world_detail_table_slot(index);
     const float4 tiles = world_detail_table_tiles[slot];
     const float4 controls = world_detail_table_controls[slot];

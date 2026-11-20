@@ -306,6 +306,37 @@ struct BTBHGPUSceneRuntime {
     [BTBH_GPU_SCENE_CULL_COUNT]
     [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
     [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
+    /* RFC 0009: a static batch with a world-detail table draws with production_model_detail_table.vert, which
+       reads each vertex's table index; the other static batches' production_model.vert doesn't (a sixth vertex
+       attribute made every static draw dearer). Their pipelines, as model_pipelines, non_omni_shadowed_ and
+       unshadowed_model_pipelines. */
+    SDL_GPUGraphicsPipeline *table_model_pipelines[
+        BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
+    ][
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT]
+    [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
+    [BTBH_GPU_SCENE_CULL_COUNT]
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
+    SDL_GPUGraphicsPipeline *non_omni_shadowed_table_model_pipelines[
+        BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
+    ][
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT]
+    [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
+    [BTBH_GPU_SCENE_CULL_COUNT]
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
+    SDL_GPUGraphicsPipeline *unshadowed_table_model_pipelines[
+        BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
+    ][
+        BTBH_GPU_SCENE_BLEND_COUNT
+    ][BTBH_GPU_SCENE_DEPTH_COUNT]
+    [BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
+    [BTBH_GPU_SCENE_CULL_COUNT]
+    [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+    [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
@@ -1433,8 +1464,10 @@ static bool btbh_gpu_scene_create_model_pipeline(
         ? BTBH_GPU_MODEL_JOINTS_OFFSET
         : BTBH_GPU_MODEL_TANGENT_OFFSET;
     if (!animated) {
-        /* RFC 0009: the joint slot's first float, the world-detail table index (production_model.vert). A shader
-           from before 0.8.0 doesn't declare location 5 and leaves it unread. */
+        /* RFC 0009: the joint slot's first float, the world-detail table index, which only
+           production_model_detail_table.vert (a table batch's) declares. Every static pipeline describes it:
+           production_model.vert, and a static vertex shader from before 0.8.0, leave it unread, which costs
+           nothing (measured). */
         attributes[5].location = 5u;
         attributes[5].buffer_slot = 0u;
         attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT;
@@ -2930,6 +2963,21 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         (temporal ? 4u : 0u) +
         (radiance_cascades_active ? 2u : 0u) +
         (auxiliary_geometry_outputs ? 1u : 0u);
+    if (!animated && btbh_gpu_world_detail_table_active(batch)) {
+        /* RFC 0009: production_model_detail_table.vert's pipelines (never fast unlit). */
+        if (!shadows_active) {
+            return &runtime->unshadowed_table_model_pipelines
+                [color_target_variant][blend][depth][transparent]
+                [cull][stencil][fast_unlit];
+        }
+        return omni_shadows_active
+            ? &runtime->table_model_pipelines
+                [color_target_variant][blend][depth][transparent]
+                [cull][stencil][fast_unlit]
+            : &runtime->non_omni_shadowed_table_model_pipelines
+                [color_target_variant][blend][depth][transparent]
+                [cull][stencil][fast_unlit];
+    }
     if (shadows_active) {
         if (!omni_shadows_active) {
             return animated
@@ -3134,9 +3182,41 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         selected_fragment_shader_path =
             fast_unlit_fragment_shader_path;
     }
+    /* RFC 0009: a static batch with a world-detail table reads its vertices' table index with
+       production_model_detail_table.vert, beside the host's production_model.vert; a host without that file
+       can't draw a table (the shader load fails with its path). */
+    const char *selected_vertex_shader_path =
+        animated ? animated_vertex_shader_path : vertex_shader_path;
+    char table_vertex_shader_path[
+        BTBH_GPU_SCENE_PATH_CAPACITY
+    ];
+    if (!animated && btbh_gpu_world_detail_table_active(batch)) {
+        char filename[128];
+        (void)snprintf(
+            filename,
+            sizeof(filename),
+            "production_model_detail_table.vert.%s",
+            project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+                ? "metallib"
+                : "spv"
+        );
+        if (!btbh_gpu_scene_sibling_path(
+                vertex_shader_path,
+                filename,
+                table_vertex_shader_path
+            )) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "World-detail table vertex shader path is too long"
+            );
+            return false;
+        }
+        selected_vertex_shader_path = table_vertex_shader_path;
+    }
     return btbh_gpu_scene_create_model_pipeline(
         window,
-        animated ? animated_vertex_shader_path : vertex_shader_path,
+        selected_vertex_shader_path,
         selected_fragment_shader_path,
         project_format,
         animated,
@@ -11369,6 +11449,26 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             device,
             &window->scene_runtime
                 ->unshadowed_animated_model_pipelines
+                    [0][0][0][0][0][0][0],
+            pipeline_count
+        );
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            &window->scene_runtime
+                ->table_model_pipelines[0][0][0][0][0][0][0],
+            pipeline_count
+        );
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            &window->scene_runtime
+                ->non_omni_shadowed_table_model_pipelines
+                    [0][0][0][0][0][0][0],
+            pipeline_count
+        );
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            &window->scene_runtime
+                ->unshadowed_table_model_pipelines
                     [0][0][0][0][0][0][0],
             pipeline_count
         );

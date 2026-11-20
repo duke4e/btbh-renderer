@@ -5,6 +5,9 @@
 #ifndef BTBH_PRODUCTION_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_VERTEX_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH must be defined"
 #endif
@@ -157,29 +160,86 @@ static int require_text(const char *path, const char *needle)
     return found;
 }
 
+/* 1 when the artifact exists and doesn't contain `needle`. */
+static int forbid_text(const char *path, const char *needle)
+{
+    FILE *file = fopen(path, "rb");
+    char *text;
+    long size;
+    int found;
+
+    if (file == NULL ||
+        fseek(file, 0, SEEK_END) != 0 ||
+        (size = ftell(file)) < 0 ||
+        fseek(file, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "missing Phase 2 shader artifact: %s\n", path);
+        if (file != NULL) {
+            fclose(file);
+        }
+        return 0;
+    }
+    text = (char *)malloc((size_t)size + 1u);
+    if (text == NULL ||
+        fread(text, 1u, (size_t)size, file) != (size_t)size) {
+        free(text);
+        fclose(file);
+        return 0;
+    }
+    fclose(file);
+    text[size] = '\0';
+    found = strstr(text, needle) != NULL;
+    if (found) {
+        fprintf(stderr, "%s contains: %s\n", path, needle);
+    }
+    free(text);
+    return !found;
+}
+
 int main(void)
 {
     if (!require_text(
             BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 4"
         ) ||
-        /* RFC 0009: the joint slot's first float after the tangent, at location 5 (0..4 as in 0.7.0), and the
-           world-detail table index out of both model vertex shaders, flat, at location 11. */
+        /* RFC 0009: the table's static vertex shader reads the joint slot's first float after the tangent, at
+           location 5 (0..4 as in 0.7.0), and passes the index in the flat animated_model (location 8).
+           production_model.vert, the animated one and the scene fragment shader read and pass on what 0.7.0's
+           did: no location 5, no output or input of its own for the index. */
         !require_text(
-            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float4\", \"location\": 4"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD7\", \"type\": \"float\", \"location\": 5"
         ) ||
         !require_text(
-            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
-            "\"name\": \"out.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+            BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH,
+            "\"name\": \"out.var.TEXCOORD8\", \"type\": \"float\", \"location\": 8"
         ) ||
-        !require_text(
+        !forbid_text(
+            BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH,
+            "TEXCOORD11"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD7\""
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "TEXCOORD11"
+        ) ||
+        !forbid_text(
             BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH,
-            "\"name\": \"out.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+            "TEXCOORD11"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
+            "TEXCOORD11"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"name\": \"in.var.TEXCOORD11\", \"type\": \"uint\", \"location\": 11"
+            "\"name\": \"in.var.TEXCOORD8\", \"type\": \"float\", \"location\": 8"
         ) ||
         !require_text(
             BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH,

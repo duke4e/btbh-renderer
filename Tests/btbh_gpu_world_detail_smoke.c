@@ -73,8 +73,9 @@
  *   texture or another window's array as map_layers, a table with a detail that has a texture, an array in the
  *   batch's albedo or emission slot, in a world detail, as the post LUT. A refracting batch ignores its table.
  * - Old shaders: a copy of the shaders with world_detail_maps renamed in production_model.frag, then only in
- *   production_model_2d_shadows.frag: a table batch fails the present with that file's path; without a table they
- *   draw as the current shaders; an omni-shadowed present beside the stale 2D-shadow variant draws.
+ *   production_model_2d_shadows.frag, then without production_model_detail_table.vert (the table batches' static
+ *   vertex shader): a table batch fails the present with that file's path; without a table they draw as the
+ *   current shaders; an omni-shadowed present beside the stale 2D-shadow variant draws.
  * - BTBH_SMOKE_BENCH=1 (or =table, this bench only): eight screen-filling walls under the heavy and the light pixel
  *   at both sizes: no detail, the single packed detail, a table of one entry, a table whose strips alternate two
  *   entries, and (with the baseline shaders) no detail with those; the CPU of 200 merged batches against 1,000
@@ -3385,10 +3386,14 @@ static void check_table_refusals(SmokeWindow *smoke, SmokeWindow *other) {
        the current shaders. Renamed in production_model.frag (the host's), and then only in
        production_model_2d_shadows.frag, the variant a sun-shadowed present draws with (0.6.0's guard read only
        the first): the stale variant is found too, and an omni-shadowed present, which draws with the full
-       shader, still draws. */
+       shader, still draws. Then a copy without production_model_detail_table.vert, the table batches' static
+       vertex shader (0.7.0's shaders have none, nor had the 0.8.0 candidate's): the same. */
     if (SMOKE_SHADER_FORMAT == BTBH_GPU_SHADER_FORMAT_SPIRV) {
-        static const char *const stale[2] = { "production_model.frag.spv", "production_model_2d_shadows.frag.spv" };
-        for (uint32_t which = 0u; which < 2u; ++which) {
+        static const char *const stale[3] = {
+            "production_model.frag.spv", "production_model_2d_shadows.frag.spv",
+            "production_model_detail_table.vert.spv",
+        };
+        for (uint32_t which = 0u; which < 3u; ++which) {
             ShaderCopy copy;
             memset(&copy, 0, sizeof(copy));
             (void)snprintf(copy.from, sizeof(copy.from), "%s", BTBH_GPU_SMOKE_SHADER_DIR);
@@ -3400,7 +3405,11 @@ static void check_table_refusals(SmokeWindow *smoke, SmokeWindow *other) {
             assert(copy.copied > 11u);
             char stale_path[1100];
             (void)snprintf(stale_path, sizeof(stale_path), "%s/%s", copy.to, stale[which]);
-            rename_in_file(stale_path, "world_detail_maps");
+            if (which == 2u) {
+                assert(SDL_RemovePath(stale_path));
+            } else {
+                rename_in_file(stale_path, "world_detail_maps");
+            }
             ShaderSet old;
             set_shaders(&old, copy.to);
             SmokeWindow fresh = open_window(other->window->device, "BTBH world detail smoke (old table shaders)",
@@ -3444,8 +3453,8 @@ static void check_table_refusals(SmokeWindow *smoke, SmokeWindow *other) {
             assert(SDL_RemovePath(copy.to));
         }
         printf("old shaders: a table batch fails the present with the stale file's path, the host's fragment shader "
-               "or the variant it draws with; without a table they draw as the current shaders; an omni-shadowed "
-               "present beside a stale 2D-shadow variant draws\n");
+               "or the variant it draws with, or the missing table vertex shader's; without a table they draw as the "
+               "current shaders; an omni-shadowed present beside a stale 2D-shadow variant draws\n");
     }
     btbh_gpu_texture_destroy(foreign);
     btbh_gpu_texture_destroy(flat);

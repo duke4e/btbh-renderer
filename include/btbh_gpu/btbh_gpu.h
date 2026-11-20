@@ -897,9 +897,11 @@ typedef struct BTBHGPUSceneWorldDetailTableEntry {
  * leaves the triangle without a detail. All three vertices of a triangle must carry the same index (which vertex
  * gives a flat value differs between graphics APIs). Meant for custom meshes and unskinned models whose joint slot
  * the host writes: a skinned batch takes entry 0 everywhere (its joints are bones), and so does a model loaded
- * without joints. Not for an SDF terrain's chunks, whose joint slots hold layer weights. The host owns the table
- * and its entries; the renderer reads them during the present call only, so one table can serve any number of
- * batches. 24 bytes on 64-bit. */
+ * without joints. Not for an SDF terrain's chunks, whose joint slots hold layer weights. A static batch with a table
+ * draws with production_model_detail_table.vert from the directory of the static vertex shader the present is
+ * given (a present without that file fails, naming it); the others with production_model.vert, which doesn't read
+ * the index. The host owns the table and its entries; the renderer reads them during the present call only, so
+ * one table can serve any number of batches. 24 bytes on 64-bit. */
 typedef struct BTBHGPUSceneWorldDetailTable {
     /* A 2D array texture (btbh_gpu_window_texture_array_*), linear, made with BTBH_GPU_TEXTURE_WRAP_REPEAT, that
      * holds every entry's maps. NULL: the batch draws as without a table. */

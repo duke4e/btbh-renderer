@@ -135,6 +135,20 @@ uint btbh_world_detail_table_index(float joint)
     return rounded >= 0.0f ? (uint)min(rounded, 255.0f) : (rounded < 0.0f ? 0u : btbh_world_detail_no_layer);
 }
 
+// A static vertex's table index rides in the flat animated_model varying, which is 0 for a static vertex and 1
+// for a skinned one (whose joints are bones): as -1 - index (a whole number, exact), so no vertex passes on more
+// than 0.7.0's did (RFC 0009, phase 2 notes).
+float btbh_world_detail_table_pack(uint index)
+{
+    return -1.0f - (float)index;
+}
+
+// The index again; a skinned or a table-less static vertex's value gives entry 0.
+uint btbh_world_detail_table_unpack(float animated_model)
+{
+    return animated_model < -0.5f ? (uint)(-animated_model) - 1u : 0u;
+}
+
 // The entry whose block an index reads: min(index, 7). Past the count it is read and thrown away.
 uint btbh_world_detail_table_slot(uint index)
 {

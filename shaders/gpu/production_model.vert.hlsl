@@ -1,9 +1,18 @@
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
-#include "production_world_detail.hlsli"
 
 #ifndef BTBH_RC_SOURCE_PROJECTION
 #define BTBH_RC_SOURCE_PROJECTION 0
+#endif
+// RFC 0009: 1 in production_model_detail_table.vert, the static vertex shader of a batch with a world-detail table,
+// which reads each vertex's table index (the joint slot's first float) and passes it in animated_model. Every
+// other static batch draws with this file, which reads and passes on what 0.7.0's did: the extra vertex attribute
+// made a frame of many small instanced draws dearer, a table or not (RFC 0009, phase 2 notes).
+#ifndef BTBH_WORLD_DETAIL_TABLE
+#define BTBH_WORLD_DETAIL_TABLE 0
+#endif
+#if BTBH_WORLD_DETAIL_TABLE
+#include "production_world_detail.hlsli"
 #endif
 
 struct InstanceData
@@ -52,7 +61,7 @@ struct VertexInput
     float2 texture_coordinate : TEXCOORD2;
     float3 normal : TEXCOORD3;
     float4 tangent : TEXCOORD6;
-#if !BTBH_RC_SOURCE_PROJECTION
+#if BTBH_WORLD_DETAIL_TABLE && !BTBH_RC_SOURCE_PROJECTION
     // RFC 0009: the first float of the vertex's joint slot (byte 64), its world-detail table index. Declared after
     // the tangent, so it takes location 5 and locations 0..4 stay where 0.7.0's shader had them.
     float detail_index : TEXCOORD7;
@@ -70,13 +79,11 @@ struct VertexOutput
     float4 instance_custom : TEXCOORD5;
     float3 world_bitangent : TEXCOORD6;
     float4 surface_data : TEXCOORD7;
+    // 0 static, 1 skinned; RFC 0009: -1 - the triangle's world-detail table index from
+    // production_model_detail_table.vert (flat: all three vertices must carry the same index).
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
-#if !BTBH_RC_SOURCE_PROJECTION
-    // RFC 0009: the triangle's world-detail table entry (flat: all three vertices must carry the same index).
-    nointerpolation uint detail_index : TEXCOORD11;
-#endif
 };
 
 // Only a zero vector takes the fallback: a normal through the cofactor of an instance at the city's 0.002 scale
@@ -272,9 +279,10 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.instance_custom = instance.custom;
     output.world_bitangent = world_bitangent;
     output.surface_data = surface.data;
+#if BTBH_WORLD_DETAIL_TABLE && !BTBH_RC_SOURCE_PROJECTION
+    output.animated_model = btbh_world_detail_table_pack(btbh_world_detail_table_index(input.detail_index));
+#else
     output.animated_model = 0.0f;
-#if !BTBH_RC_SOURCE_PROJECTION
-    output.detail_index = btbh_world_detail_table_index(input.detail_index);
 #endif
     return output;
 }

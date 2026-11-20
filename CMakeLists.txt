@@ -194,6 +194,7 @@ if(BTBH_BUILD_GPU_SPIKE)
     set(BTBH_GPU_SHADER_ARTIFACTS)
     set(BTBH_GPU_SHADER_SPECS
         "production_model.vert|vertex"
+        "production_model_detail_table.vert|vertex"
         "production_animated_model.vert|vertex"
         "production_shadow_fast.vert|vertex"
         "production_shadow_fast.frag|fragment"
@@ -304,6 +305,25 @@ if(BTBH_BUILD_GPU_SPIKE)
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.frag.hlsl"
+            )
+        endif()
+        # Vertex shaders built from another's source with a define (RFC 0009's table variant, the RC material
+        # sources).
+        if(
+            _shader_name STREQUAL "production_model_detail_table.vert" OR
+            _shader_name STREQUAL "production_rc_material_source.vert"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.vert.hlsl"
+            )
+        endif()
+        if(_shader_name STREQUAL "production_rc_animated_material_source.vert")
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_animated_model.vert.hlsl"
             )
         endif()
         if(
@@ -780,6 +800,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         target_compile_definitions(btbh_gpu_phase2_shader_test
             PRIVATE
                 BTBH_PRODUCTION_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.vert.json"
+                BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_detail_table.vert.json"
                 BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_model.vert.json"
                 BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow.vert.json"
                 BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow_fast.vert.json"
