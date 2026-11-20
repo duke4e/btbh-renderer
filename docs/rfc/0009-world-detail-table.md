@@ -598,6 +598,107 @@ These are estimates, to measure in each phase's bench.
 - **v2:** its frame telemetry with the table on the merged distance models, against `BTBH_LOD1_SPLIT=1` and against
   no detail at a distance. Then the owner's Deck.
 
+## Implementation notes (phase 1, 2026-11-20)
+
+Phase 1 is implemented for 0.7.0:
+- the header: the `BTBH_GPU_SCENE_DETAIL_*` names, `BTBH_GPU_SCENE_HAS_FACADE_WEATHER` and the two comments;
+- `btbh_street_darkening`, the pattern-7 branch and the wetness gate in `production_model.frag`;
+- the check, `btbh_gpu_scene_detail_parameters_valid` in `src/gpu/btbh_gpu_scene.c`;
+- `SurfaceDetail.Pattern.facadeWeather` in Swift;
+- the tests, in `Tests/btbh_gpu_scene_order_test.c` (native) and `Tests/btbh_gpu_world_detail_smoke.c` (GPU, with the
+  bench).
+
+The API is the one above. Where the implementation differs from the text, or measured what the text estimated,
+it is written down here. The version macros stay at 0.6.0 until the release commit.
+
+**z** (Decisions, "What z is"). As drafted: pattern 7 reads none of x, y and z, and refuses them set.
+`[0, 0, 0, 7]`, v2's value, draws the whole weather. The smoke shows it: the street darkens dry, and the walls get
+wet soaked.
+
+**The check** (more than "Refusals" says)
+- It moved out of the batch checks' one long expression into `btbh_gpu_scene_detail_parameters_valid`, declared in
+  `btbh_gpu_internal.h`, so the native test can call it. The batch checks call it in its place.
+- The pattern rounds as the shader rounds it, `(uint)(w + 0.5)`. So 6.5 up to 7 is pattern 7, and needs x, y and
+  z at 0. Above 7 is refused, 7.25 too, though the shader would round it to 7. 0.6.0 refused above 6 the same way.
+- −0 counts as 0.
+- A refusal gives the batch checks' message, "Invalid GPU model instance scene submission", as a bad pattern did in
+  0.6.0. It doesn't name the batch or the fault: the text didn't ask for that, and the other batch checks don't
+  either. Phase 2's refusals name the batch, as RFC 0008's do.
+
+**The shader.** As the text has it. Both patterns call `btbh_street_darkening`. Pattern 7's branch returns before
+the noise's footprint and face normal are taken. The wetness gate and the wall branch take 7. The darkening's old
+comment said "a fifth"; the function's comment says a quarter, as the code ramps (Need). That code didn't change.
+
+**Swift** (different from "Implementation, Phase 1")
+- The text said nothing changes in Swift until v1 asks. The coordinator asked for the Swift patterns to mirror the
+  native ones. So `SurfaceDetail.Pattern` gains `facadeWeather` (raw value 7), with a `SurfaceDetail.facadeWeather`
+  beside `lampLens`.
+- `isEnabled` is true for it whatever the other fields say. It goes native as (0, 0, 0, 7): `albedoVariation`,
+  `bumpHeight` and `frequency` are ignored, so a Swift host can't reach the refusal.
+- A new case breaks an exhaustive `switch` over the public enum in a client. Be The Bullet Hell (v1) has none: it
+  maps the patterns through dictionaries (`PresentationLook.swift`). It builds as before and never sends 7.
+
+**Tests** (different from "Platforms and testing")
+- **Native:** in `btbh_gpu_scene_order` (it already checks the batch's layout), not a new test. 24 cases: pattern 7
+  with x, y and z at 0 (and at −0), with each of them set, 6.5 rounding to 7, 7.25, 8, NaN; patterns 1–6 with z at
+  0. Static checks: the eight names' values, and the batch still 272 bytes.
+- **Equal.** `[0, 0, 0, 7]` against `[0, 0, 6, 3]` (v2's preview) and `[0, 0, 0.37, 3]` (to show that z doesn't
+  matter).
+  - The scene: the gallery's city and five more boxes (a low wall, a lawn, a sidewalk, a lens, a plain box). Every
+    batch but the lens takes the pattern. Three boxes carry the first set's textures. The ground and the turned box
+    carry a packed world detail (v2's combination). Lamps and point lights.
+  - Through the six scene fragment shaders (2D shadows, full, unshadowed, and the three radiance-cascade ones,
+    which ran), dry by day and soaked at night (wetness 1, rain).
+  - 0 of 393,216 pixels differ. No FMA contraction showed on this GPU and driver.
+- **It changes the image.** Dry, pattern 7 changes 7,349–7,706 of the 16,384 pixels from no pattern: the ground
+  and every wall's foot darken. Soaked, it changes 10,144–10,218, and differs from dry on 3,484–3,749 (the walls).
+- **Old shaders.** With 0.6.0's compiled shaders under this core, pattern 7 draws byte for byte as no pattern (0
+  pixels differ), as the text expected: the ground branch with x and y at 0.
+- **Refusals** through the present: `[0, 0, 6, 7]`, `[0.07, 0, 0, 7]`, `[0, 0.01, 0, 7]`, `[0, 0, 0, 8]` and
+  `[0, 0, 1, 7.25]`.
+- **Unset, byte for byte against 0.6.0.** The smoke's gallery grew from 8 to 15 scenes. The seven new ones hold
+  patterns 0–6 together (ground, grass, two facades, paving twice, glass, a lens, none; some on the first set's
+  textures). They go through the six shaders soaked in the rain at night with lit windows, and once more dry by
+  day with the soft sun shadow.
+  - A build of 0.6.0's core and shaders with this smoke (`bb934615`, which adds only docs to the tag) wrote the
+    gallery (`BTBH_WORLD_DETAIL_DUMP`). This build compared it (`BTBH_WORLD_DETAIL_REFERENCE`): 0 of 245,760 pixels
+    differ.
+  - With 0.6.0's compiled shaders under this core (`BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR`): 0 pixels differ in each
+    of the 15.
+  - `btbh_gpu_scene_target_smoke`'s nine images (`BTBH_SMOKE_DUMP`), written by both builds: 0 of 90,368 pixels
+    differ. `btbh_gpu_sdf_terrain_smoke` with 0.6.0's shaders: 0 pixels differ.
+- **Not done:** Metal (`check.sh` on the Mac), a register count (Radeon GPU Analyzer isn't installed), the Deck.
+
+**Measured** (`BTBH_SMOKE_BENCH=weather`, or `=1` with the world detail's bench, with
+`BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR` at 0.6.0's shaders)
+- Windows, RTX 3070 Ti. The world detail's bench layers: eight coplanar screen-filling walls drawn with
+  `LESS_EQUAL`, so every layer shades every pixel. The heavy pixel is the soft sun shadow with 40 lamps and 32 point
+  lights; the light one is the sun without a shadow. Each was run dry and soaked (`surface_wetness` 1: the bench's
+  walls are vertical, so every pixel takes the wet branch).
+- The configurations take 10 interleaved turns of 20 frames. The table gives the fastest turn's difference over 8,
+  two runs: the cost per screen of facade. Another session's GPU benches ran on the same GPU at times; the
+  interleaving spreads that load over every configuration.
+
+  | Per screen | Heavy, 1920 × 1080 | Heavy, 960 × 600 | Light, 1920 × 1080 | Light, 960 × 600 |
+  | --- | --- | --- | --- | --- |
+  | Pattern 7, dry | +0.008 / −0.006 ms | +0.001 / +0.002 ms | +0.005 / +0.007 ms | +0.001 / +0.002 ms |
+  | Pattern 7, soaked | +0.019 / +0.025 ms | +0.007 / +0.001 ms | +0.015 / +0.012 ms | +0.004 / +0.003 ms |
+  | Pattern 3 (x 0.07, y 0, z 6), dry | +0.184 / +0.173 ms | +0.057 / +0.052 ms | +0.171 / +0.180 ms | +0.046 / +0.047 ms |
+  | Pattern 3, soaked | +0.196 / +0.203 ms | +0.060 / +0.056 ms | +0.180 / +0.189 ms | +0.051 / +0.048 ms |
+  | Pattern 0 against 0.6.0's shaders, dry | +0.006 / +0.011 ms | −0.001 / −0.001 ms | 0.000 / −0.001 ms | 0.000 / 0.000 ms |
+  | Pattern 0 against 0.6.0's shaders, soaked | 0.000 / −0.009 ms | −0.002 / +0.002 ms | +0.001 / −0.001 ms | 0.000 / +0.001 ms |
+
+- **Dry,** pattern 7 costs under 0.01 ms a screen, as estimated; at 1080p that is within the bench's noise (about
+  ±0.01 ms, the unset row's spread).
+- **Soaked,** it costs 0.01–0.025 ms a 1080p screen and up to 0.007 ms at 960 × 600: the wet walls' face normal from
+  derivatives and two lerps. The estimate counted the dry path. Pattern 3 pays the same wet branch.
+- **Against pattern 3,** pattern 7 saves 0.165–0.18 ms a 1080p screen and 0.045–0.056 ms at 960 × 600, dry or
+  soaked. In v2's frames the grain measured 0.11–0.13 ms on Medium and 0.26–0.28 ms on High (Need).
+- **Unset:** nothing measurable. The extra compare on a uniform shows within ±0.011 ms at 1080p, either sign.
+- **The Deck** isn't measured. Scaled by the Deck's ALU rate (about 1/13 of this GPU's), a full 960 × 600 screen of
+  facade would cost it about 0.01–0.03 ms dry and up to about 0.09 ms soaked. v2's 0.2–0.5 million facade pixels a
+  frame are a third to most of that. Pattern 3 scaled the same way is 0.6–0.8 ms a screen.
+
 ## Compatibility
 
 - **Versioning.** Both phases are minor and opt-in: an enum value appended, new functions, new structs, a pointer

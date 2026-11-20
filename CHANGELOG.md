@@ -6,6 +6,74 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+An opt-in addition requested by Be The Bullet Hell v2: pattern 7 of the procedural surface detail, the facade's
+weather without its grain, phase 1 of [RFC 0009](docs/rfc/0009-world-detail-table.md). Nothing changes until a
+game sets it: every other pattern, and a zeroed batch, renders byte for byte as in 0.6.0. The scene fragment
+shaders changed: rebuild the shaders together with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (22/22), the Swift build and the full Swift suite
+(301 tests, 2 skipped, 0 failures). With pattern 7 unused, 0 pixels differ from 0.6.0's core and shaders: a
+gallery of 15 scenes, patterns 0–6 among them, through every scene shader variant (245,760 pixels), and
+`btbh_gpu_scene_target_smoke`'s nine images (90,368 pixels), each written by a build of 0.6.0 and by this one.
+Pattern 7 renders byte for byte as pattern 3 with x and y at 0 through the six scene shaders, dry and soaked
+(393,216 pixels). macOS (Metal) isn't verified.
+
+### Added
+- **Pattern 7, `BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER`**: a host sets `detail_parameters` to `{ 0, 0, 0, 7 }`
+  (Be The Bullet Hell v2's `[0, 0, 0, 7]`). It is pattern 3's weather without the triplanar noise, the stains and
+  the bump:
+  - every face darkens toward the street: × 0.8 at the flat world height 0, rising to × 1 at a quarter of a render
+    unit;
+  - with `BTBHGPUSceneLighting.surface_wetness`, steep faces turn a shade darker and semi-gloss (at 1: × 0.85 and a
+    roughness of 0.3 on vertical walls). Level faces only darken.
+  - It renders byte for byte as pattern 3 with x and y at 0, whatever pattern 3's z, without the noise's 40 hashes
+    a pixel.
+  - x, y and z mean nothing yet and must be 0. The present fails with `BTBH_GPU_INVALID_ARGUMENT` for pattern 7
+    with any of them set, and for any pattern above 7.
+  - For v2: on facades where the world detail replaces the grain, and as `SurfaceLook::flat()`'s facade on Low and
+    the Deck preset, which lost the darkening and the wet walls with the grain.
+- **Names for the patterns**: `BTBH_GPU_SCENE_DETAIL_NONE`, `_GROUND`, `_GRASS`, `_FACADE`, `_PAVING`, `_GLASS`,
+  `_LAMP_LENS` (0–6, as before) and `_FACADE_WEATHER` (7). `BTBH_GPU_SCENE_HAS_FACADE_WEATHER`, defined with them.
+- Swift: `SurfaceDetail.Pattern.facadeWeather` and `SurfaceDetail.facadeWeather`. It needs nothing but its
+  pattern and goes native as `{ 0, 0, 0, 7 }`, whatever its other fields say.
+- Tests:
+  - `btbh_gpu_scene_order` (no GPU): which detail parameters the present accepts, pattern 7 and the rounding
+    included.
+  - `btbh_gpu_world_detail_smoke`: pattern 7 against pattern 3 with x = y = 0 (z 6 and 0.37) through the six scene
+    fragment shaders, dry and soaked (0 pixels differ); its refusals; under 0.6.0's shaders it draws as no pattern;
+    and its bench (`BTBH_SMOKE_BENCH=1`, or `=weather` for this one only). The unset gallery grows from 8 to 15
+    scenes: patterns 0–6 together through the six shaders, soaked in the rain at night, and once dry by day.
+
+### Changed
+- Shaders: `production_model.frag` and its five variants take pattern 7. Pattern 3's street darkening moved into a
+  function both patterns call. No binding, uniform or shader file changed. The unlit, radiance-cascade source and
+  shadow shaders don't change.
+- Header comments: `detail_parameters` documents every pattern (it named 0–3), and `surface_wetness` names the
+  facade patterns too (it named 1 and 4, though the shader wets pattern 3's walls as well).
+
+### Measured
+Windows, RTX 3070 Ti, `BTBH_SMOKE_BENCH=weather`: the world detail's eight coplanar screen-filling walls drawn with
+`LESS_EQUAL`, 10 interleaved turns of 20 frames, the fastest turn of each of two runs. Per screen of facade:
+- Pattern 7: under 0.01 ms dry, within the bench's noise at 1920x1080 and 0.001–0.002 ms at 960x600. Soaked (the
+  wet walls take the face normal from derivatives): 0.012–0.025 ms at 1920x1080 and up to 0.007 ms at 960x600.
+  RFC 0009 estimated under 0.01 ms.
+- Pattern 3 (x 0.07, y 0, z 6): 0.17–0.20 ms at 1920x1080 and 0.046–0.060 ms at 960x600. Pattern 7 saves
+  0.165–0.18 ms and 0.045–0.056 ms of it.
+- Unset, against 0.6.0's shaders: nothing measurable (within ±0.011 ms at 1920x1080, either sign).
+- A Steam Deck isn't measured.
+
+### Upgrading
+- Nothing to set: zeroed batches keep pattern 0.
+- Rebuild the shaders with the C core. 0.6.0's shaders still work under this core, but draw a pattern-7 batch as
+  no pattern, without its weather, and nothing detects that (pattern 7 adds no named resource to check for). This
+  release's shaders under 0.6.0's core draw as before, and that core refuses pattern 7.
+- No struct changed. Rust hosts with bindgen get the new constants when they regenerate the bindings. A build
+  script can gate on `BTBH_GPU_SCENE_HAS_FACADE_WEATHER`.
+- To adopt it (v2): `detail: [0.0, 0.0, 0.0, 7.0]` where `kit_surface` replaces the grain, and for
+  `SurfaceLook::flat()`'s facade. See RFC 0009, "Compatibility".
+- Swift: `SurfaceDetail.facadeWeather` on a material. A `switch` over `SurfaceDetail.Pattern` without a `default`
+  needs the new case.
+
 ## [0.6.0] — 2026-11-20
 
 An opt-in addition for Be The Bullet Hell v2: the world detail, phase 1 of
