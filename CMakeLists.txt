@@ -589,7 +589,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_scene_blend_test
         )
 
-        # The opaque pass's front-to-back order and the batch flags' layout (no GPU).
+        # The opaque pass's front-to-back order, the batch flags' layout and the procedural detail's
+        # accepted parameters (no GPU).
         add_executable(btbh_gpu_scene_order_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_order_test.c"
         )

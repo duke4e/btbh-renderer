@@ -1,5 +1,7 @@
 /* The opaque pass's front-to-back order (BTBHGPUScenePost.opaque_sort, btbh_gpu_scene_opaque_order) and the
- * batch flags' layout, without a GPU: which batches sort, which keep their place, and the depth they sort by. */
+ * batch flags' layout, without a GPU: which batches sort, which keep their place, and the depth they sort by.
+ * Also which procedural detail parameters the present accepts (btbh_gpu_scene_detail_parameters_valid): the
+ * patterns' names, and RFC 0009's pattern 7 with x, y and z at 0. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -44,6 +46,17 @@ _Static_assert(
 _Static_assert(BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE == 1u, "the packed layout is bit 0");
 #if !defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
 #error "BTBH_GPU_SCENE_HAS_WORLD_DETAIL is defined with the world detail"
+#endif
+/* RFC 0009 phase 1: the patterns' names, and pattern 7, with no struct changed. */
+_Static_assert(BTBH_GPU_SCENE_DETAIL_NONE == 0 && BTBH_GPU_SCENE_DETAIL_GROUND == 1 &&
+    BTBH_GPU_SCENE_DETAIL_GRASS == 2 && BTBH_GPU_SCENE_DETAIL_FACADE == 3 && BTBH_GPU_SCENE_DETAIL_PAVING == 4 &&
+    BTBH_GPU_SCENE_DETAIL_GLASS == 5 && BTBH_GPU_SCENE_DETAIL_LAMP_LENS == 6, "the patterns keep their numbers");
+_Static_assert(BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER == 7, "the facade's weather is pattern 7");
+#if !defined(BTBH_GPU_SCENE_HAS_FACADE_WEATHER)
+#error "BTBH_GPU_SCENE_HAS_FACADE_WEATHER is defined with pattern 7"
+#endif
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 272u, "pattern 7 changes no struct");
 #endif
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(BTBHGPUScenePost) == 432u, "BTBHGPUScenePost keeps its size");
@@ -348,6 +361,51 @@ int main(void) {
             const float current_z = instances[batches[current].first_instance][14];
             assert(previous_z > current_z || (previous_z == current_z && previous < current));
         }
+    }
+
+    /* The procedural detail's parameters: a pattern rounds to the nearest whole number, as the shader rounds it. */
+    {
+        typedef struct DetailCase {
+            float parameters[4];
+            bool accepted;
+            const char *what;
+        } DetailCase;
+        const DetailCase cases[] = {
+            { { 0.0f, 0.0f, 0.0f, 0.0f }, true, "a zeroed batch" },
+            { { 0.3f, 0.02f, 0.0f, 0.0f }, true, "none ignores x, y and z" },
+            { { 0.0f, 0.0f, 0.0f, 0.49f }, true, "0.49 is none" },
+            { { 0.2f, 0.02f, 3.0f, 1.0f }, true, "the ground" },
+            { { 0.0f, 0.0f, 6.0f, 3.0f }, true, "a facade with x = y = 0 (0.6.0's preview of pattern 7)" },
+            { { 0.07f, 0.0f, 6.0f, 3.0f }, true, "a facade" },
+            { { 0.0f, 0.0f, 0.0f, 3.0f }, false, "a facade with z 0" },
+            { { 0.0f, 0.0f, 1.0f, 6.0f }, true, "a lamp's lens" },
+            { { 0.0f, 0.0f, 0.0f, 6.0f }, false, "a lamp's lens with z 0" },
+            { { 0.0f, 0.0f, 1.0f, 6.49f }, true, "6.49 is a lamp's lens" },
+            { { 0.0f, 0.0f, 0.0f, 7.0f }, true, "pattern 7" },
+            { { -0.0f, -0.0f, -0.0f, 7.0f }, true, "pattern 7 with negative zeros" },
+            { { 0.0f, 0.0f, 0.0f, 6.5f }, true, "6.5 is pattern 7" },
+            { { 0.0f, 0.0f, 1.0f, 6.5f }, false, "6.5 with z set" },
+            { { 0.0f, 0.0f, 6.0f, 7.0f }, false, "pattern 7 with z 6" },
+            { { 0.07f, 0.0f, 0.0f, 7.0f }, false, "pattern 7 with x set" },
+            { { 0.0f, 0.01f, 0.0f, 7.0f }, false, "pattern 7 with y set" },
+            { { 0.0f, 0.0f, -1.0f, 7.0f }, false, "pattern 7 with a negative z" },
+            { { 0.0f, 0.0f, 0.0f, 7.25f }, false, "past 7" },
+            { { 0.0f, 0.0f, 1.0f, 8.0f }, false, "pattern 8" },
+            { { 0.0f, 0.0f, 1.0f, -0.25f }, false, "a negative pattern" },
+            { { 0.0f, 0.0f, 0.0f, NAN }, false, "a NaN pattern" },
+            { { NAN, 0.0f, 0.0f, 7.0f }, false, "pattern 7 with a NaN x" },
+            { { 0.2f, 0.02f, INFINITY, 1.0f }, false, "an infinite z" },
+        };
+        for (size_t index = 0u; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+            const bool accepted = btbh_gpu_scene_detail_parameters_valid(cases[index].parameters);
+            if (accepted != cases[index].accepted) {
+                fprintf(stderr, "detail parameters: %s %s\n", cases[index].what,
+                    accepted ? "accepted" : "refused");
+            }
+            assert(accepted == cases[index].accepted);
+        }
+        printf("detail parameters: %u cases (pattern 7 only with x, y and z at 0; nothing past 7)\n",
+            (unsigned)(sizeof(cases) / sizeof(cases[0])));
     }
 
     printf("scene opaque order test passed\n");
