@@ -948,6 +948,29 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_sdf_terrain_smoke COMMAND btbh_gpu_sdf_terrain_smoke)
         set_tests_properties(btbh_gpu_sdf_terrain_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # RFC 0008: the world detail, rendered into targets and read back (hidden windows).
+        add_executable(btbh_gpu_world_detail_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_world_detail_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_world_detail_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_world_detail_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_world_detail_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        add_dependencies(btbh_gpu_world_detail_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_world_detail_smoke COMMAND btbh_gpu_world_detail_smoke)
+        set_tests_properties(btbh_gpu_world_detail_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
