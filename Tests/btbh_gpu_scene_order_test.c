@@ -1,7 +1,8 @@
 /* The opaque pass's front-to-back order (BTBHGPUScenePost.opaque_sort, btbh_gpu_scene_opaque_order) and the
  * batch flags' layout, without a GPU: which batches sort, which keep their place, and the depth they sort by.
  * Also which procedural detail parameters the present accepts (btbh_gpu_scene_detail_parameters_valid): the
- * patterns' names, and RFC 0009's pattern 7 with x, y and z at 0. */
+ * patterns' names, and RFC 0009's pattern 7 with x, y and z at 0. And the layouts of RFC 0009 phase 2's
+ * world-detail table, its entry and the batch it is appended to. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -22,7 +23,55 @@ _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u, "flags is the
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_reserved) == 254u, "the rest stays reserved");
 /* RFC 0008 appends world_detail after 0.5.0's 264 bytes; dug_by keeps its place. */
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail) == 264u, "world_detail is appended at 264");
-_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 272u, "the batch grows from 264 to 272 bytes");
+/* RFC 0009 phase 2 (0.8.0) appends world_detail_table after 0.6.0's and 0.7.0's 272 bytes. */
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail_table) == 272u,
+    "world_detail_table is appended at 272");
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 280u, "the batch grows from 272 to 280 bytes");
+_Static_assert(sizeof(BTBHGPUSceneWorldDetailTable) == 24u, "BTBHGPUSceneWorldDetailTable is 24 bytes");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, map_layers) == 0u, "map_layers");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, entries) == 8u, "entries");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, entry_count) == 16u, "entry_count");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, seed_component) == 20u, "seed_component");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, flags) == 21u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, reserved) == 22u, "reserved");
+#endif
+/* On any target: the entry is 36 bytes of floats and bytes, aligned to 4, and its eight floats are
+   BTBHGPUSceneWorldDetail's, at that struct's offsets minus its three pointers (24 bytes on 64-bit). */
+_Static_assert(sizeof(BTBHGPUSceneWorldDetailTableEntry) == 36u, "BTBHGPUSceneWorldDetailTableEntry is 36 bytes");
+_Static_assert(_Alignof(BTBHGPUSceneWorldDetailTableEntry) == 4u, "the entry is aligned to 4");
+#define BTBH_ENTRY_AT_DETAIL(field)     (offsetof(BTBHGPUSceneWorldDetailTableEntry, field) ==         offsetof(BTBHGPUSceneWorldDetail, field) - offsetof(BTBHGPUSceneWorldDetail, level_tile))
+_Static_assert(BTBH_ENTRY_AT_DETAIL(level_tile) && offsetof(BTBHGPUSceneWorldDetailTableEntry, level_tile) == 0u,
+    "level_tile");
+_Static_assert(BTBH_ENTRY_AT_DETAIL(wall_tile) && offsetof(BTBHGPUSceneWorldDetailTableEntry, wall_tile) == 8u,
+    "wall_tile");
+_Static_assert(BTBH_ENTRY_AT_DETAIL(albedo_scale) && offsetof(BTBHGPUSceneWorldDetailTableEntry, albedo_scale) == 16u,
+    "albedo_scale");
+_Static_assert(BTBH_ENTRY_AT_DETAIL(normal_scale) && offsetof(BTBHGPUSceneWorldDetailTableEntry, normal_scale) == 20u,
+    "normal_scale");
+_Static_assert(BTBH_ENTRY_AT_DETAIL(roughness_scale) &&
+    offsetof(BTBHGPUSceneWorldDetailTableEntry, roughness_scale) == 24u, "roughness_scale");
+_Static_assert(BTBH_ENTRY_AT_DETAIL(level_degrees) &&
+    offsetof(BTBHGPUSceneWorldDetailTableEntry, level_degrees) == 28u, "level_degrees");
+#undef BTBH_ENTRY_AT_DETAIL
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTableEntry, normal_layer) == 32u, "normal_layer");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTableEntry, orm_layer) == 33u, "orm_layer");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTableEntry, flags) == 34u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneWorldDetailTableEntry, reserved) == 35u, "reserved");
+/* The table's pointer follows world_detail; its constants and the vertex's index float. */
+_Static_assert(
+    offsetof(BTBHGPUSceneGeometryBatch, world_detail_table) ==
+        offsetof(BTBHGPUSceneGeometryBatch, world_detail) + sizeof(void *),
+    "world_detail_table follows world_detail"
+);
+_Static_assert(BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES == 8u, "eight entries (RFC 0009, decision 1)");
+_Static_assert(BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER == 255u, "255 is none (decision 5)");
+_Static_assert(BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS == 24u, "the vertex is 24 floats");
+_Static_assert(BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT * sizeof(float) == 64u, "the index is joints.x, byte 64");
+_Static_assert(BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS == 256u, "Vulkan's guaranteed maxImageArrayLayers");
+#if !defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE) || !defined(BTBH_GPU_HAS_TEXTURE_ARRAYS)
+#error "BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE and BTBH_GPU_HAS_TEXTURE_ARRAYS are defined with the table"
+#endif
+#if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(BTBHGPUSceneWorldDetail) == 64u, "BTBHGPUSceneWorldDetail is 64 bytes");
 _Static_assert(offsetof(BTBHGPUSceneWorldDetail, albedo_texture) == 0u, "albedo_texture");
 _Static_assert(offsetof(BTBHGPUSceneWorldDetail, normal_texture) == 8u, "normal_texture");
@@ -54,9 +103,6 @@ _Static_assert(BTBH_GPU_SCENE_DETAIL_NONE == 0 && BTBH_GPU_SCENE_DETAIL_GROUND =
 _Static_assert(BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER == 7, "the facade's weather is pattern 7");
 #if !defined(BTBH_GPU_SCENE_HAS_FACADE_WEATHER)
 #error "BTBH_GPU_SCENE_HAS_FACADE_WEATHER is defined with pattern 7"
-#endif
-#if UINTPTR_MAX == UINT64_MAX
-_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 272u, "pattern 7 changes no struct");
 #endif
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(BTBHGPUScenePost) == 432u, "BTBHGPUScenePost keeps its size");

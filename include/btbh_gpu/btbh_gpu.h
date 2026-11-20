@@ -864,6 +864,53 @@ enum {
     BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE = 1u << 0
 };
 
+/* The most entries a world-detail table holds (BTBHGPUSceneWorldDetailTable.entry_count, since 0.8.0). */
+#define BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES 8u
+/* An entry's normal_layer or orm_layer: that map is absent. Also the vertex index that means "no detail". */
+#define BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER 255u
+
+/* One entry of a world-detail table (RFC 0009, since 0.8.0): the eight floats of BTBHGPUSceneWorldDetail (same
+ * names, order and meaning, same zero values; they are that struct's bytes 24..55, so a host can copy them across),
+ * then the layers of the table's array it samples. 36 bytes. */
+typedef struct BTBHGPUSceneWorldDetailTableEntry {
+    float level_tile[2];       /* finite and above 0 */
+    float wall_tile[2];        /* finite and above 0 */
+    float albedo_scale;        /* 0 means 1 */
+    float normal_scale;        /* 0 means 1 */
+    float roughness_scale;     /* 0 means 1 */
+    float level_degrees;       /* 0 means 18; below 90 */
+    /* Layers of BTBHGPUSceneWorldDetailTable.map_layers: the normal (tangent space as BTBHGPUSceneWorldDetail's,
+     * OpenGL +Y, xy read and z rebuilt) and the ORM (r occlusion, g roughness factor times roughness_scale, b the
+     * grey albedo multiplier times albedo_scale, linear: BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE's layout).
+     * BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER: that map is absent. A zeroed entry samples layer 0 for both. */
+    uint8_t normal_layer;
+    uint8_t orm_layer;
+    uint8_t flags;             /* 0 */
+    uint8_t reserved;          /* 0 */
+} BTBHGPUSceneWorldDetailTableEntry;
+
+/* Several world details in one batch, chosen per vertex (BTBHGPUSceneGeometryBatch.world_detail_table, RFC 0009,
+ * since 0.8.0). Each vertex's index is the first float of its joint slot (BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT),
+ * rounded to the nearest whole number and clamped to 0..255: the triangle takes entries[index], projected and
+ * blended as a BTBHGPUSceneWorldDetail with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE (packed only: no
+ * coloured albedo). An index at or past entry_count (BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER, 255, by convention)
+ * leaves the triangle without a detail. All three vertices of a triangle must carry the same index (which vertex
+ * gives a flat value differs between graphics APIs). Meant for custom meshes and unskinned models whose joint slot
+ * the host writes: a skinned batch takes entry 0 everywhere (its joints are bones), and so does a model loaded
+ * without joints. Not for an SDF terrain's chunks, whose joint slots hold layer weights. The host owns the table
+ * and its entries; the renderer reads them during the present call only, so one table can serve any number of
+ * batches. 24 bytes on 64-bit. */
+typedef struct BTBHGPUSceneWorldDetailTable {
+    /* A 2D array texture (btbh_gpu_window_texture_array_*), linear, made with BTBH_GPU_TEXTURE_WRAP_REPEAT, that
+     * holds every entry's maps. NULL: the batch draws as without a table. */
+    BTBHGPUTexture *map_layers;
+    const BTBHGPUSceneWorldDetailTableEntry *entries;
+    uint32_t entry_count;      /* 1..BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES */
+    uint8_t seed_component;    /* as BTBHGPUSceneWorldDetail.seed_component, for every entry */
+    uint8_t flags;             /* 0 */
+    uint8_t reserved[2];       /* 0 */
+} BTBHGPUSceneWorldDetailTable;
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -946,6 +993,14 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * texture leaves the fast unlit pipeline, and needs the scene shaders from 0.6.0: with SPIR-V shaders that
      * don't sample it, the present fails with the shader's path. */
     const BTBHGPUSceneWorldDetail *world_detail;
+    /* NULL: drawn as before. Otherwise world details chosen per vertex from a table over one array texture
+     * (BTBHGPUSceneWorldDetailTable, RFC 0009, since 0.8.0). Several batches may point at one. A table that isn't
+     * valid fails the present with BTBH_GPU_INVALID_ARGUMENT, naming the batch; so does a batch with both a table
+     * whose map_layers is set and a world_detail with a texture (a world_detail without textures may stay). A
+     * refracting batch ignores it, as it does world_detail. A batch whose table has map_layers leaves the fast
+     * unlit pipeline, and needs the scene shaders from 0.8.0: with SPIR-V shaders that don't sample it, the
+     * present fails with the shader's path. */
+    const BTBHGPUSceneWorldDetailTable *world_detail_table;
 } BTBHGPUSceneGeometryBatch;
 
 /* BTBHGPUSceneGeometryBatch.flags (since 0.5.0). */
@@ -997,6 +1052,10 @@ enum {
 /* Defined when BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER (pattern 7) and the BTBH_GPU_SCENE_DETAIL_* names exist (since
    0.7.0). */
 #define BTBH_GPU_SCENE_HAS_FACADE_WEATHER 1
+
+/* Defined when BTBHGPUSceneGeometryBatch.world_detail_table, BTBHGPUSceneWorldDetailTable,
+   BTBHGPUSceneWorldDetailTableEntry and the BTBH_GPU_CUSTOM_MESH_* vertex macros exist (since 0.8.0). */
+#define BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE 1
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
@@ -1667,6 +1726,12 @@ uint8_t btbh_gpu_pack_transform_stream_instances(
     uint32_t source_start,
     uint32_t count
 );
+/* The custom-mesh vertex (a loaded model's vertex too): BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS floats, 96 bytes,
+ * position 0..2, normal 3..5, uv 6..7, tangent 8..11 (w the handedness), colour 12..15, joints 16..19, weights
+ * 20..23. A static draw reads the joints' first float as its world-detail table index (since 0.8.0, RFC 0009:
+ * BTBHGPUSceneWorldDetailTable) and nothing else of the joints and weights; a skinned draw reads them as bones. */
+#define BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS 24u
+#define BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT 16u
 BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
     BTBHGPUWindow *window,
     const void *vertices,
@@ -1916,9 +1981,50 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_ex(
     BTBHGPUTextureColorSpace color_space,
     BTBHGPUTextureReport *report
 );
+/* A 2D array texture (RFC 0001's functions, since 0.8.0): layer_count layers of one size and colour space, each
+ * with its own mips, sampled through the slots that take an array (BTBHGPUSceneWorldDetailTable.map_layers). Every
+ * other texture slot (a batch's four, a world detail's three, the canvas's texture and target, the post LUT, the
+ * capture destination, the render-to-target target) refuses one with BTBH_GPU_INVALID_ARGUMENT, and so does
+ * btbh_gpu_texture_update_rgba8. btbh_gpu_texture_destroy frees it. The report's width, height and mip_count
+ * describe one layer.
+ * - layer_pixels: layer_count pointers, each to width * height * 4 bytes (tightly packed RGBA8, row 0 at the top).
+ * - layer_count: 1..BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS; generate_mipmaps as btbh_gpu_window_texture_create_rgba8_ex
+ *   (every layer gets its own chain).
+ * - A NULL or out-of-range argument, a NULL layer pointer, or more than 4 GiB to upload: NULL with
+ *   BTBH_GPU_INVALID_ARGUMENT and the reason in the report (when there is a report). A device that can't sample a
+ *   2D array in the format: BTBH_GPU_MISSING_CAPABILITY. */
+#define BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS 256u
+BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
+    BTBHGPUWindow *window,
+    const uint8_t *const *layer_pixels,
+    uint32_t width,
+    uint32_t height,
+    uint32_t layer_count,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+);
+/* The same from image files (PNG, JPG, ...), one per layer, in order, decoded to RGBA8. Every image must have the
+ * first one's size: otherwise NULL with BTBH_GPU_INVALID_ARGUMENT, naming the path. A file that can't be read or
+ * decoded fails as with btbh_gpu_window_texture_load_ex (BTBH_GPU_DEVICE_FAILURE), and the message names the
+ * path. */
+BTBHGPUTexture *btbh_gpu_window_texture_array_load_ex(
+    BTBHGPUWindow *window,
+    const char *const *layer_paths,
+    uint32_t layer_count,
+    uint8_t generate_mipmaps,
+    BTBHGPUTextureFilter filter,
+    BTBHGPUTextureWrap wrap,
+    BTBHGPUTextureColorSpace color_space,
+    BTBHGPUTextureReport *report
+);
+/* Defined when the two functions above and BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS exist (since 0.8.0). */
+#define BTBH_GPU_HAS_TEXTURE_ARRAYS 1
 /* Replaces a region of a raw-pixel texture. Submits its own upload, so call it
  * before the scene or canvas present that samples the texture. A one-channel font atlas
- * (BTBH_GPU_FONT_FLAG_R8_ATLAS) isn't RGBA: BTBH_GPU_INVALID_ARGUMENT. */
+ * (BTBH_GPU_FONT_FLAG_R8_ATLAS) isn't RGBA, and an array texture has layers: BTBH_GPU_INVALID_ARGUMENT. */
 BTBHGPUResult btbh_gpu_texture_update_rgba8(
     BTBHGPUTexture *texture,
     const uint8_t *pixels,
