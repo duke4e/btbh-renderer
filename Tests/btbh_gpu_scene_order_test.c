@@ -39,7 +39,9 @@ _Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, reserved) == 22u, "reserve
    BTBHGPUSceneWorldDetail's, at that struct's offsets minus its three pointers (24 bytes on 64-bit). */
 _Static_assert(sizeof(BTBHGPUSceneWorldDetailTableEntry) == 36u, "BTBHGPUSceneWorldDetailTableEntry is 36 bytes");
 _Static_assert(_Alignof(BTBHGPUSceneWorldDetailTableEntry) == 4u, "the entry is aligned to 4");
-#define BTBH_ENTRY_AT_DETAIL(field)     (offsetof(BTBHGPUSceneWorldDetailTableEntry, field) ==         offsetof(BTBHGPUSceneWorldDetail, field) - offsetof(BTBHGPUSceneWorldDetail, level_tile))
+#define BTBH_ENTRY_AT_DETAIL(field) \
+    (offsetof(BTBHGPUSceneWorldDetailTableEntry, field) == \
+        offsetof(BTBHGPUSceneWorldDetail, field) - offsetof(BTBHGPUSceneWorldDetail, level_tile))
 _Static_assert(BTBH_ENTRY_AT_DETAIL(level_tile) && offsetof(BTBHGPUSceneWorldDetailTableEntry, level_tile) == 0u,
     "level_tile");
 _Static_assert(BTBH_ENTRY_AT_DETAIL(wall_tile) && offsetof(BTBHGPUSceneWorldDetailTableEntry, wall_tile) == 8u,

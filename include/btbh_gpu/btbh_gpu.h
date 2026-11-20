@@ -891,9 +891,9 @@ typedef struct BTBHGPUSceneWorldDetailTableEntry {
 
 /* Several world details in one batch, chosen per vertex (BTBHGPUSceneGeometryBatch.world_detail_table, RFC 0009,
  * since 0.8.0). Each vertex's index is the first float of its joint slot (BTBH_GPU_CUSTOM_MESH_DETAIL_INDEX_FLOAT),
- * rounded to the nearest whole number and clamped to 0..255: the triangle takes entries[index], projected and
- * blended as a BTBHGPUSceneWorldDetail with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE (packed only: no
- * coloured albedo). An index at or past entry_count (BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER, 255, by convention)
+ * rounded to the nearest whole number and clamped to 0..255 (NaN is 255): the triangle takes entries[index],
+ * projected and blended as a BTBHGPUSceneWorldDetail with BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE (packed
+ * only: no coloured albedo). An index at or past entry_count (BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER, 255, by convention)
  * leaves the triangle without a detail. All three vertices of a triangle must carry the same index (which vertex
  * gives a flat value differs between graphics APIs). Meant for custom meshes and unskinned models whose joint slot
  * the host writes: a skinned batch takes entry 0 everywhere (its joints are bones), and so does a model loaded

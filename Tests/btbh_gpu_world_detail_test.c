@@ -669,7 +669,8 @@ static void test_table_packing(void) {
         if (index < 3u) {
             BTBHGPUSceneWorldDetail detail;
             memset(&detail, 0, sizeof(detail));
-            memcpy(&detail.level_tile[0], &entries[index], 32u);  /* the entry's first 32 bytes are the detail's 24..55 */
+            /* The entry's first 32 bytes are the detail's 24..55. */
+            memcpy(&detail.level_tile[0], &entries[index], 32u);
             detail.orm_texture = (BTBHGPUTexture *)(void *)&texture_stand_in;
             detail.flags = BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE;
             BTBHGPUSceneGeometryBatch batch;

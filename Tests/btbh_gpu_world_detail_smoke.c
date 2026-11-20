@@ -37,11 +37,11 @@
  *   component, flag, reserved byte, packed layout or texture.
  * - Old shaders: a batch with a detail and a scene fragment shader that doesn't name world_detail_normal_texture
  *   (shaders from before 0.6.0) fails the present with the shader's path; without the detail it draws.
- * - BTBH_SMOKE_BENCH=1: what the detail costs (prints only). Eight coplanar screen-filling layers drawn with
- *   LESS_EQUAL (every layer shades every pixel) under a heavy pixel (the opaque-sort bench's) and a light one, at
- *   1920x1080 and 960x600, in interleaved turns: no detail, packed, three maps, and (with
- *   BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR) no detail with those shaders. The difference over eight is the cost
- *   per screen of detailed surface.
+ * - BTBH_SMOKE_BENCH=1 (or =detail, this bench only): what the detail costs (prints only). Eight coplanar
+ *   screen-filling layers drawn with LESS_EQUAL (every layer shades every pixel) under a heavy pixel (the
+ *   opaque-sort bench's) and a light one, at 1920x1080 and 960x600, in interleaved turns: no detail, packed, three
+ *   maps, and (with BTBH_WORLD_DETAIL_BASELINE_SHADER_DIR) no detail with those shaders. The difference over eight
+ *   is the cost per screen of detailed surface.
  *
  * Pattern 7, the facade's weather (RFC 0009 phase 1, 0.7.0):
  * - Equal: pattern 7 ([0, 0, 0, 7]) renders byte for byte as pattern 3 with x and y at 0, at z 6 and at z 0.37,
@@ -78,8 +78,8 @@
  * - BTBH_SMOKE_BENCH=1 (or =table, this bench only): eight screen-filling walls under the heavy and the light pixel
  *   at both sizes: no detail, the single packed detail, a table of one entry, a table whose strips alternate two
  *   entries, and (with the baseline shaders) no detail with those; the CPU of 200 merged batches against 1,000
- *   split ones; and 20,000 small boxes against the baseline shaders (the extra vertex attribute). In interleaved
- *   turns, 10 or BTBH_SMOKE_BENCH_ROUNDS (up to 40).
+ *   split ones; and 20,000 small boxes against the baseline shaders (the extra vertex attribute; =vertices runs
+ *   this one only). In interleaved turns, 10 or BTBH_SMOKE_BENCH_ROUNDS (up to 40).
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -2287,7 +2287,7 @@ static void run_world_detail_checks(BTBHGPUDevice *device, SmokeWindow *smoke, S
     check_refusals(smoke, &other);
     close_window(&other);
     const char *bench = SDL_getenv("BTBH_SMOKE_BENCH");
-    if (bench != NULL && strcmp(bench, "weather") != 0 && strcmp(bench, "table") != 0) {
+    if (bench != NULL && (strcmp(bench, "1") == 0 || strcmp(bench, "detail") == 0)) {
         bench_world_detail(smoke, baseline);
     }
 }
@@ -3865,6 +3865,8 @@ static void run_table_checks(BTBHGPUDevice *device, SmokeWindow *smoke, SmokeWin
     const char *bench = SDL_getenv("BTBH_SMOKE_BENCH");
     if (bench != NULL && (strcmp(bench, "1") == 0 || strcmp(bench, "table") == 0)) {
         bench_table(smoke, baseline);
+    }
+    if (bench != NULL && (strcmp(bench, "1") == 0 || strcmp(bench, "table") == 0 || strcmp(bench, "vertices") == 0)) {
         bench_table_unset_vertices(smoke, baseline);
     }
 }
@@ -3930,7 +3932,7 @@ int main(void) {
 #if defined(BTBH_GPU_SCENE_HAS_FACADE_WEATHER)
     check_facade_weather(&smoke, with_baseline ? &baseline : NULL);
     const char *weather_bench = SDL_getenv("BTBH_SMOKE_BENCH");
-    if (weather_bench != NULL && strcmp(weather_bench, "table") != 0) {
+    if (weather_bench != NULL && (strcmp(weather_bench, "1") == 0 || strcmp(weather_bench, "weather") == 0)) {
         bench_facade_weather(&smoke, with_baseline ? &baseline : NULL);
     }
 #endif
