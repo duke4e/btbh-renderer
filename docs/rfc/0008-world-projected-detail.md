@@ -1,11 +1,12 @@
 # RFC 0008: World-projected detail
 
-- **Status:** Draft (2026-11-20). v2 answered 2026-11-20; awaiting acceptance (see "Decisions")
+- **Status:** Accepted on 2026-11-20 (phase 1 for 0.6.0; phase 2 later). See "Decisions" and "Phases"
 - **Requested by:** Be The Bullet Hell v2 (its coordinator session, 2026-11-20). The spec is
   `Be-The-Bullet-Hell/v2/assets/kit/textures/macro/macro.json`, made by `v2/tools/kit/textures_macro.py`
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D:
   nothing, it is opt-in. They rebuild the scene shaders with the C core, as for 0.5.0
-- **Issue:** none yet. Open one titled `RFC 0008: World-projected detail` that links this file and names v2
+- **Issue:** none. The games answered through their sessions: v2 accepted every point, CHIMERA has no objection
+  (2026-11-20)
 - **Depends on:** nothing. Phase 2 (compressed textures) doesn't depend on phase 1, and phase 1 doesn't depend on
   it
 
