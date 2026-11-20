@@ -1,11 +1,12 @@
 # RFC 0009: A world-detail table chosen per vertex; the facade's weather without its grain
 
-- **Status:** Draft (2026-11-20), awaiting v2's answers
+- **Status:** Phase 1 accepted on 2026-11-20 (for 0.7.0; the owner left the decision to the coordinator). Phase 2
+  awaits v2's answers to questions 1–5.
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-20, after it adopted 0.6.0; `CONSUMERS.md`,
   "Requested")
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in. They rebuild the scene shaders with the C core, as for 0.6.0
-- **Issue:** none
+- **Issue:** none. v2 answered questions 6–8 (phase 1) through its session on 2026-11-20 (see "Decisions")
 - **Depends on:** RFC 0008 phase 1 (0.6.0). Phase 2 brings the texture-array functions RFC 0001 drafted, unchanged
 
 ## Need
@@ -198,8 +199,8 @@ Two phases, smallest first:
   to the classes. 255 is the documented "none".
 - **The seed is the table's.** One `seed_component` for all entries; v2 uses w for every class.
 - **The procedural pattern stays per batch.** A merged draw keeps one pattern. In v2 a piece is either ground
-  (pattern 1 or 4) or a building (pattern 3), so its merged draw has one (`scene.rs:897-901`). Glass (5), paving (4),
-  grass (2) and signs (6) have their own patterns and stay separate draws, as today.
+  (pattern 1 or 4) or a building (pattern 3), so its merged draw has one (`scene.rs:897-901`; Decisions, 6).
+  Glass (5), paving (4), grass (2) and signs (6) have their own patterns and stay separate draws, as today.
 - **Request 2 is a pattern, not a flag.** Pattern 7 draws as pattern 3 with x and y at 0, without the noise's cost
   (Alternatives).
 
@@ -236,6 +237,9 @@ enum {
   (`btbh_gpu_scene.c:4512-4520`). It now accepts up to 7. For 7 it refuses x, y or z not 0, with
   `BTBH_GPU_INVALID_ARGUMENT`. That keeps them free to carry the darkening's height and depth later without changing
   a look.
+- **What z is.** For pattern 7, nothing yet: it must be 0, as x and y must. `[0, 0, 0, 7]` draws all of the weather,
+  since the darkening reads only the flat world height and the wetness only `surface_wetness` and the face normal.
+  On pattern 3, z is the noise cells per render unit and scales only the noise (Decisions, "What z is").
 - **The header's comments catch up.** The batch comment lists patterns 0–3 only (`include/btbh_gpu/btbh_gpu.h:924-928`).
   `surface_wetness` says patterns 1 and 4 (`:1056-1058`), but the shader wets 1, 3 and 4. Both are corrected.
 - **The shader.**
@@ -264,7 +268,7 @@ enum {
   wetness branch is the same code. Pattern 7 computes the same values without the 40 hashes. The test below checks
   it byte for byte.
 - **v2 can see the look on 0.6.0 today.** `[0, 0, 6, 3]` (z must stay above 0 for pattern 3) draws the same pixels,
-  at the grain's cost.
+  at the grain's cost. Any z above 0 does: with x and y at 0, z reaches no pixel.
 - As every pattern, it isn't drawn on batches that take the fast unlit pipeline (`btbh_gpu_scene.c:1153-1166`).
 
 ### Phase 2: the world-detail table
@@ -597,7 +601,7 @@ These are estimates, to measure in each phase's bench.
 ## Compatibility
 
 - **Versioning.** Both phases are minor and opt-in: an enum value appended, new functions, new structs, a pointer
-  appended to the batch. Phase 1 is 0.7.0 and phase 2 0.8.0 if each is the next release.
+  appended to the batch. Phase 1 is 0.7.0, with the pipeline pre-warm, and phase 2 0.8.0 (Decisions, 8).
   - Phase 1 changes no struct. Phase 2 grows the batch from 272 to 280 bytes. Every game compiles the C core from the
     checkout whose header it builds against, so they agree on the size, as for 0.5.0 and 0.6.0.
   - The scene shaders change in both phases and must be rebuilt with the C core.
@@ -611,7 +615,8 @@ These are estimates, to measure in each phase's bench.
   - Nothing changes until it opts in. bindgen generates the new structs with `Default`, and `batch_of` ends in
     `..Default::default()`, so `world_detail_table` is null.
   - Phase 1: where `kit_surface` replaces the grain, `detail: [0.0, 0.0, 0.0, 7.0]` instead of `[0.0; 4]`
-    (`scene.rs:548`). On Low and the Deck, `SurfaceLook::flat()` can set the facade to `[0.0, 0.0, 0.0, 7.0]`.
+    (`scene.rs:548`). On Low and the Deck, `SurfaceLook::flat()` sets the facade to `[0.0, 0.0, 0.0, 7.0]` too
+    (Decisions, 8).
   - Phase 2: the array and the entries in `KitLibrary`; each kit vertex's entry in `joints[0]`; `world_detail_table` on
     the merged distance models (and, if it wants, on every kit draw). `BTBH_LOD1_SPLIT` can go.
 - **Be The Bullet Hell (v1, Swift):**
@@ -700,21 +705,56 @@ These are estimates, to measure in each phase's bench.
    table too, so the macro maps are loaded once as one array instead of twice (21 MiB more)?
 5. **Untextured triangles in a merged draw** (metal, awnings, plain trim): no detail (index 255), or one of the
    classes?
-6. **Pattern 7 per batch.** Does any merged draw mix street-level ground with walls? Pattern 7, like pattern 3 today,
-   would darken that ground to 0.8 below 0.25 render units.
-7. **Wet relief.** Pattern 3 strengthens its grain's bump up to 3.5 times when wet. Pattern 7 has no bump. Should
-   wetness strengthen the world detail's tilt instead (a later option), or are the darker, glossier walls enough?
-8. **Order.** Phase 1 (pattern 7) is small and can ship first; phase 2 is a release of its own, about the size of
-   0.6.0. Do you want them in that order, or together?
+Questions 6–8, on phase 1, are answered: see "Decisions".
+
+## Decisions (v2, 2026-11-20)
+
+v2 answered questions 6–8, the ones on phase 1. The owner left the decision to the coordinator, who accepted
+phase 1 for 0.7.0 on these answers. Questions 1–5, on phase 2, are still open.
+
+6. **Mixed merged draws: few, and pattern 7 at street level is fine as drafted.**
+   - Ground pieces never merge with walls. `road/`, `plaza/`, `water/`, `bridge/`, `rubble/` and `shared/marking`
+     are pieces of their own (`KitMesh::ground`) with patterns 1 or 4, never 3 or 7.
+   - A building piece's merged lod1 draw is walls, roofs and trim.
+   - A few ground floors carry flat yard surfaces at street level in their `Plain` draw: gardens' soil and gravel,
+     the gas station's forecourt trim, house yards, the substation yard. They take pattern 3 today and darken to
+     0.8 on Medium and High. On Low and the Deck they would start to darken too, which reads as a contact shade and
+     is acceptable.
+   - No gate on the face normal. Pattern 7 stays byte for byte pattern 3 with x = y = 0.
+7. **Wet relief: the darker, glossier walls are enough.**
+   - From the classic camera, the storm's wet look comes from wet ground, puddles, SSR, and v2's rain and fog.
+   - Wetness strengthening the world detail's tilt can come later as an option, at the lowest priority. Phase 1
+     doesn't wait for it.
+8. **Order: phase 1 first and on its own, as 0.7.0 with the pipeline pre-warm.**
+   - v2 will set `SurfaceLook::flat()`'s facade and the grain's replacement to `[0, 0, 0, 7]`. That gives Low and
+     the Deck the street darkening and the wet walls back, for about 0.01 ms.
+   - Phase 2 can follow as 0.8.0. Nothing in v2 waits on it but detail on the merged distance models.
+
+**What z is** (settled with answer 8):
+- `[0, 0, 0, 7]` is pattern 7 as drafted, with all of its weather. Pattern 7 reads none of x, y and z.
+- For pattern 7, z means nothing yet and must be 0, as x and y must. A pattern-7 batch with any of them set is
+  refused (Phase 1, "Refusals"). They stay free to carry the darkening's height and depth later.
+- On pattern 3, z is the noise cells per render unit. It scales only the noise: the grain, the stains and the
+  footprint they fade with. With x and y at 0 no noise reaches a pixel, so pattern 3 draws the same at any z above
+  0. Pattern 3 refuses z = 0. That is the only reason the 0.6.0 preview reads `[0, 0, 6, 3]`: 6 stands for any
+  positive number. The draft never meant pattern 7 to take it.
+- So "byte for byte pattern 3 with x = y = 0" compares `[0, 0, 0, 7]` with `[0, 0, z, 3]` for z above 0, at more
+  than one z.
+
+Still open:
+
+- **Phase 2:** questions 1–5.
+- **Phase 1, for the implementation:** whether the compilers keep pattern 7 byte for byte pattern 3 (FMA
+  contraction). The test reports a difference rather than hiding it.
 
 ## Phases
 
 1. **Phase 1, the facade's weather (0.7.0).** Pattern 7, the pattern names, the two header comments corrected,
    validation, the equality test and the bench. Small: one shader function and one check. It doesn't wait for the
    answers on phase 2.
-2. **Phase 2, the world-detail table (0.8.0 if it is the next release).** Texture arrays (RFC 0001's functions), the
+2. **Phase 2, the world-detail table (0.8.0; Decisions, 8).** Texture arrays (RFC 0001's functions), the
    table and its entries, the static vertex's index, one more sampler and a third uniform buffer, the refusals, the
-   tests and the bench. It starts once v2 has answered questions 1–4.
+   tests and the bench. It starts once v2 has answered questions 1–5.
 
 **Can phase 2 come first, or alone?** Alone, yes: neither phase uses the other. First isn't needed: phase 1 is
 smaller, and on its own it gives Low and the Deck their walls' weather back.
