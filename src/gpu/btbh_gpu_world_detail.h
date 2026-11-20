@@ -1,9 +1,12 @@
-/* RFC 0008: the world detail (BTBHGPUSceneWorldDetail) in C.
+/* RFC 0008: the world detail (BTBHGPUSceneWorldDetail) in C, and RFC 0009's table of them
+ * (BTBHGPUSceneWorldDetailTable).
  *
  * - How the scene checks a detail and packs it into the batch's second fragment uniform buffer.
- * - A copy of shaders/gpu/production_world_detail.hlsli (the projection, its frame, the seed's hash and the
- *   normal map's tilt), kept in step with it. Tests/btbh_gpu_world_detail_test.c checks this copy against the
- *   RFC's examples without a GPU, and Tests/btbh_gpu_world_detail_smoke.c checks the shader against it.
+ * - How it checks a table and packs it into the third (WorldDetailTable), and which entry a vertex's index picks.
+ * - A copy of shaders/gpu/production_world_detail.hlsli (the projection, its frame, the seed's hash, the normal
+ *   map's tilt, and the table's index and entry choice), kept in step with it. Tests/btbh_gpu_world_detail_test.c
+ *   checks this copy against the RFCs' examples without a GPU, and Tests/btbh_gpu_world_detail_smoke.c checks the
+ *   shader against it.
  *
  * Header-only (static inline): the scene and the tests include it, so the C core's source list doesn't change. */
 #ifndef BTBH_GPU_WORLD_DETAIL_H
@@ -15,12 +18,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 /* world_detail_mode.x (production_world_detail.hlsli): which maps the batch samples. */
 #define BTBH_GPU_WORLD_DETAIL_MAP_ALBEDO 1u
 #define BTBH_GPU_WORLD_DETAIL_MAP_NORMAL 2u
 #define BTBH_GPU_WORLD_DETAIL_MAP_ORM 4u
 #define BTBH_GPU_WORLD_DETAIL_MAP_ALBEDO_IN_ORM_BLUE 8u
+/* RFC 0009: the batch draws its world-detail table (the WorldDetailTable block and the array), not world_detail.
+   world_detail_mode.y is then the table's seed component; the tiles and controls are 0. */
+#define BTBH_GPU_WORLD_DETAIL_MAP_TABLE 16u
 
 /* level_degrees 0 means this. */
 #define BTBH_GPU_WORLD_DETAIL_DEFAULT_LEVEL_DEGREES 18.0f
@@ -32,6 +39,9 @@
 
 /* The flags this release knows. */
 #define BTBH_GPU_WORLD_DETAIL_KNOWN_FLAGS ((uint32_t)BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE)
+/* RFC 0009: the table's and an entry's flags (none yet). */
+#define BTBH_GPU_WORLD_DETAIL_TABLE_KNOWN_FLAGS 0u
+#define BTBH_GPU_WORLD_DETAIL_TABLE_ENTRY_KNOWN_FLAGS 0u
 
 /* ------------------------------------------------------------------------------------------- the descriptor */
 
@@ -106,10 +116,22 @@ static inline float btbh_gpu_world_detail_cos_level(float level_degrees) {
     return (float)cos((double)degrees * 3.14159265358979323846 / 180.0);
 }
 
+/* RFC 0009: whether a batch draws with its world-detail table: it has one whose map_layers is set, and samples a
+ * material (a refracting batch doesn't). Only such a batch leaves the fast unlit pipeline, pushes the table's block
+ * and needs 0.8.0's shaders. The scene refuses a batch that has this and an active world_detail too. */
+static inline bool btbh_gpu_world_detail_table_active(const BTBHGPUSceneGeometryBatch *batch) {
+    return batch != NULL &&
+        batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
+        batch->world_detail_table != NULL &&
+        batch->world_detail_table->map_layers != NULL;
+}
+
 /* The batch extension's world-detail block (production_model.frag.hlsl, BatchExtension): tiles 1 / level_tile
  * (u, v) and 1 / wall_tile (u, v); controls the albedo, normal and roughness scales (0 means 1) and cos(level
  * angle); mode x the maps, y the seed component, zw 0. All zero for a batch that doesn't draw a detail. The detail
- * must have passed btbh_gpu_world_detail_problem. */
+ * must have passed btbh_gpu_world_detail_problem. A batch that draws a table (RFC 0009) has mode x
+ * BTBH_GPU_WORLD_DETAIL_MAP_TABLE and y the table's seed component, the rest 0: its entries go in the table's own
+ * block (btbh_gpu_world_detail_table_pack). */
 static inline void btbh_gpu_world_detail_pack(
     const BTBHGPUSceneGeometryBatch *batch,
     float tiles[4],
@@ -120,6 +142,11 @@ static inline void btbh_gpu_world_detail_pack(
         tiles[index] = 0.0f;
         controls[index] = 0.0f;
         mode[index] = 0u;
+    }
+    if (btbh_gpu_world_detail_table_active(batch)) {
+        mode[0] = BTBH_GPU_WORLD_DETAIL_MAP_TABLE;
+        mode[1] = (uint32_t)batch->world_detail_table->seed_component;
+        return;
     }
     if (!btbh_gpu_world_detail_active(batch)) {
         return;
@@ -135,6 +162,115 @@ static inline void btbh_gpu_world_detail_pack(
     controls[3] = btbh_gpu_world_detail_cos_level(detail->level_degrees);
     mode[0] = btbh_gpu_world_detail_maps(detail);
     mode[1] = (uint32_t)detail->seed_component;
+}
+
+/* ---------------------------------------------------------------------------------- RFC 0009: the table */
+
+/* The scene fragment shaders' third uniform buffer (production_model.frag.hlsl, WorldDetailTable), 400 bytes,
+ * pushed only for a batch that draws a table. Per entry: tiles 1 / level_tile (u, v), 1 / wall_tile (u, v);
+ * controls the albedo, normal and roughness scales (0 means 1) and cos(level angle); layers x the normal's layer,
+ * y the ORM's (BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER: absent), zw 0. count x the entry count, yzw 0. The entries
+ * past the count are all zero. */
+typedef struct BTBHGPUWorldDetailTableUniforms {
+    float tiles[BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES][4];
+    float controls[BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES][4];
+    uint32_t layers[BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES][4];
+    uint32_t count[4];
+} BTBHGPUWorldDetailTableUniforms;
+
+/* What is wrong with one entry, given the array's layer count, or NULL. */
+static inline const char *btbh_gpu_world_detail_table_entry_problem(
+    const BTBHGPUSceneWorldDetailTableEntry *entry,
+    uint32_t layer_count
+) {
+    for (int axis = 0; axis < 2; ++axis) {
+        if (!isfinite(entry->level_tile[axis]) || !(entry->level_tile[axis] > 0.0f)) {
+            return "level_tile must be finite and above 0";
+        }
+        if (!isfinite(entry->wall_tile[axis]) || !(entry->wall_tile[axis] > 0.0f)) {
+            return "wall_tile must be finite and above 0";
+        }
+    }
+    if (!isfinite(entry->albedo_scale) || !isfinite(entry->normal_scale) || !isfinite(entry->roughness_scale)) {
+        return "albedo_scale, normal_scale and roughness_scale must be finite";
+    }
+    if (!isfinite(entry->level_degrees) || entry->level_degrees < 0.0f || entry->level_degrees >= 90.0f) {
+        return "level_degrees must lie in [0, 90)";
+    }
+    if (entry->normal_layer != BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER && (uint32_t)entry->normal_layer >= layer_count) {
+        return "normal_layer must be 255 (none) or below map_layers' layer count";
+    }
+    if (entry->orm_layer != BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER && (uint32_t)entry->orm_layer >= layer_count) {
+        return "orm_layer must be 255 (none) or below map_layers' layer count";
+    }
+    if (((uint32_t)entry->flags & ~BTBH_GPU_WORLD_DETAIL_TABLE_ENTRY_KNOWN_FLAGS) != 0u) {
+        return "flags has a bit this release doesn't know";
+    }
+    if (entry->reserved != 0u) {
+        return "reserved must be 0";
+    }
+    return NULL;
+}
+
+/* What is wrong with a table's own fields and entries, or NULL (its array texture's owner and kind are the scene's
+ * to check; layer_count is the array's). With a fault in an entry, *entry_index names it (UINT32_MAX otherwise).
+ * A table without map_layers draws as none: only its seed, flags and reserved bytes are checked then. */
+static inline const char *btbh_gpu_world_detail_table_problem(
+    const BTBHGPUSceneWorldDetailTable *table,
+    uint32_t layer_count,
+    uint32_t *entry_index
+) {
+    *entry_index = UINT32_MAX;
+    if (table->seed_component > 4u) {
+        return "seed_component must be 0 (none) or 1..4 (custom x..w)";
+    }
+    if (((uint32_t)table->flags & ~BTBH_GPU_WORLD_DETAIL_TABLE_KNOWN_FLAGS) != 0u) {
+        return "flags has a bit this release doesn't know";
+    }
+    if (table->reserved[0] != 0u || table->reserved[1] != 0u) {
+        return "reserved must be 0";
+    }
+    if (table->map_layers == NULL) {
+        return NULL;
+    }
+    if (table->entries == NULL) {
+        return "entries is NULL";
+    }
+    if (table->entry_count == 0u || table->entry_count > BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES) {
+        return "entry_count must be 1..8";
+    }
+    for (uint32_t index = 0u; index < table->entry_count; ++index) {
+        const char *problem = btbh_gpu_world_detail_table_entry_problem(&table->entries[index], layer_count);
+        if (problem != NULL) {
+            *entry_index = index;
+            return problem;
+        }
+    }
+    return NULL;
+}
+
+/* The table's block (BTBHGPUWorldDetailTableUniforms). The table must have passed
+ * btbh_gpu_world_detail_table_problem and have map_layers. Each entry's tiles and controls as
+ * btbh_gpu_world_detail_pack packs a detail's, so one entry and a detail with its floats agree to the bit. */
+static inline void btbh_gpu_world_detail_table_pack(
+    const BTBHGPUSceneWorldDetailTable *table,
+    BTBHGPUWorldDetailTableUniforms *uniforms
+) {
+    memset(uniforms, 0, sizeof(*uniforms));
+    for (uint32_t index = 0u; index < table->entry_count; ++index) {
+        const BTBHGPUSceneWorldDetailTableEntry *entry = &table->entries[index];
+        uniforms->tiles[index][0] = 1.0f / entry->level_tile[0];
+        uniforms->tiles[index][1] = 1.0f / entry->level_tile[1];
+        uniforms->tiles[index][2] = 1.0f / entry->wall_tile[0];
+        uniforms->tiles[index][3] = 1.0f / entry->wall_tile[1];
+        uniforms->controls[index][0] = entry->albedo_scale != 0.0f ? entry->albedo_scale : 1.0f;
+        uniforms->controls[index][1] = entry->normal_scale != 0.0f ? entry->normal_scale : 1.0f;
+        uniforms->controls[index][2] = entry->roughness_scale != 0.0f ? entry->roughness_scale : 1.0f;
+        uniforms->controls[index][3] = btbh_gpu_world_detail_cos_level(entry->level_degrees);
+        uniforms->layers[index][0] = (uint32_t)entry->normal_layer;
+        uniforms->layers[index][1] = (uint32_t)entry->orm_layer;
+    }
+    uniforms->count[0] = table->entry_count;
 }
 
 /* -------------------------------------------------- the copy of production_world_detail.hlsli (keep in step) */
@@ -292,6 +428,30 @@ static inline void btbh_gpu_world_detail_gradient(
     for (int axis = 0; axis < 3; ++axis) {
         gradient[axis] = -(normal_xy[0] * frame->tangent[axis] + normal_xy[1] * frame->bitangent[axis]) / z;
     }
+}
+
+/* RFC 0009: a vertex's table index from the first float of its joint slot (production_model.vert): rounded to the
+ * nearest whole number (to even on a tie, as HLSL's round), then 0 below 0, 255 above 255, and 255 (none) for NaN. */
+static inline uint32_t btbh_gpu_world_detail_table_index(float joint) {
+    const float rounded = rintf(joint);
+    if (rounded >= 0.0f) {
+        return rounded < 255.0f ? (uint32_t)rounded : 255u;
+    }
+    return rounded < 0.0f ? 0u : 255u;
+}
+
+/* The entry whose block the fragment shader reads for an index: min(index, 7). Past the count it is read and
+ * thrown away (btbh_gpu_world_detail_table_applies), never branched on. */
+static inline uint32_t btbh_gpu_world_detail_table_slot(uint32_t index) {
+    return index < BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES - 1u
+        ? index
+        : BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES - 1u;
+}
+
+/* Whether a map of the entry an index picks changes the pixel: the index is below the count and the map's layer
+ * isn't BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER. Otherwise the shader multiplies by 1 and adds no tilt. */
+static inline bool btbh_gpu_world_detail_table_applies(uint32_t index, uint32_t count, uint32_t layer) {
+    return index < count && layer != BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER;
 }
 
 #endif
