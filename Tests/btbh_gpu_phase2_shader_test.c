@@ -213,7 +213,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 11"
+            "\"samplers\": 14"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
@@ -221,11 +221,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 10"
+            "\"samplers\": 13"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 6"
+            "\"samplers\": 9"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
@@ -233,15 +233,15 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 11"
+            "\"samplers\": 14"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 10"
+            "\"samplers\": 13"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 6"
+            "\"samplers\": 9"
         ) ||
         !require_text(
             BTBH_PRODUCTION_SSAO_REFLECTION_PATH,
@@ -315,7 +315,9 @@ int main(void)
             BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH,
             "\"samplers\": 3, \"storage_textures\": 0"
         ) ||
-        /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer. */
+        /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer (RFC 0008: with the
+           world detail's after it, in the scene shaders; the scene shaders' samplers above end with the dig mask
+           and the world detail's three). */
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
             "\"uniform_buffers\": 2"
@@ -326,6 +328,18 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_SOURCE_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
+            "\"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
             "\"uniform_buffers\": 2"
         ) ||
         !require_text(

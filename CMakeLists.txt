@@ -291,6 +291,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             "${_shader_source}"
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_surface.hlsli"
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_dig_mask.hlsli"
+            "${BTBH_RENDERER_ROOT}/shaders/gpu/production_world_detail.hlsli"
         )
         if(
             _shader_name STREQUAL "production_model_unshadowed.frag" OR

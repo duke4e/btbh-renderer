@@ -20,6 +20,7 @@
 #include "production_surface.hlsli"
 #include "production_temporal.hlsli"
 #include "production_dig_mask.hlsli"
+#include "production_world_detail.hlsli"
 
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
@@ -60,11 +61,44 @@ SamplerState dig_mask_sampler : register(s9, space2);
 Texture2D<float> dig_mask_texture : register(t5, space2);
 SamplerState dig_mask_sampler : register(s5, space2);
 #endif
+// RFC 0008: the batch's world detail (production_world_detail.hlsli), after the dig mask: its albedo, normal and ORM
+// maps, or fallbacks never sampled (world_detail_mode.x says which are there).
+#if BTBH_DIRECTIONAL_SHADOWS && BTBH_OMNI_SHADOWS
+Texture2D<float4> world_detail_albedo_texture : register(t11, space2);
+SamplerState world_detail_albedo_sampler : register(s11, space2);
+Texture2D<float4> world_detail_normal_texture : register(t12, space2);
+SamplerState world_detail_normal_sampler : register(s12, space2);
+Texture2D<float4> world_detail_orm_texture : register(t13, space2);
+SamplerState world_detail_orm_sampler : register(s13, space2);
+#elif BTBH_DIRECTIONAL_SHADOWS
+Texture2D<float4> world_detail_albedo_texture : register(t10, space2);
+SamplerState world_detail_albedo_sampler : register(s10, space2);
+Texture2D<float4> world_detail_normal_texture : register(t11, space2);
+SamplerState world_detail_normal_sampler : register(s11, space2);
+Texture2D<float4> world_detail_orm_texture : register(t12, space2);
+SamplerState world_detail_orm_sampler : register(s12, space2);
+#else
+Texture2D<float4> world_detail_albedo_texture : register(t6, space2);
+SamplerState world_detail_albedo_sampler : register(s6, space2);
+Texture2D<float4> world_detail_normal_texture : register(t7, space2);
+SamplerState world_detail_normal_sampler : register(s7, space2);
+Texture2D<float4> world_detail_orm_texture : register(t8, space2);
+SamplerState world_detail_orm_sampler : register(s8, space2);
+#endif
 
-cbuffer DigMask : register(b1, space3)
+// The batch's second fragment uniform buffer (DigMask until 0.6.0, the same slot): the dig mask's placement, then
+// the world detail's.
+cbuffer BatchExtension : register(b1, space3)
 {
     float4 dig_mask_origin;
     float4 dig_mask_scale;
+    // 1 / level_tile (u, v), 1 / wall_tile (u, v)
+    float4 world_detail_tiles;
+    // the albedo, normal and roughness scales, cos(level angle)
+    float4 world_detail_controls;
+    // x the maps (1 albedo, 2 normal, 4 ORM, 8 the albedo in the ORM's blue; 0 none: the path is skipped);
+    // y the seed's custom float (0 none, 1..4 x..w); zw 0
+    uint4 world_detail_mode;
 };
 
 cbuffer MaterialPBR : register(b0, space3)
@@ -2046,6 +2080,62 @@ float apply_surface_wetness(
     return lerp(roughness, lerp(0.22f, 0.06f, puddle), wet);
 }
 
+// RFC 0008: the batch's world detail, after the first set's samples and before apply_surface (so derivatives are
+// valid, and a surface variant that replaces the albedo, normal or ORM, as water does, wins). Taken only when
+// world_detail_mode.x isn't 0, a uniform: a batch without a detail fetches nothing. It multiplies the albedo,
+// the occlusion and the roughness, and returns the surface gradient its normal map adds (added with the
+// procedural detail's).
+float3 apply_world_detail(FragmentInput input, float lod_bias, inout float4 albedo, inout float3 orm)
+{
+    const float3 position = input.world_position;
+    const BTBHWorldDetailFrame frame = btbh_world_detail_frame(
+        position,
+        cross(ddx(position), ddy(position)),
+        input.world_normal,
+        camera_position.xyz - position,
+        world_detail_controls.w,
+        world_detail_tiles
+    );
+    const float2 coordinate = btbh_world_detail_coordinate(
+        frame,
+        btbh_world_detail_offset(input.instance_custom, world_detail_mode.y)
+    );
+    const uint maps = world_detail_mode.x;
+    if ((maps & btbh_world_detail_map_orm) != 0u)
+    {
+        const float3 detail_orm = world_detail_orm_texture.SampleBias(
+            world_detail_orm_sampler,
+            coordinate,
+            lod_bias
+        ).rgb;
+        orm.r *= detail_orm.r;
+        orm.g *= detail_orm.g * world_detail_controls.z;
+        if ((maps & btbh_world_detail_map_albedo_in_orm_blue) != 0u)
+        {
+            albedo.rgb *= detail_orm.b * world_detail_controls.x;
+        }
+    }
+    if ((maps & btbh_world_detail_map_albedo) != 0u)
+    {
+        albedo.rgb *= world_detail_albedo_texture.SampleBias(
+            world_detail_albedo_sampler,
+            coordinate,
+            lod_bias
+        ).rgb * world_detail_controls.x;
+    }
+    float3 gradient = float3(0.0f, 0.0f, 0.0f);
+    if ((maps & btbh_world_detail_map_normal) != 0u)
+    {
+        const float2 tilt = (world_detail_normal_texture.SampleBias(
+            world_detail_normal_sampler,
+            coordinate,
+            lod_bias
+        ).xy * 2.0f - 1.0f) * world_detail_controls.y;
+        gradient = btbh_world_detail_gradient(frame, tilt);
+    }
+    return gradient;
+}
+
 FragmentOutput shade_fragment(FragmentInput input)
 {
     // Taken before any derivative, and discarded with the alpha cut-off below.
@@ -2093,6 +2183,11 @@ FragmentOutput shade_fragment(FragmentInput input)
         input.texture_coordinate,
         lod_bias
     ).rgb;
+    float3 world_gradient = float3(0.0f, 0.0f, 0.0f);
+    if (world_detail_mode.x != 0u)
+    {
+        world_gradient = apply_world_detail(input, lod_bias, albedo_sample, orm);
+    }
     apply_surface(
         input,
         albedo_sample,
@@ -2122,7 +2217,7 @@ FragmentOutput shade_fragment(FragmentInput input)
         input.world_normal * mapped_normal.z,
         geometric_normal
     );
-    normal = stable_normalize(normal - detail_gradient, normal);
+    normal = stable_normalize(normal - detail_gradient - world_gradient, normal);
     const bool flip_normal =
         input.animated_model > 0.5f
             ? input.is_front_face

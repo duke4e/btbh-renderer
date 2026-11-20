@@ -2,6 +2,7 @@
 #include "btbh_gpu_radiance_cascades_runtime.h"
 #include "btbh_gpu_fsr3.h"
 #include "btbh_gpu_sdf_terrain_internal.h"
+#include "btbh_gpu_world_detail.h"
 
 #include <float.h>
 #include <math.h>
@@ -136,6 +137,16 @@ typedef struct BTBHGPUSceneDigMaskUniforms {
     float origin[4];
     float scale[4];
 } BTBHGPUSceneDigMaskUniforms;
+
+/* The scene fragment shaders' second uniform buffer (production_model.frag.hlsl BatchExtension): the dig mask's
+   placement, then RFC 0008's world detail (btbh_gpu_world_detail_pack); all zero for a batch without them. The
+   fast unlit, radiance-cascade source and shadow shaders declare the dig mask's part only and read just that. */
+typedef struct BTBHGPUSceneBatchExtensionUniforms {
+    BTBHGPUSceneDigMaskUniforms dig_mask;
+    float world_detail_tiles[4];
+    float world_detail_controls[4];
+    uint32_t world_detail_mode[4];
+} BTBHGPUSceneBatchExtensionUniforms;
 
 typedef struct BTBHGPUShadowUniforms {
     float light_view_projection[16];
@@ -325,10 +336,11 @@ struct BTBHGPUSceneRuntime {
     /* Per batch of the scene being drawn: its dug_by terrain's dig mask, or a NULL texture (RFC 0007). */
     BTBHGPUSdfTerrainMaskBinding *dig_bindings;
     uint32_t dig_binding_capacity;
-    /* The fragment shader last checked for the dig mask (btbh_gpu_scene_check_dig_shader), and whether it has
-       it: checked again only when the path changes. */
-    char *dig_shader_checked_path;
-    bool dig_shader_has_mask;
+    /* The fragment shader last checked for the dig mask and the world detail (btbh_gpu_scene_check_scene_shader),
+       and whether it samples them: checked again only when the path changes. */
+    char *scene_shader_checked_path;
+    bool scene_shader_has_dig_mask;
+    bool scene_shader_has_world_detail;
     BTBHGPUTexture *fallback_texture;
     BTBHGPUTexture *normal_fallback_texture;
     BTBHGPUTexture *smaa_area_texture;
@@ -1141,9 +1153,11 @@ bool btbh_gpu_scene_uses_transparent_pass(
 bool btbh_gpu_scene_uses_fast_unlit_pipeline(
     const BTBHGPUSceneGeometryBatch *batch
 ) {
+    /* production_model_unlit.frag samples no world detail (RFC 0008): a batch drawing one takes the full shader. */
     return batch != NULL &&
         batch->unlit_enabled != 0u &&
         batch->surface_variant == 0u &&
+        !btbh_gpu_world_detail_active(batch) &&
         btbh_gpu_scene_uses_transparent_pass(
             batch->blend_mode,
             batch->transparency_enabled != 0u
@@ -3061,12 +3075,13 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         selected_fragment_shader_path,
         project_format,
         animated,
-        /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007). */
+        /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
+           (RFC 0008; not in the fast unlit shader). */
         fast_unlit
             ? 3u
             : (shadows_active
-                ? (omni_shadows_active ? 11u : 10u)
-                : 6u),
+                ? (omni_shadows_active ? 14u : 13u)
+                : 9u),
         auxiliary_geometry_outputs,
         temporal,
         batch,
@@ -4563,6 +4578,43 @@ static bool btbh_gpu_scene_validate_batches(
     return true;
 }
 
+static bool btbh_gpu_scene_texture_usable(const BTBHGPUWindow *window, const BTBHGPUTexture *texture) {
+    return texture == NULL ||
+        (texture->owner == window && texture->texture != NULL && texture->sampler != NULL);
+}
+
+/* RFC 0008: each batch's world detail. Batches often share one, so a run of batches pointing at the same detail
+   checks it once. False with the report naming the batch and the fault. */
+static bool btbh_gpu_scene_validate_world_details(
+    const BTBHGPUWindow *window,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    const BTBHGPUSceneWorldDetail *checked = NULL;
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        const BTBHGPUSceneWorldDetail *detail = batches[index].world_detail;
+        if (detail == NULL || detail == checked) {
+            continue;
+        }
+        const char *problem = btbh_gpu_world_detail_problem(detail);
+        if (problem == NULL &&
+            (!btbh_gpu_scene_texture_usable(window, detail->albedo_texture) ||
+             !btbh_gpu_scene_texture_usable(window, detail->normal_texture) ||
+             !btbh_gpu_scene_texture_usable(window, detail->orm_texture))) {
+            problem = "a texture belongs to another window or was destroyed";
+        }
+        if (problem != NULL) {
+            char message[sizeof(report->message)];
+            (void)snprintf(message, sizeof(message), "GPU scene batch %u: world_detail: %s", index, problem);
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+            return false;
+        }
+        checked = detail;
+    }
+    return true;
+}
+
 static bool btbh_gpu_scene_batch_uses_geometry(
     const BTBHGPUSceneGeometryBatch *batch,
     uint32_t geometry_index
@@ -5574,12 +5626,24 @@ static bool btbh_gpu_scene_prepare_dig_bindings(
     return true;
 }
 
-/* RFC 0007: a dug batch needs the scene shaders that sample the dig mask (0.5.0's). Older ones bind and draw
-   (the mask is an extra binding they never read), and the ground would show undug over its crater patches with
-   no error. So when a batch has dug_by, the scene's fragment shader must name dig_mask_texture: SPIR-V keeps
-   the names of its resources (OpName). Metal libraries aren't checked. False, with the report set, when it
-   doesn't; the file's other faults are left to the shader load, which reports them with the path. */
-static bool btbh_gpu_scene_check_dig_shader(
+/* Whether a shader file's bytes contain `name` (SPIR-V keeps its resources' names, OpName). */
+static bool btbh_gpu_scene_bytes_name(const uint8_t *bytes, size_t byte_count, const char *name) {
+    const size_t name_length = strlen(name);
+    for (size_t offset = 0u; offset + name_length <= byte_count; ++offset) {
+        if (memcmp(bytes + offset, name, name_length) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Older scene shaders bind and draw a batch whose features they don't know without a word: the extra bindings are
+   ones they never read. RFC 0007: a dug batch (dug_by) needs 0.5.0's shaders or later, or the ground shows undug
+   over its crater patches. RFC 0008: a batch that draws a world detail needs 0.6.0's, or the detail is ignored.
+   So the scene's fragment shader must name dig_mask_texture, or world_detail_normal_texture: SPIR-V keeps the
+   names of its resources (OpName). Metal libraries aren't checked. False, with the report set, when it doesn't;
+   the file's other faults are left to the shader load, which reports them with the path. */
+static bool btbh_gpu_scene_check_scene_shader(
     BTBHGPUSceneRuntime *runtime,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
@@ -5591,25 +5655,23 @@ static bool btbh_gpu_scene_check_dig_shader(
         return true;
     }
     bool dug = false;
-    for (uint32_t index = 0u; index < batch_count && !dug; ++index) {
-        dug = batches[index].dug_by != NULL;
+    bool detailed = false;
+    for (uint32_t index = 0u; index < batch_count && !(dug && detailed); ++index) {
+        dug = dug || batches[index].dug_by != NULL;
+        detailed = detailed || btbh_gpu_world_detail_active(&batches[index]);
     }
-    if (!dug) {
+    if (!dug && !detailed) {
         return true;
     }
-    if (runtime->dig_shader_checked_path == NULL ||
-        strcmp(runtime->dig_shader_checked_path, fragment_shader_path) != 0) {
+    if (runtime->scene_shader_checked_path == NULL ||
+        strcmp(runtime->scene_shader_checked_path, fragment_shader_path) != 0) {
         size_t byte_count = 0u;
         uint8_t *bytes = (uint8_t *)SDL_LoadFile(fragment_shader_path, &byte_count);
         if (bytes == NULL) {
             return true;
         }
-        static const char name[] = "dig_mask_texture";
-        const size_t name_length = sizeof(name) - 1u;
-        bool found = false;
-        for (size_t offset = 0u; !found && offset + name_length <= byte_count; ++offset) {
-            found = memcmp(bytes + offset, name, name_length) == 0;
-        }
+        const bool has_dig_mask = btbh_gpu_scene_bytes_name(bytes, byte_count, "dig_mask_texture");
+        const bool has_world_detail = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_normal_texture");
         SDL_free(bytes);
         const size_t path_length = strlen(fragment_shader_path);
         char *path = (char *)malloc(path_length + 1u);
@@ -5617,16 +5679,27 @@ static bool btbh_gpu_scene_check_dig_shader(
             return true;
         }
         memcpy(path, fragment_shader_path, path_length + 1u);
-        free(runtime->dig_shader_checked_path);
-        runtime->dig_shader_checked_path = path;
-        runtime->dig_shader_has_mask = found;
+        free(runtime->scene_shader_checked_path);
+        runtime->scene_shader_checked_path = path;
+        runtime->scene_shader_has_dig_mask = has_dig_mask;
+        runtime->scene_shader_has_world_detail = has_world_detail;
     }
-    if (!runtime->dig_shader_has_mask) {
-        char message[sizeof(report->message)];
+    char message[sizeof(report->message)];
+    if (dug && !runtime->scene_shader_has_dig_mask) {
         (void)snprintf(
             message,
             sizeof(message),
             "A batch has dug_by, and the scene shaders don't sample the dig mask (build them from 0.5.0 or later): %s",
+            fragment_shader_path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    if (detailed && !runtime->scene_shader_has_world_detail) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A batch has a world_detail, and the scene shaders don't sample it (build them from 0.6.0 or later): %s",
             fragment_shader_path
         );
         btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
@@ -5661,6 +5734,27 @@ static SDL_GPUTextureSamplerBinding btbh_gpu_scene_dig_sampler(
         sampler.sampler = runtime->fallback_texture->sampler;
     }
     return sampler;
+}
+
+/* RFC 0008: a batch's three world-detail textures (albedo, normal, ORM), or the fallbacks where it lacks one (its
+   uniforms then say so, and they are never sampled). */
+static void btbh_gpu_scene_world_detail_samplers(
+    const BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batch,
+    SDL_GPUTextureSamplerBinding samplers[3]
+) {
+    const BTBHGPUSceneWorldDetail *detail =
+        btbh_gpu_world_detail_active(batch) ? batch->world_detail : NULL;
+    const BTBHGPUTexture *textures[3] = {
+        detail != NULL && detail->albedo_texture != NULL ? detail->albedo_texture : runtime->fallback_texture,
+        detail != NULL && detail->normal_texture != NULL ? detail->normal_texture : runtime->normal_fallback_texture,
+        detail != NULL && detail->orm_texture != NULL ? detail->orm_texture : runtime->fallback_texture,
+    };
+    for (uint32_t index = 0u; index < 3u; ++index) {
+        SDL_zero(samplers[index]);
+        samplers[index].texture = textures[index]->texture;
+        samplers[index].sampler = textures[index]->sampler;
+    }
 }
 
 static bool btbh_gpu_scene_render_directional_shadow(
@@ -6496,6 +6590,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    if (!btbh_gpu_scene_validate_world_details(window, batches, batch_count, report)) {
+        return report->result;
+    }
     /* The scene renders with this view-projection: the requested one, plus a sub-pixel jitter
        while the temporal upscaler runs. */
     float view_projection[16];
@@ -6886,7 +6983,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_check_dig_shader(
+    if (!btbh_gpu_scene_check_scene_shader(
             runtime,
             batches,
             batch_count,
@@ -8611,7 +8708,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 batch->orm_texture != NULL
                     ? batch->orm_texture
                     : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[11];
+            SDL_GPUTextureSamplerBinding samplers[14];
             SDL_zeroa(samplers);
             samplers[0].texture = texture->texture;
             samplers[0].sampler = texture->sampler;
@@ -8663,25 +8760,45 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 samplers[9].sampler =
                     runtime->directional_shadow_sampler;
             }
-            /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), with its placement in the
-               fragment uniform slot 1. */
+            /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
+               (RFC 0008; not in the fast unlit shader), with their placement in the fragment uniform slot 1. */
+            const bool batch_fast_unlit =
+                !radiance_cascades_active &&
+                btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
             const uint32_t material_sampler_count =
-                (!radiance_cascades_active &&
-                 btbh_gpu_scene_uses_fast_unlit_pipeline(batch))
+                batch_fast_unlit
                     ? 2u
                     : (shadows_active
                         ? (omni_shadows_active ? 10u : 9u)
                         : 5u);
             const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
             samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
-            BTBHGPUSceneDigMaskUniforms dig_uniforms;
-            btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
-            SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+            uint32_t bound_sampler_count = material_sampler_count + 1u;
+            BTBHGPUSceneBatchExtensionUniforms extension_uniforms;
+            btbh_gpu_scene_dig_uniforms(dig, &extension_uniforms.dig_mask);
+            btbh_gpu_world_detail_pack(
+                batch,
+                extension_uniforms.world_detail_tiles,
+                extension_uniforms.world_detail_controls,
+                extension_uniforms.world_detail_mode
+            );
+            if (!batch_fast_unlit) {
+                btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
+                bound_sampler_count += 3u;
+            }
+            SDL_PushGPUFragmentUniformData(
+                command,
+                1u,
+                &extension_uniforms,
+                batch_fast_unlit
+                    ? (uint32_t)sizeof(extension_uniforms.dig_mask)
+                    : (uint32_t)sizeof(extension_uniforms)
+            );
             SDL_BindGPUFragmentSamplers(
                 pass,
                 0u,
                 samplers,
-                material_sampler_count + 1u
+                bound_sampler_count
             );
             SDL_GPUBuffer *vertex_buffer = NULL;
             SDL_GPUBuffer *index_buffer = NULL;
@@ -10624,7 +10741,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     free(window->scene_runtime->opaque_order);
     free(window->scene_runtime->opaque_geometry_base);
     free(window->scene_runtime->opaque_order_keys);
-    free(window->scene_runtime->dig_shader_checked_path);
+    free(window->scene_runtime->scene_shader_checked_path);
     free(window->scene_runtime);
     window->scene_runtime = NULL;
 }

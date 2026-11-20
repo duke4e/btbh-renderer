@@ -69,6 +69,21 @@ int main(void) {
     batch.unlit_enabled = 0u;
     assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
 
+    /* RFC 0008: a batch drawing a world detail leaves the fast unlit pipeline (its shader samples none); a detail
+       without textures draws as none, and keeps it. */
+    static int texture_stand_in;
+    BTBHGPUSceneWorldDetail detail = {0};
+    detail.level_tile[0] = detail.level_tile[1] = 1.0f;
+    detail.wall_tile[0] = detail.wall_tile[1] = 1.0f;
+    batch.unlit_enabled = 1u;
+    batch.world_detail = &detail;
+    assert(btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    detail.normal_texture = (BTBHGPUTexture *)(void *)&texture_stand_in;
+    assert(!btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.world_detail = NULL;
+    assert(btbh_gpu_scene_uses_fast_unlit_pipeline(&batch));
+    batch.unlit_enabled = 0u;
+
     BTBHGPUSceneGeometryBatch refracting = {0};
     assert(btbh_gpu_scene_refraction_valid(&refracting));
     refracting.surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
