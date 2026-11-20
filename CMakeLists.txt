@@ -971,6 +971,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_world_detail_smoke COMMAND btbh_gpu_world_detail_smoke)
         set_tests_properties(btbh_gpu_world_detail_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # btbh_gpu_window_scene_prewarm (0.7.0): a prewarmed window's frames make no pipelines and match a cold
+        # window's byte for byte (hidden windows). BTBH_SMOKE_BENCH=cold|prewarm times one sequence at 1080p.
+        add_executable(btbh_gpu_scene_prewarm_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_prewarm_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_prewarm_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_prewarm_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_prewarm_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_prewarm_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_prewarm_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_prewarm_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_prewarm_smoke COMMAND btbh_gpu_scene_prewarm_smoke)
+        set_tests_properties(btbh_gpu_scene_prewarm_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
