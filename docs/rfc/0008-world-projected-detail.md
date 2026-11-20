@@ -13,7 +13,7 @@
 
 Be The Bullet Hell v2 ("v2" below) is a Rust rewrite of Be The Bullet Hell. It uses the renderer through bindgen
 (`v2/crates/btbh-gpu-sys`, adapted from CHIMERA's), and `v2/renderer.pin` pins it to `../../btbh-renderer-v0.5.1`.
-`CONSUMERS.md` doesn't list it yet.
+`CONSUMERS.md` lists it as the fourth consumer.
 
 v2 draws its city from a building kit (`v2/crates/v2-render/src/kit.rs`, `scene.rs`):
 
