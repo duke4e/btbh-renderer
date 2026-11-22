@@ -963,7 +963,8 @@ typedef struct BTBHGPUSceneGeometryBatch {
                             // see-through layers drawn many times)
     uint8_t spot_shadow_visible;
     /* An unlit surface that takes the radiance cascades' bounce light (added to its colour) and is no
-     * source of it (unlit surfaces are, unless this is set). */
+     * source of it (unlit surfaces are, unless this is set). A lit batch that should be no source sets
+     * BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE instead. */
     uint8_t rc_receiver;
     /* BTBHGPUSceneReactiveMode: how a transparent batch marks FSR 3's reactive mask; 0 as before. */
     uint8_t reactive_mode;
@@ -1021,7 +1022,17 @@ enum {
      * renderer can't see (a coplanar overlay drawn over what it lies on with depth LESS, or with LESS_EQUAL
      * under FRONT_TO_BACK_LESS_EQUAL; the ground deliberately left after the units, so that the units before
      * it are sorted among themselves and it still draws last). Without the sort it changes nothing. */
-    BTBH_GPU_SCENE_BATCH_KEEP_ORDER = 1u << 1
+    BTBH_GPU_SCENE_BATCH_KEEP_ORDER = 1u << 1,
+    /* With the radiance cascades on, the batch is no source of their light (since 0.9.0, asked for by Be The
+     * Bullet Hell v2): it isn't drawn into their source field, so its emission (and, unlit, its colour) lights
+     * nothing round it through them. Everything else stays: it is drawn, glows on screen with its own emission,
+     * is lit, takes the cascades' bounce light (lit, or unlit with rc_receiver) and casts its shadows as before.
+     * For small glows that add up to an even wash (a city's lit windows and signs at night) while the game's own
+     * emitters and glowing batches keep lighting the streets. The cascades' occlusion is the host's
+     * (BTBHGPUSceneRadianceCascades.occlusion_cascades), which no batch draws into, so the flag leaves it alone:
+     * the batch blocks the cascades' light where that occlusion says so, with or without it. Without the
+     * cascades, or on a batch that doesn't glow, it changes nothing. */
+    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2
 };
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
@@ -1046,6 +1057,9 @@ enum {
 
 /* Defined when BTBHGPUSceneGeometryBatch.flags and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW exist (since 0.5.0). */
 #define BTBH_GPU_SCENE_HAS_BATCH_FLAGS 1
+
+/* Defined when BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE exists (since 0.9.0). */
+#define BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE 1
 
 /* Defined when BTBHGPUSceneGeometryBatch.world_detail, BTBHGPUSceneWorldDetail and
    BTBH_GPU_SCENE_WORLD_DETAIL_ALBEDO_IN_ORM_BLUE exist (since 0.6.0). */

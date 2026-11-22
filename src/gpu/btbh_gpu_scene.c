@@ -4702,7 +4702,8 @@ static bool btbh_gpu_scene_validate_batches(
             batch->ssao_mode < BTBH_GPU_SCENE_SSAO_MODE_COUNT &&
             (batch->flags & ~(uint32_t)(
                 BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
-                BTBH_GPU_SCENE_BATCH_KEEP_ORDER
+                BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
+                BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE
             )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
@@ -6543,7 +6544,10 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
             ((batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
              (batch->emission_energy > 0.0f &&
+        /* BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: no source, whatever it shows (since 0.9.0). Its geometries still
+           count below, for the bone offsets. */
               (batch->emission_red != 0u ||
+            (batch->flags & BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE) == 0u &&
                batch->emission_green != 0u ||
                batch->emission_blue != 0u)));
         SDL_GPUBuffer *batch_instance_buffer =
