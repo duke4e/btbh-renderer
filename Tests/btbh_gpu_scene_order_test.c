@@ -112,6 +112,15 @@ _Static_assert(offsetof(BTBHGPUScenePost, ssao_debug_view) == 425u, "ssao_debug_
 _Static_assert(offsetof(BTBHGPUScenePost, opaque_sort) == 426u, "opaque_sort is the old ssao_reserved[0]");
 _Static_assert(offsetof(BTBHGPUScenePost, flags) == 427u, "flags is the old ssao_reserved[0]");
 #endif
+/* 0.9.0: a batch flag and the post flags, in bytes that were there. */
+_Static_assert(BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW == 1 && BTBH_GPU_SCENE_BATCH_KEEP_ORDER == 2 &&
+    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE == 4, "the batch flags keep their bits");
+_Static_assert(BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO == 1 && BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY == 2,
+    "the post flags' bits");
+_Static_assert(sizeof(((BTBHGPUScenePost *)0)->flags) == 1u, "the post flags are a byte");
+#if !defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE) || !defined(BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO) ||     !defined(BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY) || !defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+#error "0.9.0's HAS_ macros are defined with their features"
+#endif
 
 #define MAX_INSTANCES 32u
 

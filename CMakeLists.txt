@@ -994,6 +994,37 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_world_detail_smoke COMMAND btbh_gpu_world_detail_smoke)
         set_tests_properties(btbh_gpu_world_detail_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # 0.9.0's flags (BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE, BTBHGPUScenePost.flags), rendered into targets and read
+        # back (hidden windows). BTBH_SMOKE_BENCH=1|ssr|hbao times them.
+        add_executable(btbh_gpu_scene_flags_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_flags_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_flags_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_flags_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_flags_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_flags_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_flags_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_flags_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_flags_smoke COMMAND btbh_gpu_scene_flags_smoke)
+        set_tests_properties(btbh_gpu_scene_flags_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # btbh_gpu_window_scene_prewarm (0.7.0): a prewarmed window's frames make no pipelines and match a cold
         # window's byte for byte (hidden windows). BTBH_SMOKE_BENCH=cold|prewarm times one sequence at 1080p.
         add_executable(btbh_gpu_scene_prewarm_smoke
