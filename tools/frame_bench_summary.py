@@ -8,8 +8,8 @@ rotates them cancels what a window's own resources cost). Per turn the first --s
 window's caches are cold after another window's turn); the rest give main_ms (split frames: the opaque pass) and
 gpu_ms (whole frames).
 
-- Paired: each turn against the reference's turn of the same round. A round whose slowest turn is over --limit
-  times the 10th percentile of all turns is dropped (another process on the GPU). The median difference, with a
+- Paired: each turn against the reference's turn of the same round. A round with a turn over --limit times the 10th
+  percentile of its configuration's turns is dropped (another process on the GPU). The median difference, with a
   90 % bootstrap interval.
 - Low percentile: from every frame (contention only adds time), the 10th percentile against the reference's, with
   a 90 % bootstrap interval.
@@ -87,17 +87,19 @@ def main():
     names = dict(zip(order, arguments.names.split(",")))
     reference = order[0]
     rounds = sorted({(log, round_index) for (log, _, round_index) in turns})
-    medians = sorted(statistics.median(v["main"]) for v in turns.values() if v["main"])
-    floor = percentile(medians, 0.1)
+    floors = {}
+    for configuration in order:
+        medians = [statistics.median(v["main"]) for (_, c, _), v in turns.items() if c == configuration and v["main"]]
+        floors[configuration] = percentile(medians, 0.1)
     kept = []
     for log, round_index in rounds:
-        values = [statistics.median(turns[(log, c, round_index)]["main"]) for c in order
+        ratios = [statistics.median(turns[(log, c, round_index)]["main"]) / floors[c] for c in order
                   if turns[(log, c, round_index)]["main"]]
-        if len(values) == len(order) and max(values) <= arguments.limit * floor:
+        if len(ratios) == len(order) and max(ratios) <= arguments.limit:
             kept.append((log, round_index))
     header = f"{'main':>8s} {'vs first':>9s} {'90 % interval':>19s} {'frame':>8s} {'vs first':>9s} {'90 % interval':>19s}"
-    print(f"paired: {len(kept)} of {len(rounds)} rounds kept (slowest turn within {arguments.limit:.2f} x "
-          f"{floor:.4f} ms)")
+    print(f"paired: {len(kept)} of {len(rounds)} rounds kept (every turn within {arguments.limit:.2f} x its "
+          f"configuration's 10th percentile)")
     print(f"{'configuration':28s} {header}")
     for configuration in order:
         cells = []

@@ -18,7 +18,8 @@
  * - BTBH_FRAME_BENCH_MODES (0.8.0 and later): one for every window, or one for all, separated by '|': none (the
  *   default), table (every piece's draw has a world-detail table of 8 entries over 16 512^2 layers; the slabs and
  *   ledges on entries 0..7, the frames and sills on 255, as v2's merged models carry their metal and frames),
- *   table-all (the frames on entry 3 too), table-off (a table without map_layers).
+ *   table-all (the frames on entry 3 too), table-none (every triangle on 255), table-off (a table without
+ *   map_layers).
  *
  * Output: "BENCH window <n> <directory> ..." per window, "BENCH turn <window> <round>" before each turn, then the
  * core's "BTBH_GPU_COST gpu_ms=... split=1 ... main_ms=..." lines (split=0: the whole frame). tools/
@@ -251,8 +252,9 @@ static uint32_t piece_boxes(uint32_t piece) {
     return 1u + piece_columns(piece) * piece_rows(piece) * 2u + piece_rows(piece);
 }
 
-/* Kit piece p: a wall slab and its ledges on class p % 8, a frame and a sill per window on `frame_index`. */
-static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, float frame_index) {
+/* Kit piece p: a wall slab and its ledges on class p % 8 (or on `frame_index` with `all_frame`), a frame and a sill
+   per window on `frame_index`. */
+static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, float frame_index, bool all_frame) {
     const uint32_t columns = piece_columns(piece);
     const uint32_t rows = piece_rows(piece);
     const uint32_t boxes = piece_boxes(piece);
@@ -266,7 +268,7 @@ static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, floa
     uint32_t index_count = 0u;
     const float width = 2.0f;
     const float height = 3.0f;
-    const float wall_index = (float)(piece % 8u);
+    const float wall_index = all_frame ? frame_index : (float)(piece % 8u);
     const float slab_centre[3] = { 0.0f, 0.5f * height, 0.0f };
     const float slab_half[3] = { 0.5f * width, 0.5f * height, 0.15f };
     add_box(vertices, &vertex_count, indices, &index_count, slab_centre, slab_half, wall_index);
@@ -441,7 +443,7 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     const char *mode = bench->mode;
     const float frame_index = strcmp(mode, "table-all") == 0 ? 3.0f : 255.0f;
     for (uint32_t piece = 0u; piece < BENCH_PIECES; ++piece) {
-        bench->pieces[piece] = make_piece(bench->window, piece, frame_index);
+        bench->pieces[piece] = make_piece(bench->window, piece, frame_index, strcmp(mode, "table-none") == 0);
     }
     {
         float vertices[24u * BENCH_FLOATS];
