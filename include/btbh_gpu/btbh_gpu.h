@@ -1799,6 +1799,39 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create(
     uint32_t index_count,
     BTBHGPUCustomMeshReport *report
 );
+/* btbh_gpu_window_custom_mesh_create_ex's flags (since 0.10.0, RFC 0011). */
+enum {
+    /* The mesh's vertices and indices live in the window's shared geometry buffers, beside loaded models'
+     * primitives, instead of two buffers of its own. Batches drawing such meshes one after another then bind no
+     * vertex or index buffer between them, and a run of batches that differ only in their mesh and instance range
+     * (btbh_gpu_window_scene_present_instances) costs little more than its draw calls. For meshes made once and
+     * kept until the window closes: a level's or a game's kit, landmarks, set pieces. Rules:
+     * - btbh_gpu_custom_mesh_update writes in place and must fit the mesh's ranges: at most the vertex count and
+     *   the index count the mesh was created with (a mesh created without indices takes none). A bigger update
+     *   fails with BTBH_GPU_INVALID_ARGUMENT and leaves the mesh as it was. An update shows in every frame
+     *   submitted after it, a scene already presented but not yet submitted by the canvas included (a mesh with
+     *   buffers of its own keeps the old data for that one).
+     * - btbh_gpu_custom_mesh_destroy leaves a hole that is never reused. A shared buffer is freed when every mesh
+     *   and model in it is destroyed, or when the window closes.
+     * Meshes that change size or are remade often (terrain chunks, per-stage meshes) should keep buffers of their
+     * own (no flag): their holes would keep the shared buffers alive. */
+    BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS = 1u << 0
+};
+/* btbh_gpu_window_custom_mesh_create with BTBH_GPU_CUSTOM_MESH_* flags; 0 is btbh_gpu_window_custom_mesh_create.
+ * An unknown bit fails with BTBH_GPU_INVALID_ARGUMENT. The report is filled as by
+ * btbh_gpu_window_custom_mesh_create. */
+BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_ex(
+    BTBHGPUWindow *window,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t vertex_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    uint32_t flags,
+    BTBHGPUCustomMeshReport *report
+);
+/* Defined when btbh_gpu_window_custom_mesh_create_ex and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS exist (since 0.10.0). */
+#define BTBH_GPU_HAS_SHARED_MESH_BUFFERS 1
 BTBHGPUResult btbh_gpu_custom_mesh_update(
     BTBHGPUCustomMesh *mesh,
     const void *vertices,

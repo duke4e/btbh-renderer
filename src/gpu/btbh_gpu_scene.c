@@ -4876,6 +4876,42 @@ static bool btbh_gpu_scene_batch_uses_geometry(
             batch->material_slot;
 }
 
+/* The buffers and ranges a batch's geometry draws from: a model's primitive, or a custom mesh, in buffers of its own
+   (vertex_base and first_index 0) or in the window's shared ones (BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, RFC 0011). */
+typedef struct BTBHGPUSceneGeometryDraw {
+    SDL_GPUBuffer *vertex_buffer;
+    SDL_GPUBuffer *index_buffer;
+    uint32_t vertex_count;
+    uint32_t index_count;
+    uint32_t first_index;
+    int32_t vertex_base;
+} BTBHGPUSceneGeometryDraw;
+
+static BTBHGPUSceneGeometryDraw btbh_gpu_scene_geometry_draw(
+    const BTBHGPUSceneGeometryBatch *batch,
+    uint32_t geometry_index
+) {
+    BTBHGPUSceneGeometryDraw draw;
+    if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
+        const BTBHGPUModelPrimitive *primitive = &batch->model->primitives[geometry_index];
+        draw.vertex_buffer = primitive->vertex_buffer;
+        draw.index_buffer = primitive->index_buffer;
+        draw.vertex_count = primitive->vertex_count;
+        draw.index_count = primitive->index_count;
+        draw.first_index = primitive->first_index;
+        draw.vertex_base = primitive->vertex_base;
+    } else {
+        const BTBHGPUCustomMesh *mesh = batch->custom_mesh;
+        draw.vertex_buffer = mesh->vertex_buffer;
+        draw.index_buffer = mesh->index_buffer;
+        draw.vertex_count = mesh->vertex_count;
+        draw.index_count = mesh->index_count;
+        draw.first_index = mesh->first_index;
+        draw.vertex_base = mesh->vertex_base;
+    }
+    return draw;
+}
+
 typedef struct BTBHGPUSceneAnimationSample {
     const BTBHGPUAnimationLibrary *library;
     const BTBHGPUAnimationPose *pose;
@@ -6280,27 +6316,14 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     1u
                 );
             }
-            SDL_GPUBuffer *vertex_buffer = NULL;
-            SDL_GPUBuffer *index_buffer = NULL;
-            uint32_t vertex_count = 0u;
-            uint32_t index_count = 0u;
-            uint32_t first_index = 0u;
-            int32_t vertex_base = 0;
-            if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
-                const BTBHGPUModelPrimitive *primitive =
-                    &batch->model->primitives[geometry_index];
-                vertex_buffer = primitive->vertex_buffer;
-                index_buffer = primitive->index_buffer;
-                vertex_count = primitive->vertex_count;
-                index_count = primitive->index_count;
-                first_index = primitive->first_index;
-                vertex_base = primitive->vertex_base;
-            } else {
-                vertex_buffer = batch->custom_mesh->vertex_buffer;
-                index_buffer = batch->custom_mesh->index_buffer;
-                vertex_count = batch->custom_mesh->vertex_count;
-                index_count = batch->custom_mesh->index_count;
-            }
+            const BTBHGPUSceneGeometryDraw geometry =
+                btbh_gpu_scene_geometry_draw(batch, geometry_index);
+            SDL_GPUBuffer *vertex_buffer = geometry.vertex_buffer;
+            SDL_GPUBuffer *index_buffer = geometry.index_buffer;
+            const uint32_t vertex_count = geometry.vertex_count;
+            const uint32_t index_count = geometry.index_count;
+            const uint32_t first_index = geometry.first_index;
+            const int32_t vertex_base = geometry.vertex_base;
             SDL_GPUBufferBinding vertex_bindings[2];
             SDL_zeroa(vertex_bindings);
             vertex_bindings[0].buffer = vertex_buffer;
@@ -6701,27 +6724,14 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
             samplers[2] = btbh_gpu_scene_dig_sampler(runtime, dig);
             SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 3u);
 
-            SDL_GPUBuffer *vertex_buffer = NULL;
-            SDL_GPUBuffer *index_buffer = NULL;
-            uint32_t vertex_count = 0u;
-            uint32_t index_count = 0u;
-            uint32_t first_index = 0u;
-            int32_t vertex_base = 0;
-            if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
-                const BTBHGPUModelPrimitive *primitive =
-                    &batch->model->primitives[geometry_index];
-                vertex_buffer = primitive->vertex_buffer;
-                index_buffer = primitive->index_buffer;
-                vertex_count = primitive->vertex_count;
-                index_count = primitive->index_count;
-                first_index = primitive->first_index;
-                vertex_base = primitive->vertex_base;
-            } else {
-                vertex_buffer = batch->custom_mesh->vertex_buffer;
-                index_buffer = batch->custom_mesh->index_buffer;
-                vertex_count = batch->custom_mesh->vertex_count;
-                index_count = batch->custom_mesh->index_count;
-            }
+            const BTBHGPUSceneGeometryDraw geometry =
+                btbh_gpu_scene_geometry_draw(batch, geometry_index);
+            SDL_GPUBuffer *vertex_buffer = geometry.vertex_buffer;
+            SDL_GPUBuffer *index_buffer = geometry.index_buffer;
+            const uint32_t vertex_count = geometry.vertex_count;
+            const uint32_t index_count = geometry.index_count;
+            const uint32_t first_index = geometry.first_index;
+            const int32_t vertex_base = geometry.vertex_base;
             SDL_GPUBufferBinding vertex_binding;
             SDL_zero(vertex_binding);
             vertex_binding.buffer = vertex_buffer;
@@ -9377,27 +9387,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 samplers,
                 bound_sampler_count
             );
-            SDL_GPUBuffer *vertex_buffer = NULL;
-            SDL_GPUBuffer *index_buffer = NULL;
-            uint32_t vertex_count = 0u;
-            uint32_t index_count = 0u;
-            uint32_t first_index = 0u;
-            int32_t vertex_base = 0;
-            if (batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL) {
-                const BTBHGPUModelPrimitive *primitive =
-                    &batch->model->primitives[geometry_index];
-                vertex_buffer = primitive->vertex_buffer;
-                index_buffer = primitive->index_buffer;
-                vertex_count = primitive->vertex_count;
-                index_count = primitive->index_count;
-                first_index = primitive->first_index;
-                vertex_base = primitive->vertex_base;
-            } else {
-                vertex_buffer = batch->custom_mesh->vertex_buffer;
-                index_buffer = batch->custom_mesh->index_buffer;
-                vertex_count = batch->custom_mesh->vertex_count;
-                index_count = batch->custom_mesh->index_count;
-            }
+            const BTBHGPUSceneGeometryDraw geometry =
+                btbh_gpu_scene_geometry_draw(batch, geometry_index);
+            SDL_GPUBuffer *vertex_buffer = geometry.vertex_buffer;
+            SDL_GPUBuffer *index_buffer = geometry.index_buffer;
+            const uint32_t vertex_count = geometry.vertex_count;
+            const uint32_t index_count = geometry.index_count;
+            const uint32_t first_index = geometry.first_index;
+            const int32_t vertex_base = geometry.vertex_base;
             SDL_GPUBufferBinding vertex_binding;
             SDL_zero(vertex_binding);
             vertex_binding.buffer = vertex_buffer;

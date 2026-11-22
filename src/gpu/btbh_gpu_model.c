@@ -1192,10 +1192,7 @@ static bool btbh_gpu_model_load_gltf_materials(
     return true;
 }
 
-#define BTBH_GPU_GEOMETRY_VERTEX_BLOCK_BYTES (64u * 1024u * 1024u)
-#define BTBH_GPU_GEOMETRY_INDEX_BLOCK_BYTES (32u * 1024u * 1024u)
-
-static bool btbh_gpu_geometry_copy(
+bool btbh_gpu_geometry_copy(
     SDL_GPUDevice *device,
     SDL_GPUBuffer *buffer,
     uint32_t offset,
@@ -1241,8 +1238,9 @@ static bool btbh_gpu_geometry_copy(
 }
 
 /* Copies `size` bytes into the arena's open block (a new one when they do not fit), at an offset that is a multiple
-   of `alignment`, and returns the block, or NULL. */
-static BTBHGPUGeometryBlock *btbh_gpu_geometry_arena_upload(
+   of `alignment`, and returns the block, or NULL. The models' primitives and the shared custom meshes
+   (btbh_gpu_custom_mesh.c) take their ranges here. */
+BTBHGPUGeometryBlock *btbh_gpu_geometry_arena_upload(
     SDL_GPUDevice *device,
     BTBHGPUGeometryArena *arena,
     SDL_GPUBufferUsageFlags usage,
@@ -1311,7 +1309,7 @@ static BTBHGPUGeometryBlock *btbh_gpu_geometry_arena_upload(
     return block;
 }
 
-static void btbh_gpu_geometry_block_release(
+void btbh_gpu_geometry_block_release(
     BTBHGPUGeometryBlock *block,
     SDL_GPUDevice *device
 ) {

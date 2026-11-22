@@ -7,9 +7,11 @@
 
 #include <stdbool.h>
 
-/* One buffer of a window's geometry arena: model primitives take ranges of it instead of buffers of their own,
+/* One buffer of a window's geometry arena: model primitives, and custom meshes made with
+   BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS (RFC 0011, since 0.10.0), take ranges of it instead of buffers of their own,
    so a frame binds a handful of buffers, not one or two per primitive (SDL tracks every bound buffer with a scan
-   of the buffers its command buffer used, 2026-10-18). Released when its last primitive goes. */
+   of the buffers its command buffer used, 2026-10-18). Released when its last primitive or mesh goes; ranges are
+   only ever appended to the arena's last block, so a released range is a hole that is never reused. */
 typedef struct BTBHGPUGeometryBlock {
     SDL_GPUBuffer *buffer;
     uint32_t capacity;
@@ -22,6 +24,37 @@ typedef struct BTBHGPUGeometryArena {
     uint32_t block_count;
     uint32_t block_capacity;
 } BTBHGPUGeometryArena;
+
+#define BTBH_GPU_GEOMETRY_VERTEX_BLOCK_BYTES (64u * 1024u * 1024u)
+#define BTBH_GPU_GEOMETRY_INDEX_BLOCK_BYTES (32u * 1024u * 1024u)
+
+/* Copies `size` bytes into the arena's open (last) block, or a new one when they do not fit, at an offset that is a
+   multiple of `alignment`, written to *offset; returns the block (its live count raised), or NULL. A range bigger
+   than `block_bytes` gets a block of its own size. (btbh_gpu_model.c) */
+BTBHGPUGeometryBlock *btbh_gpu_geometry_arena_upload(
+    SDL_GPUDevice *device,
+    BTBHGPUGeometryArena *arena,
+    SDL_GPUBufferUsageFlags usage,
+    uint32_t block_bytes,
+    uint32_t alignment,
+    const void *bytes,
+    uint32_t size,
+    uint32_t *offset
+);
+/* Copies `size` bytes into `buffer` at `offset`, without cycling it: the copy is ordered after the GPU's earlier use
+   of the buffer and before its later use. False when the GPU failed. */
+bool btbh_gpu_geometry_copy(
+    SDL_GPUDevice *device,
+    SDL_GPUBuffer *buffer,
+    uint32_t offset,
+    const void *bytes,
+    uint32_t size
+);
+/* Lowers a block's live count; at zero its buffer is released (with `device`; NULL only forgets it). */
+void btbh_gpu_geometry_block_release(
+    BTBHGPUGeometryBlock *block,
+    SDL_GPUDevice *device
+);
 
 typedef struct BTBHGPUModelPrimitive {
     /* The arena blocks' buffers; the primitive's vertices start at vertex_base and its indices at first_index. */
@@ -200,9 +233,18 @@ struct BTBHGPUCustomMesh {
     float minimum[3];
     float maximum[3];
     bool bounds_valid;
-    /* The buffers' sizes in bytes: an update that fits reuses them (grow-only, since 0.5.0). */
+    /* The buffers' sizes in bytes: an update that fits reuses them (grow-only, since 0.5.0). For a shared mesh,
+       the sizes of its ranges, which an update must fit. */
     uint32_t vertex_buffer_capacity;
     uint32_t index_buffer_capacity;
+    /* BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS (RFC 0011, since 0.10.0): the window's arena blocks that vertex_buffer and
+       index_buffer belong to (the mesh owns neither buffer; index_block is NULL without indices), and where its
+       vertices (vertex_base, in vertices) and indices (first_index) start in them. Without the flag the blocks are
+       NULL, and vertex_base and first_index 0. */
+    BTBHGPUGeometryBlock *vertex_block;
+    BTBHGPUGeometryBlock *index_block;
+    int32_t vertex_base;
+    uint32_t first_index;
 };
 
 /* The bounds of `vertex_count` custom mesh vertices' positions (the first three floats of each 24-float
