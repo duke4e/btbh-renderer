@@ -31,7 +31,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0008](0008-world-projected-detail.md) | World-projected detail: a second texture set per batch from the world position; BC textures (phase 2) | Phase 1 implemented in v0.6.0; phase 2 later | Be The Bullet Hell v2 |
 | [0009](0009-world-detail-table.md) | A world-detail table chosen per vertex (texture arrays); the facade's street darkening and wetness without its grain (pattern 7) | Implemented in v0.7.0 (phase 1) and v0.8.0 (phase 2) | Be The Bullet Hell v2 |
 | [0010](0010-rc-source-tops.md) | Radiance-cascade sources with a top, so street glows stay out of the roofs (`source_tops`, `top_above`) | Draft, awaiting v2's answers | Be The Bullet Hell v2 |
-| [0011](0011-cheaper-draws.md) | Cheaper draws: custom meshes in the shared geometry buffers and same-material runs; draw lists through multi-draw indirect (phase 2) | Draft, awaiting v2's answers | Be The Bullet Hell v2 |
+| [0011](0011-cheaper-draws.md) | Cheaper draws: custom meshes in the shared geometry buffers and same-material runs; draw lists through multi-draw indirect (phase 2) | Phase 1 accepted for 0.10.0; phase 2 waits for phase 1's numbers | Be The Bullet Hell v2 |
 | [0012](0012-vertex-height-lift.md) | A vertex-stage height lift from a heightfield, per batch, in vertex shader variants of its own (`height_lift`) | Draft, awaiting v2's answers | Be The Bullet Hell v2 |
 
 CHIMERA's map-look note (`RTS/docs/v2/izgled-mapa.md` §9, branch `v2-izgled`) made six proposals. Three became

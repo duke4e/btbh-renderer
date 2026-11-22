@@ -1,11 +1,12 @@
 # RFC 0011: Cheaper draws: shared mesh buffers and same-material runs; draw lists
 
-- **Status:** Draft (2026-11-22), awaiting v2's answers
+- **Status:** Phase 1 accepted on 2026-11-22 for 0.10.0 (the owner left the decision to the coordinator). Phase 2
+  waits for phase 1's numbers. See "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Phase 1's encode changes reach every game without an API and draw
   byte for byte as before: Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D change nothing and gain where their
   batches run by material. Phase 2 is opt-in
-- **Issue:** none yet
+- **Issue:** none. v2 answered all five questions through its session on 2026-11-22 (see "Decisions")
 - **Depends on:** nothing. Written against 0.8.0's layout (`feature/0.8.0-detail-table`, unreleased): the batch is
   280 bytes there, `world_detail_table` at 272. Phase 1 changes no struct. Phase 2 appends a pointer at 280 (at 288
   if RFC 0012's `height_lift` is appended first)
@@ -105,7 +106,7 @@ The ring, from v2's code (paths under `Be-The-Bullet-Hell/v2/crates/`, BTBH `dec
 ```c
 enum {
     /* The mesh's vertices and indices live in the window's shared geometry buffers, with the models' primitives,
-     * instead of buffers of its own (RFC 0011, since 0.9.0). Batches of such meshes then bind their buffers once
+     * instead of buffers of its own (RFC 0011, since 0.10.0). Batches of such meshes then bind their buffers once
      * for a run. btbh_gpu_custom_mesh_update must fit the vertex and index counts the mesh was created with;
      * a bigger one fails with BTBH_GPU_INVALID_ARGUMENT. The arena doesn't reuse holes: a buffer is freed when
      * every mesh and model in it is destroyed. For meshes made once and kept (a level's kit). */
@@ -125,7 +126,7 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_ex(
     BTBHGPUCustomMeshReport *report
 );
 
-/* Defined when btbh_gpu_window_custom_mesh_create_ex and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS exist (since 0.9.0). */
+/* Defined when btbh_gpu_window_custom_mesh_create_ex and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS exist (since 0.10.0). */
 #define BTBH_GPU_HAS_SHARED_MESH_BUFFERS 1
 ```
 
@@ -288,7 +289,7 @@ where that goes (open question 1); the shared buffers remove the tracking scans 
 
 ## Compatibility
 
-- **Versioning.** Phase 1 is minor (0.9.0) for the new function and flag; its encode changes are a patch-level
+- **Versioning.** Phase 1 is minor (0.10.0) for the new function and flag; its encode changes are a patch-level
   change that keeps every image. Phase 2 is minor: a pointer appended to the batch (280 → 288 bytes), new structs.
 - **Be The Bullet Hell v2 (Rust, bindgen):** nothing changes until it opts in. Phase 1: the flag on its kit meshes,
   and its batches sorted by material. Phase 2: regenerated bindings (`..Default::default()` leaves `draw_list` null),
@@ -344,10 +345,72 @@ where that goes (open question 1); the shared buffers remove the tracking scans 
 5. **Baking.** Is there static geometry with one instance per mesh (the moat's banks, the boulevard, the far boxes)
    that you would rather merge into chunk meshes in Rust? That needs nothing from the renderer.
 
+All five are answered: see "Decisions".
+
+## Decisions (v2, 2026-11-22)
+
+v2 answered all five questions on 2026-11-22, measured on 0.8.0 at BTBH `59af919b`: the stage 3 map edge at the Deck
+preset (1280 x 800) on a desktop RTX, medians over frames 300 and later of two or three interleaved runs. The owner
+left the decision to the coordinator, who accepted phase 1 for 0.10.0. Phase 2 waits for phase 1's numbers (answer 4).
+
+1. **Where the ring's cost goes.** The ring adds 257 batches.
+   - Geometry encode grows by 0.506 ms: 1.97 µs a batch (2.09 µs on High at 1080p). Prepare grows by 0.13 µs a batch
+     and shadow encode by 0.04 µs.
+   - The present's wall clock grows by 0.8–0.9 ms, against 0.58 ms in the timed fields: 0.25–0.35 ms of the extra is
+     in the submission (queue submit, present, the driver), which no encode field shows.
+   - The cost a batch drifts with the machine's load: 1.31–1.67 µs.
+   - Marginal geometry encode a ring batch:
+
+     | | World detail on | World detail off |
+     | --- | --- | --- |
+     | As it is | 1.31 µs | 0.76 µs |
+     | One shared mesh for every ring batch | 0.64 µs | 0.39 µs |
+
+   - **The split.** Distinct buffers a batch cost 0.4–0.7 µs: SDL's buffer tracking ("Measured, and the gap"), which
+     phase 1a removes. Table batches interleaved with batches without a table cost 0.25–0.55 µs a batch: each switch
+     alternates the static vertex shader between `production_model.vert` and `production_model_detail_table.vert`
+     (RFC 0009's follow-up), so the pipeline, and, as v2 reads it, breaks the table block's run. What remains, about
+     0.4 µs, matches the bench's 0.5–0.7 µs; phase 1b and 1c take it on.
+   - So the gap between the bench and v2's 2–5 µs a draw is explained: the bench's split batches shared a few
+     meshes and none of them alternated with a table batch.
+2. **Material runs: yes.** v2 will stable-sort each chunk's batches by a material key and keep coplanar overlays after
+   their ground.
+   - Runs can't span chunks while each chunk has its own instance buffer: the instance buffer is part of the run key.
+   - The ring is static and can share one instance buffer, with offsets, across its chunks. The map's chunks rewrite
+     their buffers on damage, so they keep one each.
+3. **Mesh lifetimes: as phase 1a needs.** Kit, landmark and set-piece meshes are made once a process, never updated,
+   and destroyed at window close: they take the flag.
+   - Per-stage meshes (the kit's water, terrain chunks, the ring's water) stay out of the shared buffers.
+   - v2 doesn't destroy its per-stage meshes yet; that is v2's leak, which v2 will fix. v2 asked whether a destroy call
+     exists: `btbh_gpu_custom_mesh_destroy` does, as the coordinator answered.
+4. **Phase 2: phase 1's numbers decide.**
+   - The ring costs about 0.5 ms on the desktop, probably two to three times that on the Deck, so v2 will likely still
+     want lists after phase 1.
+   - One list per (chunk, LOD, material) is enough. Lists are rebuilt on a LOD switch or damage; no range is dropped
+     per frame.
+5. **Baking: v2's own.** v2 merges unique static geometry in Rust and needs no API: the ring's ground goes from about
+   54 draws to about 6. The 167 building draws stay instanced.
+
+**What the answers mean for phase 1** (the coordinator's reading):
+- **Table and non-table batches interleave within a piece.** A building piece's walls draw with the world-detail table
+  and its glass and signs without (RFC 0009, decision 4), one after the other. Each switch changes the static vertex
+  shader (`production_model.vert` against `production_model_detail_table.vert`), so the pipeline: SDL then writes all
+  four descriptor sets again at the next draw, and two batches on either side of the switch never share a run key.
+  A material sort alone keeps that interleave wherever the glass must follow its wall.
+- **Phase 1 deals with it.** It either keeps runs intact across the switch, or documents the order a host sorts to so
+  that the switch happens once a chunk rather than once a piece; and it measures the interleave before and after.
+  "Implementation notes (phase 1)" says which it does.
+- **The run key holds the instance buffer** (answer 2): a run never spans two instance buffers. The ring gains most
+  if it shares one.
+- **The arena's rules can be strict** (answer 3): v2's flagged meshes are never updated, so an update that doesn't fit
+  the mesh's ranges can be refused, and a destroy may leave a hole.
+
+Nothing is open for phase 1.
+
 ## Phases
 
-1. **Phase 1, shared buffers and runs (0.9.0).** The creation flag, the run key and skips in every pass, the frame
-   part filled once a pass, the tests and the bench. No shader change.
-2. **Phase 2, draw lists (0.10.0 at the earliest, only if phase 1 isn't enough).** The structs, the pointer, the
-   indirect buffer, the grouping, the refusals. It waits for phase 1's numbers on v2's edge and for v2's answer to
-   question 4.
+1. **Phase 1, shared buffers and runs (0.10.0; Decisions).** The creation flag, the run key and skips in every pass,
+   the frame part filled once a pass, the table/non-table interleave, the tests and the bench. No shader change.
+2. **Phase 2, draw lists (after 0.10.0, only if phase 1 isn't enough).** The structs, the pointer, the indirect
+   buffer, the grouping, the refusals. It waits for phase 1's numbers on v2's edge (Decisions, 4: one list per
+   chunk, LOD and material would do).
