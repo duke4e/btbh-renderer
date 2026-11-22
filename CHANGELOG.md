@@ -6,6 +6,191 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Four opt-in additions requested by Be The Bullet Hell v2: a batch that is no source of the radiance cascades' light
+(`BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`); two post flags (`BTBHGPUScenePost.flags`), one that keeps the horizon-based
+ambient occlusion of no cascades under additive ones and one that gives the screen-space reflections each surface's
+own reflectivity without the cascades; and `btbh_gpu_window_scene_prewarm_render_to_target`. Nothing changes until a
+game sets them: unset, every frame renders byte for byte as in 0.8.0. No struct grows (the post's flags take its
+last reserved byte), no shader file is added, and eight scene shaders changed: rebuild the shaders with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (24/24, 71 shaders), the Swift build and the full Swift
+suite (301 tests, 2 skipped, 0 failures). Unset, 0 pixels differ from 0.8.0's core and shaders (0dff164d): the new
+flags smoke's gallery of 13 scenes (the HBAO without the cascades, with them and with additive ones through the sun's,
+the omni and no shadow, its contact mode, the SSAO under additive cascades, the reflections without the cascades, with
+them and with additive ones, the cascades' material sources; 332,800 pixels), the world detail smoke's gallery of 24
+scenes through every scene shader variant and its other images (56 images, 1,245,184 pixels),
+`btbh_gpu_scene_target_smoke`'s nine images (90,368 pixels), `btbh_gpu_font_smoke`'s 25 (6,549,120 pixels) and
+`btbh_gpu_scene_prewarm_smoke`'s 16 frames and 16 renders into a target (1,843,200 pixels), each written by a build of
+0.8.0 and by this one; and the world detail gallery and `btbh_gpu_sdf_terrain_smoke` with 0.8.0's shaders under this
+core. macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't
+tested it yet.
+
+### Added
+- **`BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`** (bit 2 of `BTBHGPUSceneGeometryBatch.flags`, beside `NO_SUN_SHADOW` and
+  `KEEP_ORDER`): with the radiance cascades on, the batch isn't drawn into their source field, so its emission (and,
+  unlit, its colour) lights nothing round it through them. v2 asked for it because hundreds of small city glows
+  added up to an even warm wash over every street at night (its stage 3: a final-indirect mean of 27.7/19.9/2.6 of
+  255 with no gameplay emitter at all).
+  - Everything else stays: the batch is drawn, glows on screen with its own emission, is lit, takes the cascades'
+    bounce light (lit, or unlit with `rc_receiver`) and casts its shadows as before.
+  - The occlusion is unchanged: the cascades' occlusion is the host's (`occlusion_cascades`), which no batch draws
+    into, so a batch blocks their light where that says so, with or without the flag.
+  - An unlit batch with it is no source either (`rc_receiver` also makes it take the bounce light). Without the
+    cascades, or on a batch that doesn't glow, it changes nothing.
+  - With cascades that aren't additive, a flagged glow's emission on screen still reaches a few pixels round it
+    (up to 6 measured) through the cascades' screen pass, which adds a surface's emission at its own resolution,
+    as before. With additive ones its pixels are exactly the box's.
+- **`BTBHGPUScenePost.flags`** (byte 427, the old `ssao_reserved[0]`: the struct keeps its 432 bytes). An unknown
+  bit fails the present (and the prewarms) with `BTBH_GPU_INVALID_ARGUMENT`.
+  - **`BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`**: the horizon-based ambient occlusion (`ssao_enabled` 2,
+    `ssao_contact` 0) under additive cascades darkens the ambient light of lit surfaces, as without the cascades,
+    instead of three quarters of all their light but the emission. Without it, enabling the cascades with nothing
+    glowing darkened v2's tuned night (stage 3: -1.4 sRGB levels on average, OKLab dL -0.56, 11.8 % of the pixels
+    darker by more than 4 levels).
+    - With nothing glowing, a frame is then the frame without the cascades, to the byte (reflections off).
+    - Flipping the resolve's mode wasn't enough: under the cascades the opaque pass writes the materials (albedo,
+      F0) where the HBAO's mode 1 reads the ambient light. With the flag, the cascades' scene shaders write the
+      scene's own ambient targets (as without the cascades) and the albedo the bounce light lands on, times 1 -
+      metalness, to the emission target, which the additive resolve reads it from instead
+      (`production_hrc_resolve.comp`).
+    - The bounce light is the same, but at the edges of metal surfaces (up to 2 levels within 2 pixels measured:
+      the resolve samples at its own resolution and blended the albedo and the metalness apart). The bounce light
+      isn't darkened by the occlusion (it isn't ambient light).
+    - The reflections under it weigh each surface by its reflectivity's luminance, as with
+      `SSR_SURFACE_REFLECTIVITY` (the cascades' targets kept its colour).
+    - Ignored, rendering as without it: no cascades, cascades that aren't additive, `ssao_contact` 1 (the same with
+      the cascades or without), `ssao_enabled` 0 or 1, and the cascades' debug views.
+  - **`BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY`**: the screen-space reflections without the cascades weigh each
+    surface by its own reflectivity, as they do with the cascades: its F0 (0.04 for a dielectric, 0.12 for glass, a
+    metal's albedo). The opaque pass then writes the F0's luminance to the ambient target's alpha (a constant 1
+    before, which nothing read) and marks unlit surfaces in the emission target's alpha.
+    - A dielectric, glass and a grey metal reflect byte for byte as under additive cascades with nothing glowing
+      (which read the F0 from their targets); a coloured metal reflects as bright, untinted (one channel).
+    - Unset, the reflections without the cascades reflect nothing, as before (see Known); v2 read that as glass and
+      metal reflecting too weakly. With the cascades on, or without the reflections, the flag changes nothing.
+- **`btbh_gpu_window_scene_prewarm_render_to_target`**: `btbh_gpu_window_scene_prewarm` for
+  `btbh_gpu_window_scene_render_to_target` into a target. v2's live weapon previews ("V1 cards") hitched 54–56 ms on
+  the first render of a session while that call's own scene runtime started.
+  - It makes what those renders would make the first time: their runtime, each batch's model pipelines for the
+    settings, their shadow maps, the cascades' and SMAA's or FXAA's resources, their scene targets at the render
+    size and their post chain at the target's size. The renders then make no shader, pipeline or target.
+  - It runs the window prewarm's steps with what `render_to_target` does to the settings first (FSR 3 runs as FSR
+    1; a render at the target's size or bigger is scaled bilinearly), in that call's runtime, swapped in as
+    `render_to_target` swaps it: the three share those steps and can't drift apart. It draws nothing; the window's
+    frames and their runtime are left alone; a render is the same to the byte with or without it.
+  - The renders into every target of a window share one runtime: prewarm with the render size and target size they
+    will use. A second call makes nothing.
+  - Refusals: the window prewarm's, and a target `render_to_target` refuses (NULL, another window's, not a render
+    target, an array), with `BTBH_GPU_INVALID_ARGUMENT`. The report gives the target's size and the upscaling the
+    renders will run.
+- `BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE`, `BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO`,
+  `BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY` and `BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM`, defined with them.
+- Swift: `ScreenSpaceReflectionDescriptor.surfaceReflectivity` (default false), which sets
+  `SSR_SURFACE_REFLECTIVITY`. The batch flag, the HBAO flag and the prewarm have no Swift API (the Swift layer
+  exposes neither batch flags, the HBAO nor additive cascades).
+- Tests:
+  - `btbh_gpu_scene_order` (no GPU): the flags' bits and the post's layout.
+  - `btbh_gpu_scene_flags_smoke` (new; hidden windows, a debug device): the unset gallery above
+    (`BTBH_SCENE_FLAGS_DUMP` and `_REFERENCE` compare two builds; it builds against 0.8.0's header). Set:
+    - `NO_RC_SOURCE`, on and additive: a glow and an unlit source outside the view light the ground in view
+      (15,000 pixels differ); flagged, they render byte for byte as the scene with the glow's emission at 0 and the
+      source a receiver, and so does the scene with every batch flagged. In view, a flagged glow differs from no
+      emission on its own pixels only, and from the unflagged one. Without the cascades it changes nothing.
+    - `KEEP_HBAO`: with nothing glowing, additive cascades and the HBAO render byte for byte as no cascades through
+      the sun's, the omni and no shadow (without it 3,571–4,115 pixels differ). With glowing boxes and an HBAO that
+      darkens nothing, the bounce light is the same to the byte without metal, and within 2 levels and 2 pixels of
+      the metal boxes. With the reflections it renders as no cascades with `SSR_SURFACE_REFLECTIVITY`. Ignored where
+      it doesn't apply (4 cases).
+    - `SSR_SURFACE_REFLECTIVITY`: unset reflections without the cascades render as none; set, they appear and match
+      additive cascades with nothing glowing to the byte through the three shadow variants; a gold metal differs.
+      With the cascades on, or without the reflections, it changes nothing.
+    - Refusals: an unknown batch flag, unknown post flags (present and prewarm).
+    - `BTBH_SMOKE_BENCH=1` (or `=ssr`, `=hbao`) times them (`BTBH_SMOKE_BENCH_ROUNDS`, and
+      `BTBH_SCENE_FLAGS_BASELINE_SHADER_DIR` for 0.8.0's shaders in a second window).
+  - `btbh_gpu_scene_prewarm_smoke`: the prewarm's sequence rendered into a target (FSR 1 into twice the render
+    size). Cold, the first render makes 35 shaders and 30 pipelines and the effects' first 22 and 11; prewarmed for
+    the target, the call makes exactly those, a second call nothing, no render anything, and every render matches
+    the cold window's to the byte; the window's own first frame still makes its pipelines. The same with the
+    cascades and an omni spot shadow (69 shaders, 55 pipelines). Its refusals. `BTBH_SMOKE_BENCH=target-cold` or
+    `=target-prewarm` times it after four frames of the window; `BTBH_PREWARM_SMOKE_DUMP` and `_REFERENCE` cover
+    the renders too.
+
+### Changed
+- Shaders: `production_model.frag` and its five variants write their outputs through two new bits of the fragment
+  `unlit_enabled` (64: the reflectivity without the cascades; 128: the scene's own targets under additive cascades),
+  `production_ssao_resolve.frag` reads the reflectivity from the ambient target's alpha when told to
+  (`ssr_options.y`, reserved before), and `production_hrc_resolve.comp` the albedo from the emission target (a
+  padding word renamed). No binding, uniform layout or file changed; the other 63 shaders are 0.8.0's SPIR-V.
+- `btbh_gpu_window_scene_render_to_target` takes its settings, target check and runtime swap from the steps it now
+  shares with its prewarm (no pixel changes).
+- `tools/check.ps1` and `tools/check.sh` skip the new smoke with the other GPU smokes.
+
+### Measured
+Windows, RTX 3070 Ti (driver 621.14), Vulkan, without a debug device. Another session ran Be The Bullet Hell v2 on
+the same GPU throughout (up to 100 % load): medians ran up to several times the fastest turns, and only the quietest
+series is quoted for the flags' GPU cost.
+
+**The render-to-target prewarm.** `BTBH_SMOKE_BENCH=target-cold` and `=target-prewarm`, seven runs of each,
+alternating, in separate processes: the window presents four 1920x1080 frames first (its own runtime warm, as a
+game's), then renders the sequence into a 960x540 target rendered at 480x270. CPU milliseconds of the call, median
+(range):
+
+| | Without the prewarm | With it |
+| --- | --- | --- |
+| The target prewarm call | – | 38.9 (27.3–51.8) |
+| First render | 26.2 (21.9–47.2) | 2.0 (1.3–2.7) |
+| Second render | 0.31 (0.23–0.37) | 0.27 (0.20–0.30) |
+| First render with the effects (frame 6) | 18.1 (12.8–32.2) | 0.40 (0.37–0.55) |
+
+- Cold, the first render makes 35 shaders and 30 pipelines (4.6–7.1 ms in the creation calls) and the effects' 22
+  and 11 (6.2–10.0 ms); the prewarm makes the 57 and 41 together. The smoke's own sequence (a debug device, 160x90
+  into 320x180) measured 51.7 against 2.3 ms for the first render.
+- A first prewarmed render still costs 1–2 ms more than later ones, as the window prewarm's first frame does.
+
+**The flags.** `BTBH_SMOKE_BENCH=1`, 1920x1080, 30 interleaved turns of 20 renders, fastest turn (median), ms a
+frame, the quietest of seven series:
+
+| | Unset | Flag set | 0.8.0's shaders, unset |
+| --- | --- | --- | --- |
+| Reflections without the cascades (`SSR_SURFACE_REFLECTIVITY`) | 0.441 (0.553) | 0.615 (0.747) | 0.448 (0.490) |
+| Additive cascades, HBAO and reflections (`KEEP_HBAO`) | 1.163 (1.431) | 1.160 (1.446) | 1.134 (1.375) |
+
+- `SSR_SURFACE_REFLECTIVITY` costs what the reflections cost once they run: +0.17 ms here (+0.17 to +0.57 ms in the
+  other series). Unset they return before marching (their pass costs +0.07 ms against no reflections).
+- `KEEP_HBAO` costs nothing measurable (-0.003 ms here, -0.50 to +0.17 in the contended series).
+- Unset against 0.8.0's shaders: within the noise (-0.007 and +0.029 ms here, both signs in the other series).
+
+**The HBAO under additive cascades**, in the smoke's street with nothing glowing (160x160): without the flag
+-0.23 to -0.38 sRGB levels on average and 1.6–2.8 % of the pixels darker by more than 4 levels against no
+cascades; with it, 0 pixels differ.
+
+### Upgrading
+- Nothing to set: a zeroed batch and post (`= {0}`, `..Default::default()`) render as in 0.8.0.
+- Rebuild the shaders with the C core. 0.8.0's shaders under this core render unset frames byte for byte as these.
+  With them, `SSR_SURFACE_REFLECTIVITY` changes nothing (the reflections still see every surface as unlit), but
+  **don't set `KEEP_HBAO` with older shaders**: their cascades' variants write the materials where the occlusion
+  then reads the ambient light, and it darkens by the albedo. Neither flag is detected (they add no named resource
+  for the stale-shader check to find).
+- Rust hosts with bindgen regenerate the bindings: `BTBHGPUScenePost.ssao_reserved` (one byte) becomes `flags`. A
+  host that names every field sees it go; `..Default::default()` doesn't. A build script can gate on the four
+  `HAS_` macros.
+- To adopt them (v2):
+  - `flags |= BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE` on the city's small glows (lit windows, signs, street lamps'
+    lenses), leaving the gameplay emitters' and effects' batches as they are.
+  - `post.flags |= BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO` with `radiance_cascades.additive` 1 and the
+    HBAO, where the cascades should leave the tuned look alone.
+  - `post.flags |= BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY` to A/B the reflections without the cascades.
+  - `btbh_gpu_window_scene_prewarm_render_to_target` at load with a card's target, its render size and settings, and
+    the batches the previews draw.
+- Swift: `ScreenSpaceReflectionDescriptor(..., surfaceReflectivity: true)`; existing calls compile unchanged.
+
+### Known
+- **The reflections without the cascades have reflected nothing since they came** (e7def301): every lit surface
+  writes 1 to the emission target's alpha, which the reflections take for unlit and skip. Kept unset, so frames
+  stay as they were (Be The Bullet Hell v1 runs them so); `SSR_SURFACE_REFLECTIVITY` makes them reflect.
+- `KEEP_HBAO`'s bounce light differs by up to 2 levels at the edges of metal surfaces (above).
+- The SSAO (`ssao_enabled` 1) under additive cascades keeps the cascades' mode: `KEEP_HBAO` covers the HBAO only.
+
 ## [0.8.0] — 2026-11-22
 
 One opt-in addition requested by Be The Bullet Hell v2: the world-detail table chosen per vertex (phase 2 of

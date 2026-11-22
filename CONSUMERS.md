@@ -58,8 +58,9 @@ shadows, water normals, rain and wetness, bloom, vignette, LUT grading, FSR 1, a
 a reactive mask. Since 0.6.0: the world detail (RFC 0008 phase 1), a world-projected second texture set per batch
 for its kit's coarse relief. Since 0.7.0: the scene prewarm and pattern 7 (RFC 0009 phase 1). Since 0.8.0:
 the world-detail table chosen per vertex (RFC 0009 phase 2) on its merged distance models, full kit models and
-outskirts ring. Requested: a batch flag that keeps a batch out of the radiance cascades' sources, HBAO's mode 1
-under additive cascades, a prewarm for render-to-target (planned for 0.9.0); an emitter height in the cascades'
+outskirts ring. In 0.9.0 (unreleased), as it asked: `BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`, the HBAO of no cascades
+under additive ones and the reflections' surface reflectivity (`BTBHGPUScenePost.flags`), and
+`btbh_gpu_window_scene_prewarm_render_to_target`. Requested: an emitter height in the cascades'
 field, multi-draw for meshes sharing a material, a vertex lift from a heightfield (RFCs 0010–0012, drafting); BC
 texture formats (RFC 0008 phase 2); descriptor pools made before the first frames.
 
