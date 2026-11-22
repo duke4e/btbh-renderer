@@ -10382,10 +10382,12 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     );
 }
 
-/* Makes what the window's next scene presents would make the first time they draw these batches with these
-   settings, through the present's own steps (btbh_gpu_scene_prepare_frame, btbh_gpu_scene_ensure_model_pipelines,
-   btbh_gpu_scene_ensure_frame_targets), and draws nothing. */
-BTBHGPUResult btbh_gpu_window_scene_prewarm(
+/* Makes what the next scene presents would make the first time they draw these batches with these settings,
+   through the present's own steps (btbh_gpu_scene_prepare_frame, btbh_gpu_scene_ensure_model_pipelines,
+   btbh_gpu_scene_ensure_frame_targets), and draws nothing: for output_width x output_height (0: the window's
+   drawable size, as the present's own argument). btbh_gpu_window_scene_prewarm runs it for the window's frames,
+   btbh_gpu_window_scene_prewarm_render_to_target in the window's aside runtime with a render's post settings. */
+static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
@@ -10405,6 +10407,8 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
     const BTBHGPUScenePost *post,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
+    uint32_t output_width,
+    uint32_t output_height,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -10477,7 +10481,7 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
             shader_format,
             render_width,
             render_height,
-            0u,
+            output_width,
             lighting,
             post,
             batches,
@@ -10558,8 +10562,8 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
             shader_format,
             render_width,
             render_height,
-            0u,
-            0u,
+            output_width,
+            output_height,
             &drawable_width,
             &drawable_height,
             &scene_distance_ready,
@@ -10582,6 +10586,196 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
     report->upscale_mode = setup.upscale_mode;
     report->message[0] = '\0';
     return report->result;
+}
+
+BTBHGPUResult btbh_gpu_window_scene_prewarm(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_prewarm_internal(
+        window,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        lighting,
+        post,
+        batches,
+        batch_count,
+        0u,
+        0u,
+        report
+    );
+}
+
+/* A target btbh_gpu_window_scene_render_to_target can render into (and its prewarm make ready): a 2D render
+   target of this window. */
+static bool btbh_gpu_scene_render_target_usable(
+    const BTBHGPUWindow *window,
+    const BTBHGPUTexture *target
+) {
+    return target != NULL &&
+        target->owner == window &&
+        target->texture != NULL &&
+        target->color_target &&
+        !btbh_gpu_texture_is_array(target) &&
+        target->width != 0u &&
+        target->height != 0u;
+}
+
+/* The post settings a scene rendered into `target` runs with (btbh_gpu_window_scene_render_to_target, and its
+   prewarm). Never temporal: FSR 3 runs as FSR 1, and the instance motions and the reset don't apply. The upscalers
+   only enlarge: a render at the target's size or bigger is scaled bilinearly (a render twice the target's size is
+   halved exactly), with no sharpening. */
+static BTBHGPUScenePost btbh_gpu_scene_render_target_post(
+    const BTBHGPUScenePost *post,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUTexture *target
+) {
+    BTBHGPUScenePost target_post = *post;
+    if (target_post.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3) {
+        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR1;
+    }
+    if (render_width >= target->width && render_height >= target->height) {
+        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
+    }
+    target_post.temporal_instance_motions = NULL;
+    target_post.temporal_instance_motion_count = 0u;
+    target_post.temporal_reset = 0u;
+    return target_post;
+}
+
+/* What a scene rendered into a target swaps out of the window while it runs (btbh_gpu_scene_enter_aside). */
+typedef struct BTBHGPUSceneAsideSwap {
+    BTBHGPUSceneRuntime *window_runtime;
+    BTBHGPUSceneTelemetryReport window_telemetry;
+    bool window_radiance_cascades_telemetry;
+    SDL_GPUDevice *window_cost_split_device;
+} BTBHGPUSceneAsideSwap;
+
+/* The window's aside runtime in place of its own (btbh_gpu_window_scene_render_to_target, and its prewarm): its own
+   scene targets, shadow maps, pipelines and (never temporal) state, so that the window's are neither read nor
+   written. The cost log's splits are off meanwhile. btbh_gpu_scene_leave_aside puts the window's back. */
+static void btbh_gpu_scene_enter_aside(BTBHGPUWindow *window, BTBHGPUSceneAsideSwap *swap) {
+    swap->window_runtime = window->scene_runtime;
+    swap->window_telemetry = window->scene_telemetry;
+    swap->window_radiance_cascades_telemetry = window->radiance_cascades_telemetry_enabled;
+    swap->window_cost_split_device = btbh_gpu_cost_split_device;
+    btbh_gpu_cost_split_device = NULL;
+    window->scene_runtime = window->aside_scene_runtime;
+}
+
+static void btbh_gpu_scene_leave_aside(BTBHGPUWindow *window, const BTBHGPUSceneAsideSwap *swap) {
+    /* (The aside runtime may have been made, or released by a failure, in the call.) */
+    window->aside_scene_runtime = window->scene_runtime;
+    window->scene_runtime = swap->window_runtime;
+    window->scene_telemetry = swap->window_telemetry;
+    window->radiance_cascades_telemetry_enabled = swap->window_radiance_cascades_telemetry;
+    btbh_gpu_cost_split_device = swap->window_cost_split_device;
+}
+
+/* btbh_gpu_window_scene_prewarm for btbh_gpu_window_scene_render_to_target: the prewarm's steps, in the window's
+   aside runtime, with the render's post settings and the target's size, as render_to_target runs the present's. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->claimed ||
+        post == NULL ||
+        !btbh_gpu_scene_render_target_usable(window, target)) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU scene prewarm for a render target"
+        );
+        return report->result;
+    }
+    const BTBHGPUScenePost target_post =
+        btbh_gpu_scene_render_target_post(post, render_width, render_height, target);
+    BTBHGPUSceneAsideSwap swap;
+    btbh_gpu_scene_enter_aside(window, &swap);
+    const BTBHGPUResult result = btbh_gpu_scene_prewarm_internal(
+        window,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        lighting,
+        &target_post,
+        batches,
+        batch_count,
+        target->width,
+        target->height,
+        report
+    );
+    btbh_gpu_scene_leave_aside(window, &swap);
+    return result;
 }
 
 /* A scene drawn into a render target apart from the window's frame (a unit's portrait). It renders
@@ -10637,13 +10831,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         window->device->gpu == NULL ||
         !window->claimed ||
         post == NULL ||
-        target == NULL ||
-        target->owner != window ||
-        target->texture == NULL ||
-        !target->color_target ||
-        btbh_gpu_texture_is_array(target) ||
-        target->width == 0u ||
-        target->height == 0u) {
+        !btbh_gpu_scene_render_target_usable(window, target)) {
         btbh_gpu_scene_error(
             report,
             BTBH_GPU_INVALID_ARGUMENT,
@@ -10660,29 +10848,10 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         );
         return report->result;
     }
-    /* Never temporal: FSR 3 runs as FSR 1, and the instance motions and the reset don't apply. The
-       upscalers only enlarge: a render at the target's size or bigger is scaled bilinearly (a render
-       twice the target's size is halved exactly), with no sharpening. */
-    BTBHGPUScenePost target_post = *post;
-    if (target_post.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3) {
-        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR1;
-    }
-    if (render_width >= target->width && render_height >= target->height) {
-        target_post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
-    }
-    target_post.temporal_instance_motions = NULL;
-    target_post.temporal_instance_motion_count = 0u;
-    target_post.temporal_reset = 0u;
-
-    BTBHGPUSceneRuntime *window_runtime = window->scene_runtime;
-    const BTBHGPUSceneTelemetryReport window_telemetry =
-        window->scene_telemetry;
-    const bool window_radiance_cascades_telemetry =
-        window->radiance_cascades_telemetry_enabled;
-    SDL_GPUDevice *const window_cost_split_device =
-        btbh_gpu_cost_split_device;
-    btbh_gpu_cost_split_device = NULL;
-    window->scene_runtime = window->aside_scene_runtime;
+    const BTBHGPUScenePost target_post =
+        btbh_gpu_scene_render_target_post(post, render_width, render_height, target);
+    BTBHGPUSceneAsideSwap swap;
+    btbh_gpu_scene_enter_aside(window, &swap);
     /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
        update periods), no radiance-cascade history (two portraits are two pictures). */
     btbh_gpu_window_scene_submission_finished(window, false);
@@ -10756,13 +10925,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
             );
         }
     }
-    /* (The aside runtime may have been made, or released by a failure, in the call.) */
-    window->aside_scene_runtime = window->scene_runtime;
-    window->scene_runtime = window_runtime;
-    window->scene_telemetry = window_telemetry;
-    window->radiance_cascades_telemetry_enabled =
-        window_radiance_cascades_telemetry;
-    btbh_gpu_cost_split_device = window_cost_split_device;
+    btbh_gpu_scene_leave_aside(window, &swap);
     return report->result;
 }
 

@@ -2000,6 +2000,49 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 );
+/* btbh_gpu_window_scene_prewarm for btbh_gpu_window_scene_render_to_target into `target` (since 0.9.0, asked for by
+   Be The Bullet Hell v2, whose first render to a target in a session, a card's live preview, stalled for 54-56 ms
+   while it made that call's runtime). Makes what those renders would make the first time: their own scene runtime,
+   each batch's model pipelines for these settings, their shadow maps and the cascades' and SMAA's or FXAA's
+   resources, their scene targets at render_width x render_height and their post chain at the target's size. Call
+   it with the target and the arguments the renders will take: they then make no shader, pipeline or target.
+   - It runs btbh_gpu_window_scene_prewarm's steps with what btbh_gpu_window_scene_render_to_target does to the
+     settings first (FSR 3 runs as FSR 1; a render at the target's size or bigger is scaled bilinearly), in that
+     call's runtime, so the three can't drift apart. It draws nothing: the window's frames and their runtime are
+     left alone, and a render to a target is the same to the byte with or without it.
+   - The renders to every target of a window share one runtime: prewarm with the render size and the target size
+     they will use. A render at another size makes its targets anew (the pipelines stay).
+   - A second call with the same arguments makes nothing. Batches, settings and their limits are as for
+     btbh_gpu_window_scene_prewarm: call it once per set of settings.
+   Refusals: btbh_gpu_window_scene_prewarm's, and a target btbh_gpu_window_scene_render_to_target refuses (NULL,
+   another window's, not a render target, an array), with BTBH_GPU_INVALID_ARGUMENT. On success the report holds
+   drawable_width/height (the target's size), batch_count, prepared_geometry_count and upscale_mode (what the
+   renders will run); its timings stay 0. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+);
+/* Defined when btbh_gpu_window_scene_prewarm_render_to_target exists (since 0.9.0). */
+#define BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM 1
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report
