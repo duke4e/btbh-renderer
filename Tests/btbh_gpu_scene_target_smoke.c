@@ -25,6 +25,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
 
@@ -309,7 +310,7 @@ static BTBHGPUCustomMesh *create_cube_wound(BTBHGPUWindow *window, bool front_fa
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
-    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(
+    BTBHGPUCustomMesh *mesh = smoke_custom_mesh_create(
         window,
         vertices,
         (uint32_t)sizeof(vertices),

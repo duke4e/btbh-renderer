@@ -2,7 +2,9 @@
  * batch flags' layout, without a GPU: which batches sort, which keep their place, and the depth they sort by.
  * Also which procedural detail parameters the present accepts (btbh_gpu_scene_detail_parameters_valid): the
  * patterns' names, and RFC 0009's pattern 7 with x, y and z at 0. And the layouts of RFC 0009 phase 2's
- * world-detail table, its entry and the batch it is appended to. */
+ * world-detail table, its entry and the batch it is appended to. And RFC 0011's run key
+ * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
+ * don't, and the shared-mesh flag's constants. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -122,6 +124,12 @@ _Static_assert(sizeof(((BTBHGPUScenePost *)0)->flags) == 1u, "the post flags are
 #error "0.9.0's HAS_ macros are defined with their features"
 #endif
 
+/* RFC 0011 (0.10.0): the shared-mesh flag and its macro. */
+_Static_assert(BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS == 1u, "the shared-buffers flag is bit 0");
+#if !defined(BTBH_GPU_HAS_SHARED_MESH_BUFFERS)
+#error "BTBH_GPU_HAS_SHARED_MESH_BUFFERS is defined with btbh_gpu_window_custom_mesh_create_ex"
+#endif
+
 #define MAX_INSTANCES 32u
 
 static float instances[MAX_INSTANCES][24];
@@ -226,6 +234,171 @@ static void assert_order(const uint32_t *order, uint32_t count, const uint32_t *
     }
     assert(count == expected_count);
     assert(memcmp(order, expected, sizeof(uint32_t) * count) == 0);
+}
+
+/* ---- RFC 0011: the run key ---- */
+
+/* Every field of the batch in order, and whether a batch that differs from the one before it only there continues
+   its run: its geometry (kind, model, custom_mesh, material_slot) and its instance range (first_instance,
+   instance_count) may differ; nothing else may. */
+typedef struct RunField {
+    const char *name;
+    size_t offset;
+    size_t size;
+    bool continues;
+} RunField;
+
+#define RUN_FIELD(field, continues) \
+    { #field, offsetof(BTBHGPUSceneGeometryBatch, field), sizeof(((BTBHGPUSceneGeometryBatch *)0)->field), continues }
+static const RunField run_fields[] = {
+    RUN_FIELD(kind, true),
+    RUN_FIELD(model, true),
+    RUN_FIELD(custom_mesh, true),
+    RUN_FIELD(animation_library, false),
+    RUN_FIELD(animation_pose, false),
+    RUN_FIELD(animation_index, false),
+    RUN_FIELD(animation_time, false),
+    RUN_FIELD(material_slot, true),
+    RUN_FIELD(instance_buffer, false),
+    RUN_FIELD(first_instance, true),
+    RUN_FIELD(instance_count, true),
+    RUN_FIELD(albedo_texture, false),
+    RUN_FIELD(albedo_red, false),
+    RUN_FIELD(albedo_green, false),
+    RUN_FIELD(albedo_blue, false),
+    RUN_FIELD(albedo_alpha, false),
+    RUN_FIELD(uv_scale_x, false),
+    RUN_FIELD(uv_scale_y, false),
+    RUN_FIELD(uv_offset_x, false),
+    RUN_FIELD(uv_offset_y, false),
+    RUN_FIELD(normal_texture, false),
+    RUN_FIELD(orm_texture, false),
+    RUN_FIELD(normal_scale, false),
+    RUN_FIELD(occlusion, false),
+    RUN_FIELD(roughness, false),
+    RUN_FIELD(metalness, false),
+    RUN_FIELD(emission_texture, false),
+    RUN_FIELD(emission_red, false),
+    RUN_FIELD(emission_green, false),
+    RUN_FIELD(emission_blue, false),
+    RUN_FIELD(emission_alpha, false),
+    RUN_FIELD(emission_energy, false),
+    RUN_FIELD(blend_mode, false),
+    RUN_FIELD(billboard_mode, false),
+    RUN_FIELD(depth_compare, false),
+    RUN_FIELD(alpha_cutoff, false),
+    RUN_FIELD(stencil_compare, false),
+    RUN_FIELD(cull_mode, false),
+    RUN_FIELD(stencil_fail, false),
+    RUN_FIELD(stencil_depth_fail, false),
+    RUN_FIELD(stencil_pass, false),
+    RUN_FIELD(stencil_reference, false),
+    RUN_FIELD(stencil_mask, false),
+    RUN_FIELD(transparency_enabled, false),
+    RUN_FIELD(unlit_enabled, false),
+    RUN_FIELD(spot_shadow_visible, false),
+    RUN_FIELD(rc_receiver, false),
+    RUN_FIELD(reactive_mode, false),
+    RUN_FIELD(surface_variant, false),
+    RUN_FIELD(surface_time, false),
+    RUN_FIELD(surface_parameters0, false),
+    RUN_FIELD(surface_parameters1, false),
+    RUN_FIELD(detail_parameters, false),
+    RUN_FIELD(ssao_mode, false),
+    RUN_FIELD(flags, false),
+    RUN_FIELD(ssao_reserved, false),
+    RUN_FIELD(dug_by, false),
+    RUN_FIELD(world_detail, false),
+    RUN_FIELD(world_detail_table, false),
+};
+#undef RUN_FIELD
+#define RUN_FIELD_COUNT (sizeof(run_fields) / sizeof(run_fields[0]))
+
+/* A batch with something in every field (the pointers are never followed). */
+static BTBHGPUSceneGeometryBatch run_batch(void) {
+    BTBHGPUSceneGeometryBatch batch;
+    memset(&batch, 0, sizeof(batch));
+    uint8_t *bytes = (uint8_t *)&batch;
+    for (size_t field = 0u; field < RUN_FIELD_COUNT; ++field) {
+        for (size_t byte = 0u; byte < run_fields[field].size; ++byte) {
+            bytes[run_fields[field].offset + byte] = (uint8_t)(17u + 31u * field + 7u * byte);
+        }
+    }
+    return batch;
+}
+
+static void check_run_key(void) {
+    /* The fields cover the batch, in order, with only padding (less than a pointer) between them and none after. */
+    size_t covered = 0u;
+    size_t padding = 0u;
+    size_t end = 0u;
+    for (size_t field = 0u; field < RUN_FIELD_COUNT; ++field) {
+        assert(run_fields[field].offset >= end);
+        assert(run_fields[field].offset - end < sizeof(void *));
+        padding += run_fields[field].offset - end;
+        covered += run_fields[field].size;
+        end = run_fields[field].offset + run_fields[field].size;
+    }
+    assert(end == sizeof(BTBHGPUSceneGeometryBatch));
+    assert(covered + padding == sizeof(BTBHGPUSceneGeometryBatch));
+
+    const BTBHGPUSceneGeometryBatch base = run_batch();
+    assert(btbh_gpu_scene_batch_continues_run(&base, &base));
+    BTBHGPUSceneGeometryBatch copy = base;
+    assert(btbh_gpu_scene_batch_continues_run(&base, &copy));
+
+    /* Every byte flipped in turn, either way round. */
+    uint32_t breaking = 0u;
+    uint32_t keeping = 0u;
+    for (size_t byte = 0u; byte < sizeof(BTBHGPUSceneGeometryBatch); ++byte) {
+        bool expected = true;   /* padding */
+        const char *name = "padding";
+        for (size_t field = 0u; field < RUN_FIELD_COUNT; ++field) {
+            if (byte >= run_fields[field].offset && byte < run_fields[field].offset + run_fields[field].size) {
+                expected = run_fields[field].continues;
+                name = run_fields[field].name;
+            }
+        }
+        BTBHGPUSceneGeometryBatch flipped = base;
+        ((uint8_t *)&flipped)[byte] ^= 0xa5u;
+        const bool forward = btbh_gpu_scene_batch_continues_run(&base, &flipped);
+        const bool backward = btbh_gpu_scene_batch_continues_run(&flipped, &base);
+        if (forward != expected || backward != expected) {
+            fprintf(stderr, "run key: byte %u (%s): %s, expected %s\n", (unsigned)byte, name,
+                forward ? "continues" : "breaks", expected ? "continues" : "breaks");
+        }
+        assert(forward == expected && backward == expected);
+        if (expected) {
+            keeping += 1u;
+        } else {
+            breaking += 1u;
+        }
+    }
+
+    /* All six at once still continue; any one other field with them breaks. */
+    BTBHGPUSceneGeometryBatch moved = base;
+    moved.kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+    moved.model = (BTBHGPUModel *)(uintptr_t)0x1234u;
+    moved.custom_mesh = NULL;
+    moved.material_slot = 3;
+    moved.first_instance = 900u;
+    moved.instance_count = 77u;
+    assert(btbh_gpu_scene_batch_continues_run(&base, &moved));
+    moved.stencil_reference ^= 1u;
+    assert(!btbh_gpu_scene_batch_continues_run(&base, &moved));
+
+    /* Floats compare by their bits: -0 and +0 differ (conservatively), the same NaN is the same. */
+    BTBHGPUSceneGeometryBatch zero = base;
+    BTBHGPUSceneGeometryBatch negative_zero = base;
+    zero.roughness = 0.0f;
+    negative_zero.roughness = -0.0f;
+    assert(!btbh_gpu_scene_batch_continues_run(&zero, &negative_zero));
+    zero.roughness = NAN;
+    negative_zero.roughness = zero.roughness;
+    assert(btbh_gpu_scene_batch_continues_run(&zero, &negative_zero));
+    printf("run key: %u fields over %u bytes (%u of padding); %u bytes break a run, %u keep it (the six fields "
+        "and padding)\n", (unsigned)RUN_FIELD_COUNT, (unsigned)sizeof(BTBHGPUSceneGeometryBatch), (unsigned)padding,
+        breaking, keeping);
 }
 
 int main(void) {
@@ -464,6 +637,8 @@ int main(void) {
         printf("detail parameters: %u cases (pattern 7 only with x, y and z at 0; nothing past 7)\n",
             (unsigned)(sizeof(cases) / sizeof(cases[0])));
     }
+
+    check_run_key();
 
     printf("scene opaque order test passed\n");
     return 0;

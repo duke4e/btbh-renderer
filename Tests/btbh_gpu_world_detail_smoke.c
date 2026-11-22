@@ -86,6 +86,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL)
@@ -345,7 +346,7 @@ static BTBHGPUCustomMesh *create_cube_with(BTBHGPUWindow *window, bool jointed) 
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
-    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(
+    BTBHGPUCustomMesh *mesh = smoke_custom_mesh_create(
         window, vertices, (uint32_t)sizeof(vertices), 24u, indices, 36u, &report);
     if (mesh == NULL) {
         fprintf(stderr, "cube: %s\n", report.message);
@@ -2580,7 +2581,7 @@ static BTBHGPUCustomMesh *create_merged_mesh(BTBHGPUWindow *window, const Merged
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
-    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(window, vertices,
+    BTBHGPUCustomMesh *mesh = smoke_custom_mesh_create(window, vertices,
         vertex_count * BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS * (uint32_t)sizeof(float), vertex_count, indices,
         index_count, &report);
     if (mesh == NULL) {
@@ -3563,7 +3564,7 @@ static BTBHGPUCustomMesh *create_strip_wall(BTBHGPUWindow *window, float first, 
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
-    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(window, vertices,
+    BTBHGPUCustomMesh *mesh = smoke_custom_mesh_create(window, vertices,
         vertex_count * BTBH_GPU_CUSTOM_MESH_VERTEX_FLOATS * (uint32_t)sizeof(float), vertex_count, indices,
         strips * 6u, &report);
     free(vertices);

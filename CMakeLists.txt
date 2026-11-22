@@ -609,8 +609,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_scene_blend_test
         )
 
-        # The opaque pass's front-to-back order, the batch flags' layout and the procedural detail's
-        # accepted parameters (no GPU).
+        # The opaque pass's front-to-back order, the batch flags' layout, the procedural detail's accepted
+        # parameters and RFC 0011's run key (no GPU).
         add_executable(btbh_gpu_scene_order_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_order_test.c"
         )
@@ -1056,6 +1056,39 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_dependencies(btbh_gpu_scene_prewarm_smoke btbh_gpu_shaders)
         add_test(NAME btbh_gpu_scene_prewarm_smoke COMMAND btbh_gpu_scene_prewarm_smoke)
         set_tests_properties(btbh_gpu_scene_prewarm_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
+        # RFC 0011 phase 1 (0.10.0): custom meshes in the shared geometry buffers and same-material runs draw byte
+        # for byte as before, through every pass that encodes batches; the shared meshes' refusals and lifetime
+        # (hidden windows).
+        add_executable(btbh_gpu_scene_runs_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_runs_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_runs_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_runs_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_runs_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_runs_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_runs_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_runs_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_runs_smoke COMMAND btbh_gpu_scene_runs_smoke)
+        set_tests_properties(btbh_gpu_scene_runs_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
         # A measurement, not a test: a frame like Be The Bullet Hell v2's city (RFC 0009's follow-up); see the file
         # and tools/frame_bench_summary.py.
