@@ -20,6 +20,20 @@
  *   ledges on entries 0..7, the frames and sills on 255, as v2's merged models carry their metal and frames),
  *   table-all (the frames on entry 3 too), table-none (every triangle on 255), table-off (a table without
  *   map_layers).
+ * - RFC 0011's ring (0.10.0's bench; it builds against 0.9.0 too): a mode "ring" with '+' options adds, after the
+ *   frame's draws and its ground, Be The Bullet Hell v2's outskirts ring as it measured it: 257 batches, a ground and
+ *   128 building pieces, each a wall and its glass, every one a distinct custom mesh (24 to 144 vertices), in 8
+ *   chunks of 16 pieces with a persistent instance buffer each (1 to 3 instances a piece), no sun shadow of their
+ *   own. Options: +table (world detail on: the frame's draws and the ring's walls take the table of mode table, so
+ *   the walls' static vertex shader differs from the glass's), +sorted (each chunk's walls, then its glass;
+ *   otherwise a wall, its glass, the next wall: interleaved), +arena (the ring's meshes in the shared geometry
+ *   buffers, BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS; ignored before 0.10.0), +noruns (BTBH_GPU_SCENE_RUNS=0 around this
+ *   window's presents; nothing before 0.10.0), +one (every ring batch draws the first wall's mesh: v2's "one shared
+ *   mesh").
+ *   Every frame of a ring window alternates with the ring and without it (the frame's draws alone).
+ * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
+ *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
+ *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
  *
  * Output: "BENCH window <n> <directory> ..." per window, "BENCH turn <window> <round>" before each turn, then the
  * core's "BTBH_GPU_COST gpu_ms=... split=1 ... main_ms=..." lines (split=0: the whole frame). tools/
@@ -29,6 +43,7 @@
 
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
 
 #include <math.h>
 #include <stdio.h>
@@ -41,8 +56,13 @@
 #define BENCH_RENDER_WIDTH 960u
 #define BENCH_RENDER_HEIGHT 600u
 #define BENCH_PIECES 32u
-#define BENCH_MAX_WINDOWS 6u
+#define BENCH_MAX_WINDOWS 10u
 #define BENCH_FLOATS 24u
+#define RING_CHUNKS 8u
+#define RING_CHUNK_PIECES 16u
+#define RING_PIECES (RING_CHUNKS * RING_CHUNK_PIECES)
+#define RING_MESHES (2u * RING_PIECES + 1u)
+#define RING_CHUNK_INSTANCES (3u * RING_CHUNK_PIECES)
 
 #if defined(__APPLE__)
 #define BENCH_SHADER_EXTENSION ".metallib"
@@ -74,9 +94,22 @@ static const char *const canvas_shader_names[3] = {
     "production_canvas_textured.frag",
 };
 
+typedef struct BenchRing {
+    bool enabled;
+    bool table;
+    bool sorted;
+    bool arena;
+    bool runs_off;
+    bool one;
+    BTBHGPUCustomMesh *meshes[RING_MESHES];   /* walls, then glass, then the ground */
+    BTBHGPUInstanceBuffer *chunks[RING_CHUNKS + 1u];
+    uint32_t batch_count;
+} BenchRing;
+
 typedef struct BenchWindow {
     BTBHGPUWindow *window;
-    char mode[16];
+    char mode[48];
+    BenchRing ring;
     char scene_shaders[11][1024];
     char canvas_shaders[3][1024];
     BTBHGPUCustomMesh *pieces[BENCH_PIECES];
@@ -353,7 +386,7 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
     const char *mode = bench->mode;
     uint32_t state = 12345u;
     bench->instances = calloc(((size_t)draws * 5u + 1u) * BENCH_FLOATS, sizeof(float));
-    bench->batches = calloc((size_t)draws + 1u, sizeof(BTBHGPUSceneGeometryBatch));
+    bench->batches = calloc((size_t)draws + 1u + 2u * RING_PIECES + 1u, sizeof(BTBHGPUSceneGeometryBatch));
     if (bench->instances == NULL || bench->batches == NULL) {
         fprintf(stderr, "out of memory\n");
         exit(1);
@@ -368,7 +401,7 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE)
-        if (strncmp(mode, "table", 5) == 0) {
+        if (strncmp(mode, "table", 5) == 0 || bench->ring.table) {
             batch->world_detail_table = &bench->table;
         }
 #else
@@ -412,10 +445,206 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
     bench->triangles += 12u;
 }
 
+/* Whether a '+'-separated mode has `option`. */
+static bool mode_has(const char *mode, const char *option) {
+    const size_t length = strlen(option);
+    for (const char *at = strchr(mode, '+'); at != NULL; at = strchr(at + 1, '+')) {
+        if (strncmp(at + 1, option, length) == 0 && (at[1 + length] == '+' || at[1 + length] == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static BTBHGPUCustomMesh *bench_mesh(BTBHGPUWindow *window, const float *vertices, uint32_t vertex_count,
+    const uint32_t *indices, uint32_t index_count, bool arena) {
+    BTBHGPUCustomMeshReport report;
+    memset(&report, 0, sizeof(report));
+    BTBHGPUCustomMesh *mesh = NULL;
+#if defined(BTBH_GPU_HAS_SHARED_MESH_BUFFERS)
+    mesh = btbh_gpu_window_custom_mesh_create_ex(window, vertices, vertex_count * BENCH_FLOATS * (uint32_t)sizeof(float),
+        vertex_count, indices, index_count, arena ? BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS : 0u, &report);
+#else
+    (void)arena;
+    mesh = btbh_gpu_window_custom_mesh_create(window, vertices, vertex_count * BENCH_FLOATS * (uint32_t)sizeof(float),
+        vertex_count, indices, index_count, &report);
+#endif
+    if (mesh == NULL) {
+        fprintf(stderr, "ring mesh: %s\n", report.message);
+        exit(1);
+    }
+    return mesh;
+}
+
+/* Ring mesh m: a wall (m < RING_PIECES: a slab and 0..5 ledges, entries 0..7), a glass piece (panes, on 255), or the
+   ground (a thin slab). Each one distinct. */
+static BTBHGPUCustomMesh *make_ring_mesh(BTBHGPUWindow *window, uint32_t m, bool arena) {
+    float vertices[6u * 24u * BENCH_FLOATS];
+    uint32_t indices[6u * 36u];
+    uint32_t vertex_count = 0u;
+    uint32_t index_count = 0u;
+    uint32_t state = 4242u + m * 17u;
+    if (m < RING_PIECES) {
+        const float height = 1.5f + 0.25f * (float)(m % 7u);
+        const float slab_centre[3] = { 0.0f, 0.5f * height, 0.0f };
+        const float slab_half[3] = { 0.8f + 0.05f * (float)(m % 5u), 0.5f * height, 0.12f };
+        add_box(vertices, &vertex_count, indices, &index_count, slab_centre, slab_half, (float)(m % 8u));
+        const uint32_t ledges = m % 6u;
+        for (uint32_t ledge = 0u; ledge < ledges; ++ledge) {
+            const float y = height * ((float)ledge + 0.7f) / (float)(ledges + 1u);
+            const float centre[3] = { 0.0f, y, 0.15f };
+            const float half[3] = { slab_half[0], 0.03f + 0.01f * (float)(bench_random(&state) % 3u), 0.04f };
+            add_box(vertices, &vertex_count, indices, &index_count, centre, half, (float)((m + ledge) % 8u));
+        }
+    } else if (m < 2u * RING_PIECES) {
+        const uint32_t piece = m - RING_PIECES;
+        const uint32_t panes = 1u + piece % 4u;
+        for (uint32_t pane = 0u; pane < panes; ++pane) {
+            const float x = -0.6f + 1.2f * ((float)pane + 0.5f) / (float)panes;
+            const float centre[3] = { x, 0.9f + 0.1f * (float)(piece % 3u), 0.13f };
+            const float half[3] = { 0.45f / (float)panes, 0.3f + 0.02f * (float)(piece % 5u), 0.01f };
+            add_box(vertices, &vertex_count, indices, &index_count, centre, half, 255.0f);
+        }
+    } else {
+        const float centre[3] = { 0.0f, -0.05f, 0.0f };
+        const float half[3] = { 40.0f, 0.05f, 6.0f };
+        add_box(vertices, &vertex_count, indices, &index_count, centre, half, 0.0f);
+    }
+    return bench_mesh(window, vertices, vertex_count, indices, index_count, arena);
+}
+
+static void ring_instance(float *instance, float x, float z, float yaw, float fade, float seed) {
+    memset(instance, 0, BENCH_FLOATS * sizeof(float));
+    instance[0] = cosf(yaw);
+    instance[2] = -sinf(yaw);
+    instance[5] = 1.0f;
+    instance[8] = sinf(yaw);
+    instance[10] = cosf(yaw);
+    instance[12] = x;
+    instance[14] = z;
+    instance[15] = 1.0f;
+    instance[16] = fade;
+    instance[17] = fade;
+    instance[18] = 0.95f * fade;
+    instance[19] = 1.0f;
+    instance[23] = seed;   /* the lot's seed in custom.w */
+}
+
+/* The ring: its meshes, its chunks' instance buffers (a ninth for the ground) and its batches, appended to the
+   frame's. A band behind the city, 8 chunks of 16 pieces. */
+static void build_ring(BenchWindow *bench) {
+    BenchRing *ring = &bench->ring;
+    for (uint32_t m = 0u; m < RING_MESHES; ++m) {
+        ring->meshes[m] = make_ring_mesh(bench->window, m, ring->arena);
+    }
+    uint32_t state = 999u;
+    uint32_t firsts[RING_PIECES];
+    uint32_t counts[RING_PIECES];
+    for (uint32_t chunk = 0u; chunk <= RING_CHUNKS; ++chunk) {
+        float instances[RING_CHUNK_INSTANCES][BENCH_FLOATS];
+        uint32_t count = 0u;
+        if (chunk == RING_CHUNKS) {
+            ring_instance(instances[count++], 0.0f, -84.0f, 0.0f, 0.8f, 0.0f);
+        } else {
+            for (uint32_t local = 0u; local < RING_CHUNK_PIECES; ++local) {
+                const uint32_t piece = chunk * RING_CHUNK_PIECES + local;
+                firsts[piece] = count;
+                counts[piece] = 1u + bench_random(&state) % 3u;
+                for (uint32_t copy = 0u; copy < counts[piece]; ++copy) {
+                    const float x = -96.0f + 1.5f * (float)piece + 0.4f * (float)copy;
+                    const float z = -80.0f - 3.0f * (float)copy - 0.5f * bench_unit(&state);
+                    ring_instance(instances[count++], x, z, 0.0f, 0.55f + 0.3f * bench_unit(&state),
+                        (float)(piece % 97u));
+                }
+            }
+        }
+        BTBHGPUInstanceBufferReport report;
+        memset(&report, 0, sizeof(report));
+        ring->chunks[chunk] = btbh_gpu_window_instance_buffer_create(bench->window, RING_CHUNK_INSTANCES,
+            BENCH_FLOATS * (uint32_t)sizeof(float), &report);
+        if (ring->chunks[chunk] == NULL ||
+            btbh_gpu_instance_buffer_upload(ring->chunks[chunk], 0u, instances,
+                count * BENCH_FLOATS * (uint32_t)sizeof(float), &report) != BTBH_GPU_OK) {
+            fprintf(stderr, "ring instances: %s\n", report.message);
+            exit(1);
+        }
+    }
+    /* The walls' material (the city's textures, pattern 7, the table with +table) and the glass's. */
+    BTBHGPUSceneGeometryBatch wall;
+    fill_batch(&wall, NULL, 0u, 1u);
+    wall.albedo_texture = bench->albedo;
+    wall.normal_texture = bench->normal;
+    wall.orm_texture = bench->orm;
+    wall.detail_parameters[3] = 7.0f;
+    wall.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+    wall.spot_shadow_visible = 0u;
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE)
+    if (ring->table) {
+        wall.world_detail_table = &bench->table;
+    }
+#endif
+    BTBHGPUSceneGeometryBatch glass = wall;
+    glass.albedo_texture = NULL;
+    glass.normal_texture = NULL;
+    glass.orm_texture = NULL;
+#if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE)
+    glass.world_detail_table = NULL;
+#endif
+    glass.albedo_red = 140u;
+    glass.albedo_green = 170u;
+    glass.albedo_blue = 200u;
+    glass.roughness = 0.1f;
+    glass.detail_parameters[2] = 3.0f;
+    glass.detail_parameters[3] = 5.0f;
+    BTBHGPUSceneGeometryBatch *out = &bench->batches[bench->batch_count];
+    uint32_t added = 0u;
+    BTBHGPUSceneGeometryBatch ground = glass;
+    ground.custom_mesh = ring->meshes[RING_MESHES - 1u];
+    ground.instance_buffer = ring->chunks[RING_CHUNKS];
+    ground.first_instance = 0u;
+    ground.instance_count = 1u;
+    ground.albedo_red = 110u;
+    ground.albedo_green = 110u;
+    ground.albedo_blue = 100u;
+    ground.detail_parameters[2] = 0.0f;
+    ground.detail_parameters[3] = 7.0f;
+    out[added++] = ground;
+    for (uint32_t chunk = 0u; chunk < RING_CHUNKS; ++chunk) {
+        for (uint32_t pass = 0u; pass < (ring->sorted ? 2u : 1u); ++pass) {
+            for (uint32_t local = 0u; local < RING_CHUNK_PIECES; ++local) {
+                const uint32_t piece = chunk * RING_CHUNK_PIECES + local;
+                for (uint32_t part = 0u; part < 2u; ++part) {
+                    if (ring->sorted && part != pass) {
+                        continue;
+                    }
+                    BTBHGPUSceneGeometryBatch batch = part == 0u ? wall : glass;
+                    batch.custom_mesh = ring->one
+                        ? ring->meshes[0]
+                        : ring->meshes[part == 0u ? piece : RING_PIECES + piece];
+                    batch.instance_buffer = ring->chunks[chunk];
+                    batch.first_instance = firsts[piece];
+                    batch.instance_count = counts[piece];
+                    out[added++] = batch;
+                }
+            }
+        }
+    }
+    ring->batch_count = added;
+    bench->batch_count += added;
+}
+
 static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const char *directory, uint32_t number,
     uint32_t draws) {
     memset(bench, 0, sizeof(*bench));
     bench_list_item(SDL_getenv("BTBH_FRAME_BENCH_MODES"), number, "none", bench->mode, sizeof(bench->mode));
+    if (strncmp(bench->mode, "ring", 4) == 0) {
+        bench->ring.enabled = true;
+        bench->ring.table = mode_has(bench->mode, "table");
+        bench->ring.sorted = mode_has(bench->mode, "sorted");
+        bench->ring.arena = mode_has(bench->mode, "arena");
+        bench->ring.runs_off = mode_has(bench->mode, "noruns");
+        bench->ring.one = mode_has(bench->mode, "one");
+    }
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -466,7 +695,7 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     bench->normal = noise_texture(bench->window, 12u, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
     bench->orm = noise_texture(bench->window, 13u, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR);
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE)
-    if (strncmp(mode, "table", 5) == 0) {
+    if (strncmp(mode, "table", 5) == 0 || bench->ring.table) {
         /* v2's macro maps: class k's normal at layer 2k, its ORM at 2k + 1, 512^2 with mips. */
         uint8_t *layers[16];
         for (uint32_t layer = 0u; layer < 16u; ++layer) {
@@ -500,6 +729,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     }
 #endif
     build_frame(bench, draws);
+    if (bench->ring.enabled) {
+        build_ring(bench);
+    }
 }
 
 static BTBHGPUSceneLighting bench_lighting(void) {
@@ -578,20 +810,36 @@ static BTBHGPUScenePost bench_post(void) {
     return post;
 }
 
+static bool bench_cpu_mode;
+
 static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHGPUSceneLighting *lighting,
-    const BTBHGPUScenePost *post) {
+    const BTBHGPUScenePost *post, uint32_t number, int round, bool with_ring) {
     BTBHGPUSceneReport report;
+    const uint32_t batch_count = bench->batch_count - (with_ring ? 0u : bench->ring.batch_count);
+    if (bench->ring.runs_off) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
+    }
+    const uint64_t started = SDL_GetTicksNS();
     const BTBHGPUResult presented = btbh_gpu_window_scene_present_instances(bench->window,
         bench->scene_shaders[0], bench->scene_shaders[1], bench->scene_shaders[2], bench->scene_shaders[3],
         bench->scene_shaders[4], bench->scene_shaders[5], bench->scene_shaders[6], bench->scene_shaders[7],
         bench->scene_shaders[8], bench->scene_shaders[9], bench->scene_shaders[10],
         BENCH_SHADER_FORMAT, BENCH_RENDER_WIDTH, BENCH_RENDER_HEIGHT,
         camera->view_projection, camera->right, camera->up, camera->position, lighting, post,
-        bench->instances, bench->instance_count, bench->instance_count, bench->batches, bench->batch_count,
+        bench->instances, bench->instance_count, bench->instance_count, bench->batches, batch_count,
         90u, 110u, 140u, 255u, &report);
+    const double present_milliseconds = (double)(SDL_GetTicksNS() - started) / 1.0e6;
+    if (bench->ring.runs_off) {
+        (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
+    }
     if (presented != BTBH_GPU_OK) {
         fprintf(stderr, "present: %s\n", report.message);
         exit(1);
+    }
+    if (bench_cpu_mode && round >= 0) {
+        printf("BENCH cpu %u %d ring=%d prepare=%.4f shadow=%.4f geometry=%.4f present=%.4f draws=%u\n", number,
+            round, with_ring ? 1 : 0, report.cpu_prepare_milliseconds, report.cpu_shadow_encode_milliseconds,
+            report.cpu_geometry_encode_milliseconds, present_milliseconds, report.primitive_draw_count);
     }
     /* The canvas submits the frame (and the cost log times it). */
     BTBHGPUCanvasPass pass;
@@ -607,7 +855,11 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
 
 int main(void) {
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
-    (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_COST_LOG", "1", true);
+    const char *cpu = SDL_getenv("BTBH_FRAME_BENCH_CPU");
+    bench_cpu_mode = cpu != NULL && cpu[0] == '1';
+    if (!bench_cpu_mode) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_COST_LOG", "1", true);
+    }
     const BTBHGPUDeviceDescriptor device_descriptor = {
         .backend = BENCH_BACKEND,
         .required_features = BTBH_GPU_REQUIRED_FEATURES,
@@ -635,9 +887,16 @@ int main(void) {
         char directory[1024];
         (void)snprintf(directory, sizeof(directory), "%.*s", (int)length, at);
         open_bench_window(&windows[window_count], device, directory, window_count, draws);
-        printf("BENCH window %u %s mode=%s draws=%u instances=%u triangles=%llu\n", window_count, directory,
-            windows[window_count].mode, windows[window_count].batch_count, windows[window_count].instance_count,
-            (unsigned long long)windows[window_count].triangles);
+        printf("BENCH window %u %s mode=%s draws=%u instances=%u triangles=%llu ring=%u%s\n", window_count,
+            directory, windows[window_count].mode, windows[window_count].batch_count,
+            windows[window_count].instance_count, (unsigned long long)windows[window_count].triangles,
+            windows[window_count].ring.batch_count,
+#if defined(BTBH_GPU_HAS_SHARED_MESH_BUFFERS)
+            ""
+#else
+            windows[window_count].ring.arena ? " (no shared buffers before 0.10.0)" : ""
+#endif
+        );
         window_count += 1u;
         at = end != NULL ? end + 1 : at + length;
     }
@@ -649,7 +908,7 @@ int main(void) {
     /* Pipelines, caches and clocks first. */
     for (uint32_t w = 0u; w < window_count; ++w) {
         for (int frame = 0; frame < 10; ++frame) {
-            run_frame(&windows[w], &camera, &lighting, &post);
+            run_frame(&windows[w], &camera, &lighting, &post, w, -1, frame % 2 == 0);
         }
     }
     uint32_t order_state = 777u;
@@ -667,7 +926,10 @@ int main(void) {
         for (uint32_t position = 0u; position < window_count; ++position) {
             printf("BENCH turn %u %d\n", order[position], round);
             for (int frame = 0; frame < frames; ++frame) {
-                run_frame(&windows[order[position]], &camera, &lighting, &post);
+                /* A ring window alternates: with the ring, then without. */
+                BenchWindow *bench = &windows[order[position]];
+                run_frame(bench, &camera, &lighting, &post, order[position], round,
+                    !bench->ring.enabled || frame % 2 == 0);
             }
         }
     }
