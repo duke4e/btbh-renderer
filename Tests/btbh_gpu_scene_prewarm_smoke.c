@@ -10,10 +10,20 @@
  * (other pipelines), and its FSR 1 frame makes nothing. The refusals run on A. Windows D (cold) and C (prewarmed)
  * repeat the comparison with the radiance cascades on and an omni spot shadow (their pipeline variants).
  *
+ * btbh_gpu_window_scene_prewarm_render_to_target (0.9.0): the same sequence rendered into a target with
+ * btbh_gpu_window_scene_render_to_target (FSR 3 runs there as FSR 1, into a target twice the render size). Window E
+ * runs it cold: its first render and the render the effects appear in make shaders and pipelines. Window F prewarms
+ * for the target with every batch: the call makes what E's renders made, a second call nothing, no render of F
+ * anything, and each of F's images is byte for byte E's. The call leaves F's own frames alone (its scene runtime
+ * isn't made; its first frame still makes its pipelines). Windows G (cold) and H (prewarmed) repeat it with the
+ * radiance cascades and an omni spot shadow. The refusals run on E.
+ *
  * BTBH_SMOKE_BENCH=cold or =prewarm runs only that window's sequence at 1920x1080 (rendered at 960x540) and prints
  * each frame's times, to compare the two in separate processes (a process's first window pays for the driver's
- * caches). BTBH_PREWARM_SMOKE_DUMP and _REFERENCE write and compare window A's frames (two builds). It needs a GPU
- * and the production shaders; with no device it is skipped (77). */
+ * caches); =target-cold or =target-prewarm presents four frames of the window first (its own runtime warm, as a
+ * game's), then renders the sequence into a 960x540 target (rendered at 480x270), with or without the target's
+ * prewarm. BTBH_PREWARM_SMOKE_DUMP and _REFERENCE write and compare window A's frames and window E's images (two
+ * builds). It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
@@ -655,6 +665,80 @@ static FrameCost run_frame(SmokeWindow *smoke, uint32_t frame, const SmokeSettin
     return cost;
 }
 
+/* The frame's scene rendered into `target` (btbh_gpu_window_scene_render_to_target): FSR 3 runs as FSR 1 there. */
+static BTBHGPUResult render_target_frame(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    uint32_t frame,
+    const SmokeSettings *settings,
+    BTBHGPUSceneReport *report
+) {
+    const SmokeCamera camera = smoke_camera(frame);
+    const BTBHGPUSceneLighting lighting = smoke_lighting(settings);
+    const BTBHGPUScenePost post = smoke_post(&camera, frame == 0u ? 1u : 0u, settings);
+    float instances[INSTANCE_COUNT][INSTANCE_FLOATS];
+    smoke_instances(instances, frame);
+    BTBHGPUSceneGeometryBatch batches[ALL_BATCH_COUNT];
+    const uint32_t batch_count = smoke_batches(smoke, frame, batches);
+    return btbh_gpu_window_scene_render_to_target(
+        smoke->window,
+        target,
+        shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+        shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+        shader_paths[8], shader_paths[9], shader_paths[10],
+        SMOKE_SHADER_FORMAT,
+        render_width,
+        render_height,
+        camera.view_projection,
+        camera.right,
+        camera.up,
+        camera.position,
+        &lighting,
+        &post,
+        &instances[0][0],
+        INSTANCE_COUNT,
+        INSTANCE_COUNT,
+        batches,
+        NULL,
+        NULL,
+        batch_count,
+        40u, 60u, 90u, 255u,
+        report
+    );
+}
+
+/* A render into `target` (the call submits its own work), the GPU waited for; its pixels returned when `pixels` is
+   given. present_milliseconds is the call's CPU time. */
+static FrameCost run_target_frame(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    uint32_t frame,
+    const SmokeSettings *settings,
+    uint8_t **pixels
+) {
+    FrameCost cost;
+    memset(&cost, 0, sizeof(cost));
+    const BTBHGPUCreationStats before = creation_stats();
+    const uint64_t started = SDL_GetTicksNS();
+    BTBHGPUSceneReport report;
+    const BTBHGPUResult result = render_target_frame(smoke, target, frame, settings, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "target frame %u: %s\n", frame, report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    cost.present_milliseconds = milliseconds_since(started);
+    cost.report = report;
+    const uint64_t wait_started = SDL_GetTicksNS();
+    assert(SDL_WaitForGPUIdle(smoke->window->device->gpu));
+    cost.gpu_wait_milliseconds = milliseconds_since(wait_started);
+    cost.total_milliseconds = milliseconds_since(started);
+    cost.made = creation_since(&before);
+    if (pixels != NULL) {
+        *pixels = read_texture(smoke->window, target);
+    }
+    return cost;
+}
+
 static SmokeWindow open_window(BTBHGPUDevice *device, const char *title) {
     SmokeWindow smoke;
     memset(&smoke, 0, sizeof(smoke));
@@ -828,11 +912,119 @@ static void print_made(const char *label, const BTBHGPUCreationStats *made, doub
     );
 }
 
+#if defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+/* Prewarms the window's renders into `target` with every batch of the sequence and its settings. */
+static BTBHGPUResult prewarm_target_with(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const SmokeSettings *settings,
+    BTBHGPUSceneReport *report
+) {
+    const SmokeCamera camera = smoke_camera(0u);
+    const BTBHGPUSceneLighting lighting = smoke_lighting(settings);
+    const BTBHGPUScenePost post = smoke_post(&camera, 1u, settings);
+    BTBHGPUSceneGeometryBatch batches[ALL_BATCH_COUNT];
+    const uint32_t batch_count = smoke_batches(smoke, EFFECT_FRAME, batches);
+    assert(batch_count == ALL_BATCH_COUNT);
+    return btbh_gpu_window_scene_prewarm_render_to_target(
+        smoke->window,
+        target,
+        shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+        shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+        shader_paths[8], shader_paths[9], shader_paths[10],
+        SMOKE_SHADER_FORMAT,
+        render_width,
+        render_height,
+        &lighting,
+        &post,
+        batches,
+        batch_count,
+        report
+    );
+}
+
+/* Prewarms for the target and checks that it succeeded; what it made comes back. */
+static BTBHGPUCreationStats prewarm_target(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const SmokeSettings *settings,
+    double *milliseconds
+) {
+    const BTBHGPUCreationStats before = creation_stats();
+    const uint64_t started = SDL_GetTicksNS();
+    BTBHGPUSceneReport report;
+    const BTBHGPUResult result = prewarm_target_with(smoke, target, settings, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "target prewarm: %s\n", report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    if (milliseconds != NULL) {
+        *milliseconds = milliseconds_since(started);
+    }
+    /* The target's size, and what the renders run: FSR 3 runs as FSR 1 into a target bigger than the render. */
+    assert(report.drawable_width == target->width && report.drawable_height == target->height);
+    assert(report.batch_count == ALL_BATCH_COUNT);
+    assert(report.prepared_geometry_count == ALL_BATCH_COUNT);
+    assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1);
+    return creation_since(&before);
+}
+#endif
+
+/* BTBH_SMOKE_BENCH=target-cold or =target-prewarm: four frames of the window, then the sequence into a target. */
+static int run_target_bench(const char *mode) {
+    const bool prewarmed = strcmp(mode, "target-prewarm") == 0;
+#if !defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+    if (prewarmed) {
+        fprintf(stderr, "BTBH_SMOKE_BENCH=target-prewarm needs btbh_gpu_window_scene_prewarm_render_to_target\n");
+        return 1;
+    }
+#endif
+    window_width = 1920u;
+    window_height = 1080u;
+    render_width = 960u;
+    render_height = 540u;
+    BTBHGPUDevice *device = create_device(false);
+    if (device == NULL) {
+        return SMOKE_SKIP;
+    }
+    SmokeWindow smoke = open_window(device, "BTBH target prewarm bench");
+    const SmokeSettings settings = {0};
+    for (uint32_t frame = 0u; frame < 4u; ++frame) {
+        const FrameCost cost = run_frame(&smoke, frame, &settings, NULL);
+        print_frame("window", frame, &cost);
+    }
+    /* The target: half the window's size, rendered at half its own (FSR 1 enlarges it). */
+    render_width = 480u;
+    render_height = 270u;
+    BTBHGPUTextureReport texture_report;
+    BTBHGPUTexture *target = btbh_gpu_window_render_target_create(
+        smoke.window, 960u, 540u, BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+    assert(target != NULL);
+#if defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+    if (prewarmed) {
+        double milliseconds = 0.0;
+        const BTBHGPUCreationStats made = prewarm_target(&smoke, target, &settings, &milliseconds);
+        print_made("target prewarm", &made, milliseconds);
+    }
+#endif
+    for (uint32_t frame = 0u; frame < FRAME_COUNT; ++frame) {
+        const FrameCost cost = run_target_frame(&smoke, target, frame, &settings, NULL);
+        print_frame(mode, frame, &cost);
+    }
+    btbh_gpu_texture_destroy(target);
+    close_window(&smoke);
+    btbh_gpu_device_destroy(device);
+    return 0;
+}
+
 /* BTBH_SMOKE_BENCH: one sequence at 1080p, its frames' times printed. */
 static int run_bench(const char *mode) {
+    if (strcmp(mode, "target-cold") == 0 || strcmp(mode, "target-prewarm") == 0) {
+        return run_target_bench(mode);
+    }
     const bool prewarmed = strcmp(mode, "prewarm") == 0;
     if (!prewarmed && strcmp(mode, "cold") != 0) {
-        fprintf(stderr, "BTBH_SMOKE_BENCH: cold or prewarm\n");
+        fprintf(stderr, "BTBH_SMOKE_BENCH: cold, prewarm, target-cold or target-prewarm\n");
         return 1;
     }
     window_width = 1920u;
@@ -890,6 +1082,33 @@ static void run_sequence(
     }
 }
 
+/* Renders frames [first, first + count) into `target` and keeps their pixels; checks what each made. */
+static void run_target_sequence(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const char *label,
+    const SmokeSettings *settings,
+    uint32_t first,
+    uint32_t count,
+    bool expect_nothing_made,
+    uint8_t **pixels,
+    BTBHGPUCreationStats *made_per_frame
+) {
+    for (uint32_t index = 0u; index < count; ++index) {
+        const uint32_t frame = first + index;
+        const FrameCost cost = run_target_frame(smoke, target, frame, settings, &pixels[index]);
+        print_frame(label, frame, &cost);
+        made_per_frame[index] = cost.made;
+        if (expect_nothing_made) {
+            assert(made_count(&cost.made) == 0u);
+        }
+        assert(cost.report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1);
+        if (settings->radiance_cascades) {
+            assert(cost.report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_LOW);
+        }
+    }
+}
+
 static void assert_same_frames(uint8_t **a, uint8_t **b, uint32_t count, const char *what) {
     const size_t size = (size_t)window_width * window_height * 4u;
     for (uint32_t index = 0u; index < count; ++index) {
@@ -904,24 +1123,24 @@ static void assert_same_frames(uint8_t **a, uint8_t **b, uint32_t count, const c
     }
 }
 
-/* BTBH_PREWARM_SMOKE_DUMP=<dir> writes the cold window's frames (frame-NN.rgba, RGBA8 rows from the top);
-   BTBH_PREWARM_SMOKE_REFERENCE=<dir> compares them with that directory's, which must match to the byte (two builds,
-   two releases). */
-static void dump_or_compare_frames(uint8_t **pixels, uint32_t count) {
+/* BTBH_PREWARM_SMOKE_DUMP=<dir> writes the cold window's frames (<prefix>-NN.rgba, RGBA8 rows from the top: frame-
+   for window A's frames, target-frame- for window E's renders into its target); BTBH_PREWARM_SMOKE_REFERENCE=<dir>
+   compares them with that directory's, which must match to the byte (two builds, two releases). */
+static void dump_or_compare_frames(uint8_t **pixels, uint32_t count, const char *prefix) {
     const char *dump = SDL_getenv("BTBH_PREWARM_SMOKE_DUMP");
     const char *reference = SDL_getenv("BTBH_PREWARM_SMOKE_REFERENCE");
     const size_t size = (size_t)window_width * window_height * 4u;
     for (uint32_t index = 0u; index < count; ++index) {
         char path[1100];
         if (dump != NULL && dump[0] != '\0') {
-            (void)snprintf(path, sizeof(path), "%s/frame-%02u.rgba", dump, index);
+            (void)snprintf(path, sizeof(path), "%s/%s-%02u.rgba", dump, prefix, index);
             FILE *file = fopen(path, "wb");
             assert(file != NULL);
             assert(fwrite(pixels[index], 1u, size, file) == size);
             fclose(file);
         }
         if (reference != NULL && reference[0] != '\0') {
-            (void)snprintf(path, sizeof(path), "%s/frame-%02u.rgba", reference, index);
+            (void)snprintf(path, sizeof(path), "%s/%s-%02u.rgba", reference, prefix, index);
             FILE *file = fopen(path, "rb");
             assert(file != NULL);
             uint8_t *expected = malloc(size);
@@ -932,7 +1151,7 @@ static void dump_or_compare_frames(uint8_t **pixels, uint32_t count) {
             for (size_t byte = 0u; byte < size; ++byte) {
                 differing += expected[byte] != pixels[index][byte] ? 1u : 0u;
             }
-            printf("reference frame %2u: %zu bytes differ\n", index, differing);
+            printf("reference %s %2u: %zu bytes differ\n", prefix, index, differing);
             assert(differing == 0u);
             free(expected);
         }
@@ -1052,6 +1271,132 @@ static void check_refusals(SmokeWindow *smoke, SmokeWindow *other) {
 #undef PREWARM_CALL
 }
 
+#if defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+/* The target prewarm's refusals: each leaves the window as it was and makes nothing. */
+static void check_target_refusals(SmokeWindow *smoke, SmokeWindow *other, BTBHGPUTexture *target) {
+    const SmokeSettings plain = {0};
+    const SmokeCamera camera = smoke_camera(0u);
+    const BTBHGPUSceneLighting lighting = smoke_lighting(&plain);
+    const BTBHGPUScenePost post = smoke_post(&camera, 1u, &plain);
+    BTBHGPUSceneGeometryBatch batches[ALL_BATCH_COUNT];
+    const uint32_t batch_count = smoke_batches(smoke, EFFECT_FRAME, batches);
+    BTBHGPUSceneReport report;
+    BTBHGPUSceneRuntime *const window_runtime = smoke->window->scene_runtime;
+    BTBHGPUSceneRuntime *const aside_runtime = smoke->window->aside_scene_runtime;
+    const BTBHGPUCreationStats before = creation_stats();
+#define TARGET_PREWARM_CALL(window_, target_, paths_, format_, width_, height_, lighting_, post_, batches_, count_, \
+    report_) \
+    btbh_gpu_window_scene_prewarm_render_to_target( \
+        (window_), (target_), \
+        (paths_)[0], (paths_)[1], (paths_)[2], (paths_)[3], (paths_)[4], (paths_)[5], \
+        (paths_)[6], (paths_)[7], (paths_)[8], (paths_)[9], (paths_)[10], \
+        (format_), (width_), (height_), (lighting_), (post_), (batches_), (count_), (report_))
+    const char *paths[11];
+    for (int index = 0; index < 11; ++index) {
+        paths[index] = shader_paths[index];
+    }
+    /* No report, no window, no target. */
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, batches, batch_count, NULL) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(NULL, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height, &lighting,
+        &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(report.result == BTBH_GPU_INVALID_ARGUMENT && strstr(report.message, "prewarm") != NULL);
+    assert(TARGET_PREWARM_CALL(smoke->window, NULL, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(strstr(report.message, "render target") != NULL);
+    /* Another window's target, a texture that is no render target, an array. */
+    assert(TARGET_PREWARM_CALL(smoke->window, other->frame, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    {
+        const uint8_t texels[16] = {255u, 255u, 255u, 255u, 255u, 255u, 255u, 255u,
+            255u, 255u, 255u, 255u, 255u, 255u, 255u, 255u};
+        BTBHGPUTextureReport texture_report;
+        BTBHGPUTexture *plain_texture = btbh_gpu_window_texture_create_rgba8(smoke->window, texels, 2u, 2u,
+            BTBH_GPU_TEXTURE_FILTER_LINEAR, BTBH_GPU_TEXTURE_WRAP_REPEAT, &texture_report);
+        assert(plain_texture != NULL);
+        assert(TARGET_PREWARM_CALL(smoke->window, plain_texture, paths, SMOKE_SHADER_FORMAT, render_width,
+            render_height, &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        btbh_gpu_texture_destroy(plain_texture);
+        const uint8_t *layers[2] = {texels, texels};
+        BTBHGPUTexture *array = btbh_gpu_window_texture_array_create_rgba8_ex(smoke->window, layers, 2u, 2u, 2u, 0u,
+            BTBH_GPU_TEXTURE_FILTER_LINEAR, BTBH_GPU_TEXTURE_WRAP_REPEAT, BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR,
+            &texture_report);
+        assert(array != NULL);
+        assert(TARGET_PREWARM_CALL(smoke->window, array, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+            &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        btbh_gpu_texture_destroy(array);
+    }
+    /* Each shader path NULL in turn; the format, a size, the lighting, the post, the batches. */
+    for (int missing = 0; missing < 11; ++missing) {
+        const char *holes[11];
+        for (int index = 0; index < 11; ++index) {
+            holes[index] = index == missing ? NULL : shader_paths[index];
+        }
+        assert(TARGET_PREWARM_CALL(smoke->window, target, holes, SMOKE_SHADER_FORMAT, render_width, render_height,
+            &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    }
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, BTBH_GPU_SHADER_FORMAT_INVALID, render_width,
+        render_height, &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, 0u, render_height, &lighting,
+        &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, 0u, &lighting,
+        &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height, NULL,
+        &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, NULL, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    BTBHGPUScenePost bad_post = post;
+    bad_post.exposure = -1.0f;
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &bad_post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, NULL, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, batches, 0u, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    BTBHGPUSceneGeometryBatch bad[ALL_BATCH_COUNT];
+    memcpy(bad, batches, sizeof(bad));
+    bad[0].flags = 0x80u;
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, bad, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    memcpy(bad, batches, sizeof(bad));
+    bad[1].custom_mesh = other->cube;
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, bad, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    {
+        const BTBHGPUCreationStats made = creation_since(&before);
+        assert(made_count(&made) == 0u);
+        assert(smoke->window->scene_runtime == window_runtime);
+        assert(smoke->window->aside_scene_runtime == aside_runtime);
+    }
+    /* While a scene waits for its canvas: refused, and the scene still copies. */
+    BTBHGPUSceneReport present_report;
+    assert(present_frame(smoke, EFFECT_FRAME, &plain, &present_report) == BTBH_GPU_OK);
+    assert(TARGET_PREWARM_CALL(smoke->window, target, paths, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, batches, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(strstr(report.message, "canvas") != NULL);
+    BTBHGPUTextureReport copied;
+    assert(btbh_gpu_window_copy_pending_scene_texture(smoke->window, smoke->frame, &copied) == BTBH_GPU_OK);
+    /* A shader that can't be loaded, for a pipeline the target's runtime lacks (front faces culled): the present's
+       error, with the path; the window's runtime is put back. */
+    char missing_vertex[1100];
+    (void)snprintf(missing_vertex, sizeof(missing_vertex), "%s/missing_model.vert%s",
+        BTBH_GPU_SMOKE_SHADER_DIR, SMOKE_SHADER_EXTENSION);
+    const char *broken[11];
+    for (int index = 0; index < 11; ++index) {
+        broken[index] = index == 0 ? missing_vertex : shader_paths[index];
+    }
+    memcpy(bad, batches, sizeof(bad));
+    bad[0].cull_mode = BTBH_GPU_SCENE_CULL_FRONT;
+    BTBHGPUSceneRuntime *const runtime_before = smoke->window->scene_runtime;
+    assert(TARGET_PREWARM_CALL(smoke->window, target, broken, SMOKE_SHADER_FORMAT, render_width, render_height,
+        &lighting, &post, bad, batch_count, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    assert(strstr(report.message, "missing_model.vert") != NULL);
+    assert(smoke->window->scene_runtime == runtime_before);
+#undef TARGET_PREWARM_CALL
+    puts("target prewarm refusals: each argument, a scene waiting for its canvas, a missing shader");
+}
+#endif
+
 int main(void) {
     if (!load_shader_paths()) {
         return SMOKE_SKIP;
@@ -1075,7 +1420,7 @@ int main(void) {
     const SmokeSettings plain = {0};
     SmokeWindow a = open_window(device, "BTBH prewarm smoke A (cold)");
     run_sequence(&a, "A cold", &plain, 0u, FRAME_COUNT, false, cold, cold_made);
-    dump_or_compare_frames(cold, FRAME_COUNT);
+    dump_or_compare_frames(cold, FRAME_COUNT, "frame");
     for (uint32_t frame = 0u; frame < FRAME_COUNT; ++frame) {
         const bool makes = frame == 0u || frame == EFFECT_FRAME;
         assert((made_count(&cold_made[frame]) > 0u) == makes);
@@ -1150,6 +1495,57 @@ int main(void) {
     close_window(&a);
     close_window(&b);
 
+    /* E, cold, renders the sequence into a target (twice the render size: FSR 1): its first render and the effects'
+       first make shaders and pipelines; the others none. */
+    BTBHGPUTextureReport target_report;
+    SmokeWindow e = open_window(device, "BTBH prewarm smoke E (target, cold)");
+    BTBHGPUTexture *e_target = btbh_gpu_window_render_target_create(
+        e.window, window_width, window_height, BTBH_GPU_TEXTURE_FILTER_LINEAR, &target_report);
+    assert(e_target != NULL);
+    run_target_sequence(&e, e_target, "E target cold", &plain, 0u, FRAME_COUNT, false, cold, cold_made);
+    dump_or_compare_frames(cold, FRAME_COUNT, "target-frame");
+    for (uint32_t frame = 0u; frame < FRAME_COUNT; ++frame) {
+        const bool makes = frame == 0u || frame == EFFECT_FRAME;
+        assert((made_count(&cold_made[frame]) > 0u) == makes);
+    }
+#if defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+    /* F, prewarmed for its target with every batch: no render makes anything, each is E's to the byte, and the
+       window's own frames are left alone. */
+    SmokeWindow f = open_window(device, "BTBH prewarm smoke F (target, prewarmed)");
+    BTBHGPUTexture *f_target = btbh_gpu_window_render_target_create(
+        f.window, window_width, window_height, BTBH_GPU_TEXTURE_FILTER_LINEAR, &target_report);
+    assert(f_target != NULL);
+    assert(f.window->scene_runtime == NULL && f.window->aside_scene_runtime == NULL);
+    const BTBHGPUCreationStats target_made = prewarm_target(&f, f_target, &plain, &prewarm_milliseconds);
+    print_made("F target prewarm", &target_made, prewarm_milliseconds);
+    assert(f.window->scene_runtime == NULL && f.window->aside_scene_runtime != NULL);
+    assert(target_made.shaders == cold_made[0].shaders + cold_made[EFFECT_FRAME].shaders);
+    assert(target_made.graphics_pipelines ==
+           cold_made[0].graphics_pipelines + cold_made[EFFECT_FRAME].graphics_pipelines);
+    assert(target_made.compute_pipelines == cold_made[0].compute_pipelines + cold_made[EFFECT_FRAME].compute_pipelines);
+    {
+        const BTBHGPUCreationStats again = prewarm_target(&f, f_target, &plain, NULL);
+        assert(made_count(&again) == 0u);
+    }
+    run_target_sequence(&f, f_target, "F target prewarmed", &plain, 0u, FRAME_COUNT, true, warm, warm_made);
+    assert_same_frames(cold, warm, FRAME_COUNT, "E and F (targets)");
+    free_frames(warm, FRAME_COUNT);
+    {
+        /* The window's first frame still makes its own pipelines (the target's runtime is apart). */
+        uint8_t *pixels = NULL;
+        const FrameCost cost = run_frame(&f, 0u, &plain, &pixels);
+        print_frame("F window", 0u, &cost);
+        assert(made_count(&cost.made) > 0u);
+        free(pixels);
+    }
+    check_target_refusals(&e, &f, e_target);
+    btbh_gpu_texture_destroy(f_target);
+    close_window(&f);
+#endif
+    free_frames(cold, FRAME_COUNT);
+    btbh_gpu_texture_destroy(e_target);
+    close_window(&e);
+
     /* C prewarmed and D cold, with the radiance cascades and an omni spot shadow (their model and shadow variants,
        the cascades' pipelines), every batch drawn from the first frame. */
     const SmokeSettings lit = {.radiance_cascades = true, .omni_spot_shadow = true};
@@ -1172,6 +1568,39 @@ int main(void) {
     free_frames(warm, LIT_FRAMES);
     close_window(&c);
     close_window(&d);
+
+#if defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
+    /* H prewarmed for its target and G cold, with the radiance cascades and an omni spot shadow. */
+    {
+        SmokeWindow g = open_window(device, "BTBH prewarm smoke G (target, cold, cascades)");
+        BTBHGPUTexture *g_target = btbh_gpu_window_render_target_create(
+            g.window, window_width, window_height, BTBH_GPU_TEXTURE_FILTER_LINEAR, &target_report);
+        assert(g_target != NULL);
+        run_target_sequence(&g, g_target, "G target cold", &lit, EFFECT_FRAME, LIT_FRAMES, false, cold, cold_made);
+        assert(made_count(&cold_made[0]) > 0u);
+        for (uint32_t index = 1u; index < LIT_FRAMES; ++index) {
+            assert(made_count(&cold_made[index]) == 0u);
+        }
+        SmokeWindow h = open_window(device, "BTBH prewarm smoke H (target, prewarmed, cascades)");
+        BTBHGPUTexture *h_target = btbh_gpu_window_render_target_create(
+            h.window, window_width, window_height, BTBH_GPU_TEXTURE_FILTER_LINEAR, &target_report);
+        assert(h_target != NULL);
+        const BTBHGPUCreationStats lit_target_made = prewarm_target(&h, h_target, &lit, &prewarm_milliseconds);
+        print_made("H target prewarm", &lit_target_made, prewarm_milliseconds);
+        assert(lit_target_made.shaders == cold_made[0].shaders);
+        assert(lit_target_made.graphics_pipelines == cold_made[0].graphics_pipelines);
+        assert(lit_target_made.compute_pipelines == cold_made[0].compute_pipelines);
+        run_target_sequence(&h, h_target, "H target prewarmed", &lit, EFFECT_FRAME, LIT_FRAMES, true, warm,
+            warm_made);
+        assert_same_frames(cold, warm, LIT_FRAMES, "G and H (targets)");
+        free_frames(cold, LIT_FRAMES);
+        free_frames(warm, LIT_FRAMES);
+        btbh_gpu_texture_destroy(h_target);
+        btbh_gpu_texture_destroy(g_target);
+        close_window(&h);
+        close_window(&g);
+    }
+#endif
 
     btbh_gpu_device_destroy(device);
     puts("btbh_gpu_scene_prewarm_smoke: passed");
