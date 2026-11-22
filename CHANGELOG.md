@@ -4,6 +4,95 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] (0.10.0)
+
+RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch that differs from the one drawn before
+it only in its mesh and instance range now binds and pushes nothing new (same-material runs), the frame's lighting is
+filled once a pass instead of once a batch, and a creation flag puts custom meshes in the models' shared geometry
+buffers, so that neighbouring draws share their vertex and index buffers. Every game gains where its batches run by
+material, without changing anything; nothing it draws changes. No struct grows and no shader changes.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (25/25 with the new runs smoke, 71 shaders), the Swift
+build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.9.0's candidate (`d077b5e6`), each smoke's
+images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ, with nothing set, with the
+smokes' custom meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`) and with runs turned off
+(`BTBH_GPU_SCENE_RUNS=0`). macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The
+Bullet Hell v2 hasn't measured it at its map edge yet.
+
+### Added
+- **`BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`** and **`btbh_gpu_window_custom_mesh_create_ex`** (the plain create's
+  arguments and a `flags` word; 0 is the plain create, an unknown bit is refused): the mesh's vertices and indices go
+  into the window's shared geometry buffers with the loaded models' primitives, instead of two buffers of its own.
+  For meshes made once and kept: v2's kit, landmark and set-piece meshes.
+  - `btbh_gpu_custom_mesh_update` writes in place and must fit the mesh's ranges: at most the vertex and index counts
+    it was created with (none for a mesh made without indices). A bigger update fails with
+    `BTBH_GPU_INVALID_ARGUMENT` and leaves the mesh as it was. An update shows in every frame submitted after it,
+    a scene already presented but not yet submitted by the canvas included (a mesh with buffers of its own keeps the
+    old data for that frame).
+  - `btbh_gpu_custom_mesh_destroy` leaves a hole that is never reused. A shared buffer goes when every mesh and model
+    in it is destroyed, or with the window. Meshes that change size or are remade (terrain chunks, per-stage meshes)
+    should keep buffers of their own.
+  - `BTBH_GPU_HAS_SHARED_MESH_BUFFERS`.
+- `BTBH_GPU_SCENE_RUNS=0`, a measurement tool: every batch binds and pushes its whole state again.
+
+### Changed
+- **Same-material runs** (no API). In every pass that draws batches (opaque, transparent, refraction, the shadow maps,
+  the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but `kind`,
+  `model`, `custom_mesh`, `material_slot`, `first_instance` and `instance_count` (byte for byte, padding aside)
+  binds and pushes nothing but its vertex and index buffers before it draws: no uniforms, stencil reference,
+  pipeline, storage buffers or samplers. A model's second and later primitives do the same. A skinned geometry never
+  starts or continues a run.
+- **The frame's lighting once a pass** (no API): the frame's part of the uniform blocks (lights, lamps, point lights,
+  the sky's harmonics, clouds, shadow matrices) is filled once a pass and each batch writes its own fields over it.
+  Every push carries the bytes it carried before.
+- The geometry passes bind a vertex buffer only when it changes.
+- The header says, beside `btbh_gpu_window_scene_present_instances`, how a host gains most: within each instance
+  buffer, batches grouped by static vertex shader first (those with a world-detail table together, the others
+  together: each switch changes the pipeline, and SDL then writes every descriptor set again), then by material, mesh
+  after mesh; coplanar overlays after what they lie on, grouped the same way; the meshes drawn so made with the flag.
+- Tests: `btbh_gpu_scene_order_test` checks the run key byte by byte; `btbh_gpu_scene_runs_smoke` (new) draws a
+  street of kit pieces through every pass with and without shared meshes and runs, and the shared meshes' rules; the
+  smokes take `BTBH_SMOKE_SHARED_MESHES=1`; the frame bench gains v2's ring (`ring` modes) and a CPU mode
+  (`BTBH_FRAME_BENCH_CPU=1`, summarised by `tools/frame_bench_cpu.py`). Three Swift source-text checks follow the
+  moved uniform code. `tools/check.ps1` skips the new smoke with the other GPU smokes.
+
+### Measured
+Windows, RTX 3070 Ti, Vulkan, without a debug device: the frame bench's new CPU mode, a frame like v2's map edge (943
+draws of one material, then v2's ring as it measured it: 257 batches over distinct meshes from 8 chunks' persistent
+instance buffers, walls with the world-detail table and glass without). The marginal geometry encode
+(`cpu_geometry_encode_milliseconds`) a ring batch, µs, median of six alternating pairs of processes (one to five
+`v2-game` processes ran beside them; contended frames dropped):
+
+| Ring batches | 0.9.0 | 0.10.0 |
+| --- | --- | --- |
+| World detail on, wall and glass interleaved, distinct meshes (v2's "as it is", 1.31 µs on its machine) | 2.19 | 2.01 |
+| the same, one mesh for every batch (v2's "one shared mesh", 0.64) | 1.49 | 1.25 |
+| the same, the meshes in the shared buffers | – | 1.38 |
+| World detail on, each chunk's walls then its glass, distinct meshes | 1.19 | 0.52 |
+| the same, in the shared buffers | – | **0.14** |
+| World detail off, interleaved, distinct meshes (v2: 0.76) | 1.45 | 1.26 |
+| World detail off, sorted, in the shared buffers | – | **0.11** |
+
+- The 943 batches before the ring: 0.58 → 0.14 µs a batch (runs; 0.40 with runs off).
+- Runs take the sorted, shared ring from 0.45 to 0.14 µs a batch; the shared buffers from 0.52 to 0.14 (sorted) and
+  2.01 to 1.38 (interleaved). The table/non-table interleave costs 1.24 µs a batch on top (a pipeline switch, about
+  0.8 µs, on a material change): sorting by vertex shader removes it.
+- 0.9.0 here costs 1.5–2 times v2's figures; scaled, the sorted shared ring would be about 0.1 µs a batch on v2's
+  machine, some 0.02–0.03 ms for its 257 batches against the 0.5 ms it measured.
+- Prepare (0.03 µs) and shadow encode (0.01 µs) a ring batch are unchanged. The GPU's time wasn't measurable beside
+  the `v2-game` processes; the GPU gets the same draws and bytes.
+
+### Upgrading
+- Nothing to set: every game gets the runs and the once-a-pass lighting, and draws as before.
+- Rust hosts with bindgen regenerate the bindings for `btbh_gpu_window_custom_mesh_create_ex` and the flag; no struct
+  changed.
+- To gain (v2):
+  - Make the kit's, the landmarks' and the set pieces' meshes with `btbh_gpu_window_custom_mesh_create_ex(...,
+    BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, ...)`; leave per-stage meshes as they are.
+  - Within each chunk, submit the batches with a table first and those without after them (overlays after their
+    ground), each group by material, mesh after mesh. The ring's chunks can share one instance buffer, with offsets.
+- Swift: nothing changes; a `sharedBuffers:` option can follow when Be The Bullet Hell (v1) asks.
+
 ## [Unreleased]
 
 Four opt-in additions requested by Be The Bullet Hell v2: a batch that is no source of the radiance cascades' light

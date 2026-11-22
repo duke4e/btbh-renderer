@@ -287,6 +287,179 @@ where that goes (open question 1); the shared buffers remove the tracking scans 
 - **A many-meshes case**: 600 distinct small meshes, so SDL's tracking list is as long as v2's.
 - **v2:** the map edge, with and without the ring, before and after.
 
+## Implementation notes (phase 1, 2026-11-22)
+
+Phase 1 is implemented for 0.10.0 on `feature/0.10.0-cheaper-draws`, cut from 0.9.0's candidate (`d077b5e6`) with
+the drafts of RFCs 0010–0012:
+- the header: `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`, `btbh_gpu_window_custom_mesh_create_ex`,
+  `BTBH_GPU_HAS_SHARED_MESH_BUFFERS`, and a note on runs and the order a host submits in, beside
+  `btbh_gpu_window_scene_present_instances`;
+- `src/gpu/btbh_gpu_custom_mesh.c` (shared meshes), `src/gpu/btbh_gpu_model.c` (the arena's upload, copy and release
+  shared with the custom meshes), `src/gpu/btbh_gpu_internal.h`;
+- `src/gpu/btbh_gpu_scene.c`: the run key and its skips in every pass that encodes batches, the frame's uniforms once
+  a pass, the shared meshes' ranges in the draws;
+- the tests: `btbh_gpu_scene_order_test` (the key), `btbh_gpu_scene_runs_smoke` (new), `BTBH_SMOKE_SHARED_MESHES` in
+  the smokes, the frame bench's ring and `tools/frame_bench_cpu.py`.
+
+No struct of the public header grows and no shader changes. The version macros stay at 0.8.0's, as on 0.9.0's
+candidate, until the release commit.
+
+**The shared meshes' rules** (the text said less):
+- `btbh_gpu_window_custom_mesh_create` is `_ex` with no flags and unchanged. An unknown bit is refused
+  (`BTBH_GPU_INVALID_ARGUMENT`, "Unknown GPU custom mesh flags"); the data is checked as before.
+- **Placement.** As a model primitive's: the vertices (96-byte aligned, so `vertex_base` counts vertices) and the
+  indices (4-byte aligned) are appended to the arena's open block, the last one; a range that doesn't fit opens a new
+  block, and one bigger than a block (64 MiB, 32 MiB) gets a block of its own size. Each range is one copy submission,
+  as for the primitives. A mesh without indices takes no index range.
+- **Updates** write in place, vertices and indices in one submission, without cycling (the block's other ranges are
+  other meshes' and models'). They must fit the ranges the mesh was created with: at most its vertex count and its
+  index count, none for a mesh made without indices. A bigger one is refused, naming both counts, and leaves the mesh
+  as it was. A smaller one draws its own counts; a later update may grow back to the created size. Because they
+  don't cycle, an update shows in every frame submitted after it, a scene already presented but not yet submitted by
+  its canvas included; a mesh with buffers of its own keeps the old data for that frame (SDL cycles its buffer).
+- **Destroy** gives the ranges back to their blocks. The holes are never reused (the arena only appends to its last
+  block); a block's buffer is released with its last range, a mesh's or a model primitive's, or at window close. A
+  mesh that outlives its window can be destroyed after it; an update of it is refused.
+- Decided from v2's answer 3: the strict rules cost v2 nothing (its flagged meshes are never updated) and keep a
+  dynamic mesh from pinning blocks by accident. Per-stage meshes stay without the flag.
+
+**The run key** (as drafted, more exactly):
+- `btbh_gpu_scene_batch_continues_run(previous, batch)`: true when 53 of the batch's 59 fields are equal, byte for
+  byte, each compared on its own; the six that may differ are `kind`, `model`, `custom_mesh`, `material_slot`,
+  `first_instance` and `instance_count`. The animation fields are in the key (the text didn't say). Padding (13 bytes
+  on 64-bit) isn't compared, so a host that doesn't zero it (Rust's struct literals, Swift) still runs. Floats compare
+  by their bits: −0 and +0 break a run (conservatively), the same NaN doesn't. Pointers compare as pointers: two
+  world details or tables with equal contents but different addresses break a run.
+- Why it is enough: everything a pass binds or pushes for a batch, apart from its vertex and index buffers and the
+  draw, is a function of those fields (and of what they point at, which a present doesn't change: the dig mask comes
+  from `dug_by`, the pipeline from the material and the stencil fields), of the pass and of whether the geometry is
+  skinned. The passes require both geometries unskinned: a skinned one never starts or continues a run.
+- "The batch before" is the last geometry the pass drew. A batch the pass skips (invisible, the other phase, not a
+  caster of this map, not a source) changes nothing. Each pass starts without one: the opaque, transparent and
+  refraction passes, every shadow map and omni face, the cascades' sources.
+- A geometry that continues its run binds and pushes nothing but its vertex and index buffers, each only when it
+  changed, and draws. In the geometry passes that skips the vertex and fragment uniforms, the extension block, the
+  table's block, the stencil reference, the pipeline's lookup and bind, the storage buffers and the samplers' array
+  and bind; in the shadow passes the slow path's uniforms, the pipeline, the dig mask and the storage buffers; among
+  the cascades' sources the uniforms, the storage buffers, the dig mask and the samplers.
+- A model's second and later primitives continue their batch's run (unskinned).
+- The fast shadow path binds the instances as a vertex stream at `first_instance`, so every range still binds its
+  stream. Binding it at 0 and passing `first_instance` to the draw would remove that, but changes every game's fast
+  shadow draws, and Metal's handling of a base instance there is unverified: not done. v2's ring casts no sun shadow.
+- `BTBH_GPU_SCENE_RUNS=0` (a measurement tool, read once a present) turns runs off. The package-internal telemetry
+  counts the draws that continued a run per kind of pass (`geometry_run_draw_count`, `shadow_run_draw_count`,
+  `rc_source_run_draw_count`); the pipeline bind and skip counts mean what they meant.
+
+**The frame's uniforms once a pass** (phase 1c, as drafted): at the start of each geometry pass the frame's part of
+both uniform blocks is filled; each batch writes its own fields over it (the material, the bone offsets, the motion
+flag, the reactive scale, the detail) before it pushes them, so every push carries the bytes it carried before. The
+shadow passes' slow uniforms and the cascades' sources' vertex uniforms do the same. The geometry passes bind a vertex
+buffer only when it changes.
+
+**The table/non-table interleave** (Decisions):
+- The table's block didn't break with the interleave: 0.8.0's `pushed_table` already outlived a batch without a table
+  (such a batch never touches slot 2), so v2's walls pushed their table once a table, not once a switch. What a switch
+  costs is the pipeline: SDL then writes all four descriptor sets at the next draw.
+- Runs can't be kept across the switch: on either side of it the batches differ in their material (the table, and in
+  v2 the textures), so they bind and push anew whatever the renderer does. Drawing a batch without a table through the
+  table's vertex shader would avoid the pipeline switch, but costs the sixth attribute on the GPU (RFC 0009's
+  follow-up) and isn't guaranteed to rasterise to the same bits on every driver; the renderer reordering the batches
+  would change the order the host chose (overlays, depth ties). Neither is done.
+- So phase 1 documents the order instead (the header, beside the present): within each instance buffer, by static
+  vertex shader first (table batches together, the others together), then by material, mesh after mesh, coplanar
+  overlays after what they lie on and grouped the same way; and measures the interleave both ways (below).
+
+**Tests**
+- **Native** (`btbh_gpu_scene_order_test`): the flag's value and macro; the run key with every byte of a batch flipped
+  in turn, both ways round: the bytes of the six fields and the padding (45 of 280) keep a run, the other 235 break
+  it; the fields listed cover the batch, so a field appended later fails the test until it is listed; the six changed
+  at once keep it and one more field breaks it; −0 against +0 breaks it, the same NaN doesn't.
+- **GPU, `btbh_gpu_scene_runs_smoke`** (new, the 25th test):
+  - A street of kit pieces: ten distinct meshes (one without indices) in two chunks with a persistent instance buffer
+    each, the first chunk's walls (a table) and glass (none) interleaved piece by piece, the second's sorted; a model
+    of two primitives on two nodes in two batches around a skinned model; runs of emissive and unlit pieces, coplanar
+    LESS_EQUAL decals, a stencil writer and two skippers, three boxes the middle one KEEP_ORDER, transparent pieces.
+    Through no shadow, the sun's soft shadow, the sun's and the omni shadow, the cascades, the front-to-back sort.
+  - Each scene with the meshes in buffers of their own and in the shared buffers, runs on and off: the same bytes,
+    each twice. Presented to the window, the telemetry counts 24 (25 sorted) geometry draws that continued a run, 20
+    in the sun's map and 140 over the sun's and the omni's faces, 3 among the cascades' sources, and none with runs
+    off.
+  - The shared meshes: unknown flags (two), invalid data (three) and no report refused; two meshes and then a model
+    share one vertex and one index block (bases 0, 24 and 30); updates of 25 vertices, of 42 indices and with indices
+    for a mesh made without refused, the mesh unchanged and drawing so; an update to three faces and back to six draws
+    as a mesh of its own made with that data; the blocks' buffers stay after the meshes are destroyed and go with the
+    model; a mesh outlives its window, its update is refused and it is destroyed after.
+- `BTBH_SMOKE_SHARED_MESHES=1` (`Tests/btbh_gpu_smoke_meshes.h`): the flags, prewarm, scene-target, SDF terrain and
+  world-detail smokes make their custom meshes (those they never update) in the shared buffers.
+
+**Byte for byte against 0.9.0** (`d077b5e6`, the candidate a game is testing):
+- A build of it with this branch's smokes and bench overlaid (they build against 0.9.0's header, without the shared
+  meshes, the run counts and the run switch) wrote every smoke's images; this build compared them, decoded, pixel by
+  pixel: the flags smoke's 25 images (640,000 pixels), the prewarm smoke's 16 window frames and 16 target renders
+  (1,843,200), the world detail smoke's 56 (1,245,184), `btbh_gpu_scene_target_smoke`'s 9 (90,368),
+  `btbh_gpu_font_smoke`'s 25 (6,549,120), the SDF terrain smoke's saved frame (25,600) and the runs smoke's gallery of
+  5 (184,320; each of its 20 renders compared): **153 images, 10,577,792 pixels, 0 differ**
+  - with nothing set (runs on, as every game gets them);
+  - with `BTBH_SMOKE_SHARED_MESHES=1` (every smoke's custom meshes in the shared buffers);
+  - with `BTBH_GPU_SCENE_RUNS=0`.
+- Every smoke passed its own checks in each run. `check.ps1`: 25/25, 71 shaders, the headers on their own. Swift: the
+  build and the full suite, 301 tests, 2 skipped, 0 failures; three of its source-text checks follow the moved uniform
+  code (same facts, new indentation).
+
+**Measured** (Windows, RTX 3070 Ti, Vulkan, no debug device; the frame bench's CPU mode, `tools/frame_bench_cpu.py`)
+- **The frame.** Like v2's map edge: 943 draws of the bench's 32 kit pieces (one material, transient instances, the
+  table with world detail on) and a ground, then the ring: 257 batches, a ground and 128 building pieces, each a wall
+  (the table with world detail on) and its glass (no table), each one a distinct custom mesh, in 8 chunks with a
+  persistent instance buffer each, no sun shadow. Every frame of a configuration alternates with the ring and without
+  it; a pair's difference over 257 is the marginal cost a ring batch. Ten configurations as hidden windows in one
+  process, in shuffled turns of 8 frames, 12 rounds; six pairs of processes, 0.9.0's candidate's core (with this
+  bench overlaid) and this branch's alternating, each pair starting with the other build. A frame over 1.5 times its
+  configuration's 25th percentile drops its pair (another session ran one to five `v2-game` processes on the machine
+  throughout); 1.25 and 2.5 give the same picture within 0.1–0.4 µs.
+- **Geometry encode a ring batch** (`cpu_geometry_encode_milliseconds`), µs, median of the pairs [25th, 75th
+  percentile]:
+
+  | Ring batches | 0.9.0 | 0.10.0 |
+  | --- | --- | --- |
+  | World detail on, interleaved (a wall, its glass), distinct meshes: v2's "as it is" | 2.19 [1.94, 2.58] | 2.01 [1.68, 2.42] |
+  | the same, one mesh for every ring batch: v2's "one shared mesh" | 1.49 [1.31, 1.77] | 1.25 [1.18, 1.57] |
+  | the same, distinct meshes in the shared buffers | 2.18 [1.94, 2.51]¹ | 1.38 [1.18, 1.98] |
+  | World detail on, sorted (a chunk's walls, then its glass), distinct meshes | 1.19 [1.01, 1.50] | 0.52 [0.44, 0.68] |
+  | the same, in the shared buffers | 1.13 [0.99, 1.43]¹ | **0.14 [0.12, 0.20]** |
+  | the same, runs off (`BTBH_GPU_SCENE_RUNS=0`) | 1.16 [0.96, 1.44]¹ | 0.45 [0.31, 0.58] |
+  | World detail off, interleaved, distinct meshes: v2's "as it is" | 1.45 [1.22, 1.69] | 1.26 [1.06, 1.51] |
+  | the same, one mesh for every ring batch | 0.81 [0.66, 0.98] | 0.58 [0.52, 0.68] |
+  | the same, in the shared buffers | 1.46 [1.24, 1.73]¹ | 0.59 [0.53, 0.67] |
+  | World detail off, sorted, in the shared buffers | 1.08 [0.96, 1.38]¹ | **0.11 [0.09, 0.15]** |
+
+  ¹ 0.9.0 has no flag: these windows draw the distinct meshes with buffers of their own (and runs off means nothing),
+  so they repeat the row above them and show the noise.
+- **The frame without the ring** (944 batches of one material): 0.549 → 0.136 ms, **0.58 → 0.14 µs a batch**; with
+  runs off 0.380 ms (0.40 µs). Every game's batches that run by material gain so, without changing anything.
+- **What each part gives** (0.10.0, world detail on): runs 0.45 → 0.14 µs a ring batch (sorted, shared); the shared
+  buffers 0.52 → 0.14 (sorted) and 2.01 → 1.38 (interleaved); the frame's uniforms once a pass and the vertex buffer
+  bound when it changes about 0.18 µs a batch that doesn't run (the frame without the ring, runs off, against 0.9.0).
+- **The interleave.** Sorting by vertex shader takes the shared ring from 1.38 to 0.14 µs a batch with world detail
+  on (0.9.0: 2.19 to 1.19). Without world detail, where the wall and the glass alternate only their materials, 0.59
+  against 0.11: the pipeline switch costs about 0.8 µs a batch on top of a material change here, more than v2's
+  0.25–0.55 µs. The renderer can't take it away without changing what the GPU runs, so the host's order does
+  (Decisions, "Implementation notes").
+- **Against v2's figures.** 0.9.0 here costs 1.5–2 times v2's numbers (2.19 and 1.45 against 1.31 and 0.76 µs; one
+  mesh 1.49 and 0.81 against 0.64 and 0.39): another frame, another load. The order agrees. Scaled to v2's machine,
+  the sorted shared ring would cost about 0.1 µs a batch, some 0.02–0.03 ms for the 257 batches against the 0.5 ms v2
+  measured; v2's own measurement will tell.
+- **Prepare and shadow encode** a ring batch: 0.03 and 0.01 µs in both builds (the ring casts no sun shadow); the
+  present call's wall clock follows the geometry encode (sorted, shared, world detail on: 1.17 → 0.20 µs).
+- **Contended.** A first pair run beside four `v2-game` processes measured 1.5–3 times these, in the same order (for
+  example 2.64 → 0.31 µs sorted and shared with world detail on).
+- **The GPU's time** isn't measured: beside three to five `v2-game` processes the cost log's opaque pass ran at
+  2.5–2.8 ms instead of about 1.1, and an in-process comparison of runs and shared kit pieces on and off (the bench's
+  `table+noruns`, `table+arena`) kept 4 of 64 rounds, with intervals of ±0.3 ms. The GPU gets the same draws and the
+  same bytes (the identity runs), so none is expected.
+
+- **Not done:** Metal (`check.sh` on the Mac), the Vulkan validation layers (not installed; SDL's debug device ran the
+  smokes), the Deck, v2's own frames at the map edge.
+
 ## Compatibility
 
 - **Versioning.** Phase 1 is minor (0.10.0) for the new function and flag; its encode changes are a patch-level
