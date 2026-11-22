@@ -718,7 +718,8 @@ The API is the one above. Where the implementation differs from the text, or mea
 it is written down here. The version macros stay at 0.6.0 until the release commit (0.7.0's included).
 
 **The index.** As drafted, rounded and clamped to 0..255 in the vertex shader (`btbh_world_detail_table_index` in
-`production_world_detail.hlsli`, which the static vertex shader now includes). Not in the text:
+`production_world_detail.hlsli`). Since the follow-up below that is a table batch's own static vertex shader,
+`production_model_detail_table.vert`, and the index travels in `animated_model`, not `TEXCOORD11`. Not in the text:
 - the rounding is HLSL's `round`, to even on a tie (2.5 is 2), as the seed's;
 - below 0 is 0 (entry 0), as the clamp says; NaN is 255 (none), since neither comparison holds. The C copy
   (`btbh_gpu_world_detail_table_index`) matches, and the native test checks both ends.
@@ -747,12 +748,13 @@ stay (it draws nothing), as may a table without `map_layers` beside a detail wit
 `world_detail_mode.x` (an `if`, not a ternary: both functions write `inout` arguments). The entry is read at
 `min(index, 7)`; both layers are sampled on every pixel and each change is chosen by a select. The table function
 repeats the single path's arithmetic in the same order, so one entry draws to the bit as a packed detail with its
-floats (tested, not assumed: no FMA contraction showed). Register use isn't measured (Radeon GPU Analyzer isn't
-installed).
+floats (tested, not assumed: no FMA contraction showed). Branching instead, to skip a triangle without a detail,
+was measured in the follow-up and not kept. The registers (NVIDIA's driver, follow-up): 0.7.0's.
 
 **Pipelines.** The fast unlit fragment shader keeps two uniform buffers and three samplers; the core creates the
-scene fragment shaders with three uniform buffers, 0.7.0's included (their slot 2 goes unread). The static model
-pipeline binds location 5 for every shader; 0.7.0's static vertex shader doesn't declare it.
+scene fragment shaders with three uniform buffers, 0.7.0's included (their slot 2 goes unread). Every static model
+pipeline describes location 5; since the follow-up only `production_model_detail_table.vert`, in a table batch's
+own pipelines, declares it. A pass pushes a table's block once for a run of batches sharing it (follow-up).
 
 **The name check** (more than the text says). A table batch needs `world_detail_maps`, as drafted. 0.6.0's check
 read only the host's `production_model.frag`; the present draws with the variant for its shadows and the radiance
@@ -836,9 +838,104 @@ below are of the quieter runs: 1, 4 and 5 for the light pass at 1920 x 1080, 4 a
   `TEXCOORD11` measured the same (+0.002 ms against this build, two runs), so the varying isn't it, and the shaders
   keep `TEXCOORD11` as drafted. Only a static vertex shader without the attribute for batches without a table
   would take it back: a new shader file, which the text ruled out. Screen-filling surfaces show nothing
-  measurable unset.
+  measurable unset. (The follow-up below made that file, after v2 measured its frame.)
 - **Memory:** as estimated, the sixteen 512² maps with mips are 21.3 MiB as one array.
-- **Not measured:** register use (Radeon GPU Analyzer isn't installed), the Deck, v2's frames.
+- **Not measured:** register use (Radeon GPU Analyzer isn't installed; the follow-up read NVIDIA's), the Deck, v2's
+  frames.
+
+**Follow-up: the cost without a table, and the table's** (after Be The Bullet Hell v2 tested the 0.8.0 candidate,
+f96cd45d). v2 measured its stage 3 at the Deck preset (1280 x 800; RTX 3070 Ti, GPU median, ms; "merged" is the
+merged distance models without a detail):
+
+| Scene | No detail, 0.7.0 | No detail, candidate | Table | Split, 0.7.0 | Merged |
+| --- | --- | --- | --- | --- | --- |
+| Day | 1.33 | 1.40 | 1.49 | 1.44 | 1.36 |
+| Storm | 1.30 | 1.37 | 1.44 | 1.40 | 1.31 |
+
+Without a table the frame cost 0.06–0.07 ms more (about 5 %), in the opaque pass (0.91–0.92 → 0.98–0.99 ms): the
+"Unset, many vertices" cost above, in a frame of 1,800–2,300 instanced draws. And the table cost more than the split,
+which v2 put down to its untextured triangles (index 255) sampling both layers before the select dropped them.
+
+- **A bench like v2's frame**, `btbh_gpu_frame_bench` (`Tests/btbh_gpu_frame_bench.c`, summarised by
+  `tools/frame_bench_summary.py`): 2,000 draws of 32 kit pieces (a slab with a grid of window frames, sills and
+  ledges: 96–480 triangles, 1–5 instances a draw), 2.2 million triangles at 960 x 600, upscaled to 1280 x 800 (FSR 1),
+  HBAO, FXAA, the soft sun shadow, 8 lamps, pattern 7 on the pieces. The GPU's time is the cost log's: `main_ms` (the
+  opaque pass alone) from the split frames, `gpu_ms` from the others. Configurations are hidden windows with their own
+  shader directories and modes in one process, in turns of 8 frames (the first 2 dropped: the caches are the previous
+  window's), shuffled every round; each turn is paired with the reference's turn of its round, and rounds another
+  process slowed are dropped. The configurations rotate over the windows from run to run: with fixed windows, a
+  window's own resources moved a configuration by up to 0.02 ms, and one early run seemed to say the attribute wasn't
+  it. Another session ran `v2-game` and `cnc3game` on the GPU on and off; the runs waited for no `v2-game`.
+- **The cause, measured.**
+  - The cores: 0.7.0's core and shaders against the candidate's, in alternating processes: +0.049 ms on the opaque
+    pass (1.111 → 1.160 ms, a first configuration at 1280 x 800 without HBAO). 0.7.0's shaders under the candidate's
+    core: +0.001 ms. The core's per-draw changes (the third uniform buffer, the fifteenth sampler, the fallback array,
+    the sixth attribute's description) cost nothing; the shaders did.
+  - The shaders, one factor at a time (36 runs, 72 of 108 rounds kept; the median of the pairs against 0.7.0's
+    shaders, the 10th percentile of every frame in brackets):
+
+    | Static vertex shader reads location 5 | Index in its own output (`TEXCOORD11`) | Fragment table code | Opaque pass | Frame |
+    | --- | --- | --- | --- | --- |
+    | yes | yes | yes (the candidate) | +0.014 (+0.016) ms | +0.020 (+0.019) ms |
+    | no | yes | yes | +0.000 (+0.002) ms | +0.010 (+0.002) ms |
+    | yes, packed into `animated_model` | no | yes | +0.027 (+0.022) ms | +0.035 (+0.026) ms |
+    | no | no | yes | −0.001 (−0.005) ms | −0.001 (−0.003) ms |
+    | no | yes | no | −0.003 (−0.002) ms | +0.003 (−0.000) ms |
+
+    The sixth vertex attribute is the cost: every configuration that reads it pays, none that doesn't, the flat
+    output and the fragment shader's table code included. Pointing location 5 at bytes the other attributes already
+    fetch (offsets 0, 44 and 60 instead of 64; one run, windows not rotated) kept most of it: it is the attribute, not
+    the memory it reads.
+  - The driver's numbers (`VK_KHR_pipeline_executable_properties`, from a small Vulkan program that builds the static
+    pipeline from the same SPIR-V; NVIDIA gives statistics, no disassembly): the registers of 0.7.0's shaders (vertex
+    64, fragment 80 in `production_model_2d_shadows`), so not occupancy; the fragment shader 3.3 KiB bigger (185,344 →
+    188,672 bytes); vertex inputs 17 → 18, fragment inputs 30 → 31.
+- **The fix.** `production_model.vert` reads and passes on what 0.7.0's did again; it compiles to 0.7.0's SPIR-V, and
+  so does `production_animated_model.vert`. A static batch with a table draws with a new file,
+  `production_model_detail_table.vert` (the same source with `BTBH_WORLD_DETAIL_TABLE`), which the core loads beside
+  the host's `production_model.vert` for such batches only (`table_model_pipelines` and the non-omni and unshadowed
+  ones). It reads location 5 and passes the index in the flat `animated_model` value as −1 − index
+  (`btbh_world_detail_table_pack` and `_unpack` in `production_world_detail.hlsli`; 0 static and 1 skinned stay, and
+  so does the `> 0.5` front-face test): no shader gains an output, and `TEXCOORD11` is gone. Every static pipeline
+  still describes location 5; unread, it costs nothing. This is the new shader file the text ruled out: a host that
+  draws a table needs it, the others can leave it out. A shader directory without it fails a table batch's present,
+  naming the file.
+- **After, without a table** (this build, the same frame): in one process (32 runs, configurations rotated over the
+  windows, 80 of 128 rounds kept), −0.008 ms on the opaque pass (10th percentile −0.014) and −0.017 ms (−0.013) on
+  the frame; the candidate measured +0.021 (+0.023) and +0.023 (+0.023) in the same runs, and a second copy of
+  0.7.0's shaders +0.003 (+0.002). Across the cores (alternating processes, 0.7.0's core and shaders against this
+  build's): +0.009 and +0.013 ms on the opaque pass (10th percentile +0.013 and +0.012; two sets of 20 and 16 pairs),
+  where the candidate measured +0.033 (+0.029); 0.7.0's shaders under both cores, +0.002. Separate processes scatter
+  by up to 0.03 ms; the two methods differ by about 0.02 ms on what remains, and both put the candidate's extra cost
+  back.
+- **No samples for none, measured and not kept.** Branches on the flat index (the same over a triangle, so over each
+  2 x 2 quad and its helpers: the derivatives stay one entry's) that skip the samples of a triangle at or past the
+  count, or of a layer of 255, against the select (30 runs, then 24 again after the push below; a table on every
+  piece, 8 entries over 16 layers of 512²):
+
+  | | 85 % of the triangles on 255 | Every triangle on an entry |
+  | --- | --- | --- |
+  | A branch per layer, the index returning early (fb271f1a) | +0.003 to +0.008 ms | +0.029 to +0.035 ms |
+  | The index returning early, then both samples and the selects | −0.003 to −0.011 ms | +0.013 to +0.019 ms |
+
+  The candidate's table cost the same on both meshes: the none-triangles' samples aren't where its cost is, and a
+  branch costs more where every triangle samples (v2's full models) than it saves where most don't. The function
+  samples both layers and selects, as drafted (1318d0d0 reverts the branch); its comment says why.
+- **The table's block once a run.** Every table batch pushed the table's 400 bytes into uniform slot 2: 800 KB of
+  identical uniforms a frame of 2,000 draws. SDL keeps pushed data for the command buffer's later draws and only
+  table batches read the slot, so a pass pushes a table's block when the batch's table isn't the one pushed last. The
+  table's cost (paired with no table in each process, 16 alternating pairs): +0.126 → +0.090 ms on the opaque pass,
+  alike with 85 % and with all the triangles on an entry. The renders are byte for byte as before.
+- **The table, before and after** (the candidate's core and shaders against this build's, alternating processes, each
+  table paired with its own build's frame without one): with 85 % of the triangles on 255, +0.148 → +0.109 ms on the
+  opaque pass and +0.151 → +0.109 ms on the frame; with every triangle on an entry, +0.147 → +0.107 and +0.144 →
+  +0.104 (16 alternating pairs, each against 0.7.0's shaders without a table in its own process). What the rest of a
+  table's cost is isn't established. With every triangle on 255 it is +0.089 ms (the select still samples); the
+  table's vertex shader reads the sixth attribute, 0.014–0.027 ms in the factorial above.
+- **Tests.** The reflection test checks both static vertex shaders (the table's has location 5 and passes
+  `TEXCOORD8`; no shader has `TEXCOORD11`). The world detail smoke's old-shader check adds a directory without
+  `production_model_detail_table.vert`. Byte for byte: every table render of the smoke as the candidate's (26 images,
+  671,744 pixels), the gallery and the other identity suites as 0.7.0's.
 
 ## Compatibility
 
@@ -850,7 +947,8 @@ below are of the quieter runs: 1, 4 and 5 for the light pass at 1920 x 1080, 4 a
     - Phase 1: old shaders under the new core draw every pattern but 7 as before; 7 draws without its weather.
     - Phase 1's shaders under 0.6.0's core draw as before; that core refuses pattern 7.
     - Phase 2: old shaders under the new core draw as before: the extra sampler, uniform buffer and vertex attribute
-      go unread. A batch with a table is refused by the name check.
+      go unread. A batch with a table is refused by the name check, or, beside a current fragment shader, fails
+      without `production_model_detail_table.vert` (the candidate's shaders have none).
     - Phase 2's shaders under an older core don't work: too few samplers, uniform buffers and vertex attributes.
   - **Byte-identical when unset** is tested, not assumed, as for 0.6.0.
 - **Be The Bullet Hell v2 (Rust, bindgen):**
@@ -864,9 +962,10 @@ below are of the quieter runs: 1, 4 and 5 for the light pass at 1920 x 1080, 4 a
 - **Be The Bullet Hell (v1, Swift):**
   - Nothing changes. The Swift layer builds batches zeroed. Its `SurfaceDetail.Pattern` has no case 7, so it never
     sends it.
-  - Its static draws bind one more vertex attribute. Its custom meshes' joint slots are read and then unused.
+  - Its static pipelines describe one more vertex attribute, which its static vertex shader (0.7.0's) doesn't read.
 - **CHIMERA (Rust, bindgen):** nothing changes. `default_batch()` ends in `..Default::default()`. It regenerates the
-  bindings for the bigger batch (phase 2). No shader file is added to its list of 14.
+  bindings for the bigger batch (phase 2). Its list of 14 shaders can stay: `production_model_detail_table.vert` is
+  only for a batch with a table.
 - **Tyrian3D (C):** nothing changes. `init_batch` memsets the batch. It is pinned at v0.2.1.
 - **RFC 0001 (Draft):** phase 2 ships its array functions with its signatures. Its terrain shaders are separate files
   with their own bindings, so the slot count here doesn't touch them.
