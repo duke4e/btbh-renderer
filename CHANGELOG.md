@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-22
+
 One opt-in addition requested by Be The Bullet Hell v2: the world-detail table chosen per vertex (phase 2 of
 [RFC 0009](docs/rfc/0009-world-detail-table.md)), with the 2D array textures RFC 0001 drafted. Nothing changes until a
 game sets it: a batch without a table, and every existing feature, renders byte for byte as in 0.7.0, and costs what
@@ -24,6 +26,19 @@ written by a build of 0.7.0 and by this one; and the gallery and `btbh_gpu_sdf_t
 under this core. A table draws byte for byte as the same faces split into one draw per class with single packed
 details, through the six scene shaders, and as the candidate (f96cd45d) drew it. macOS (Metal), the Vulkan
 validation layers and a Steam Deck aren't verified.
+
+Be The Bullet Hell v2 tested it (its main at dec1a3b7, 71 shaders built from this list, 751 tests, its UI tour of 43
+screens clean), with the table on its merged distance models, its full per-class models (a constant index per mesh)
+and its outskirts ring. Deck preset at 1280x800 on a desktop RTX, two interleaved passes:
+- Frames at frame 900 against 0.7.0 are byte-identical without a table (Deck by day, High in the storm), with the
+  full models on the table, with its resource marks and night pane tints, over its outskirts ring and in its
+  render-to-target card previews. They differ only on the merged distance models, where the detail lands.
+- GPU: the table costs what 0.7.0's split per-class draws cost by day (1.182–1.185 ms against 1.184–1.199 ms), and
+  0.02 ms more in the storm's main pass; against merged models without distance detail, 0.05–0.07 ms more.
+- CPU (a CPU-bound frame by day): 1,296 draws and 0.87–0.89 ms of geometry encoding against 1,739 and 1.38–1.40 ms
+  split, so the frame is 0.14–0.24 ms shorter than split.
+- Without a table, the total GPU time is within noise of 0.7.0's. The main pass alone measured about 0.02 ms more
+  in all four of its pairs (see Known).
 
 ### Added
 - **`BTBHGPUSceneGeometryBatch.world_detail_table`** (appended at byte 272): up to eight world details in one batch,
@@ -187,6 +202,13 @@ v2 and a game on this GPU on and off). The opaque pass against 0.7.0's shaders, 
   index), leaving `world_detail` NULL. Then the eight 2D detail sets and `BTBH_LOD1_SPLIT` can go. See RFC 0009,
   "Implementation notes (phase 2)".
 - Swift: no API.
+
+### Known
+- Without a table, Be The Bullet Hell v2's main pass measured about 0.02 ms more than with 0.7.0 in each of its four
+  pairs (0.72–0.73 ms against 0.74–0.77 ms by day), though its total GPU time stays within noise. This release's own
+  bench put the residual within ±0.013 ms, with both signs. Its cause isn't established: the vertex shaders are
+  0.7.0's SPIR-V, so what differs is the fragment shaders' unused table path and their bindings (a third uniform
+  buffer, a one-layer fallback array).
 
 ## [0.7.0] — 2026-11-20
 

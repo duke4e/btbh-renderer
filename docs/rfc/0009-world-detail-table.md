@@ -1,7 +1,7 @@
 # RFC 0009: A world-detail table chosen per vertex; the facade's weather without its grain
 
-- **Status:** Phase 1 implemented in v0.7.0. Phase 2 accepted for 0.8.0. Both accepted on 2026-11-20 (the owner
-  left the decisions to the coordinator). See "Decisions"
+- **Status:** Implemented: phase 1 in v0.7.0, phase 2 in v0.8.0. Both accepted on 2026-11-20 (the owner left the
+  decisions to the coordinator). See "Decisions" and the implementation notes
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-20, after it adopted 0.6.0; `CONSUMERS.md`,
   "Requested")
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
