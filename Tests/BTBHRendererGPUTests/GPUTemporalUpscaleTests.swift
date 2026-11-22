@@ -124,7 +124,8 @@ final class GPUTemporalUpscaleTests: XCTestCase {
         // native frames keep a bias of 0.
         XCTAssertTrue(scene.contains(": log2f((float)render_width / (float)temporal_window_width) - 1.0f;"))
         XCTAssertTrue(scene.contains("float temporal_lod_bias = 0.0f;\n    if (temporal_active) {"))
-        XCTAssertTrue(scene.contains("fragment_uniforms.procedural_controls[3] =\n                temporal_lod_bias;"))
+        // (Filled once a pass with the rest of the frame's uniforms since 0.10.0, RFC 0011.)
+        XCTAssertTrue(scene.contains("fragment_uniforms.procedural_controls[3] =\n            temporal_lod_bias;"))
         XCTAssertTrue(scene.contains("SDL_getenv(\"BTBH_FSR3_MIP_BIAS\")"))
         // Every material texture samples with it, and the surface detail's footprint follows it.
         for texture in ["albedo", "emission", "normal", "orm"] {
@@ -203,7 +204,9 @@ final class GPUTemporalUpscaleTests: XCTestCase {
                 "        runtime->temporal_palette_count = 0u;"
         ))
         XCTAssertTrue(scene.contains("bone_offsets[prepared_geometry_count + geometry_cursor];"))
-        XCTAssertTrue(scene.contains("uniforms.previous_bone_offset =\n                animated ? previous_bone_offset : 0u;"))
+        XCTAssertTrue(scene.contains(
+            "uniforms.previous_bone_offset =\n                    animated ? previous_bone_offset : 0u;"
+        ))
         XCTAssertTrue(scene.contains("entry->pose != sample->pose ||"))
         // The vertex skinned with the previous pose, moved back by the instance's translation.
         XCTAssertTrue(animated.contains("bones[previous_bone_offset + joint_indices.x] * input.weights.x +"))

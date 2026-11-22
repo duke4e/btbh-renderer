@@ -2141,8 +2141,10 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(normalizedShadowFunction.contains(
             "light_view_projection, sizeof(float) * 16u"
         ))
+        // (Since 0.10.0, RFC 0011, the shadow uniforms' frame part is filled once a pass; the slow path writes its
+        // batch's fields over it.)
         XCTAssertTrue(normalizedShadowFunction.contains(
-            "} else { BTBHGPUShadowUniforms uniforms;"
+            "} else { uniforms.bone_offset = animated ? bone_offset : 0u;"
         ))
         XCTAssertEqual(
             shadowFunction.components(
