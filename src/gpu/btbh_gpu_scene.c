@@ -8599,6 +8599,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
         SDL_GPUGraphicsPipeline *bound_model_pipeline = NULL;
         SDL_GPUBuffer *bound_index_buffer = NULL;
+        /* RFC 0009: the world-detail table whose block the fragment uniform slot 2 holds in this pass. Pushed data
+           stays for the command buffer's later draws, and only table batches read the slot, so a run of batches
+           sharing a table pushes its 400 bytes once. */
+        const BTBHGPUSceneWorldDetailTable *pushed_table = NULL;
         SDL_InsertGPUDebugLabel(
             command,
             !transparent_phase
@@ -9309,8 +9313,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 samplers[bound_sampler_count].texture = maps->texture;
                 samplers[bound_sampler_count].sampler = maps->sampler;
                 bound_sampler_count += 1u;
-                if (btbh_gpu_world_detail_table_active(batch)) {
-                    /* Only a table batch pushes the block; the others never read the slot. */
+                if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
+                    /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
+                       never read the slot. */
                     BTBHGPUWorldDetailTableUniforms table_uniforms;
                     btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
                     SDL_PushGPUFragmentUniformData(
@@ -9319,6 +9324,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         &table_uniforms,
                         (uint32_t)sizeof(table_uniforms)
                     );
+                    pushed_table = batch->world_detail_table;
                 }
             }
             SDL_PushGPUFragmentUniformData(
