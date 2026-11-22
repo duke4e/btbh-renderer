@@ -30,7 +30,8 @@
  *   buffers, BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS; ignored before 0.10.0), +noruns (BTBH_GPU_SCENE_RUNS=0 around this
  *   window's presents; nothing before 0.10.0), +one (every ring batch draws the first wall's mesh: v2's "one shared
  *   mesh").
- *   Every frame of a ring window alternates with the ring and without it (the frame's draws alone).
+ *   Every frame of a ring window alternates with the ring and without it (the frame's draws alone). The other modes
+ *   take +noruns too, and +arena for the 32 kit pieces (table+noruns, table+arena), for the GPU's time.
  * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
  *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
  *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
@@ -285,9 +286,13 @@ static uint32_t piece_boxes(uint32_t piece) {
     return 1u + piece_columns(piece) * piece_rows(piece) * 2u + piece_rows(piece);
 }
 
+static BTBHGPUCustomMesh *bench_mesh(BTBHGPUWindow *window, const float *vertices, uint32_t vertex_count,
+    const uint32_t *indices, uint32_t index_count, bool arena);
+
 /* Kit piece p: a wall slab and its ledges on class p % 8 (or on `frame_index` with `all_frame`), a frame and a sill
-   per window on `frame_index`. */
-static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, float frame_index, bool all_frame) {
+   per window on `frame_index`; `arena`: in the shared geometry buffers (from 0.10.0). */
+static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, float frame_index, bool all_frame,
+    bool arena) {
     const uint32_t columns = piece_columns(piece);
     const uint32_t rows = piece_rows(piece);
     const uint32_t boxes = piece_boxes(piece);
@@ -320,16 +325,9 @@ static BTBHGPUCustomMesh *make_piece(BTBHGPUWindow *window, uint32_t piece, floa
         const float ledge_half[3] = { 0.5f * width, 0.03f, 0.05f };
         add_box(vertices, &vertex_count, indices, &index_count, ledge_centre, ledge_half, wall_index);
     }
-    BTBHGPUCustomMeshReport report;
-    memset(&report, 0, sizeof(report));
-    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(window, vertices,
-        vertex_count * BENCH_FLOATS * (uint32_t)sizeof(float), vertex_count, indices, index_count, &report);
+    BTBHGPUCustomMesh *mesh = bench_mesh(window, vertices, vertex_count, indices, index_count, arena);
     free(vertices);
     free(indices);
-    if (mesh == NULL) {
-        fprintf(stderr, "kit piece: %s\n", report.message);
-        exit(1);
-    }
     return mesh;
 }
 
@@ -470,7 +468,7 @@ static BTBHGPUCustomMesh *bench_mesh(BTBHGPUWindow *window, const float *vertice
         vertex_count, indices, index_count, &report);
 #endif
     if (mesh == NULL) {
-        fprintf(stderr, "ring mesh: %s\n", report.message);
+        fprintf(stderr, "mesh: %s\n", report.message);
         exit(1);
     }
     return mesh;
@@ -644,6 +642,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
         bench->ring.arena = mode_has(bench->mode, "arena");
         bench->ring.runs_off = mode_has(bench->mode, "noruns");
         bench->ring.one = mode_has(bench->mode, "one");
+    } else {
+        /* (table+noruns, table+arena: runs off, the kit pieces in the shared buffers.) */
+        bench->ring.runs_off = mode_has(bench->mode, "noruns");
     }
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
@@ -672,7 +673,8 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     const char *mode = bench->mode;
     const float frame_index = strcmp(mode, "table-all") == 0 ? 3.0f : 255.0f;
     for (uint32_t piece = 0u; piece < BENCH_PIECES; ++piece) {
-        bench->pieces[piece] = make_piece(bench->window, piece, frame_index, strcmp(mode, "table-none") == 0);
+        bench->pieces[piece] = make_piece(bench->window, piece, frame_index, strcmp(mode, "table-none") == 0,
+            !bench->ring.enabled && mode_has(mode, "arena"));
     }
     {
         float vertices[24u * BENCH_FLOATS];
