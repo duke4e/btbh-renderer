@@ -271,6 +271,16 @@ uint32_t btbh_gpu_scene_opaque_order(
     uint64_t *scratch
 );
 
+/* RFC 0011 phase 1b, the run key (btbh_gpu_scene.c): whether `batch` continues the run of `previous`, the batch the
+   pass drew before it, so that it binds and pushes nothing but its vertex and index buffers. True when the two are
+   equal, byte for byte, in every field but kind, model, custom_mesh, material_slot, first_instance and
+   instance_count (padding isn't compared; a float compares by its bits). The passes also require both geometries to
+   be unskinned. */
+bool btbh_gpu_scene_batch_continues_run(
+    const BTBHGPUSceneGeometryBatch *previous,
+    const BTBHGPUSceneGeometryBatch *batch
+);
+
 /* BTBHGPUSceneGeometryBatch.detail_parameters as the present accepts them: finite; a pattern in [0, 7], rounded
    to the nearest whole number as the shader rounds it; patterns 1..6 with z above 0; pattern 7
    (BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER) with x, y and z at 0. */

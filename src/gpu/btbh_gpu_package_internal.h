@@ -22,6 +22,12 @@ typedef struct BTBHGPUSceneTelemetryReport {
     double cpu_prepare_bone_sample_milliseconds;
     double cpu_prepare_pipelines_milliseconds;
     double cpu_prepare_buffers_milliseconds;
+    /* RFC 0011 (since 0.10.0): the geometries that continued a run (btbh_gpu_scene_batch_continues_run), binding and
+       pushing nothing but their vertex and index buffers, in the opaque, transparent and refraction passes, in the
+       shadow passes (each map and face counts) and among the radiance cascades' material sources. */
+    uint32_t geometry_run_draw_count;
+    uint32_t shadow_run_draw_count;
+    uint32_t rc_source_run_draw_count;
 } BTBHGPUSceneTelemetryReport;
 
 void btbh_gpu_delay_precise(uint64_t nanoseconds);

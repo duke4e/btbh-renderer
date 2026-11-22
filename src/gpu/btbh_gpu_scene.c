@@ -4876,6 +4876,82 @@ static bool btbh_gpu_scene_batch_uses_geometry(
             batch->material_slot;
 }
 
+/* RFC 0011 phase 1b, the run key: whether `batch` continues the run of `previous`, the batch drawn before it in the
+   same pass. True when they are equal, byte for byte, in every field but their geometry (kind, model, custom_mesh,
+   material_slot) and their instance range (first_instance, instance_count); a float compares by its bits (-0 and
+   +0 differ), and padding isn't compared. Everything a pass binds or pushes for a batch other than its vertex and
+   index buffers and its draw comes from those fields, from the pass and from what the fields point at (which a
+   present doesn't change), so a batch that continues a run binds and pushes nothing new. The passes never let a
+   skinned geometry start or continue a run: its bone offsets are its own. */
+bool btbh_gpu_scene_batch_continues_run(
+    const BTBHGPUSceneGeometryBatch *previous,
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+#define BTBH_GPU_SCENE_RUN_SAME(field) (memcmp(&previous->field, &batch->field, sizeof(batch->field)) == 0)
+    return
+        BTBH_GPU_SCENE_RUN_SAME(instance_buffer) &&
+        BTBH_GPU_SCENE_RUN_SAME(albedo_texture) &&
+        BTBH_GPU_SCENE_RUN_SAME(normal_texture) &&
+        BTBH_GPU_SCENE_RUN_SAME(orm_texture) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_texture) &&
+        BTBH_GPU_SCENE_RUN_SAME(world_detail) &&
+        BTBH_GPU_SCENE_RUN_SAME(world_detail_table) &&
+        BTBH_GPU_SCENE_RUN_SAME(dug_by) &&
+        BTBH_GPU_SCENE_RUN_SAME(albedo_red) &&
+        BTBH_GPU_SCENE_RUN_SAME(albedo_green) &&
+        BTBH_GPU_SCENE_RUN_SAME(albedo_blue) &&
+        BTBH_GPU_SCENE_RUN_SAME(albedo_alpha) &&
+        BTBH_GPU_SCENE_RUN_SAME(uv_scale_x) &&
+        BTBH_GPU_SCENE_RUN_SAME(uv_scale_y) &&
+        BTBH_GPU_SCENE_RUN_SAME(uv_offset_x) &&
+        BTBH_GPU_SCENE_RUN_SAME(uv_offset_y) &&
+        BTBH_GPU_SCENE_RUN_SAME(normal_scale) &&
+        BTBH_GPU_SCENE_RUN_SAME(occlusion) &&
+        BTBH_GPU_SCENE_RUN_SAME(roughness) &&
+        BTBH_GPU_SCENE_RUN_SAME(metalness) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_red) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_green) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_blue) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_alpha) &&
+        BTBH_GPU_SCENE_RUN_SAME(emission_energy) &&
+        BTBH_GPU_SCENE_RUN_SAME(blend_mode) &&
+        BTBH_GPU_SCENE_RUN_SAME(billboard_mode) &&
+        BTBH_GPU_SCENE_RUN_SAME(depth_compare) &&
+        BTBH_GPU_SCENE_RUN_SAME(alpha_cutoff) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_compare) &&
+        BTBH_GPU_SCENE_RUN_SAME(cull_mode) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_fail) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_depth_fail) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_pass) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_reference) &&
+        BTBH_GPU_SCENE_RUN_SAME(stencil_mask) &&
+        BTBH_GPU_SCENE_RUN_SAME(transparency_enabled) &&
+        BTBH_GPU_SCENE_RUN_SAME(unlit_enabled) &&
+        BTBH_GPU_SCENE_RUN_SAME(spot_shadow_visible) &&
+        BTBH_GPU_SCENE_RUN_SAME(rc_receiver) &&
+        BTBH_GPU_SCENE_RUN_SAME(reactive_mode) &&
+        BTBH_GPU_SCENE_RUN_SAME(surface_variant) &&
+        BTBH_GPU_SCENE_RUN_SAME(surface_time) &&
+        BTBH_GPU_SCENE_RUN_SAME(surface_parameters0) &&
+        BTBH_GPU_SCENE_RUN_SAME(surface_parameters1) &&
+        BTBH_GPU_SCENE_RUN_SAME(detail_parameters) &&
+        BTBH_GPU_SCENE_RUN_SAME(ssao_mode) &&
+        BTBH_GPU_SCENE_RUN_SAME(flags) &&
+        BTBH_GPU_SCENE_RUN_SAME(ssao_reserved) &&
+        BTBH_GPU_SCENE_RUN_SAME(animation_library) &&
+        BTBH_GPU_SCENE_RUN_SAME(animation_pose) &&
+        BTBH_GPU_SCENE_RUN_SAME(animation_index) &&
+        BTBH_GPU_SCENE_RUN_SAME(animation_time);
+#undef BTBH_GPU_SCENE_RUN_SAME
+}
+
+/* BTBH_GPU_SCENE_RUNS=0, a measurement tool (RFC 0011): every batch binds and pushes its whole state again, as
+   before 0.10.0 (the frame's uniforms are still filled once a pass). Read once a present. */
+static bool btbh_gpu_scene_runs_enabled(void) {
+    const char *value = SDL_getenv("BTBH_GPU_SCENE_RUNS");
+    return value == NULL || strcmp(value, "0") != 0;
+}
+
 /* The buffers and ranges a batch's geometry draws from: a model's primitive, or a custom mesh, in buffers of its own
    (vertex_base and first_index 0) or in the window's shared ones (BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, RFC 0011). */
 typedef struct BTBHGPUSceneGeometryDraw {
@@ -6123,7 +6199,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
     uint8_t shadow_layer,
     bool cycle_texture,
     bool bind_telemetry,
-    BTBHGPUSceneTelemetryReport *telemetry
+    BTBHGPUSceneTelemetryReport *telemetry,
+    bool runs_enabled
 ) {
     SDL_GPUDepthStencilTargetInfo depth_target;
     SDL_zero(depth_target);
@@ -6152,6 +6229,27 @@ static bool btbh_gpu_scene_render_directional_shadow(
     /* The dig mask last given to the fragment-stage pipelines in this pass (RFC 0007). */
     bool dig_bound = false;
     SDL_GPUTexture *bound_dig_texture = NULL;
+    /* RFC 0011: the batch whose uniforms, pipeline, dig mask and storage buffers the pass holds (NULL before the first
+       draw and after a skinned geometry); a batch that continues its run binds and pushes none of them. The frame's
+       part of the shadow uniforms is filled once. */
+    const BTBHGPUSceneGeometryBatch *run_batch = NULL;
+    BTBHGPUShadowUniforms uniforms;
+    (void)memset(&uniforms, 0, sizeof(uniforms));
+    (void)memcpy(
+        uniforms.light_view_projection,
+        light_view_projection,
+        sizeof(uniforms.light_view_projection)
+    );
+    (void)memcpy(
+        uniforms.camera_right,
+        camera_right,
+        sizeof(float) * 3u
+    );
+    (void)memcpy(
+        uniforms.camera_up,
+        camera_up,
+        sizeof(float) * 3u
+    );
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
          ++batch_index) {
@@ -6203,118 +6301,114 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 ) &&
                 batch->billboard_mode ==
                     BTBH_GPU_SCENE_BILLBOARD_DISABLED;
-            if (uses_fast_shadow) {
-                if (!shadow_uniform_bound) {
+            const bool continues_run =
+                runs_enabled &&
+                !animated &&
+                run_batch != NULL &&
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            if (continues_run) {
+                telemetry->shadow_run_draw_count += 1u;
+                if (bind_telemetry) {
+                    telemetry->shadow_pipeline_bind_skip_count += 1u;
+                }
+            } else {
+                if (uses_fast_shadow) {
+                    if (!shadow_uniform_bound) {
+                        SDL_PushGPUVertexUniformData(
+                            command,
+                            0u,
+                            light_view_projection,
+                            sizeof(float) * 16u
+                        );
+                        shadow_uniform_bound = true;
+                    }
+                } else {
+                    uniforms.bone_offset = animated ? bone_offset : 0u;
+                    uniforms.billboard_mode =
+                        (uint32_t)batch->billboard_mode;
+                    uniforms.surface_variant =
+                        (uint32_t)batch->surface_variant;
+                    uniforms.surface_time = batch->surface_time;
+                    (void)memcpy(
+                        uniforms.surface_parameters0,
+                        batch->surface_parameters0,
+                        sizeof(uniforms.surface_parameters0)
+                    );
+                    (void)memcpy(
+                        uniforms.surface_parameters1,
+                        batch->surface_parameters1,
+                        sizeof(uniforms.surface_parameters1)
+                    );
                     SDL_PushGPUVertexUniformData(
                         command,
                         0u,
-                        light_view_projection,
-                        sizeof(float) * 16u
+                        &uniforms,
+                        sizeof(uniforms)
                     );
                     shadow_uniform_bound = true;
                 }
-            } else {
-                BTBHGPUShadowUniforms uniforms;
-                (void)memset(&uniforms, 0, sizeof(uniforms));
-                (void)memcpy(
-                    uniforms.light_view_projection,
-                    light_view_projection,
-                    sizeof(uniforms.light_view_projection)
-                );
-                (void)memcpy(
-                    uniforms.camera_right,
-                    camera_right,
-                    sizeof(float) * 3u
-                );
-                (void)memcpy(
-                    uniforms.camera_up,
-                    camera_up,
-                    sizeof(float) * 3u
-                );
-                uniforms.bone_offset = animated ? bone_offset : 0u;
-                uniforms.billboard_mode =
-                    (uint32_t)batch->billboard_mode;
-                uniforms.surface_variant =
-                    (uint32_t)batch->surface_variant;
-                uniforms.surface_time = batch->surface_time;
-                (void)memcpy(
-                    uniforms.surface_parameters0,
-                    batch->surface_parameters0,
-                    sizeof(uniforms.surface_parameters0)
-                );
-                (void)memcpy(
-                    uniforms.surface_parameters1,
-                    batch->surface_parameters1,
-                    sizeof(uniforms.surface_parameters1)
-                );
-                SDL_PushGPUVertexUniformData(
-                    command,
-                    0u,
-                    &uniforms,
-                    sizeof(uniforms)
-                );
-                shadow_uniform_bound = true;
-            }
-            SDL_GPUGraphicsPipeline *shadow_pipeline = NULL;
-            if (animated) {
-                shadow_pipeline = requires_shadow_discard
-                    ? runtime->animated_shadow_pipelines[
-                        batch->cull_mode
-                    ]
-                    : runtime
-                        ->animated_non_discard_shadow_pipelines[
-                            batch->cull_mode
-                        ];
-            } else {
-                shadow_pipeline = uses_fast_shadow
-                    ? runtime->fast_shadow_pipelines[
-                        batch->cull_mode
-                    ]
-                    : requires_shadow_discard
-                        ? runtime->shadow_pipelines[
+                SDL_GPUGraphicsPipeline *shadow_pipeline = NULL;
+                if (animated) {
+                    shadow_pipeline = requires_shadow_discard
+                        ? runtime->animated_shadow_pipelines[
                             batch->cull_mode
                         ]
-                        : runtime->non_discard_shadow_pipelines[
+                        : runtime
+                            ->animated_non_discard_shadow_pipelines[
+                                batch->cull_mode
+                            ];
+                } else {
+                    shadow_pipeline = uses_fast_shadow
+                        ? runtime->fast_shadow_pipelines[
                             batch->cull_mode
-                        ];
-            }
-            if (shadow_pipeline != bound_pipeline) {
-                SDL_BindGPUGraphicsPipeline(pass, shadow_pipeline);
-                bound_pipeline = shadow_pipeline;
-                if (bind_telemetry) {
-                    telemetry->shadow_pipeline_bind_count += 1u;
+                        ]
+                        : requires_shadow_discard
+                            ? runtime->shadow_pipelines[
+                                batch->cull_mode
+                            ]
+                            : runtime->non_discard_shadow_pipelines[
+                                batch->cull_mode
+                            ];
                 }
-            } else if (bind_telemetry) {
-                telemetry->shadow_pipeline_bind_skip_count += 1u;
-            }
-            if (!uses_fast_shadow && requires_shadow_discard &&
-                (!dig_bound || bound_dig_texture != dig->texture)) {
-                BTBHGPUSceneDigMaskUniforms dig_uniforms;
-                btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
-                SDL_PushGPUFragmentUniformData(command, 0u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
-                const SDL_GPUTextureSamplerBinding dig_sampler = btbh_gpu_scene_dig_sampler(runtime, dig);
-                SDL_BindGPUFragmentSamplers(pass, 0u, &dig_sampler, 1u);
-                dig_bound = true;
-                bound_dig_texture = dig->texture;
-            }
-            if (animated) {
-                SDL_GPUBuffer *storage_buffers[2] = {
-                    batch_instance_buffer,
-                    bone_buffer
-                };
-                SDL_BindGPUVertexStorageBuffers(
-                    pass,
-                    0u,
-                    storage_buffers,
-                    2u
-                );
-            } else if (!uses_fast_shadow) {
-                SDL_BindGPUVertexStorageBuffers(
-                    pass,
-                    0u,
-                    &batch_instance_buffer,
-                    1u
-                );
+                if (shadow_pipeline != bound_pipeline) {
+                    SDL_BindGPUGraphicsPipeline(pass, shadow_pipeline);
+                    bound_pipeline = shadow_pipeline;
+                    if (bind_telemetry) {
+                        telemetry->shadow_pipeline_bind_count += 1u;
+                    }
+                } else if (bind_telemetry) {
+                    telemetry->shadow_pipeline_bind_skip_count += 1u;
+                }
+                if (!uses_fast_shadow && requires_shadow_discard &&
+                    (!dig_bound || bound_dig_texture != dig->texture)) {
+                    BTBHGPUSceneDigMaskUniforms dig_uniforms;
+                    btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
+                    SDL_PushGPUFragmentUniformData(command, 0u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+                    const SDL_GPUTextureSamplerBinding dig_sampler = btbh_gpu_scene_dig_sampler(runtime, dig);
+                    SDL_BindGPUFragmentSamplers(pass, 0u, &dig_sampler, 1u);
+                    dig_bound = true;
+                    bound_dig_texture = dig->texture;
+                }
+                if (animated) {
+                    SDL_GPUBuffer *storage_buffers[2] = {
+                        batch_instance_buffer,
+                        bone_buffer
+                    };
+                    SDL_BindGPUVertexStorageBuffers(
+                        pass,
+                        0u,
+                        storage_buffers,
+                        2u
+                    );
+                } else if (!uses_fast_shadow) {
+                    SDL_BindGPUVertexStorageBuffers(
+                        pass,
+                        0u,
+                        &batch_instance_buffer,
+                        1u
+                    );
+                }
+                run_batch = animated ? NULL : batch;
             }
             const BTBHGPUSceneGeometryDraw geometry =
                 btbh_gpu_scene_geometry_draw(batch, geometry_index);
@@ -6514,7 +6608,9 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     const uint32_t *bone_offsets,
     uint32_t prepared_geometry_count,
     SDL_GPUBuffer *transient_instance_buffer,
-    SDL_GPUBuffer *bone_buffer
+    SDL_GPUBuffer *bone_buffer,
+    bool runs_enabled,
+    uint32_t *run_draw_count
 ) {
     if (command == NULL || runtime == NULL || config == NULL ||
         (batches == NULL && batch_count > 0u) ||
@@ -6563,6 +6659,26 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     uint32_t geometry_cursor = 0u;
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
     SDL_GPUBuffer *bound_index_buffer = NULL;
+    /* RFC 0011: the batch whose uniforms, storage buffers, dig mask and samplers the pass holds (NULL before the first
+       draw and after a skinned geometry); a batch that continues its run binds and pushes none of them. The frame's
+       part of the vertex uniforms is filled once. */
+    const BTBHGPUSceneGeometryBatch *run_batch = NULL;
+    BTBHGPUSceneUniforms uniforms;
+    (void)memset(&uniforms, 0, sizeof(uniforms));
+    (void)memcpy(
+        uniforms.camera_right,
+        camera_right,
+        sizeof(float) * 3u
+    );
+    (void)memcpy(
+        uniforms.camera_up,
+        camera_up,
+        sizeof(float) * 3u
+    );
+    uniforms.ambient_color_energy[0] = origin_x;
+    uniforms.ambient_color_energy[1] = origin_z;
+    uniforms.ambient_color_energy[2] = inverse_world_width;
+    uniforms.ambient_color_energy[3] = inverse_world_height;
     for (uint32_t batch_index = 0u;
          batch_index < batch_count;
          ++batch_index) {
@@ -6608,121 +6724,114 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 SDL_BindGPUGraphicsPipeline(pass, pipeline);
                 bound_pipeline = pipeline;
             }
+            const bool continues_run =
+                runs_enabled &&
+                !animated &&
+                run_batch != NULL &&
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            if (continues_run) {
+                *run_draw_count += 1u;
+            } else {
+                uniforms.material_color[0] =
+                    (float)batch->albedo_red / 255.0f;
+                uniforms.material_color[1] =
+                    (float)batch->albedo_green / 255.0f;
+                uniforms.material_color[2] =
+                    (float)batch->albedo_blue / 255.0f;
+                uniforms.material_color[3] =
+                    (float)batch->albedo_alpha / 255.0f;
+                uniforms.uv_transform[0] = batch->uv_scale_x;
+                uniforms.uv_transform[1] = batch->uv_scale_y;
+                uniforms.uv_transform[2] = batch->uv_offset_x;
+                uniforms.uv_transform[3] = batch->uv_offset_y;
+                uniforms.bone_offset = animated ? bone_offset : 0u;
+                uniforms.billboard_mode = (uint32_t)batch->billboard_mode;
+                uniforms.unlit_enabled = (uint32_t)batch->unlit_enabled;
+                uniforms.surface_variant = (uint32_t)batch->surface_variant;
+                uniforms.surface_controls[0] = batch->surface_time;
+                (void)memcpy(
+                    uniforms.surface_parameters0,
+                    batch->surface_parameters0,
+                    sizeof(uniforms.surface_parameters0)
+                );
+                (void)memcpy(
+                    uniforms.surface_parameters1,
+                    batch->surface_parameters1,
+                    sizeof(uniforms.surface_parameters1)
+                );
+                SDL_PushGPUVertexUniformData(
+                    command,
+                    0u,
+                    &uniforms,
+                    (uint32_t)sizeof(uniforms)
+                );
 
-            BTBHGPUSceneUniforms uniforms;
-            (void)memset(&uniforms, 0, sizeof(uniforms));
-            (void)memcpy(
-                uniforms.camera_right,
-                camera_right,
-                sizeof(float) * 3u
-            );
-            (void)memcpy(
-                uniforms.camera_up,
-                camera_up,
-                sizeof(float) * 3u
-            );
-            uniforms.material_color[0] =
-                (float)batch->albedo_red / 255.0f;
-            uniforms.material_color[1] =
-                (float)batch->albedo_green / 255.0f;
-            uniforms.material_color[2] =
-                (float)batch->albedo_blue / 255.0f;
-            uniforms.material_color[3] =
-                (float)batch->albedo_alpha / 255.0f;
-            uniforms.uv_transform[0] = batch->uv_scale_x;
-            uniforms.uv_transform[1] = batch->uv_scale_y;
-            uniforms.uv_transform[2] = batch->uv_offset_x;
-            uniforms.uv_transform[3] = batch->uv_offset_y;
-            uniforms.ambient_color_energy[0] = origin_x;
-            uniforms.ambient_color_energy[1] = origin_z;
-            uniforms.ambient_color_energy[2] = inverse_world_width;
-            uniforms.ambient_color_energy[3] = inverse_world_height;
-            uniforms.bone_offset = animated ? bone_offset : 0u;
-            uniforms.billboard_mode = (uint32_t)batch->billboard_mode;
-            uniforms.unlit_enabled = (uint32_t)batch->unlit_enabled;
-            uniforms.surface_variant = (uint32_t)batch->surface_variant;
-            uniforms.surface_controls[0] = batch->surface_time;
-            (void)memcpy(
-                uniforms.surface_parameters0,
-                batch->surface_parameters0,
-                sizeof(uniforms.surface_parameters0)
-            );
-            (void)memcpy(
-                uniforms.surface_parameters1,
-                batch->surface_parameters1,
-                sizeof(uniforms.surface_parameters1)
-            );
-            SDL_PushGPUVertexUniformData(
-                command,
-                0u,
-                &uniforms,
-                (uint32_t)sizeof(uniforms)
-            );
+                BTBHGPUSceneFragmentUniforms fragment_uniforms;
+                (void)memset(
+                    &fragment_uniforms,
+                    0,
+                    sizeof(fragment_uniforms)
+                );
+                fragment_uniforms.emission_color_energy[0] =
+                    (float)batch->emission_red / 255.0f;
+                fragment_uniforms.emission_color_energy[1] =
+                    (float)batch->emission_green / 255.0f;
+                fragment_uniforms.emission_color_energy[2] =
+                    (float)batch->emission_blue / 255.0f;
+                fragment_uniforms.emission_color_energy[3] =
+                    batch->emission_energy;
+                fragment_uniforms.unlit_enabled =
+                    (uint32_t)batch->unlit_enabled |
+                    (batch->rc_receiver != 0u ? 4u : 0u);
+                fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
+                fragment_uniforms.surface_variant =
+                    batch->surface_variant ==
+                            BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE
+                        ? (uint32_t)BTBH_GPU_SCENE_SURFACE_NONE
+                        : (uint32_t)batch->surface_variant;
+                fragment_uniforms.surface_time = batch->surface_time;
+                SDL_PushGPUFragmentUniformData(
+                    command,
+                    0u,
+                    &fragment_uniforms,
+                    (uint32_t)offsetof(
+                        BTBHGPUSceneFragmentUniforms,
+                        surface_parameters0
+                    )
+                );
 
-            BTBHGPUSceneFragmentUniforms fragment_uniforms;
-            (void)memset(
-                &fragment_uniforms,
-                0,
-                sizeof(fragment_uniforms)
-            );
-            fragment_uniforms.emission_color_energy[0] =
-                (float)batch->emission_red / 255.0f;
-            fragment_uniforms.emission_color_energy[1] =
-                (float)batch->emission_green / 255.0f;
-            fragment_uniforms.emission_color_energy[2] =
-                (float)batch->emission_blue / 255.0f;
-            fragment_uniforms.emission_color_energy[3] =
-                batch->emission_energy;
-            fragment_uniforms.unlit_enabled =
-                (uint32_t)batch->unlit_enabled |
-                (batch->rc_receiver != 0u ? 4u : 0u);
-            fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
-            fragment_uniforms.surface_variant =
-                batch->surface_variant ==
-                        BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE
-                    ? (uint32_t)BTBH_GPU_SCENE_SURFACE_NONE
-                    : (uint32_t)batch->surface_variant;
-            fragment_uniforms.surface_time = batch->surface_time;
-            SDL_PushGPUFragmentUniformData(
-                command,
-                0u,
-                &fragment_uniforms,
-                (uint32_t)offsetof(
-                    BTBHGPUSceneFragmentUniforms,
-                    surface_parameters0
-                )
-            );
-
-            SDL_GPUBuffer *storage_buffers[2] = {
-                batch_instance_buffer,
-                bone_buffer
-            };
-            SDL_BindGPUVertexStorageBuffers(
-                pass,
-                0u,
-                storage_buffers,
-                animated ? 2u : 1u
-            );
-            BTBHGPUTexture *albedo_texture =
-                batch->albedo_texture != NULL
-                    ? batch->albedo_texture
-                    : runtime->fallback_texture;
-            BTBHGPUTexture *emission_texture =
-                batch->emission_texture != NULL
-                    ? batch->emission_texture
-                    : runtime->fallback_texture;
-            const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
-            BTBHGPUSceneDigMaskUniforms dig_uniforms;
-            btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
-            SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
-            SDL_GPUTextureSamplerBinding samplers[3];
-            SDL_zeroa(samplers);
-            samplers[0].texture = albedo_texture->texture;
-            samplers[0].sampler = albedo_texture->sampler;
-            samplers[1].texture = emission_texture->texture;
-            samplers[1].sampler = emission_texture->sampler;
-            samplers[2] = btbh_gpu_scene_dig_sampler(runtime, dig);
-            SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 3u);
+                SDL_GPUBuffer *storage_buffers[2] = {
+                    batch_instance_buffer,
+                    bone_buffer
+                };
+                SDL_BindGPUVertexStorageBuffers(
+                    pass,
+                    0u,
+                    storage_buffers,
+                    animated ? 2u : 1u
+                );
+                BTBHGPUTexture *albedo_texture =
+                    batch->albedo_texture != NULL
+                        ? batch->albedo_texture
+                        : runtime->fallback_texture;
+                BTBHGPUTexture *emission_texture =
+                    batch->emission_texture != NULL
+                        ? batch->emission_texture
+                        : runtime->fallback_texture;
+                const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+                BTBHGPUSceneDigMaskUniforms dig_uniforms;
+                btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
+                SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+                SDL_GPUTextureSamplerBinding samplers[3];
+                SDL_zeroa(samplers);
+                samplers[0].texture = albedo_texture->texture;
+                samplers[0].sampler = albedo_texture->sampler;
+                samplers[1].texture = emission_texture->texture;
+                samplers[1].sampler = emission_texture->sampler;
+                samplers[2] = btbh_gpu_scene_dig_sampler(runtime, dig);
+                SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 3u);
+                run_batch = animated ? NULL : batch;
+            }
 
             const BTBHGPUSceneGeometryDraw geometry =
                 btbh_gpu_scene_geometry_draw(batch, geometry_index);
@@ -7421,6 +7530,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const uint64_t prepare_started_ticks = SDL_GetTicksNS();
     const bool detailed_prepare_telemetry =
         window != NULL && window->frame_telemetry_enabled;
+    const bool runs_enabled = btbh_gpu_scene_runs_enabled();
     if (window != NULL &&
         (window->pending_scene_ready ||
          window->pending_command != NULL)) {
@@ -8067,7 +8177,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         (uint8_t)face,
                         face == 0u,
                         detailed_prepare_telemetry,
-                        telemetry
+                        telemetry,
+                        runs_enabled
                     )) {
                     shadow_rendered = false;
                     break;
@@ -8092,7 +8203,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 0u,
                 true,
                 detailed_prepare_telemetry,
-                telemetry
+                telemetry,
+                runs_enabled
             );
         }
         if (!shadow_rendered) {
@@ -8647,6 +8759,375 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
            stays for the command buffer's later draws, and only table batches read the slot, so a run of batches
            sharing a table pushes its 400 bytes once. */
         const BTBHGPUSceneWorldDetailTable *pushed_table = NULL;
+        /* RFC 0011: the batch whose state the pass holds (phase 1b; NULL before the first draw and after a skinned
+           geometry), the vertex buffer bound last, and the frame's part of both uniform blocks, filled once a pass
+           (phase 1c): each batch writes its own fields over it before it pushes them. */
+        const BTBHGPUSceneGeometryBatch *run_batch = NULL;
+        SDL_GPUBuffer *bound_vertex_buffer = NULL;
+        BTBHGPUSceneUniforms uniforms;
+        BTBHGPUSceneFragmentUniforms fragment_uniforms;
+        (void)memset(&uniforms, 0, sizeof(uniforms));
+        (void)memcpy(
+            uniforms.view_projection,
+            view_projection,
+            sizeof(uniforms.view_projection)
+        );
+        (void)memcpy(
+            uniforms.camera_right,
+            camera_right,
+            sizeof(float) * 3u
+        );
+        (void)memcpy(
+            uniforms.camera_up,
+            camera_up,
+            sizeof(float) * 3u
+        );
+        (void)memcpy(
+            uniforms.camera_position,
+            camera_position,
+            sizeof(float) * 3u
+        );
+        uniforms.ambient_color_energy[0] =
+            lighting->ambient_red;
+        uniforms.ambient_color_energy[1] =
+            lighting->ambient_green;
+        uniforms.ambient_color_energy[2] =
+            lighting->ambient_blue;
+        uniforms.ambient_color_energy[3] =
+            lighting->ambient_energy;
+        uniforms.directional_direction_energy[0] =
+            lighting->directional_x;
+        uniforms.directional_direction_energy[1] =
+            lighting->directional_y;
+        uniforms.directional_direction_energy[2] =
+            lighting->directional_z;
+        uniforms.directional_direction_energy[3] =
+            lighting->directional_energy;
+        uniforms.directional_color[0] =
+            lighting->directional_red;
+        uniforms.directional_color[1] =
+            lighting->directional_green;
+        uniforms.directional_color[2] =
+            lighting->directional_blue;
+        uniforms.directional_color[3] = 1.0f;
+        uniforms.secondary_directional_direction_energy[0] =
+            lighting->secondary_directional_x;
+        uniforms.secondary_directional_direction_energy[1] =
+            lighting->secondary_directional_y;
+        uniforms.secondary_directional_direction_energy[2] =
+            lighting->secondary_directional_z;
+        uniforms.secondary_directional_direction_energy[3] =
+            lighting->secondary_directional_energy;
+        uniforms.secondary_directional_color[0] =
+            lighting->secondary_directional_red;
+        uniforms.secondary_directional_color[1] =
+            lighting->secondary_directional_green;
+        uniforms.secondary_directional_color[2] =
+            lighting->secondary_directional_blue;
+        uniforms.secondary_directional_color[3] = 1.0f;
+        (void)memcpy(
+            uniforms.previous_view_projection,
+            previous_view_projection,
+            sizeof(uniforms.previous_view_projection)
+        );
+        (void)memcpy(
+            uniforms.world_curvature,
+            post->world_curvature,
+            sizeof(uniforms.world_curvature)
+        );
+        (void)memcpy(
+            uniforms.previous_world_curvature,
+            previous_world_curvature,
+            sizeof(uniforms.previous_world_curvature)
+        );
+        (void)memcpy(
+            uniforms.temporal_controls,
+            temporal_controls,
+            sizeof(uniforms.temporal_controls)
+        );
+        (void)memset(
+            &fragment_uniforms,
+            0,
+            sizeof(fragment_uniforms)
+        );
+        (void)memcpy(
+            fragment_uniforms.camera_position,
+            camera_position,
+            sizeof(float) * 3u
+        );
+        (void)memcpy(
+            fragment_uniforms.ambient_color_energy,
+            uniforms.ambient_color_energy,
+            sizeof(fragment_uniforms.ambient_color_energy)
+        );
+        (void)memcpy(
+            fragment_uniforms.directional_direction_energy,
+            uniforms.directional_direction_energy,
+            sizeof(fragment_uniforms.directional_direction_energy)
+        );
+        (void)memcpy(
+            fragment_uniforms.directional_color,
+            uniforms.directional_color,
+            sizeof(fragment_uniforms.directional_color)
+        );
+        (void)memcpy(
+            fragment_uniforms
+                .secondary_directional_direction_energy,
+            uniforms.secondary_directional_direction_energy,
+            sizeof(
+                fragment_uniforms
+                    .secondary_directional_direction_energy
+            )
+        );
+        (void)memcpy(
+            fragment_uniforms.secondary_directional_color,
+            uniforms.secondary_directional_color,
+            sizeof(fragment_uniforms.secondary_directional_color)
+        );
+        fragment_uniforms.spot_position_range[0] =
+            lighting->spot_position_x;
+        fragment_uniforms.spot_position_range[1] =
+            lighting->spot_position_y;
+        fragment_uniforms.spot_position_range[2] =
+            lighting->spot_position_z;
+        fragment_uniforms.spot_position_range[3] =
+            lighting->spot_range;
+        fragment_uniforms.spot_direction_energy[0] =
+            lighting->spot_direction_x;
+        fragment_uniforms.spot_direction_energy[1] =
+            lighting->spot_direction_y;
+        fragment_uniforms.spot_direction_energy[2] =
+            lighting->spot_direction_z;
+        fragment_uniforms.spot_direction_energy[3] =
+            lighting->spot_energy;
+        fragment_uniforms.spot_color_falloff[0] =
+            lighting->spot_red;
+        fragment_uniforms.spot_color_falloff[1] =
+            lighting->spot_green;
+        fragment_uniforms.spot_color_falloff[2] =
+            lighting->spot_blue;
+        fragment_uniforms.spot_color_falloff[3] =
+            lighting->spot_falloff;
+        fragment_uniforms.spot_cutoffs[0] =
+            lighting->spot_inner_cutoff;
+        fragment_uniforms.spot_cutoffs[1] =
+            lighting->spot_outer_cutoff;
+        fragment_uniforms.spot_cutoffs[2] =
+            lighting->spot_occluder_shadow_strength;
+        fragment_uniforms.spot_cutoffs[3] =
+            lighting->spot_occluder_shadow_reach;
+        {
+            const uint32_t point_count = SDL_min(
+                lighting->point_light_count,
+                (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
+            );
+            fragment_uniforms.point_light_count[0] =
+                (float)point_count;
+            for (uint32_t light = 0u; light < point_count; ++light) {
+                (void)memcpy(
+                    fragment_uniforms.point_lights[light * 2u],
+                    &lighting->point_lights[light][0],
+                    4u * sizeof(float)
+                );
+                (void)memcpy(
+                    fragment_uniforms.point_lights[light * 2u + 1u],
+                    &lighting->point_lights[light][4],
+                    4u * sizeof(float)
+                );
+            }
+        }
+        for (size_t coefficient = 0u;
+             coefficient < 9u;
+             coefficient += 1u) {
+            for (size_t channel = 0u;
+                 channel < 3u;
+                 channel += 1u) {
+                fragment_uniforms
+                    .irradiance_sh[coefficient][channel] =
+                    lighting->irradiance_sh[
+                        coefficient * 3u + channel
+                    ];
+            }
+        }
+        fragment_uniforms.ground_bottom_energy[0] =
+            lighting->ground_bottom_red;
+        fragment_uniforms.ground_bottom_energy[1] =
+            lighting->ground_bottom_green;
+        fragment_uniforms.ground_bottom_energy[2] =
+            lighting->ground_bottom_blue;
+        fragment_uniforms.ground_bottom_energy[3] =
+            lighting->ground_energy;
+        fragment_uniforms.ground_horizon_curve[0] =
+            lighting->ground_horizon_red;
+        fragment_uniforms.ground_horizon_curve[1] =
+            lighting->ground_horizon_green;
+        fragment_uniforms.ground_horizon_curve[2] =
+            lighting->ground_horizon_blue;
+        fragment_uniforms.ground_horizon_curve[3] =
+            lighting->ground_horizon_curve;
+        fragment_uniforms.sky_top_energy[0] =
+            lighting->sky_top_red;
+        fragment_uniforms.sky_top_energy[1] =
+            lighting->sky_top_green;
+        fragment_uniforms.sky_top_energy[2] =
+            lighting->sky_top_blue;
+        fragment_uniforms.sky_top_energy[3] =
+            lighting->sky_energy;
+        fragment_uniforms.sky_horizon_curve[0] =
+            lighting->sky_horizon_red;
+        fragment_uniforms.sky_horizon_curve[1] =
+            lighting->sky_horizon_green;
+        fragment_uniforms.sky_horizon_curve[2] =
+            lighting->sky_horizon_blue;
+        fragment_uniforms.sky_horizon_curve[3] =
+            lighting->sky_horizon_curve;
+        fragment_uniforms.sun_color_energy[0] =
+            lighting->sun_red;
+        fragment_uniforms.sun_color_energy[1] =
+            lighting->sun_green;
+        fragment_uniforms.sun_color_energy[2] =
+            lighting->sun_blue;
+        fragment_uniforms.sun_color_energy[3] =
+            lighting->sun_energy;
+        fragment_uniforms.sun_direction_size[0] =
+            lighting->sun_direction_x;
+        fragment_uniforms.sun_direction_size[1] =
+            lighting->sun_direction_y;
+        fragment_uniforms.sun_direction_size[2] =
+            lighting->sun_direction_z;
+        fragment_uniforms.sun_direction_size[3] =
+            lighting->sun_size_radians;
+        fragment_uniforms.procedural_controls[0] =
+            lighting->sun_curve;
+        fragment_uniforms.procedural_controls[1] =
+            (float)lighting->ibl_enabled;
+        fragment_uniforms.procedural_controls[3] =
+            temporal_lod_bias;
+        fragment_uniforms.surface_wetness[0] =
+            isfinite(lighting->surface_wetness)
+                ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
+                : 0.0f;
+        fragment_uniforms.surface_wetness[1] =
+            isfinite(lighting->window_glow)
+                ? fmaxf(lighting->window_glow, 0.0f)
+                : 0.0f;
+        fragment_uniforms.surface_wetness[2] =
+            isfinite(lighting->rain)
+                ? fminf(fmaxf(lighting->rain, 0.0f), 1.0f)
+                : 0.0f;
+        fragment_uniforms.cloud_controls[0] = lighting->cloud_offset[0];
+        fragment_uniforms.cloud_controls[1] = lighting->cloud_offset[1];
+        fragment_uniforms.cloud_controls[2] = lighting->cloud_frequency;
+        fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;
+        fragment_uniforms.cloud_shape[0] = lighting->cloud_coverage;
+        fragment_uniforms.cloud_shape[1] = lighting->cloud_softness;
+        fragment_uniforms.cloud_shape[2] = lighting->cloud_height;
+        {
+            const uint32_t lamp_count =
+                lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS
+                    ? lighting->lamp_count
+                    : BTBH_GPU_SCENE_MAX_LAMPS;
+            fragment_uniforms.lamp_controls[0] = (float)lamp_count;
+            fragment_uniforms.lamp_controls[1] =
+                lighting->lamp_core_radius;
+            if (lamp_count > 0u) {
+                (void)memcpy(
+                    fragment_uniforms.lamp_position_reach,
+                    lighting->lamp_position_reach,
+                    sizeof(float) * 4u * lamp_count
+                );
+                (void)memcpy(
+                    fragment_uniforms.lamp_color_energy,
+                    lighting->lamp_color_energy,
+                    sizeof(float) * 4u * lamp_count
+                );
+            }
+        }
+        /* The dark scene's controls ride in the point lights' header. */
+        fragment_uniforms.point_light_count[1] =
+            lighting->unlit_darkness;
+        fragment_uniforms.point_light_count[2] =
+            lighting->unlit_glow_threshold;
+        fragment_uniforms.point_light_count[3] =
+            SDL_max(lighting->point_light_ceiling, 0.0f);
+        const float *primary_shadow_matrix =
+            runtime->retained_shadow_ready[0] != 0u
+                ? runtime->retained_shadow_view_projection[0]
+                : lighting->directional_shadow_view_projection;
+        const float *secondary_shadow_matrix =
+            runtime->retained_shadow_ready[1] != 0u
+                ? runtime->retained_shadow_view_projection[1]
+                : lighting
+                    ->secondary_directional_shadow_view_projection;
+        const float *spot_shadow_matrix =
+            runtime->retained_shadow_ready[2] != 0u
+                ? runtime->retained_shadow_view_projection[2]
+                : lighting->spot_shadow_view_projection;
+        (void)memcpy(
+            fragment_uniforms
+                .directional_shadow_view_projection,
+            primary_shadow_matrix,
+            sizeof(
+                fragment_uniforms
+                    .directional_shadow_view_projection
+            )
+        );
+        (void)memcpy(
+            fragment_uniforms
+                .secondary_directional_shadow_view_projection,
+            secondary_shadow_matrix,
+            sizeof(
+                fragment_uniforms
+                    .secondary_directional_shadow_view_projection
+            )
+        );
+        (void)memcpy(
+            fragment_uniforms.spot_shadow_view_projection,
+            spot_shadow_matrix,
+            sizeof(fragment_uniforms.spot_shadow_view_projection)
+        );
+        fragment_uniforms.directional_shadow_controls[0] =
+            (float)shadow_enabled[0];
+        fragment_uniforms.directional_shadow_controls[1] =
+            lighting->directional_shadow_softness;
+        fragment_uniforms.directional_shadow_controls[2] =
+            lighting->directional_shadow_filter ==
+                    BTBH_GPU_SCENE_SHADOW_FILTER_SOFT
+                ? 1.0f
+                : 0.0f;
+        fragment_uniforms
+            .secondary_directional_shadow_controls[0] =
+            (float)shadow_enabled[1];
+        fragment_uniforms
+            .secondary_directional_shadow_controls[1] =
+            lighting->secondary_directional_shadow_softness;
+        fragment_uniforms.spot_shadow_controls[0] =
+            (float)shadow_enabled[2];
+        fragment_uniforms.spot_shadow_controls[1] =
+            lighting->spot_shadow_softness;
+        fragment_uniforms.spot_shadow_controls[2] =
+            (float)runtime->retained_spot_shadow_is_omni;
+        fragment_uniforms.spot_shadow_controls[3] =
+            lighting->spot_shadow_near;
+        if (runtime->retained_shadow_ready[2] != 0u &&
+            runtime->retained_spot_shadow_is_omni != 0u) {
+            (void)memcpy(
+                fragment_uniforms.omni_shadow_position_range,
+                runtime->retained_omni_shadow_position_range,
+                sizeof(
+                    fragment_uniforms.omni_shadow_position_range
+                )
+            );
+        } else {
+            fragment_uniforms.omni_shadow_position_range[0] =
+                lighting->spot_position_x;
+            fragment_uniforms.omni_shadow_position_range[1] =
+                lighting->spot_position_y;
+            fragment_uniforms.omni_shadow_position_range[2] =
+                lighting->spot_position_z;
+            fragment_uniforms.omni_shadow_position_range[3] =
+                lighting->spot_range;
+        }
         SDL_InsertGPUDebugLabel(
             command,
             !transparent_phase
@@ -8708,685 +9189,337 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 continue;
             }
             const bool animated = bone_offset != UINT32_MAX;
-            BTBHGPUSceneUniforms uniforms;
-            (void)memset(&uniforms, 0, sizeof(uniforms));
-            (void)memcpy(
-                uniforms.view_projection,
-                view_projection,
-                sizeof(uniforms.view_projection)
-            );
-            (void)memcpy(
-                uniforms.camera_right,
-                camera_right,
-                sizeof(float) * 3u
-            );
-            (void)memcpy(
-                uniforms.camera_up,
-                camera_up,
-                sizeof(float) * 3u
-            );
-            (void)memcpy(
-                uniforms.camera_position,
-                camera_position,
-                sizeof(float) * 3u
-            );
-            uniforms.material_color[0] =
-                (float)batch->albedo_red / 255.0f;
-            uniforms.material_color[1] =
-                (float)batch->albedo_green / 255.0f;
-            uniforms.material_color[2] =
-                (float)batch->albedo_blue / 255.0f;
-            uniforms.material_color[3] =
-                (float)batch->albedo_alpha / 255.0f;
-            uniforms.uv_transform[0] = batch->uv_scale_x;
-            uniforms.uv_transform[1] = batch->uv_scale_y;
-            uniforms.uv_transform[2] = batch->uv_offset_x;
-            uniforms.uv_transform[3] = batch->uv_offset_y;
-            uniforms.ambient_color_energy[0] =
-                lighting->ambient_red;
-            uniforms.ambient_color_energy[1] =
-                lighting->ambient_green;
-            uniforms.ambient_color_energy[2] =
-                lighting->ambient_blue;
-            uniforms.ambient_color_energy[3] =
-                lighting->ambient_energy;
-            uniforms.directional_direction_energy[0] =
-                lighting->directional_x;
-            uniforms.directional_direction_energy[1] =
-                lighting->directional_y;
-            uniforms.directional_direction_energy[2] =
-                lighting->directional_z;
-            uniforms.directional_direction_energy[3] =
-                lighting->directional_energy;
-            uniforms.directional_color[0] =
-                lighting->directional_red;
-            uniforms.directional_color[1] =
-                lighting->directional_green;
-            uniforms.directional_color[2] =
-                lighting->directional_blue;
-            uniforms.directional_color[3] = 1.0f;
-            uniforms.secondary_directional_direction_energy[0] =
-                lighting->secondary_directional_x;
-            uniforms.secondary_directional_direction_energy[1] =
-                lighting->secondary_directional_y;
-            uniforms.secondary_directional_direction_energy[2] =
-                lighting->secondary_directional_z;
-            uniforms.secondary_directional_direction_energy[3] =
-                lighting->secondary_directional_energy;
-            uniforms.secondary_directional_color[0] =
-                lighting->secondary_directional_red;
-            uniforms.secondary_directional_color[1] =
-                lighting->secondary_directional_green;
-            uniforms.secondary_directional_color[2] =
-                lighting->secondary_directional_blue;
-            uniforms.secondary_directional_color[3] = 1.0f;
-            uniforms.bone_offset = animated ? bone_offset : 0u;
-            uniforms.previous_bone_offset =
-                animated ? previous_bone_offset : 0u;
-            uniforms.billboard_mode =
-                (uint32_t)batch->billboard_mode;
-            uniforms.unlit_enabled =
-                (uint32_t)batch->unlit_enabled;
-            uniforms.surface_variant =
-                (uint32_t)batch->surface_variant;
-            uniforms.surface_controls[0] =
-                batch->surface_time;
-            (void)memcpy(
-                uniforms.surface_parameters0,
-                batch->surface_parameters0,
-                sizeof(uniforms.surface_parameters0)
-            );
-            (void)memcpy(
-                uniforms.surface_parameters1,
-                batch->surface_parameters1,
-                sizeof(uniforms.surface_parameters1)
-            );
-            (void)memcpy(
-                uniforms.previous_view_projection,
-                previous_view_projection,
-                sizeof(uniforms.previous_view_projection)
-            );
-            (void)memcpy(
-                uniforms.world_curvature,
-                post->world_curvature,
-                sizeof(uniforms.world_curvature)
-            );
-            (void)memcpy(
-                uniforms.previous_world_curvature,
-                previous_world_curvature,
-                sizeof(uniforms.previous_world_curvature)
-            );
-            (void)memcpy(
-                uniforms.temporal_controls,
-                temporal_controls,
-                sizeof(uniforms.temporal_controls)
-            );
-            /* Persistent instances (the static city) have no motion of their own. */
-            const bool batch_motion =
-                temporal_motion_ready && batch->instance_buffer == NULL;
-            uniforms.temporal_controls[2] = batch_motion ? 1.0f : 0.0f;
-            SDL_PushGPUVertexUniformData(
-                command,
-                0u,
-                &uniforms,
-                sizeof(uniforms)
-            );
-            BTBHGPUSceneFragmentUniforms fragment_uniforms;
-            (void)memset(
-                &fragment_uniforms,
-                0,
-                sizeof(fragment_uniforms)
-            );
-            (void)memcpy(
-                fragment_uniforms.camera_position,
-                camera_position,
-                sizeof(float) * 3u
-            );
-            (void)memcpy(
-                fragment_uniforms.ambient_color_energy,
-                uniforms.ambient_color_energy,
-                sizeof(fragment_uniforms.ambient_color_energy)
-            );
-            (void)memcpy(
-                fragment_uniforms.directional_direction_energy,
-                uniforms.directional_direction_energy,
-                sizeof(fragment_uniforms.directional_direction_energy)
-            );
-            (void)memcpy(
-                fragment_uniforms.directional_color,
-                uniforms.directional_color,
-                sizeof(fragment_uniforms.directional_color)
-            );
-            (void)memcpy(
-                fragment_uniforms
-                    .secondary_directional_direction_energy,
-                uniforms.secondary_directional_direction_energy,
-                sizeof(
-                    fragment_uniforms
-                        .secondary_directional_direction_energy
-                )
-            );
-            (void)memcpy(
-                fragment_uniforms.secondary_directional_color,
-                uniforms.secondary_directional_color,
-                sizeof(fragment_uniforms.secondary_directional_color)
-            );
-            fragment_uniforms.spot_position_range[0] =
-                lighting->spot_position_x;
-            fragment_uniforms.spot_position_range[1] =
-                lighting->spot_position_y;
-            fragment_uniforms.spot_position_range[2] =
-                lighting->spot_position_z;
-            fragment_uniforms.spot_position_range[3] =
-                lighting->spot_range;
-            fragment_uniforms.spot_direction_energy[0] =
-                lighting->spot_direction_x;
-            fragment_uniforms.spot_direction_energy[1] =
-                lighting->spot_direction_y;
-            fragment_uniforms.spot_direction_energy[2] =
-                lighting->spot_direction_z;
-            fragment_uniforms.spot_direction_energy[3] =
-                lighting->spot_energy;
-            fragment_uniforms.spot_color_falloff[0] =
-                lighting->spot_red;
-            fragment_uniforms.spot_color_falloff[1] =
-                lighting->spot_green;
-            fragment_uniforms.spot_color_falloff[2] =
-                lighting->spot_blue;
-            fragment_uniforms.spot_color_falloff[3] =
-                lighting->spot_falloff;
-            fragment_uniforms.spot_cutoffs[0] =
-                lighting->spot_inner_cutoff;
-            fragment_uniforms.spot_cutoffs[1] =
-                lighting->spot_outer_cutoff;
-            fragment_uniforms.spot_cutoffs[2] =
-                lighting->spot_occluder_shadow_strength;
-            fragment_uniforms.spot_cutoffs[3] =
-                lighting->spot_occluder_shadow_reach;
-            {
-                const uint32_t point_count = SDL_min(
-                    lighting->point_light_count,
-                    (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
-                );
-                fragment_uniforms.point_light_count[0] =
-                    (float)point_count;
-                for (uint32_t light = 0u; light < point_count; ++light) {
-                    (void)memcpy(
-                        fragment_uniforms.point_lights[light * 2u],
-                        &lighting->point_lights[light][0],
-                        4u * sizeof(float)
-                    );
-                    (void)memcpy(
-                        fragment_uniforms.point_lights[light * 2u + 1u],
-                        &lighting->point_lights[light][4],
-                        4u * sizeof(float)
-                    );
-                }
-            }
-            fragment_uniforms.material_factors[0] =
-                batch->normal_scale;
-            fragment_uniforms.material_factors[1] =
-                batch->occlusion;
-            fragment_uniforms.material_factors[2] =
-                batch->roughness;
-            fragment_uniforms.material_factors[3] =
-                batch->metalness;
-            fragment_uniforms.emission_color_energy[0] =
-                (float)batch->emission_red / 255.0f;
-            fragment_uniforms.emission_color_energy[1] =
-                (float)batch->emission_green / 255.0f;
-            fragment_uniforms.emission_color_energy[2] =
-                (float)batch->emission_blue / 255.0f;
-            fragment_uniforms.emission_color_energy[3] =
-                batch->emission_energy;
-            fragment_uniforms.unlit_enabled =
-                uniforms.unlit_enabled |
-                (batch->rc_receiver != 0u ? 4u : 0u) |
-                (hbao_active
-                    ? 32u | ((uint32_t)batch->ssao_mode << 3u)
-                    : 0u) |
-                (ssr_surface_reflectivity ? 64u : 0u) |
-                (scene_ambient_targets ? 128u : 0u);
-            fragment_uniforms.alpha_cutoff =
-                batch->alpha_cutoff;
-            fragment_uniforms.surface_variant =
-                batch->surface_variant ==
-                        BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE &&
-                    !(transparent_phase && scene_distance_ready)
-                    ? (uint32_t)BTBH_GPU_SCENE_SURFACE_NONE
-                    : (uint32_t)batch->surface_variant;
-            fragment_uniforms.surface_time =
-                batch->surface_time;
-            (void)memcpy(
-                fragment_uniforms.surface_parameters0,
-                batch->surface_parameters0,
-                sizeof(fragment_uniforms.surface_parameters0)
-            );
-            (void)memcpy(
-                fragment_uniforms.surface_parameters1,
-                batch->surface_parameters1,
-                sizeof(fragment_uniforms.surface_parameters1)
-            );
-            if (batch_refracts) {
-                /* Reserved for the host: 1 tells the shader the normal slot carries the scene's distance. */
-                fragment_uniforms.surface_parameters1[3] =
-                    scene_distance_ready ? 1.0f : 0.0f;
-            }
-            for (size_t coefficient = 0u;
-                 coefficient < 9u;
-                 coefficient += 1u) {
-                for (size_t channel = 0u;
-                     channel < 3u;
-                     channel += 1u) {
-                    fragment_uniforms
-                        .irradiance_sh[coefficient][channel] =
-                        lighting->irradiance_sh[
-                            coefficient * 3u + channel
-                        ];
-                }
-            }
-            fragment_uniforms.ground_bottom_energy[0] =
-                lighting->ground_bottom_red;
-            fragment_uniforms.ground_bottom_energy[1] =
-                lighting->ground_bottom_green;
-            fragment_uniforms.ground_bottom_energy[2] =
-                lighting->ground_bottom_blue;
-            fragment_uniforms.ground_bottom_energy[3] =
-                lighting->ground_energy;
-            fragment_uniforms.ground_horizon_curve[0] =
-                lighting->ground_horizon_red;
-            fragment_uniforms.ground_horizon_curve[1] =
-                lighting->ground_horizon_green;
-            fragment_uniforms.ground_horizon_curve[2] =
-                lighting->ground_horizon_blue;
-            fragment_uniforms.ground_horizon_curve[3] =
-                lighting->ground_horizon_curve;
-            fragment_uniforms.sky_top_energy[0] =
-                lighting->sky_top_red;
-            fragment_uniforms.sky_top_energy[1] =
-                lighting->sky_top_green;
-            fragment_uniforms.sky_top_energy[2] =
-                lighting->sky_top_blue;
-            fragment_uniforms.sky_top_energy[3] =
-                lighting->sky_energy;
-            fragment_uniforms.sky_horizon_curve[0] =
-                lighting->sky_horizon_red;
-            fragment_uniforms.sky_horizon_curve[1] =
-                lighting->sky_horizon_green;
-            fragment_uniforms.sky_horizon_curve[2] =
-                lighting->sky_horizon_blue;
-            fragment_uniforms.sky_horizon_curve[3] =
-                lighting->sky_horizon_curve;
-            fragment_uniforms.sun_color_energy[0] =
-                lighting->sun_red;
-            fragment_uniforms.sun_color_energy[1] =
-                lighting->sun_green;
-            fragment_uniforms.sun_color_energy[2] =
-                lighting->sun_blue;
-            fragment_uniforms.sun_color_energy[3] =
-                lighting->sun_energy;
-            fragment_uniforms.sun_direction_size[0] =
-                lighting->sun_direction_x;
-            fragment_uniforms.sun_direction_size[1] =
-                lighting->sun_direction_y;
-            fragment_uniforms.sun_direction_size[2] =
-                lighting->sun_direction_z;
-            fragment_uniforms.sun_direction_size[3] =
-                lighting->sun_size_radians;
-            fragment_uniforms.procedural_controls[0] =
-                lighting->sun_curve;
-            fragment_uniforms.procedural_controls[1] =
-                (float)lighting->ibl_enabled;
-            /* The reactive mask's scale: the frame's, unless this batch stays out of the mask (a
-               transparent layer that should be accumulated like the opaque scene, such as ground
-               detail drawn over its base). The shader writes the mask only for a positive scale (at
-               zero the pass's second target keeps the shading's ambient term), so "none" is a scale
-               too small to reach the mask's first step (1/255 of full alpha). */
-            fragment_uniforms.procedural_controls[2] =
-                transparent_phase && temporal_active
-                    ? (batch->reactive_mode == BTBH_GPU_SCENE_REACTIVE_NONE
-                        ? BTBH_GPU_SCENE_REACTIVE_NONE_SCALE
-                        : post->temporal_reactive_scale)
-                    : 0.0f;
-            fragment_uniforms.procedural_controls[3] =
-                temporal_lod_bias;
-            (void)memcpy(
-                fragment_uniforms.detail_parameters,
-                batch->detail_parameters,
-                sizeof(fragment_uniforms.detail_parameters)
-            );
-            fragment_uniforms.surface_wetness[0] =
-                isfinite(lighting->surface_wetness)
-                    ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
-                    : 0.0f;
-            fragment_uniforms.surface_wetness[1] =
-                isfinite(lighting->window_glow)
-                    ? fmaxf(lighting->window_glow, 0.0f)
-                    : 0.0f;
-            fragment_uniforms.surface_wetness[2] =
-                isfinite(lighting->rain)
-                    ? fminf(fmaxf(lighting->rain, 0.0f), 1.0f)
-                    : 0.0f;
-            fragment_uniforms.cloud_controls[0] = lighting->cloud_offset[0];
-            fragment_uniforms.cloud_controls[1] = lighting->cloud_offset[1];
-            fragment_uniforms.cloud_controls[2] = lighting->cloud_frequency;
-            fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;
-            fragment_uniforms.cloud_shape[0] = lighting->cloud_coverage;
-            fragment_uniforms.cloud_shape[1] = lighting->cloud_softness;
-            fragment_uniforms.cloud_shape[2] = lighting->cloud_height;
-            {
-                const uint32_t lamp_count =
-                    lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS
-                        ? lighting->lamp_count
-                        : BTBH_GPU_SCENE_MAX_LAMPS;
-                fragment_uniforms.lamp_controls[0] = (float)lamp_count;
-                fragment_uniforms.lamp_controls[1] =
-                    lighting->lamp_core_radius;
-                if (lamp_count > 0u) {
-                    (void)memcpy(
-                        fragment_uniforms.lamp_position_reach,
-                        lighting->lamp_position_reach,
-                        sizeof(float) * 4u * lamp_count
-                    );
-                    (void)memcpy(
-                        fragment_uniforms.lamp_color_energy,
-                        lighting->lamp_color_energy,
-                        sizeof(float) * 4u * lamp_count
-                    );
-                }
-            }
-            /* The dark scene's controls ride in the point lights' header. */
-            fragment_uniforms.point_light_count[1] =
-                lighting->unlit_darkness;
-            fragment_uniforms.point_light_count[2] =
-                lighting->unlit_glow_threshold;
-            fragment_uniforms.point_light_count[3] =
-                SDL_max(lighting->point_light_ceiling, 0.0f);
-            const float *primary_shadow_matrix =
-                runtime->retained_shadow_ready[0] != 0u
-                    ? runtime->retained_shadow_view_projection[0]
-                    : lighting->directional_shadow_view_projection;
-            const float *secondary_shadow_matrix =
-                runtime->retained_shadow_ready[1] != 0u
-                    ? runtime->retained_shadow_view_projection[1]
-                    : lighting
-                        ->secondary_directional_shadow_view_projection;
-            const float *spot_shadow_matrix =
-                runtime->retained_shadow_ready[2] != 0u
-                    ? runtime->retained_shadow_view_projection[2]
-                    : lighting->spot_shadow_view_projection;
-            (void)memcpy(
-                fragment_uniforms
-                    .directional_shadow_view_projection,
-                primary_shadow_matrix,
-                sizeof(
-                    fragment_uniforms
-                        .directional_shadow_view_projection
-                )
-            );
-            (void)memcpy(
-                fragment_uniforms
-                    .secondary_directional_shadow_view_projection,
-                secondary_shadow_matrix,
-                sizeof(
-                    fragment_uniforms
-                        .secondary_directional_shadow_view_projection
-                )
-            );
-            (void)memcpy(
-                fragment_uniforms.spot_shadow_view_projection,
-                spot_shadow_matrix,
-                sizeof(fragment_uniforms.spot_shadow_view_projection)
-            );
-            fragment_uniforms.directional_shadow_controls[0] =
-                (float)shadow_enabled[0];
-            fragment_uniforms.directional_shadow_controls[1] =
-                lighting->directional_shadow_softness;
-            fragment_uniforms.directional_shadow_controls[2] =
-                lighting->directional_shadow_filter ==
-                        BTBH_GPU_SCENE_SHADOW_FILTER_SOFT
-                    ? 1.0f
-                    : 0.0f;
-            fragment_uniforms
-                .secondary_directional_shadow_controls[0] =
-                (float)shadow_enabled[1];
-            fragment_uniforms
-                .secondary_directional_shadow_controls[1] =
-                lighting->secondary_directional_shadow_softness;
-            fragment_uniforms.spot_shadow_controls[0] =
-                (float)shadow_enabled[2];
-            fragment_uniforms.spot_shadow_controls[1] =
-                lighting->spot_shadow_softness;
-            fragment_uniforms.spot_shadow_controls[2] =
-                (float)runtime->retained_spot_shadow_is_omni;
-            fragment_uniforms.spot_shadow_controls[3] =
-                lighting->spot_shadow_near;
-            if (runtime->retained_shadow_ready[2] != 0u &&
-                runtime->retained_spot_shadow_is_omni != 0u) {
-                (void)memcpy(
-                    fragment_uniforms.omni_shadow_position_range,
-                    runtime->retained_omni_shadow_position_range,
-                    sizeof(
-                        fragment_uniforms.omni_shadow_position_range
-                    )
-                );
-            } else {
-                fragment_uniforms.omni_shadow_position_range[0] =
-                    lighting->spot_position_x;
-                fragment_uniforms.omni_shadow_position_range[1] =
-                    lighting->spot_position_y;
-                fragment_uniforms.omni_shadow_position_range[2] =
-                    lighting->spot_position_z;
-                fragment_uniforms.omni_shadow_position_range[3] =
-                    lighting->spot_range;
-            }
-            SDL_PushGPUFragmentUniformData(
-                command,
-                0u,
-                &fragment_uniforms,
-                shadows_active
-                    ? (uint32_t)sizeof(fragment_uniforms)
-                    : (uint32_t)offsetof(
-                        BTBHGPUSceneFragmentUniforms,
-                        directional_shadow_view_projection
-                    )
-            );
-            BTBHGPUSceneStencilVariant stencil_variant;
-            if (!btbh_gpu_scene_stencil_variant(
-                    batch,
-                    &stencil_variant
-                )) {
-                SDL_EndGPURenderPass(pass);
-                btbh_gpu_scene_cancel_submission(window, command);
-                free(bone_offsets);
-                btbh_gpu_scene_error(
-                    report,
-                    BTBH_GPU_INVALID_ARGUMENT,
-                    "Unsupported GPU scene stencil material state"
-                );
-                return report->result;
-            }
-            SDL_SetGPUStencilReference(
-                pass,
-                batch->stencil_reference
-            );
-            SDL_GPUGraphicsPipeline *model_pipeline =
-                *btbh_gpu_scene_pipeline_slot(
-                    window->scene_runtime,
-                    phase_auxiliary_geometry_outputs,
-                    temporal_active,
-                    radiance_cascades_active,
-                    shadows_active,
-                    omni_shadows_active,
-                    animated,
-                    batch,
-                    stencil_variant
-                );
-            if (model_pipeline != bound_model_pipeline) {
-                SDL_BindGPUGraphicsPipeline(pass, model_pipeline);
-                bound_model_pipeline = model_pipeline;
+            /* RFC 0011 phase 1b: a geometry whose batch continues the run (btbh_gpu_scene_batch_continues_run) finds
+               its uniforms, stencil reference, pipeline, storage buffers and samplers bound by the run's first batch,
+               and binds only its vertex and index buffers. */
+            const bool continues_run =
+                runs_enabled &&
+                !animated &&
+                run_batch != NULL &&
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            if (continues_run) {
+                telemetry->geometry_run_draw_count += 1u;
                 if (detailed_prepare_telemetry) {
-                    telemetry->geometry_pipeline_bind_count += 1u;
+                    telemetry->geometry_pipeline_bind_skip_count += 1u;
                 }
-            } else if (detailed_prepare_telemetry) {
-                telemetry->geometry_pipeline_bind_skip_count += 1u;
-            }
-            /* The motion slot takes the instance buffer when the draw has no motion; the shader
-               then never reads it. */
-            SDL_GPUBuffer *batch_motion_buffer = batch_motion
-                ? motion_buffer
-                : batch_instance_buffer;
-            if (animated) {
-                SDL_GPUBuffer *storage_buffers[3] = {
-                    batch_instance_buffer,
-                    bone_buffer,
-                    batch_motion_buffer
-                };
-                SDL_BindGPUVertexStorageBuffers(
-                    pass,
-                    0u,
-                    storage_buffers,
-                    3u
-                );
             } else {
-                SDL_GPUBuffer *storage_buffers[2] = {
-                    batch_instance_buffer,
-                    batch_motion_buffer
-                };
-                SDL_BindGPUVertexStorageBuffers(
-                    pass,
-                    0u,
-                    storage_buffers,
-                    2u
+                uniforms.material_color[0] =
+                    (float)batch->albedo_red / 255.0f;
+                uniforms.material_color[1] =
+                    (float)batch->albedo_green / 255.0f;
+                uniforms.material_color[2] =
+                    (float)batch->albedo_blue / 255.0f;
+                uniforms.material_color[3] =
+                    (float)batch->albedo_alpha / 255.0f;
+                uniforms.uv_transform[0] = batch->uv_scale_x;
+                uniforms.uv_transform[1] = batch->uv_scale_y;
+                uniforms.uv_transform[2] = batch->uv_offset_x;
+                uniforms.uv_transform[3] = batch->uv_offset_y;
+                uniforms.bone_offset = animated ? bone_offset : 0u;
+                uniforms.previous_bone_offset =
+                    animated ? previous_bone_offset : 0u;
+                uniforms.billboard_mode =
+                    (uint32_t)batch->billboard_mode;
+                uniforms.unlit_enabled =
+                    (uint32_t)batch->unlit_enabled;
+                uniforms.surface_variant =
+                    (uint32_t)batch->surface_variant;
+                uniforms.surface_controls[0] =
+                    batch->surface_time;
+                (void)memcpy(
+                    uniforms.surface_parameters0,
+                    batch->surface_parameters0,
+                    sizeof(uniforms.surface_parameters0)
                 );
-            }
-            BTBHGPUTexture *texture = batch->albedo_texture != NULL
-                ? batch->albedo_texture
-                : window->scene_runtime->fallback_texture;
-            BTBHGPUTexture *emission_texture =
-                batch->emission_texture != NULL
-                    ? batch->emission_texture
+                (void)memcpy(
+                    uniforms.surface_parameters1,
+                    batch->surface_parameters1,
+                    sizeof(uniforms.surface_parameters1)
+                );
+                /* Persistent instances (the static city) have no motion of their own. */
+                const bool batch_motion =
+                    temporal_motion_ready && batch->instance_buffer == NULL;
+                uniforms.temporal_controls[2] = batch_motion ? 1.0f : 0.0f;
+                SDL_PushGPUVertexUniformData(
+                    command,
+                    0u,
+                    &uniforms,
+                    sizeof(uniforms)
+                );
+                fragment_uniforms.material_factors[0] =
+                    batch->normal_scale;
+                fragment_uniforms.material_factors[1] =
+                    batch->occlusion;
+                fragment_uniforms.material_factors[2] =
+                    batch->roughness;
+                fragment_uniforms.material_factors[3] =
+                    batch->metalness;
+                fragment_uniforms.emission_color_energy[0] =
+                    (float)batch->emission_red / 255.0f;
+                fragment_uniforms.emission_color_energy[1] =
+                    (float)batch->emission_green / 255.0f;
+                fragment_uniforms.emission_color_energy[2] =
+                    (float)batch->emission_blue / 255.0f;
+                fragment_uniforms.emission_color_energy[3] =
+                    batch->emission_energy;
+                fragment_uniforms.unlit_enabled =
+                    uniforms.unlit_enabled |
+                    (batch->rc_receiver != 0u ? 4u : 0u) |
+                    (hbao_active
+                        ? 32u | ((uint32_t)batch->ssao_mode << 3u)
+                        : 0u) |
+                    (ssr_surface_reflectivity ? 64u : 0u) |
+                    (scene_ambient_targets ? 128u : 0u);
+                fragment_uniforms.alpha_cutoff =
+                    batch->alpha_cutoff;
+                fragment_uniforms.surface_variant =
+                    batch->surface_variant ==
+                            BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE &&
+                        !(transparent_phase && scene_distance_ready)
+                        ? (uint32_t)BTBH_GPU_SCENE_SURFACE_NONE
+                        : (uint32_t)batch->surface_variant;
+                fragment_uniforms.surface_time =
+                    batch->surface_time;
+                (void)memcpy(
+                    fragment_uniforms.surface_parameters0,
+                    batch->surface_parameters0,
+                    sizeof(fragment_uniforms.surface_parameters0)
+                );
+                (void)memcpy(
+                    fragment_uniforms.surface_parameters1,
+                    batch->surface_parameters1,
+                    sizeof(fragment_uniforms.surface_parameters1)
+                );
+                if (batch_refracts) {
+                    /* Reserved for the host: 1 tells the shader the normal slot carries the scene's distance. */
+                    fragment_uniforms.surface_parameters1[3] =
+                        scene_distance_ready ? 1.0f : 0.0f;
+                }
+                /* The reactive mask's scale: the frame's, unless this batch stays out of the mask (a
+                   transparent layer that should be accumulated like the opaque scene, such as ground
+                   detail drawn over its base). The shader writes the mask only for a positive scale (at
+                   zero the pass's second target keeps the shading's ambient term), so "none" is a scale
+                   too small to reach the mask's first step (1/255 of full alpha). */
+                fragment_uniforms.procedural_controls[2] =
+                    transparent_phase && temporal_active
+                        ? (batch->reactive_mode == BTBH_GPU_SCENE_REACTIVE_NONE
+                            ? BTBH_GPU_SCENE_REACTIVE_NONE_SCALE
+                            : post->temporal_reactive_scale)
+                        : 0.0f;
+                (void)memcpy(
+                    fragment_uniforms.detail_parameters,
+                    batch->detail_parameters,
+                    sizeof(fragment_uniforms.detail_parameters)
+                );
+                SDL_PushGPUFragmentUniformData(
+                    command,
+                    0u,
+                    &fragment_uniforms,
+                    shadows_active
+                        ? (uint32_t)sizeof(fragment_uniforms)
+                        : (uint32_t)offsetof(
+                            BTBHGPUSceneFragmentUniforms,
+                            directional_shadow_view_projection
+                        )
+                );
+                BTBHGPUSceneStencilVariant stencil_variant;
+                if (!btbh_gpu_scene_stencil_variant(
+                        batch,
+                        &stencil_variant
+                    )) {
+                    SDL_EndGPURenderPass(pass);
+                    btbh_gpu_scene_cancel_submission(window, command);
+                    free(bone_offsets);
+                    btbh_gpu_scene_error(
+                        report,
+                        BTBH_GPU_INVALID_ARGUMENT,
+                        "Unsupported GPU scene stencil material state"
+                    );
+                    return report->result;
+                }
+                SDL_SetGPUStencilReference(
+                    pass,
+                    batch->stencil_reference
+                );
+                SDL_GPUGraphicsPipeline *model_pipeline =
+                    *btbh_gpu_scene_pipeline_slot(
+                        window->scene_runtime,
+                        phase_auxiliary_geometry_outputs,
+                        temporal_active,
+                        radiance_cascades_active,
+                        shadows_active,
+                        omni_shadows_active,
+                        animated,
+                        batch,
+                        stencil_variant
+                    );
+                if (model_pipeline != bound_model_pipeline) {
+                    SDL_BindGPUGraphicsPipeline(pass, model_pipeline);
+                    bound_model_pipeline = model_pipeline;
+                    if (detailed_prepare_telemetry) {
+                        telemetry->geometry_pipeline_bind_count += 1u;
+                    }
+                } else if (detailed_prepare_telemetry) {
+                    telemetry->geometry_pipeline_bind_skip_count += 1u;
+                }
+                /* The motion slot takes the instance buffer when the draw has no motion; the shader
+                   then never reads it. */
+                SDL_GPUBuffer *batch_motion_buffer = batch_motion
+                    ? motion_buffer
+                    : batch_instance_buffer;
+                if (animated) {
+                    SDL_GPUBuffer *storage_buffers[3] = {
+                        batch_instance_buffer,
+                        bone_buffer,
+                        batch_motion_buffer
+                    };
+                    SDL_BindGPUVertexStorageBuffers(
+                        pass,
+                        0u,
+                        storage_buffers,
+                        3u
+                    );
+                } else {
+                    SDL_GPUBuffer *storage_buffers[2] = {
+                        batch_instance_buffer,
+                        batch_motion_buffer
+                    };
+                    SDL_BindGPUVertexStorageBuffers(
+                        pass,
+                        0u,
+                        storage_buffers,
+                        2u
+                    );
+                }
+                BTBHGPUTexture *texture = batch->albedo_texture != NULL
+                    ? batch->albedo_texture
                     : window->scene_runtime->fallback_texture;
-            BTBHGPUTexture *normal_texture =
-                batch->normal_texture != NULL
-                    ? batch->normal_texture
-                    : window->scene_runtime->normal_fallback_texture;
-            BTBHGPUTexture *orm_texture =
-                batch->orm_texture != NULL
-                    ? batch->orm_texture
-                    : window->scene_runtime->fallback_texture;
-            SDL_GPUTextureSamplerBinding samplers[15];
-            SDL_zeroa(samplers);
-            samplers[0].texture = texture->texture;
-            samplers[0].sampler = texture->sampler;
-            samplers[1].texture = emission_texture->texture;
-            samplers[1].sampler = emission_texture->sampler;
-            samplers[2].texture = normal_texture->texture;
-            samplers[2].sampler = normal_texture->sampler;
-            if (transparent_phase &&
-                scene_distance_ready &&
-                batch->surface_variant ==
-                    BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE) {
-                /* A soft particle has no normal map; the slot carries the scene's distance. */
-                samplers[2].texture = runtime->scene_distance_texture;
-                samplers[2].sampler = runtime->scene_color_sampler;
-            }
-            if (batch_refracts) {
-                /* Refraction samples no material: the albedo slot carries the scene copy, the normal
-                   slot the scene's distance. */
-                samplers[0].texture = runtime->refraction_texture;
-                samplers[0].sampler = runtime->scene_color_sampler;
-                if (scene_distance_ready) {
+                BTBHGPUTexture *emission_texture =
+                    batch->emission_texture != NULL
+                        ? batch->emission_texture
+                        : window->scene_runtime->fallback_texture;
+                BTBHGPUTexture *normal_texture =
+                    batch->normal_texture != NULL
+                        ? batch->normal_texture
+                        : window->scene_runtime->normal_fallback_texture;
+                BTBHGPUTexture *orm_texture =
+                    batch->orm_texture != NULL
+                        ? batch->orm_texture
+                        : window->scene_runtime->fallback_texture;
+                SDL_GPUTextureSamplerBinding samplers[15];
+                SDL_zeroa(samplers);
+                samplers[0].texture = texture->texture;
+                samplers[0].sampler = texture->sampler;
+                samplers[1].texture = emission_texture->texture;
+                samplers[1].sampler = emission_texture->sampler;
+                samplers[2].texture = normal_texture->texture;
+                samplers[2].sampler = normal_texture->sampler;
+                if (transparent_phase &&
+                    scene_distance_ready &&
+                    batch->surface_variant ==
+                        BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE) {
+                    /* A soft particle has no normal map; the slot carries the scene's distance. */
                     samplers[2].texture = runtime->scene_distance_texture;
                     samplers[2].sampler = runtime->scene_color_sampler;
                 }
-            }
-            samplers[3].texture = orm_texture->texture;
-            samplers[3].sampler = orm_texture->sampler;
-            samplers[4].texture = runtime->brdf_lut_texture;
-            samplers[4].sampler = runtime->brdf_lut_sampler;
-            samplers[5].texture =
-                runtime->directional_shadow_textures[0];
-            samplers[5].sampler =
-                runtime->directional_shadow_sampler;
-            samplers[6].texture =
-                runtime->directional_shadow_textures[1];
-            samplers[6].sampler =
-                runtime->directional_shadow_sampler;
-            samplers[7].texture =
-                runtime->directional_shadow_textures[2];
-            samplers[7].sampler =
-                runtime->directional_shadow_sampler;
-            /* The primary map again, through the comparison sampler (the soft sun shadow filter's taps). */
-            samplers[8].texture =
-                runtime->directional_shadow_textures[0];
-            samplers[8].sampler =
-                runtime->directional_shadow_compare_sampler;
-            if (omni_shadows_active) {
-                samplers[9].texture = runtime->omni_shadow_texture;
-                samplers[9].sampler =
-                    runtime->directional_shadow_sampler;
-            }
-            /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
-               (RFC 0008) and the world-detail table's array (RFC 0009; these four not in the fast unlit shader),
-               with their placement in the fragment uniform slot 1, and a table's entries in slot 2. */
-            const bool batch_fast_unlit =
-                !radiance_cascades_active &&
-                btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
-            const uint32_t material_sampler_count =
-                batch_fast_unlit
-                    ? 2u
-                    : (shadows_active
-                        ? (omni_shadows_active ? 10u : 9u)
-                        : 5u);
-            const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
-            samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
-            uint32_t bound_sampler_count = material_sampler_count + 1u;
-            BTBHGPUSceneBatchExtensionUniforms extension_uniforms;
-            btbh_gpu_scene_dig_uniforms(dig, &extension_uniforms.dig_mask);
-            btbh_gpu_world_detail_pack(
-                batch,
-                extension_uniforms.world_detail_tiles,
-                extension_uniforms.world_detail_controls,
-                extension_uniforms.world_detail_mode
-            );
-            if (!batch_fast_unlit) {
-                btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
-                bound_sampler_count += 3u;
-                const BTBHGPUTexture *maps = btbh_gpu_world_detail_table_active(batch)
-                    ? batch->world_detail_table->map_layers
-                    : runtime->fallback_array_texture;
-                samplers[bound_sampler_count].texture = maps->texture;
-                samplers[bound_sampler_count].sampler = maps->sampler;
-                bound_sampler_count += 1u;
-                if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
-                    /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
-                       never read the slot. */
-                    BTBHGPUWorldDetailTableUniforms table_uniforms;
-                    btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
-                    SDL_PushGPUFragmentUniformData(
-                        command,
-                        2u,
-                        &table_uniforms,
-                        (uint32_t)sizeof(table_uniforms)
-                    );
-                    pushed_table = batch->world_detail_table;
+                if (batch_refracts) {
+                    /* Refraction samples no material: the albedo slot carries the scene copy, the normal
+                       slot the scene's distance. */
+                    samplers[0].texture = runtime->refraction_texture;
+                    samplers[0].sampler = runtime->scene_color_sampler;
+                    if (scene_distance_ready) {
+                        samplers[2].texture = runtime->scene_distance_texture;
+                        samplers[2].sampler = runtime->scene_color_sampler;
+                    }
                 }
+                samplers[3].texture = orm_texture->texture;
+                samplers[3].sampler = orm_texture->sampler;
+                samplers[4].texture = runtime->brdf_lut_texture;
+                samplers[4].sampler = runtime->brdf_lut_sampler;
+                samplers[5].texture =
+                    runtime->directional_shadow_textures[0];
+                samplers[5].sampler =
+                    runtime->directional_shadow_sampler;
+                samplers[6].texture =
+                    runtime->directional_shadow_textures[1];
+                samplers[6].sampler =
+                    runtime->directional_shadow_sampler;
+                samplers[7].texture =
+                    runtime->directional_shadow_textures[2];
+                samplers[7].sampler =
+                    runtime->directional_shadow_sampler;
+                /* The primary map again, through the comparison sampler (the soft sun shadow filter's taps). */
+                samplers[8].texture =
+                    runtime->directional_shadow_textures[0];
+                samplers[8].sampler =
+                    runtime->directional_shadow_compare_sampler;
+                if (omni_shadows_active) {
+                    samplers[9].texture = runtime->omni_shadow_texture;
+                    samplers[9].sampler =
+                        runtime->directional_shadow_sampler;
+                }
+                /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
+                   (RFC 0008) and the world-detail table's array (RFC 0009; these four not in the fast unlit shader),
+                   with their placement in the fragment uniform slot 1, and a table's entries in slot 2. */
+                const bool batch_fast_unlit =
+                    !radiance_cascades_active &&
+                    btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+                const uint32_t material_sampler_count =
+                    batch_fast_unlit
+                        ? 2u
+                        : (shadows_active
+                            ? (omni_shadows_active ? 10u : 9u)
+                            : 5u);
+                const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+                samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
+                uint32_t bound_sampler_count = material_sampler_count + 1u;
+                BTBHGPUSceneBatchExtensionUniforms extension_uniforms;
+                btbh_gpu_scene_dig_uniforms(dig, &extension_uniforms.dig_mask);
+                btbh_gpu_world_detail_pack(
+                    batch,
+                    extension_uniforms.world_detail_tiles,
+                    extension_uniforms.world_detail_controls,
+                    extension_uniforms.world_detail_mode
+                );
+                if (!batch_fast_unlit) {
+                    btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
+                    bound_sampler_count += 3u;
+                    const BTBHGPUTexture *maps = btbh_gpu_world_detail_table_active(batch)
+                        ? batch->world_detail_table->map_layers
+                        : runtime->fallback_array_texture;
+                    samplers[bound_sampler_count].texture = maps->texture;
+                    samplers[bound_sampler_count].sampler = maps->sampler;
+                    bound_sampler_count += 1u;
+                    if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
+                        /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
+                           never read the slot. */
+                        BTBHGPUWorldDetailTableUniforms table_uniforms;
+                        btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
+                        SDL_PushGPUFragmentUniformData(
+                            command,
+                            2u,
+                            &table_uniforms,
+                            (uint32_t)sizeof(table_uniforms)
+                        );
+                        pushed_table = batch->world_detail_table;
+                    }
+                }
+                SDL_PushGPUFragmentUniformData(
+                    command,
+                    1u,
+                    &extension_uniforms,
+                    batch_fast_unlit
+                        ? (uint32_t)sizeof(extension_uniforms.dig_mask)
+                        : (uint32_t)sizeof(extension_uniforms)
+                );
+                SDL_BindGPUFragmentSamplers(
+                    pass,
+                    0u,
+                    samplers,
+                    bound_sampler_count
+                );
+                run_batch = animated ? NULL : batch;
             }
-            SDL_PushGPUFragmentUniformData(
-                command,
-                1u,
-                &extension_uniforms,
-                batch_fast_unlit
-                    ? (uint32_t)sizeof(extension_uniforms.dig_mask)
-                    : (uint32_t)sizeof(extension_uniforms)
-            );
-            SDL_BindGPUFragmentSamplers(
-                pass,
-                0u,
-                samplers,
-                bound_sampler_count
-            );
             const BTBHGPUSceneGeometryDraw geometry =
                 btbh_gpu_scene_geometry_draw(batch, geometry_index);
             SDL_GPUBuffer *vertex_buffer = geometry.vertex_buffer;
@@ -9395,15 +9528,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             const uint32_t index_count = geometry.index_count;
             const uint32_t first_index = geometry.first_index;
             const int32_t vertex_base = geometry.vertex_base;
-            SDL_GPUBufferBinding vertex_binding;
-            SDL_zero(vertex_binding);
-            vertex_binding.buffer = vertex_buffer;
-            SDL_BindGPUVertexBuffers(
-                pass,
-                0u,
-                &vertex_binding,
-                1u
-            );
+            if (vertex_buffer != bound_vertex_buffer) {
+                SDL_GPUBufferBinding vertex_binding;
+                SDL_zero(vertex_binding);
+                vertex_binding.buffer = vertex_buffer;
+                SDL_BindGPUVertexBuffers(
+                    pass,
+                    0u,
+                    &vertex_binding,
+                    1u
+                );
+                bound_vertex_buffer = vertex_buffer;
+            }
             if (btbh_gpu_cost_skips_model(
                     batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
                         ? batch->model
@@ -9510,7 +9646,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         bone_offsets,
                         prepared_geometry_count,
                         transient_instance_buffer,
-                        bone_buffer
+                        bone_buffer,
+                        runs_enabled,
+                        &telemetry->rc_source_run_draw_count
                     );
                 btbh_gpu_cost_rc_emitters =
                     runtime->radiance_cascades.emitter_count;
