@@ -1,15 +1,18 @@
 # RFC 0010: Radiance-cascade sources with a top
 
-- **Status:** Draft (2026-11-22), awaiting v2's answers
+- **Status:** Accepted on 2026-11-23 for 0.10.0 (the owner left the decision to the coordinator). The wall falloff
+  v2 prefers (high floors take less light, answer 5) isn't blocking and is deferred to phase 2. See "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift) and Tyrian3D use the radiance
   cascades but don't set it, so nothing changes for them. CHIMERA doesn't use the cascades. All of them rebuild the
   radiance-cascade shaders with the C core
-- **Issue:** none yet
+- **Issue:** none. v2 answered all six questions through its session on 2026-11-23 (see "Decisions")
 - **Depends on:** nothing. It is written against 0.8.0's layout (`feature/0.8.0-detail-table`, unreleased), but it
-  touches no struct 0.8.0 changes: the emitter and the cascades' configuration are as in 0.7.0
-- **Related, no RFC (planned for 0.9.0):** a per-batch opt-out from the radiance-cascade sources, and HBAO mode 1
-  under additive cascades. Both are small additive changes v2 asked for in the same play-test
+  touches no struct 0.8.0 changes: the emitter and the cascades' configuration are as in 0.7.0. It lands in 0.10.0,
+  on 0.9.0 and RFC 0011 phase 1, neither of which changes those two structs (Decisions, 6)
+- **Related, no RFC (in 0.9.0):** a per-batch opt-out from the radiance-cascade sources
+  (`BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`), and HBAO mode 1 under additive cascades. Both are small additive changes v2
+  asked for in the same play-test
 
 ## Need
 
@@ -374,10 +377,98 @@ and two more compute pipelines from the same files.
    street's glow up its whole height, as today. Is that right, or should high floors take less?
 6. **Release.** 0.9.0, with the opt-out and HBAO mode 1, in one rebuild of the RC shaders?
 
+All six are answered: see "Decisions".
+
+## Decisions (v2, 2026-11-23)
+
+v2 answered all six questions on 2026-11-23, through its lighting agent, measured at 4K at night with gameplay off. The
+owner left the decision to the coordinator, who accepted phase 1 for 0.10.0. The wall falloff v2 prefers (answer 5)
+isn't blocking and is deferred to phase 2.
+
+1. **Which glows: the set the RFC read.**
+   - The material sources are:
+     - the props' lamp heads (0.1 amber times the window glow);
+     - the kit's glow meshes and window panes;
+     - the power lines (0.35 by day, 1.2 at night);
+     - the resource-coloured buildings, roof gear and car lights;
+     - enemy bodies and the kaiju.
+   - No unlit draw is a source.
+   - Share of the field at night:
+
+     | Source | Share |
+     | --- | --- |
+     | Lamp heads | 57% |
+     | Roof gear | 9% |
+     | Lit windows | 6% |
+     | Resource buildings | 4% |
+     | Other kit glows and power lines | 11% |
+     | Cars | under 1% |
+
+     At dusk the kit's glows and the power lines are about 70%. Enemy bodies are 3% of a fight frame.
+   - With 0.9.0's `BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE` v2 takes out the lit panes, the props' lamp heads, the power
+     lines, the traffic, ambulance and boat lights, enemy bodies, boss parts, the kaiju's plates and rim, and the
+     cocoon. The lamps come back as explicit emitters. It keeps the kit's glow meshes, the resource buildings' surfaces
+     and the roof gear.
+   - With tops, the lamp heads could stay material sources: a lamp head's top is its head's height, with nothing to
+     set.
+   - **What it means:** tops serve both kinds of source. The kit's glow meshes, the resource buildings and the roof
+     gear take their tops from their geometry. Lamps drawn as emitters take `position_y + top_above`.
+2. **The flat test is the right line.**
+   - A storey is 0.35 and a roof's top is floors × 0.35 + 0.035: 0.385 for one storey, 0.735 for two. A lamp head is
+     at 0.6.
+   - With the margin of a twentieth of a texel (0.025 on High, 0.05 on Low), a two-storey roof (0.735) passes over a
+     lamp head and a one-storey roof (0.385) takes its light.
+   - One-storey mass cells by stage: 21%, 13%, 10%, 18% and 10% on stages 1–5. Those roofs stay lit, as they should.
+   - The tests use these heights.
+3. **The edge band is acceptable.**
+   - It reads as a street light's rim on the roof.
+   - Glow already costs about +0.46 ms on the Deck and about +1.7 ms at 4K, so the two-band field, at about twice the
+     cascades' cost, isn't worth it. Phase 2's two bands aren't planned.
+4. **Gameplay emitters get tops.**
+
+   | Emitter | `top_above` |
+   | --- | --- |
+   | Shots, beams, arcs, drones, XP | 0: their top is their own height |
+   | Blasts | about their radius (0.6–3 cells) |
+   | Fires (`position_y` at the roof's top) | 0.6 |
+   | Roof gear | 0.3 above its own height |
+
+   None stays a column. A host that wants one sets a large `top_above`.
+5. **Walls: high floors should take less light. Deferred to phase 2.**
+   - v2 prefers that a facade take a street glow in full up to the source's top + 0.7 (two storeys) and none of it
+     above the top + 2.1. Its towers are 5–12 storeys. Not blocking.
+   - The resolve knows a wall pixel's height, but not which sources lit the texel it reads: the field holds light, not
+     the heights the light came from. A falloff from each source's top needs that height in the field. That means one
+     of two things:
+     - a light-weighted top carried beside the light through the trace, both merges and the finish, which is one more
+       atlas at each;
+     - phase 2's two bands, whose upper band is what high floors would read: its pieces start at the band's height and
+       pass over the street's glows.
+   - A fade from the highest top near the wall would be cheap. But it is the receiver-side fade under "Alternatives":
+     a roof fire's light on a tower would fade as a lamp's does, and "near" has no right radius. A fade between two
+     heights the host sets would be cheaper still, but it isn't relative to the source's top.
+   - So phase 1 keeps the walls as drafted. With tops on, a steep face reads the field half a texel out from its wall
+     and keeps the street's glow up its whole height, as today.
+6. **Release: one rebuild of the cascades' shaders is fine.**
+   - 0.9.0 was cut as a candidate before the answers came, so tops ship in 0.10.0 beside RFC 0011's phase 1.
+   - Every "since 0.9.0" in "Proposal" reads "since 0.10.0". The layouts are as the table there gives them: neither
+     0.9.0 nor RFC 0011 changes the emitter or the cascades' configuration.
+
+**Also from v2, outside this RFC:**
+- v2 now asks for contact AO explicitly (`ssao_contact`, mode 3), so it doesn't need 0.9.0's `KEEP_HBAO`. That flag
+  stays for others.
+- v2 will turn on `SSR_SURFACE_REFLECTIVITY` once it pins 0.9.0, and retune its reflection strengths.
+- With the cascades on at night, the plaza trees near lamps get darker (−5 L at the darkest 1%). Noted for a separate
+  look.
+
+Nothing is open for phase 1.
+
 ## Phases
 
-1. **Phase 1, source tops (0.9.0).** The switch, `top_above`, the tops texture, the test in the trace and finish
-   passes, the wall lookup, the checks, the tests and the bench.
-2. **Phase 2, only if asked: two height bands.** A second set of the cascades' atlases traced with every piece
-   starting at least a band height up, and the resolve choosing by the receiver's height. It would shield roof
-   edges too, at about twice the cascades' cost. It waits for v2's answer to question 3.
+1. **Phase 1, source tops (0.10.0; Decisions, 6).** The switch, `top_above`, the tops texture, the test in the trace
+   and finish passes, the wall lookup, the checks, the tests and the bench.
+2. **Phase 2, only if asked: two height bands, and the wall falloff.** A second set of the cascades' atlases traced
+   with every piece starting at least a band height up, and the resolve choosing by the receiver's height. It would
+   shield roof edges too, at about twice the cascades' cost, and its upper band is what a facade's high floors
+   would read (v2's wall falloff, Decisions, 5). v2 found the edge band acceptable (Decisions, 3) and the falloff
+   not blocking, so it isn't planned.
