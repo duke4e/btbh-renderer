@@ -2473,6 +2473,9 @@ public final class GPUWindowProbe {
             nativePost.ssr_max_roughness = post.reflections.maxRoughness
             nativePost.ssr_max_distance = post.reflections.maxDistance
             nativePost.ssr_thickness = post.reflections.thickness
+            if post.reflections.surfaceReflectivity {
+                nativePost.flags |= UInt8(truncatingIfNeeded: BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY)
+            }
         }
         nativePost.anti_aliasing =
             GPUAntiAliasingProjection.native(post.antiAliasing)

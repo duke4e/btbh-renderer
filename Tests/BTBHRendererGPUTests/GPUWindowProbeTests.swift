@@ -3582,6 +3582,15 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(reflecting(ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 0.3, maxDistance: .nan,
                                                                   thickness: 1)).reflections, .off)
         XCTAssertEqual(EnvironmentDescriptor.default.reflections, .off)
+        // The surfaces' reflectivity without the cascades (0.9.0): off by default, kept when enabled.
+        XCTAssertFalse(reflections.surfaceReflectivity)
+        XCTAssertFalse(ScreenSpaceReflectionDescriptor.off.surfaceReflectivity)
+        XCTAssertTrue(reflecting(ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 3, maxDistance: 20,
+                                                                 thickness: -1, surfaceReflectivity: true))
+            .reflections.surfaceReflectivity)
+        XCTAssertEqual(reflecting(ScreenSpaceReflectionDescriptor(intensity: 0, maxRoughness: 0.3, maxDistance: 20,
+                                                                  thickness: 1, surfaceReflectivity: true)).reflections,
+                       .off)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

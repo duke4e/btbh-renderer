@@ -334,17 +334,25 @@ public struct CloudShadowDescriptor: Hashable, Sendable {
 /// Screen-space reflections: glossy surfaces (no rougher than `maxRoughness`) reflect the opaque scene their
 /// reflected ray meets within `maxDistance` render units, passing behind a surface by less than `thickness`.
 /// `intensity` multiplies their Fresnel reflectance (0 off).
+///
+/// `surfaceReflectivity` (since 0.9.0, `BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY`): without the radiance cascades,
+/// each surface reflects by its own reflectivity (its F0's luminance: 0.04 for a dielectric, 0.12 for glass, a
+/// metal's albedo), as it does with them. Without it, reflections without the cascades see no surface's
+/// reflectivity and reflect nothing. It needs the 0.9.0 scene shaders.
 public struct ScreenSpaceReflectionDescriptor: Hashable, Sendable {
     public var intensity: Float
     public var maxRoughness: Float
     public var maxDistance: Float
     public var thickness: Float
+    public var surfaceReflectivity: Bool
 
-    public init(intensity: Float, maxRoughness: Float, maxDistance: Float, thickness: Float) {
+    public init(intensity: Float, maxRoughness: Float, maxDistance: Float, thickness: Float,
+                surfaceReflectivity: Bool = false) {
         self.intensity = intensity
         self.maxRoughness = maxRoughness
         self.maxDistance = maxDistance
         self.thickness = thickness
+        self.surfaceReflectivity = surfaceReflectivity
     }
 
     public static let off = Self(intensity: 0, maxRoughness: 0, maxDistance: 0, thickness: 0)
@@ -359,7 +367,7 @@ public struct ScreenSpaceReflectionDescriptor: Hashable, Sendable {
     var sanitized: Self {
         guard isEnabled else { return .off }
         return Self(intensity: intensity, maxRoughness: min(maxRoughness, 1), maxDistance: maxDistance,
-                    thickness: max(thickness, 0))
+                    thickness: max(thickness, 0), surfaceReflectivity: surfaceReflectivity)
     }
 }
 
