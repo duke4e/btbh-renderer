@@ -1,0 +1,383 @@
+# RFC 0010: Radiance-cascade sources with a top
+
+- **Status:** Draft (2026-11-22), awaiting v2's answers
+- **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
+- **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift) and Tyrian3D use the radiance
+  cascades but don't set it, so nothing changes for them. CHIMERA doesn't use the cascades. All of them rebuild the
+  radiance-cascade shaders with the C core
+- **Issue:** none yet
+- **Depends on:** nothing. It is written against 0.8.0's layout (`feature/0.8.0-detail-table`, unreleased), but it
+  touches no struct 0.8.0 changes: the emitter and the cascades' configuration are as in 0.7.0
+- **Related, no RFC (planned for 0.9.0):** a per-batch opt-out from the radiance-cascade sources, and HBAO mode 1
+  under additive cascades. Both are small additive changes v2 asked for in the same play-test
+
+## Need
+
+v2's request, verbatim:
+
+> "A source is a column with no height, so a street glow lights the roofs around it as strongly as the street. A
+> height per emitter (sources stop rays only below their top) would keep street glows in the street canyons."
+
+How v2 uses the cascades (v2 paths below are under `Be-The-Bullet-Hell/v2/crates/`, at BTBH `dec1a3b7`):
+
+- **Additive, for glows.** `additive` is always 1 (`v2-platform/src/radiance.rs:14-16`). By day the glow barely
+  shows; at dusk and at night it carries (`v2-game/src/glow.rs:11-14`).
+- **The street glows are material sources.** "The city's glows (props' lamp heads, the kit's glows, power lines)
+  light the field through their own emission" (`v2-game/src/glow.rs:83`). Those are lit batches with an emission,
+  which the renderer always draws into the field (`v2-render/src/radiance.rs:26-27`). v2's explicit lamp emitters
+  are off.
+- **Unlit draws are receivers.** v2 sets `rc_receiver` on every unlit draw that isn't flagged as a source
+  (`v2-platform/src/gpu.rs:1832-1837`), so the night's pools and ground marks don't glow into the field.
+- **The gameplay glows are emitters.** Shots at 0.55 units plus their arc, blasts, gems, fires at a roof's top plus
+  0.4 (`v2-render/src/radiance.rs`). Emitter `y` is "kept for the record" there: the renderer ignores it.
+- **The field.** Low: 128² texels of one cell. High: 256² texels of half a cell, traced at twice that
+  (`v2-render/src/radiance.rs:85-86`). One world unit is one cell; a storey is 0.35 units, a lamp head 0.6 up.
+- **The occluders.** v2 writes each texel's signed distance to the nearest column and that column's top
+  (`CityLayer::top_at`). Columns under 0.1 units are left out.
+
+A lamp head at 0.6 next to a two-storey house (roof at 0.7) lights the house's roof as much as the pavement under
+it. In the play-test the roofs round every lit street glowed.
+
+## What the code does today
+
+### The field is two textures
+
+| Texture | Format | Written by | Holds |
+| --- | --- | --- | --- |
+| Source field | RGBA16F, the field's size | the emitter pass (blend ADD, `src/gpu/btbh_gpu_radiance_cascades.c:904-905`), then the material-source pass (blend MAX, `:998-999`) | rgb the light times its coverage, a the coverage. No height |
+| Occlusion | RG32F, the host's samples (`:1231`) | uploaded from `occlusion_cascades[0].samples` | x the signed distance to the nearest occluder (negative inside), y its top |
+
+- **Emitters** are drawn from above as a disk, a square or a segment (`shaders/gpu/production_rc_source.vert.hlsl`).
+  `position_y` isn't read there; only the direct-light pass reads it, as the light's height
+  (`production_rc_direct_light.vert.hlsl:82`). `height` is a segment's width there (`production_rc_source.vert.hlsl:51-57`),
+  which is how v2 sets it (`v2-platform/src/radiance.rs:168`), and the direct light's range
+  (`production_rc_direct_light.vert.hlsl:44`). The Swift layer documents it as a "vertical source extent"
+  (`Sources/BTBHRenderer/RenderResources.swift:987-989`); no shader uses it that way.
+- **Material sources** are every batch that is unlit and no receiver, or lit with an emission
+  (`btbh_gpu_scene_encode_rc_material_sources`, `src/gpu/btbh_gpu_scene.c:6190`, test at `:6254-6260`). The
+  vertex shader projects them straight down (`production_model.vert.hlsl` with `BTBH_RC_SOURCE_PROJECTION`); the
+  fragment shader writes their light (`production_rc_material_source.frag.hlsl:47-64`). The fragment knows its
+  world height, but nothing keeps it.
+
+### How a ray meets them
+
+The trace (`production_hrc_trace.comp.hlsl`) and the finish pass (`production_hrc_finish.comp.hlsl`) march each ray
+piece over both textures:
+
+- **The piece's start height** is the top of the column it starts in, or 0 outside a column (`trace:159`,
+  `finish:162-166`).
+- **Occluders:** the ray rises 0.65 units per unit it travels from that height (`trace:193`). A texel within 0.55
+  texels of a column whose top stands more than a quarter texel above the ray stops it (`trace:196`).
+- **Sources:** every sample with coverage is composited at any height (`trace:201-216`,
+  `production_hrc_source_transport.hlsli`). That is the "column with no height".
+
+### Why the field can't follow one ray's height
+
+The holographic cascades share ray pieces between receivers. That is what makes them cheap, and it decides what a
+height test can do.
+
+- **Pieces.** Levels 0–2 are traced; higher levels are merged from level-2 pieces
+  (`BTBH_GPU_HRC_TRACED_LEVEL_COUNT`, `src/gpu/btbh_gpu_holographic_radiance_cascades.h:9`). A level-0 piece is two
+  display cells long: one texel (half a cell) on v2's High, two texels (two cells) on Low.
+- **A ray is a chain of pieces.** From the receiver, pieces start at 0, 1, 3, 7, 15 … level-0 lengths
+  (`production_hrc_merge_down.comp.hlsl`). The finish pass traces the receiver's own first piece.
+- **Each piece starts from its own height.** A piece that starts over the street starts at 0, whatever receiver its
+  result later reaches. Today's occluder test has the same limit: a roof's ray that has left the roof is blocked by
+  the next house as if it ran at street level.
+
+So a height test on sources works for the pieces that start on a roof. For a roof receiver and a street source:
+
+| Where the source lies | The roof receiver is shielded when |
+| --- | --- |
+| Within 7 level-0 lengths of the receiver (High 3.5 cells, Low 14) | it is farther from the roof's edge than the source is: the piece that reaches the source starts about half way |
+| Farther | the source lies less than about 4 lengths (High 2 cells, Low 8) past the roof's edge: the piece that reaches it starts at most 4 lengths before it |
+
+A lamp half a cell out from a facade then lights only the outer half cell of the roof. A glow in the middle of a
+two-cell street lights about the outer cell. The rest of the roof stays dark, and the field's light falls off with
+distance anyway, so the edge band is the dimmer part of what roofs show today. Making every receiver's height count
+means tracing the field once per height band (Alternatives).
+
+### Why sources can't use the occluders' rising ray
+
+With the occluders' rule (the ray rises 0.65 per unit from the piece's start), a lamp head at 0.6 would be passed
+over by every street piece that reaches it from more than about 0.9 units away. The street would lose its own glow
+beyond a unit of the lamp. Sources therefore compare their top with the piece's start height, flat: a piece that
+starts higher than a source's top passes over it.
+
+## Proposal
+
+One switch on the cascades' configuration, one float on the emitter, a second texture in the source passes, and a
+test in the trace.
+
+1. **`source_tops`** in `BTBHGPUSceneRadianceCascades`, in the byte that was `reserved[0]`. 0: as before. 1: every
+   source has a top.
+2. **A material source's top** is the highest world height of its glowing fragments in each texel. No API: the
+   renderer already draws the fragment and knows its height.
+3. **An emitter's top** is `position_y + top_above`. `top_above` is a float in the four bytes that were the
+   emitter's `reserved`.
+4. **The test:** a piece that starts higher than a source's top (plus a twentieth of a texel) passes over it. It
+   takes none of its light and isn't dimmed by it.
+5. **Walls:** with `source_tops` on, a steep face looks the field up half a texel out from its wall (below).
+
+### Where this differs from the request
+
+- **"A height per emitter" covers material sources too.** v2's street glows are lit batches with an emission, not
+  emitters. Their tops come from their geometry, so a lamp head's top is its head's height with no field to set.
+- **The top is compared with the piece's start, not with a rising ray** (section "Why sources can't use the
+  occluders' rising ray").
+- **Roof edges.** The field shields a roof from the street sources whose ray pieces start on the roof. A band along
+  each roof's edge about as wide as the source's distance from that edge still takes the light ("Why the field
+  can't follow one ray's height"). Open question 3.
+- **`height` keeps its meaning.** It is a segment's width and the direct light's range in the shaders, and a
+  segment's width in v2. The top gets its own field. The Swift comment is corrected to say what the shaders do.
+
+### API
+
+```c
+typedef struct BTBHGPUSceneRadianceEmitter {
+    /* ... every field before light_class as in 0.7.0 ... */
+    BTBHGPUSceneRadianceEmitterShape shape;
+    BTBHGPUSceneRadianceEmitterClass light_class;
+    /* With BTBHGPUSceneRadianceCascades.source_tops 1: the source's top stands this far above position_y (world
+     * units; finite and at least 0; 0 puts it at position_y). A ray piece that starts higher than the top passes
+     * over the source. Ignored, and not checked, with source_tops 0. (RFC 0010, since 0.9.0, in the four bytes
+     * that were reserved.) */
+    float top_above;
+} BTBHGPUSceneRadianceEmitter;
+
+typedef struct BTBHGPUSceneRadianceCascades {
+    /* ... as in 0.7.0 up to additive ... */
+    uint8_t additive;
+    /* 0: as before: every source lights every ray that crosses it, at any height. 1: sources have tops (RFC
+     * 0010, since 0.9.0, in the byte that was reserved[0]). A material source's top is the highest world height
+     * of its glowing fragments in each field texel; an emitter's is position_y + top_above. A ray piece passes
+     * over a source whose top is lower than the height it starts from: the top of the occluder it starts in, or
+     * 0 outside one. Steep faces then look the field up half a texel out from their wall. Other values fail the
+     * present with BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t source_tops;
+    const BTBHGPUSceneRadianceEmitter *emitters;
+    BTBHGPUSceneRadianceCascadesOcclusionCascade
+        occlusion_cascades[BTBH_GPU_RC_MAX_OCCLUSION_CASCADES];
+} BTBHGPUSceneRadianceCascades;
+
+/* Defined when BTBHGPUSceneRadianceCascades.source_tops and BTBHGPUSceneRadianceEmitter.top_above exist (since
+   0.9.0). */
+#define BTBH_GPU_SCENE_HAS_RC_SOURCE_TOPS 1
+```
+
+Layouts on 64-bit; neither struct changes size.
+
+| Struct | Field | Offset | Size | Was |
+| --- | --- | --- | --- | --- |
+| `BTBHGPUSceneRadianceEmitter` (80 bytes) | `top_above` | 76 | 4 | `uint32_t reserved` |
+| `BTBHGPUSceneRadianceCascades` (168 bytes) | `source_tops` | 35 | 1 | `reserved[0]` |
+
+**Zero values.** `source_tops` 0 draws as before, byte for byte, whatever `top_above` holds. With `source_tops` 1,
+`top_above` 0 puts an emitter's top at its `position_y`. Material sources need nothing.
+
+**Refusals** (`BTBH_GPU_INVALID_ARGUMENT`, as the other configuration checks in
+`btbh_gpu_radiance_cascades_config_valid`):
+- `source_tops` above 1;
+- with `source_tops` 1, an emitter's `top_above` that isn't finite or is below 0.
+
+`top_above` isn't checked with `source_tops` 0, so a host that left garbage in `reserved` still draws.
+
+### The tops texture
+
+- **Format and size.** R16F at the source field's size: 32 KiB on v2's Low, 128 KiB on High. Cleared to −65504 (the
+  lowest half float) by the emitter pass, which already clears the source field (`btbh_gpu_radiance_cascades.c:2599`).
+- **Blend MAX in both source passes.** It is a second colour target beside the source field. Several sources in one
+  texel keep the highest top, so a mixed texel errs toward today's look.
+- **Emitters** write `position_y + top_above` over their footprint (`production_rc_source.frag` gains
+  `SV_Target1`). A spot also writes it over its angular footprint's radius (at least 1.5 texels, as
+  `production_rc_directional_source.vert` draws it), so its directional light has a top where it lands.
+- **Material sources** write their fragment's world height (`production_rc_material_source.frag` gains
+  `SV_Target1`, `input.world_position.y`). A discarded fragment (no glow, alpha cut, dug) writes nothing.
+- **Precision.** A half float steps by 1/64 unit or less up to 32 units and by one unit at 2048. v2's tops lie under
+  10 units.
+
+### The trace
+
+In `production_hrc_trace.comp.hlsl` and `production_hrc_finish.comp.hlsl`, inside the loop:
+
+```hlsl
+const float4 source = source_field_texture.SampleLevel(source_field_sampler, uv, 0.0f);
+const float4 directed_source = directional_source(uv, angle);
+bool passes_over = false;
+if (source_tops != 0u && max(source.a, directed_source.a) > 0.001f)
+{
+    // The source sample is bilinear, so the top is the highest of the four texels it read.
+    const float4 tops = source_top_texture.GatherRed(source_top_sampler, uv);
+    const float top = max(max(tops.x, tops.y), max(tops.z, tops.w));
+    passes_over = receiver_height > top + origin_cell.z * 0.05f;
+}
+if (!passes_over && hrc_source_composite(source, directed_source, background_luminance, radiance, transmittance))
+{
+    break;
+}
+```
+
+- **One gather, only where a source is.** Most samples have no coverage, so most steps pay one compare.
+- **The margin is a twentieth of a texel** (0.025 units on v2's High, 0.05 on Low). It keeps a glow at a roof's own
+  height lit from that roof despite the half float's rounding. A two-storey roof (0.7) then passes over a lamp head
+  (0.6); a one-storey roof (0.35) still takes its light, as it should.
+- **Occluders are unchanged.** The rising ray, the 0.55-texel reach and the quarter-texel margin stay as they are.
+- **Bindings.** Each shader takes one more sampled texture (t3 in the trace, t4 in the finish pass) and a uniform
+  word, `source_tops`, in a padding slot of its block (`HRCTraceUniforms.padding`, and a new word in
+  `HRCFinishUniforms`). With `source_tops` 0 the tops texture is still made, cleared and bound, and never read.
+
+### Wall receivers
+
+The resolve reads the field at a receiver's xz (`production_hrc_resolve.comp.hlsl:285`, `:344`). A facade's pixels
+lie on its column's edge, so the bilinear lookup mixes the street texel with the column's. The column's texel starts
+its pieces at the roof, so with tops it no longer takes the street's glow. Without a change, every facade at street
+level would lose up to half of it.
+
+- With `source_tops` on, a receiver whose normal is steeper than 45° (|n.y| < 0.7) looks the field up half a texel
+  along its normal's horizontal part. That is the street side of its wall.
+- Walls then take what they take today: the street texel's light, up the whole facade. Roofs and level ground are
+  read where they are.
+- With `source_tops` 0 the lookup doesn't move.
+
+## Minimal example
+
+```c
+/* v2: the city's street glows (lamp heads, the kit's emissive batches) get tops from their geometry. */
+post.radiance_cascades.source_tops = 1;
+
+/* A shot's glow at its flight height; it lights roofs lower than that, and the street. */
+BTBHGPUSceneRadianceEmitter shot = {0};
+/* ... position, radius, colour, energy, cutoffs as today ... */
+shot.position_y = 0.55f + arc;
+shot.top_above = 0.0f;
+
+/* A fire on a roof: its flames reach 0.6 above the roof's top. */
+fire.position_y = roof_top;
+fire.top_above = 0.6f;
+```
+
+In v2's Rust: `Emitter::raw` names every field of the C struct (`v2-platform/src/radiance.rs:183-215`), so
+`reserved: 0` becomes `top_above: self.top_above` after the bindings are regenerated, and `Radiance::apply` sets
+`rc.source_tops = 1`.
+
+## Implementation
+
+| File | Change |
+| --- | --- |
+| `include/btbh_gpu/btbh_gpu.h` | The two fields, their comments, the macro. Comments on `height` (a segment's width, the direct light's range) and on `position_y` (the direct light's height, and the base of the top) |
+| `src/gpu/btbh_gpu_radiance_cascades.c` | The checks; the R16F tops texture (create, release, clear); a second colour target with MAX blend in the emitter and material-source pipelines; the emitters' tops buffer; the tops texture and the switch in the trace and finish dispatches; the switch in the resolve's uniforms; the name check |
+| `src/gpu/btbh_gpu_scene.c` | The material-source pass binds the second target (`btbh_gpu_scene_encode_rc_material_sources`) |
+| `shaders/gpu/production_rc_source.vert/.frag` | The tops buffer (a second storage buffer); the emitter's top out to `SV_Target1`; a spot's footprint at least 1.5 texels in that target |
+| `shaders/gpu/production_rc_material_source.frag` | `SV_Target1 = world_position.y` |
+| `shaders/gpu/production_hrc_trace.comp`, `production_hrc_finish.comp` | The tops texture, the switch, the test above |
+| `shaders/gpu/production_hrc_resolve.comp` | The wall lookup, behind the switch |
+| `Sources/` (Swift) | Nothing but the corrected comment on `height`. A `RadianceEmitter.topAbove` and a switch can follow when v1 asks |
+
+- **The emitters' tops travel in a buffer of their own.** `BTBHGPUSceneRadianceEmitterGPU` is four `float4`s with
+  no free lane (`src/gpu/btbh_gpu_radiance_cascades.c:544-549`), and three shaders declare it
+  (`production_rc_source.vert`, `production_rc_directional_source.vert`, `production_rc_direct_light.vert`). A fifth
+  `float4` would change its stride under all three. Instead the tops (one float per emitter, in the record's order)
+  go in a second structured buffer, uploaded in the same copy, and only `production_rc_source.vert` binds it. The
+  record and the other two shaders stay as they are.
+- **No new shader file.** Every changed file is already in `CMakeLists.txt`'s list. CHIMERA's and Tyrian3D's
+  lists (read from it) and v2's are unchanged.
+- **Old shaders.** 0.8.0's RC shaders under the new core draw as before: the extra target, texture and storage
+  buffer go unread, and the record is unchanged. They ignore the switch. So a present with `source_tops` 1 checks
+  that the trace's SPIR-V names `source_top_texture`, as 0.5.0 checks the scene shader for `dig_mask_texture`
+  (`src/gpu/btbh_gpu_scene.c:5692`), and fails with the shader's path otherwise. Metal libraries aren't checked, as
+  before.
+- **History.** Turning the switch on or off changes the field's light. The temporal history follows over a few
+  frames; a host that wants a clean cut sets `invalidate` for that frame.
+
+### Cost
+
+Estimates, to measure with the frame bench (`btbh_gpu_frame_bench`, RFC 0009 phase 2) with the cascades on.
+
+| Item | Estimate |
+| --- | --- |
+| Tops texture | 32 KiB (Low), 128 KiB (High) |
+| Source passes | One more R16F target written per source fragment: a few thousand texels a frame |
+| Trace and finish, on | One `GatherRed` per step that crosses a source; one compare per step otherwise. The steps already take three to four samples |
+| Trace and finish, off | One compare on a uniform per step. Whether the longer path costs registers is measured, as 0.6.0 measured the world detail's |
+| Resolve | A few ALU instructions per receiver with the switch on |
+| CPU | One more colour target per source pass, one more sampler per trace and finish dispatch, four bytes per emitter uploaded |
+
+On the bench GPU the cascades' trace and finish are a fraction of a millisecond at High. A gather on the few steps
+that meet a source should stay within the run-to-run noise. If the off path shows a cost, the fallback is a define
+and two more compute pipelines from the same files.
+
+## Compatibility
+
+- **Versioning:** minor (0.9.0). A byte and a float taken from reserved fields, as 0.5.0 took `ssao_reserved[0]` and
+  0.3.0 the window descriptor's `reserved`. Neither struct changes size. The RC shaders change and are rebuilt with
+  the core; 0.8.0's draw as before under the new core with the switch off.
+- **Be The Bullet Hell v2 (Rust, bindgen):** `Radiance::apply` starts from `::default()`, so `source_tops` is 0.
+  `Emitter::raw` names `reserved: 0` and stops compiling until it names `top_above` (CHANGELOG, "Upgrading", as
+  for 0.5.0's `ssao_reserved`). To adopt: `source_tops = 1`, and each emitter's `top_above`.
+- **Be The Bullet Hell (v1, Swift):** nothing changes. `BTBHRendererGPU.swift` fills a zeroed native emitter
+  (`nativeEmitter.height = emitter.height`, …, `Sources/BTBHRendererGPU/BTBHRendererGPU.swift:2560`) and never sets
+  the new byte.
+- **Tyrian3D (C):** nothing changes. It zeroes its structs and is pinned at v0.2.1.
+- **CHIMERA:** doesn't use the cascades.
+- **0.9.0's per-batch opt-out** is independent: a batch that opts out writes neither light nor top.
+
+## Platforms and testing
+
+- **Native** (`btbh_gpu_radiance_cascades_test`): `offsetof(top_above) == 76`, `sizeof(BTBHGPUSceneRadianceEmitter)
+  == 80`, `offsetof(source_tops) == 35`, `sizeof(BTBHGPUSceneRadianceCascades) == 168`; the refusals; `top_above`
+  unchecked with the switch off.
+- **GPU smoke** (Windows/Vulkan, a small city in the RC gallery of `btbh_gpu_world_detail_smoke` or its own):
+  - **Off, byte for byte:** the RC scenes as with 0.8.0's core and shaders, with `top_above` set to garbage.
+  - **Street and roof:** a lamp-head source (emissive, 0.6 up) between a two-storey and a one-storey box. With tops,
+    the two-storey roof's interior takes none of its light and the one-storey roof takes it; the pavement as without
+    tops.
+  - **Edge band:** the shielded roof's pixels read back against the table in "Why the field can't follow one ray's
+    height", at Low and High.
+  - **Walls:** a facade's light at street level with tops within a few percent of without.
+  - **Emitters:** a disk at 0.55 with `top_above` 0 against a roof at 0.7 (shielded) and at 0.35 (lit); a fire with
+    `top_above` 0.6 on a roof lights the next roof of the same height.
+  - **Old shaders:** 0.8.0's RC shaders under the new core draw byte for byte as before with the switch off, and a
+    present with it on fails with the trace shader's path.
+- **Bench:** the frame bench with the cascades at High, off against on, and the off path against 0.8.0's shaders.
+- **Platforms:** Windows/Vulkan runs the smokes. The Mac session runs `check.sh` (metallib: the gather and a second
+  target go through shadercross as other shaders' do). Linux and the Deck through v2.
+- **Games:** v2's night captures (stages 1 and 3) with and without tops, and its readability measure.
+
+## Alternatives
+
+| Alternative | Why not (now) |
+| --- | --- |
+| **Rising-ray test for sources** (the occluders' rule) | A lamp head 0.6 up would light the street only within about 0.9 units of its foot |
+| **Two height bands** (the field traced twice: from the ground, and from a band height with every piece starting at least that high; the resolve picks by the receiver's height) | Shields whole roofs, edges included. But the trace, both merges and the finish run twice and their atlases double: about twice the cascades' GPU time and memory. Phase 2, if v2's captures show the edge band |
+| **A fade at the receiver** (the resolve dims a receiver standing above the highest source top near it) | A tall source farther off (a roof fire) would be dimmed with the street's glows, and "near" has no right radius |
+| **Reuse `height` as the top** | It is a segment's width in the shader and in v2 (`Emitter::segment`). Changing it would change every segment emitter |
+| **A top per batch** (a field in `BTBHGPUSceneGeometryBatch`) | The fragment already knows its height. A batch field would grow the batch (280 bytes on 0.8.0) for less |
+| **The top in the source field's alpha** | Alpha is the coverage the composite reads, and the two passes blend it with ADD and MAX |
+| **Only the per-batch opt-out (0.9.0)** | It takes a glow out of the field everywhere. v2 wants its street glows to light the street, not to vanish |
+| **The direct-light field** (`direct_energy`) | It assumes receivers at street level (`production_rc_direct_light.frag`) and isn't used in additive mode |
+
+## Open questions for v2
+
+1. **Which glows.** From your code, the street glows are lit batches with an emission (lamp heads, the kit's glows,
+   power lines), and unlit draws are receivers. Is that the set you mean? Will the 0.9.0 opt-out take any of them out
+   of the field entirely?
+2. **The flat test.** A piece passes over a source when it starts higher than the source's top plus a twentieth of
+   a texel. So a two-storey roof (0.7) passes over a lamp head (0.6), and a one-storey roof (0.35) takes its light.
+   Is that the line you want?
+3. **The edge band.** A band along each roof's edge, about as wide as the glow's distance from that edge, keeps the
+   light (half a cell for a lamp by a facade). Is that acceptable, or do you need the two-band field at about twice
+   the cascades' cost?
+4. **Gameplay emitters.** With tops on, a shot at 0.55 lights roofs lower than that and not higher ones; a fire's
+   `top_above` decides how far round the roofs it reaches. Should your gameplay glows have tops, or stay columns
+   (`top_above` large)?
+5. **Walls.** With tops on, steep faces read the field half a texel out from their wall, so a facade keeps the
+   street's glow up its whole height, as today. Is that right, or should high floors take less?
+6. **Release.** 0.9.0, with the opt-out and HBAO mode 1, in one rebuild of the RC shaders?
+
+## Phases
+
+1. **Phase 1, source tops (0.9.0).** The switch, `top_above`, the tops texture, the test in the trace and finish
+   passes, the wall lookup, the checks, the tests and the bench.
+2. **Phase 2, only if asked: two height bands.** A second set of the cascades' atlases traced with every piece
+   starting at least a band height up, and the resolve choosing by the receiver's height. It would shield roof
+   edges too, at about twice the cascades' cost. It waits for v2's answer to question 3.
