@@ -1841,6 +1841,19 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     BTBHGPUCustomMeshReport *report
 );
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
+/* Same-material runs (since 0.10.0, RFC 0011). In every pass that draws batches (opaque, transparent, refraction, the
+ * shadow maps, the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but
+ * kind, model, custom_mesh, material_slot, first_instance and instance_count (byte for byte, a float by its bits)
+ * binds and pushes nothing but its vertex and index buffers before it draws; so do a model's second and later
+ * primitives. A skinned geometry never starts or continues a run. What is drawn doesn't change. A host gains most by
+ * submitting each instance buffer's batches grouped, outermost first:
+ * 1. by static vertex shader: the batches whose world-detail table has map_layers together, the others together. Each
+ *    switch between the two changes the pipeline, and SDL then writes all of its descriptor sets again. A coplanar
+ *    overlay still has to follow what it lies on: put the overlays after the batches under them, grouped the same way;
+ * 2. by material (every field but the six), mesh after mesh;
+ * and by making the meshes drawn so with BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, so that neighbours share their vertex
+ * and index buffers. The instance buffer is part of the material: a run never spans two. With
+ * BTBHGPUScenePost.opaque_sort, the opaque pass draws the batches it may move in its own order. */
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
