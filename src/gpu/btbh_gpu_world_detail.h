@@ -441,8 +441,8 @@ static inline uint32_t btbh_gpu_world_detail_table_index(float joint) {
     return rounded < 0.0f ? 0u : 255u;
 }
 
-/* The entry whose block the fragment shader reads for an index: min(index, 7). The shader reads none past the
- * count (btbh_gpu_world_detail_table_applies). */
+/* The entry whose block the fragment shader reads for an index: min(index, 7). Past the count it is read and
+ * thrown away (btbh_gpu_world_detail_table_applies), never branched on. */
 static inline uint32_t btbh_gpu_world_detail_table_slot(uint32_t index) {
     return index < BTBH_GPU_SCENE_WORLD_DETAIL_TABLE_MAX_ENTRIES - 1u
         ? index
@@ -450,8 +450,7 @@ static inline uint32_t btbh_gpu_world_detail_table_slot(uint32_t index) {
 }
 
 /* Whether a map of the entry an index picks changes the pixel: the index is below the count and the map's layer
- * isn't BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER. Otherwise the shader doesn't sample it (a branch, the same over a
- * triangle): nothing multiplies the pixel and no tilt is added. */
+ * isn't BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER. Otherwise the shader multiplies by 1 and adds no tilt. */
 static inline bool btbh_gpu_world_detail_table_applies(uint32_t index, uint32_t count, uint32_t layer) {
     return index < count && layer != BTBH_GPU_SCENE_WORLD_DETAIL_NO_LAYER;
 }
