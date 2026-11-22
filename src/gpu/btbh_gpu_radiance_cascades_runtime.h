@@ -118,6 +118,9 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     SDL_GPUTexture *ambient_texture,
     SDL_GPUTexture *ambient_specular_texture,
     SDL_GPUTexture *emission_texture,
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO: the opaque pass wrote the scene's own ambient targets, and the
+       albedo times 1 - metalness to the emission target's rgb (additive cascades only). */
+    bool albedo_in_emission,
     SDL_GPUTexture *normal_texture,
     SDL_GPUTexture *depth_texture,
     SDL_GPUTexture *hero_omni_shadow_texture,

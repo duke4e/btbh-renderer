@@ -36,8 +36,9 @@ cbuffer PostUniforms : register(b0, space3)
     float projection_scale_y;
     float saturation;
     // Screen-space reflections (screen_space_reflection): ssr_options x 1 when the specular target carries the
-    // surface's F0 (the cascades' material targets; 0.04 stands in otherwise), y reserved; view_projection
-    // projects the reflected rays; ssr_controls x the intensity (0 off), y the roughest surface that reflects,
+    // surface's F0 (the cascades' material targets), y 1 when the ambient target's alpha carries its reflectivity,
+    // the F0's luminance (BTBHGPUScenePost.flags: production_model.frag.hlsl's with_surface_reflectivity and
+    // rc_scene_targets); 0.04 stands in otherwise; view_projection projects the reflected rays; ssr_controls x the intensity (0 off), y the roughest surface that reflects,
     // z the farthest a ray looks and w the thickness a hit may lie behind a surface (render units)
     float2 ssr_options;
     float4x4 view_projection;
@@ -392,7 +393,15 @@ float3 screen_space_reflection(
             scene_texture.SampleLevel(scene_sampler, hit_uv - float2(0.0f, blur), 0.0f).rgb
         ) / 6.0f;
     }
-    const float3 f0 = ssr_options.x > 0.5f ? specular.rgb : float3(0.04f, 0.04f, 0.04f);
+    float3 f0 = float3(0.04f, 0.04f, 0.04f);
+    if (ssr_options.x > 0.5f)
+    {
+        f0 = specular.rgb;
+    }
+    else if (ssr_options.y > 0.5f)
+    {
+        f0 = ambient_texture.SampleLevel(ambient_sampler, uv, 0.0f).aaa;
+    }
     const float3 fresnel = f0 + (1.0f - f0) * pow(1.0f - saturate(dot(reflecting_normal, view)), 5.0f);
     return reflected * min(fresnel * intensity, 0.5f) * fade;
 }

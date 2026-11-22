@@ -5770,6 +5770,10 @@ static bool btbh_gpu_scene_post_valid(
         post->upscale_mode <= BTBH_GPU_SCENE_UPSCALE_MODE_MAX &&
         post->mirror_horizontal <= 1u &&
         post->opaque_sort < BTBH_GPU_SCENE_OPAQUE_SORT_COUNT &&
+        (post->flags & ~(uint32_t)(
+            BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO |
+            BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY
+        )) == 0u &&
         (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
          (isfinite(post->temporal_camera_near) &&
           isfinite(post->temporal_camera_far) &&
@@ -6540,14 +6544,14 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
          batch_index < batch_count;
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        /* BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: no source, whatever it shows (since 0.9.0). Its geometries still
+           count below, for the bone offsets. */
         const bool material_emits =
+            (batch->flags & BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE) == 0u &&
             batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
             ((batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
              (batch->emission_energy > 0.0f &&
-        /* BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: no source, whatever it shows (since 0.9.0). Its geometries still
-           count below, for the bone offsets. */
               (batch->emission_red != 0u ||
-            (batch->flags & BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE) == 0u &&
                batch->emission_green != 0u ||
                batch->emission_blue != 0u)));
         SDL_GPUBuffer *batch_instance_buffer =
@@ -6800,6 +6804,15 @@ typedef struct BTBHGPUSceneFrameSetup {
     uint32_t shadow_enabled[3];
     bool omni_shadows_active;
     bool shadows_active;
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO where it applies: the opaque pass writes the scene's own
+       ambient targets under the cascades (unlit_enabled bit 7 for production_model_rc*.frag), the cascades' resolve
+       takes the albedo from the emission target, and the HBAO resolve and the SSR read them as without the
+       cascades. */
+    bool scene_ambient_targets;
+    /* BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY where it applies (the reflections on, the cascades off): the
+       opaque pass writes the reflectivity to the ambient target's alpha and marks unlit surfaces in the emission
+       target's (unlit_enabled bit 6), and the SSR reads them. */
+    bool ssr_surface_reflectivity;
 } BTBHGPUSceneFrameSetup;
 
 /* The first part of a scene frame, shared by the present and btbh_gpu_window_scene_prewarm so that the two make
@@ -7050,6 +7063,17 @@ static bool btbh_gpu_scene_prepare_frame(
     (void)memcpy(setup->shadow_enabled, shadow_enabled, sizeof(setup->shadow_enabled));
     setup->omni_shadows_active = omni_shadows_active;
     setup->shadows_active = shadows_active;
+    /* (ssao_contact's mode is the same with the cascades or without; it reads the emission target.) */
+    setup->scene_ambient_targets =
+        hbao_active &&
+        radiance_cascades_active &&
+        post->radiance_cascades.additive != 0u &&
+        post->ssao_contact == 0u &&
+        (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
+    setup->ssr_surface_reflectivity =
+        ssr_active &&
+        !radiance_cascades_active &&
+        (post->flags & BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY) != 0u;
     return true;
 }
 
@@ -7534,6 +7558,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const uint32_t *shadow_enabled = setup.shadow_enabled;
     const bool omni_shadows_active = setup.omni_shadows_active;
     const bool shadows_active = setup.shadows_active;
+    const bool scene_ambient_targets = setup.scene_ambient_targets;
+    const bool ssr_surface_reflectivity = setup.ssr_surface_reflectivity;
     if (!runtime->temporal_debug_view_read) {
         /* BTBH_DEBUG_MOTION_VECTORS=1 shows the upscaler's inputs, =2 the motion vectors' reprojection
            error; BTBH_FSR3_DEBUG_VIEW=1 AMD's view. */
@@ -8262,7 +8288,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
             : 1u)
         : 0u;
-    post_uniforms.ssr_options[0] = radiance_cascades_active ? 1.0f : 0.0f;
+    post_uniforms.ssr_options[0] =
+        radiance_cascades_active && !scene_ambient_targets ? 1.0f : 0.0f;
+    post_uniforms.ssr_options[1] =
+        scene_ambient_targets || ssr_surface_reflectivity ? 1.0f : 0.0f;
     (void)memcpy(
         post_uniforms.view_projection,
         view_projection,
@@ -8322,9 +8351,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             hbao_uniforms.controls[1] = post->ssao_intensity;
             hbao_uniforms.controls[2] = post->ssao_power;
             hbao_uniforms.controls[3] = post->ssao_bias;
+            /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO: the ambient light, from the scene's own targets. */
             hbao_uniforms.options[0] = post->ssao_contact != 0u
                 ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
-                : (radiance_cascades_active
+                : (radiance_cascades_active && !scene_ambient_targets
                     ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
                     : 1u);
             hbao_uniforms.options[1] = post->ssao_debug_view != 0u ? 1u : 0u;
@@ -8904,7 +8934,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 (batch->rc_receiver != 0u ? 4u : 0u) |
                 (hbao_active
                     ? 32u | ((uint32_t)batch->ssao_mode << 3u)
-                    : 0u);
+                    : 0u) |
+                (ssr_surface_reflectivity ? 64u : 0u) |
+                (scene_ambient_targets ? 128u : 0u);
             fragment_uniforms.alpha_cutoff =
                 batch->alpha_cutoff;
             fragment_uniforms.surface_variant =
@@ -9506,6 +9538,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     runtime->ambient_texture,
                     runtime->ambient_specular_texture,
                     runtime->emission_texture,
+                    scene_ambient_targets,
                     runtime->normal_texture,
                     runtime->depth_texture,
                     hero_omni_shadow_ready

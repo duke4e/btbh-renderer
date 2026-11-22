@@ -520,7 +520,10 @@ typedef struct BTBHGPUHRCResolveUniforms {
     uint32_t quadrant_atlas_resolution[2];
     float indirect_strength;
     uint32_t debug_view;
-    uint32_t padding0[2];
+    uint32_t additive;
+    /* 1: the albedo the bounce light lands on, times 1 - metalness, is the emission target's rgb
+       (BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO, additive only). */
+    uint32_t albedo_in_emission;
     float inverse_view_projection[16];
     float origin_cell[4];
     uint32_t field_dimensions[2];
@@ -3050,6 +3053,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     SDL_GPUTexture *ambient_texture,
     SDL_GPUTexture *ambient_specular_texture,
     SDL_GPUTexture *emission_texture,
+    bool albedo_in_emission,
     SDL_GPUTexture *normal_texture,
     SDL_GPUTexture *depth_texture,
     SDL_GPUTexture *hero_omni_shadow_texture,
@@ -3469,7 +3473,8 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
         layout->quadrant_atlas_height;
     resolve_uniforms.indirect_strength = config->indirect_intensity;
     resolve_uniforms.debug_view = (uint32_t)config->debug_view;
-    resolve_uniforms.padding0[0] = config->additive != 0u ? 1u : 0u;  /* additive */
+    resolve_uniforms.additive = config->additive != 0u ? 1u : 0u;
+    resolve_uniforms.albedo_in_emission = albedo_in_emission ? 1u : 0u;
     (void)memcpy(
         resolve_uniforms.inverse_view_projection,
         inverse_view_projection,
@@ -3729,6 +3734,7 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     SDL_GPUTexture *ambient_texture,
     SDL_GPUTexture *ambient_specular_texture,
     SDL_GPUTexture *emission_texture,
+    bool albedo_in_emission,
     SDL_GPUTexture *normal_texture,
     SDL_GPUTexture *depth_texture,
     SDL_GPUTexture *hero_omni_shadow_texture,
@@ -3777,6 +3783,7 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
         ambient_texture,
         ambient_specular_texture,
         emission_texture,
+        albedo_in_emission,
         normal_texture,
         depth_texture,
         hero_omni_shadow_texture,

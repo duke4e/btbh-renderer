@@ -110,7 +110,7 @@ _Static_assert(BTBH_GPU_SCENE_DETAIL_FACADE_WEATHER == 7, "the facade's weather 
 _Static_assert(sizeof(BTBHGPUScenePost) == 432u, "BTBHGPUScenePost keeps its size");
 _Static_assert(offsetof(BTBHGPUScenePost, ssao_debug_view) == 425u, "ssao_debug_view keeps its place");
 _Static_assert(offsetof(BTBHGPUScenePost, opaque_sort) == 426u, "opaque_sort is the old ssao_reserved[0]");
-_Static_assert(offsetof(BTBHGPUScenePost, ssao_reserved) == 427u, "the rest stays reserved");
+_Static_assert(offsetof(BTBHGPUScenePost, flags) == 427u, "flags is the old ssao_reserved[0]");
 #endif
 
 #define MAX_INSTANCES 32u

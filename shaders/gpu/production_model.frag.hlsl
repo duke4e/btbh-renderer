@@ -1760,6 +1760,24 @@ FragmentOutput fragment_output(
     return output;
 }
 
+// The reflectivity the screen-space reflections weigh a surface by where no target carries its F0: the F0's
+// luminance, in the ambient target's alpha (production_ssao_resolve.frag.hlsl's ssr_options.y), which nothing else
+// reads there.
+static const float3 btbh_reflectivity_luma = float3(0.2126f, 0.7152f, 0.0722f);
+
+// unlit_enabled bit 6 (64: BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY, the cascades off, the reflections on): the
+// ambient target's alpha carries the reflectivity and the emission target's marks unlit surfaces (1; lit ones 0), as
+// the cascades' material targets do. Without it both alphas are 1, which the reflections take for unlit everywhere.
+FragmentOutput with_surface_reflectivity(FragmentOutput output, float3 f0, bool unlit)
+{
+    if ((unlit_enabled & 64u) != 0u)
+    {
+        output.ambient.a = unlit ? 0.0f : dot(f0, btbh_reflectivity_luma);
+        output.emission.a = unlit ? 1.0f : 0.0f;
+    }
+    return output;
+}
+
 #if BTBH_RC_MATERIAL_OUTPUT
 /* The emission target's alpha marks unlit materials (1). A lit one's alpha is its light's directness (the share
    of it the sun and the spot cast) times this, below the HRC resolve's unlit test (0.5): the SSAO resolve's
@@ -1804,6 +1822,31 @@ FragmentOutput rc_material_output(
         receiver ? 0.75f : unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale
     );
     output.velocity = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    return output;
+}
+
+/* unlit_enabled bit 7 (128: BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO, additive cascades and the HBAO): the
+   scene's own targets (`output`, fragment_output's, as without the cascades), so that the HBAO resolve darkens the
+   ambient light alone, with the reflectivity in the ambient target's alpha for the reflections. The emission target
+   carries what the additive resolve reads instead (production_hrc_resolve.comp.hlsl's albedo_in_emission): the
+   albedo the bounce light lands on, times 1 - metalness (an unlit receiver's albedo; 0 for a source, as
+   rc_material_output's albedo target holds, which the resolve's coarser samples blend into their neighbours'), and
+   rc_material_output's marks in its alpha. */
+FragmentOutput rc_scene_targets(
+    FragmentOutput output,
+    float4 albedo,
+    float metalness,
+    float3 f0,
+    float directness,
+    bool unlit
+)
+{
+    const bool receiver = unlit && (unlit_enabled & 4u) != 0u;
+    output.ambient.a = unlit ? 0.0f : dot(f0, btbh_reflectivity_luma);
+    output.emission = float4(
+        unlit && !receiver ? float3(0.0f, 0.0f, 0.0f) : albedo.rgb * (unlit ? 1.0f : 1.0f - metalness),
+        receiver ? 0.75f : unlit ? 1.0f : saturate(directness) * btbh_rc_directness_scale
+    );
     return output;
 }
 #endif
@@ -2427,6 +2470,25 @@ FragmentOutput shade_fragment(FragmentInput input)
             albedo_sample.rgb * evaluate_point_lights(input.world_position, lit_normal)
         );
 #if BTBH_RC_MATERIAL_OUTPUT
+        if ((unlit_enabled & 128u) != 0u)
+        {
+            return rc_scene_targets(
+                fragment_output(
+                    float4(albedo_sample.rgb + emission, albedo_sample.a),
+                    emission,
+                    0.0f,
+                    0.0f,
+                    normal,
+                    1.0f,
+                    1.0f
+                ),
+                albedo_sample,
+                metalness,
+                f0,
+                0.0f,
+                true
+            );
+        }
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
             albedo_sample,
@@ -2440,14 +2502,18 @@ FragmentOutput shade_fragment(FragmentInput input)
             true
         );
 #else
-        return fragment_output(
-            float4(albedo_sample.rgb + emission, albedo_sample.a),
-            emission,
-            0.0f,
-            0.0f,
-            normal,
-            1.0f,
-            1.0f
+        return with_surface_reflectivity(
+            fragment_output(
+                float4(albedo_sample.rgb + emission, albedo_sample.a),
+                emission,
+                0.0f,
+                0.0f,
+                normal,
+                1.0f,
+                1.0f
+            ),
+            f0,
+            true
         );
 #endif
     }
@@ -2465,6 +2531,25 @@ FragmentOutput shade_fragment(FragmentInput input)
     if (total_energy <= 0.0f)
     {
 #if BTBH_RC_MATERIAL_OUTPUT
+        if ((unlit_enabled & 128u) != 0u)
+        {
+            return rc_scene_targets(
+                fragment_output(
+                    float4(albedo_sample.rgb + emission, albedo_sample.a),
+                    emission,
+                    0.0f,
+                    0.0f,
+                    normal,
+                    occlusion,
+                    roughness
+                ),
+                albedo_sample,
+                metalness,
+                f0,
+                0.0f,
+                false
+            );
+        }
         return rc_material_output(
             float4(albedo_sample.rgb + emission, albedo_sample.a),
             albedo_sample,
@@ -2478,14 +2563,18 @@ FragmentOutput shade_fragment(FragmentInput input)
             false
         );
 #else
-        return fragment_output(
-            float4(albedo_sample.rgb + emission, albedo_sample.a),
-            emission,
-            0.0f,
-            0.0f,
-            normal,
-            occlusion,
-            roughness
+        return with_surface_reflectivity(
+            fragment_output(
+                float4(albedo_sample.rgb + emission, albedo_sample.a),
+                emission,
+                0.0f,
+                0.0f,
+                normal,
+                occlusion,
+                roughness
+            ),
+            f0,
+            false
         );
 #endif
     }
@@ -2639,6 +2728,25 @@ FragmentOutput shade_fragment(FragmentInput input)
             dot(sun_lighting * (1.0f - spot_occluder) + spot_lighting, btbh_rc_luma) / occludable_luma
         )
         : 0.0f;
+    if ((unlit_enabled & 128u) != 0u)
+    {
+        return rc_scene_targets(
+            fragment_output(
+                float4(lighting + emission, albedo_sample.a),
+                emission,
+                ambient_diffuse_lighting,
+                ambient_specular_lighting,
+                normal,
+                occlusion,
+                roughness
+            ),
+            albedo_sample,
+            metalness,
+            f0,
+            directness,
+            false
+        );
+    }
     return rc_material_output(
         float4(lighting + emission, albedo_sample.a),
         albedo_sample,
@@ -2652,14 +2760,18 @@ FragmentOutput shade_fragment(FragmentInput input)
         false
     );
 #else
-    return fragment_output(
-        float4(lighting + emission, albedo_sample.a),
-        emission,
-        ambient_diffuse_lighting,
-        ambient_specular_lighting,
-        normal,
-        occlusion,
-        roughness
+    return with_surface_reflectivity(
+        fragment_output(
+            float4(lighting + emission, albedo_sample.a),
+            emission,
+            ambient_diffuse_lighting,
+            ambient_specular_lighting,
+            normal,
+            occlusion,
+            roughness
+        ),
+        f0,
+        false
     );
 #endif
 }

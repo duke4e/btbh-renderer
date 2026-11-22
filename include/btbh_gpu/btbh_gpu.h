@@ -1332,7 +1332,9 @@ typedef struct BTBHGPUScenePost {
     /* Screen-space reflections, added in the SSAO resolve (production_ssao_resolve.frag.hlsl, which then runs
      * without ambient occlusion too): their intensity (0 off; it multiplies the Fresnel reflectance), the
      * roughest surface that reflects, how far a reflected ray looks and the thickness a hit may lie behind a
-     * surface (render units). */
+     * surface (render units). Without the radiance cascades they reflect nothing unless flags has
+     * BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY: the scene's targets there mark every surface unlit, which they
+     * skip (as since they came; kept so for the hosts that run them so). */
     float ssr_intensity;
     float ssr_max_roughness;
     float ssr_max_distance;
@@ -1365,8 +1367,48 @@ typedef struct BTBHGPUScenePost {
      * was ssao_reserved[0], so the struct keeps its size). 0 draws them in the order given, as before; a value
      * past the enum fails the present with BTBH_GPU_INVALID_ARGUMENT. */
     uint8_t opaque_sort;
-    uint8_t ssao_reserved[1];
+    /* BTBH_GPU_SCENE_POST_* bits (since 0.9.0, in the byte that was ssao_reserved[0], so the struct keeps its
+     * size). 0 renders as before; a bit the renderer doesn't know fails the present with
+     * BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t flags;
 } BTBHGPUScenePost;
+
+/* BTBHGPUScenePost.flags (since 0.9.0). Each needs this release's scene shaders (production_model*.frag,
+ * production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones: with them
+ * SSR_SURFACE_REFLECTIVITY changes nothing, and KEEP_HBAO darkens by the albedo (don't set it with them). */
+enum {
+    /* The horizon-based ambient occlusion (ssao_enabled 2, ssao_contact 0) under additive radiance cascades
+     * (BTBHGPUSceneRadianceCascades.additive) darkens what it darkens without the cascades: the ambient light of
+     * lit surfaces (diffuse, and specular as its occlusion goes). Without it, cascades of any kind make it darken
+     * three quarters of all their light but the emission, which suits cascades that replace the scene's ambient
+     * light and darkens additive ones, whose surfaces keep it (Be The Bullet Hell v2, who asked for it: with
+     * nothing glowing, its night stage lost 1.4 sRGB levels on average once the cascades were on).
+     * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off).
+     * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't.
+     * - How: the opaque pass writes the scene's own ambient light to the targets the cascades' resolve reads its
+     *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission
+     *   target, which the additive resolve doesn't otherwise read. The bounce light is the same but at the edges of
+     *   metal surfaces (a level or two), where the resolve's coarser samples blend albedo times (1 - metalness)
+     *   instead of each apart.
+     * - Screen-space reflections then weigh each surface by its reflectivity's luminance, as with
+     *   BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY (the cascades' targets kept its colour).
+     * - Ignored, rendering as without it: without the cascades or with them not additive, with ssao_contact 1
+     *   (which is the same either way), with ssao_enabled 0 or 1, and in the cascades' debug views. */
+    BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO = 1u << 0,
+    /* Screen-space reflections without the radiance cascades weigh each surface by its own reflectivity, as with
+     * the cascades: its F0 (0.04 for a dielectric, 0.12 for glass, detail pattern 5, its albedo for a metal,
+     * between them as metalness goes). Without it they reflect nothing there (see ssr_intensity). Asked for by
+     * Be The Bullet Hell v2.
+     * - The reflectivity is the F0's luminance, one channel: a dielectric, glass or a grey metal reflects as with
+     *   the cascades, to the byte; a coloured metal reflects as bright, untinted.
+     * - With the cascades on it changes nothing (they carry the F0 already); nor without SSR. */
+    BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY = 1u << 1
+};
+
+/* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO exist (since 0.9.0). */
+#define BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO 1
+/* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY exist (since 0.9.0). */
+#define BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY 1
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;

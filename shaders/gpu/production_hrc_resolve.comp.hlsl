@@ -25,7 +25,10 @@ cbuffer HRCResolveUniforms : register(b0, space2)
     float indirect_strength;
     uint debug_view;
     uint additive;  // only add the bounce light of what glows (BTBHGPUSceneRadianceCascades.additive)
-    uint padding0;
+    // 1 (additive only, BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO): the albedo the bounce light lands on, times
+    // 1 - metalness, is the emission target's rgb; the albedo target holds the scene's own ambient light
+    // (production_model.frag.hlsl's rc_scene_targets)
+    uint albedo_in_emission;
     float4x4 inverse_view_projection;
     float4 origin_cell;
     uint2 field_dimensions;
@@ -254,11 +257,13 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         ? normalize(encoded_normal.xyz * 2.0f - 1.0f)
         : float3(0.0f, 1.0f, 0.0f);
     const float occlusion = saturate(encoded_normal.a);
-    const float4 albedo_material = albedo_material_texture.SampleLevel(
-        albedo_material_sampler,
-        uv,
-        0.0f
-    );
+    const float4 albedo_material = albedo_in_emission != 0u
+        ? float4(emission, 0.0f)
+        : albedo_material_texture.SampleLevel(
+            albedo_material_sampler,
+            uv,
+            0.0f
+        );
     const float3 albedo = albedo_material.rgb;
     const float metalness = saturate(albedo_material.a);
     const float4 specular_material = specular_material_texture.SampleLevel(
