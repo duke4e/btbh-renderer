@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-23
+
 Four opt-in additions requested by Be The Bullet Hell v2: a batch that is no source of the radiance cascades' light
 (`BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`); two post flags (`BTBHGPUScenePost.flags`), one that keeps the horizon-based
 ambient occlusion of no cascades under additive ones and one that gives the screen-space reflections each surface's
@@ -22,8 +24,24 @@ scenes through every scene shader variant and its other images (56 images, 1,245
 `btbh_gpu_scene_target_smoke`'s nine images (90,368 pixels), `btbh_gpu_font_smoke`'s 25 (6,549,120 pixels) and
 `btbh_gpu_scene_prewarm_smoke`'s 16 frames and 16 renders into a target (1,843,200 pixels), each written by a build of
 0.8.0 and by this one; and the world detail gallery and `btbh_gpu_sdf_terrain_smoke` with 0.8.0's shaders under this
-core. macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't
-tested it yet.
+core. macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified.
+
+Be The Bullet Hell v2 tested it: its main at 728e3cf0 on 0.8.0 plus a test patch, 756 tests, and its text check and
+44-screen UI tour clean.
+- Unset, frames match 0.8.0's within its run-to-run noise. It saw 1-level differences once: 123 pixels with the
+  cascades at night and 1 in rain. Two runs of 0.8.0 differ as much (122 and 30 pixels).
+- The prewarm into a target takes the first present of its V1 cards' first offer from 12–14 ms to 1.1–1.2 ms, and that
+  frame from 32.5/31.8 ms to 19.5/19.8 ms. With its lane scenes also made at load, the frame is 4.3/2.9 ms. Steady
+  lanes cost 0.3–0.4 ms a present.
+- `NO_RC_SOURCE` on its city glows (night, stage 3) takes the cascades' light from 3.57/2.24/1.35 to 1.88/1.54/1.30.
+  The warm wash over roofs and streets goes, and the final frame's luma drops by 0.55.
+- `KEEP_HBAO` with nothing feeding the cascades equals the frame without them within 9–13 pixels by 1 level, by day
+  and at night, with its neon point lights off (see Known).
+- `SSR_SURFACE_REFLECTIVITY` costs GPU time where the wet streets trace (preset High, GPU-bound, medians of three):
+  - 1440p: +0.17 ms by day, +0.31 ms in rain;
+  - 4K in rain: +0.81 ms, because every wet street pixel now traces.
+
+  By day, glass facades reflect correctly.
 
 ### Added
 - **`BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`** (bit 2 of `BTBHGPUSceneGeometryBatch.flags`, beside `NO_SUN_SHADOW` and
@@ -190,6 +208,15 @@ cascades; with it, 0 pixels differ.
   stay as they were (Be The Bullet Hell v1 runs them so); `SSR_SURFACE_REFLECTIVITY` makes them reflect.
 - `KEEP_HBAO`'s bounce light differs by up to 2 levels at the edges of metal surfaces (above).
 - The SSAO (`ssao_enabled` 1) under additive cascades keeps the cascades' mode: `KEEP_HBAO` covers the HBAO only.
+- **`KEEP_HBAO` doesn't match the frame without the cascades under strong point lights in occluded corners.**
+  - Case: Be The Bullet Hell v2's sign lights at a wall's foot (reach 2.6, energy 2.1).
+  - With the flag, those corners are up to 45–50 levels brighter than without the cascades: +0.8 luma over its night
+    frame, +0.3 at dusk on the Deck preset.
+  - It isn't established which of the two darkens the point lights' share. Under investigation for 0.10.0.
+- **The radiance cascades' debug views draw the transparent pass over them**, so additive effects such as street
+  washes and lamp pools read as cascade light there.
+- **`SSR_SURFACE_REFLECTIVITY` in rain under a steep camera:** each actor leaves a noisy vertical streak of itself
+  down the wet street below it. An `ssr_thickness` of about 0.1, down from 0.6, removes most of it.
 
 ## [0.8.0] — 2026-11-22
 

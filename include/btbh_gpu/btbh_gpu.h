@@ -9,7 +9,7 @@ extern "C" {
 
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
-#define BTBH_GPU_VERSION_MINOR 8
+#define BTBH_GPU_VERSION_MINOR 9
 #define BTBH_GPU_VERSION_PATCH 0
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
