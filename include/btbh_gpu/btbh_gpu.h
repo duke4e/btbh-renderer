@@ -1095,7 +1095,12 @@ typedef struct BTBHGPUSceneGeometryBatch {
     /* BTBH_GPU_SCENE_BATCH_* bits (since 0.5.0, in a byte that was ssao_reserved[0]). 0 draws as before; a bit the renderer doesn't know fails the present with
      * BTBH_GPU_INVALID_ARGUMENT. */
     uint8_t flags;
-    uint8_t ssao_reserved[2];
+    /* BTBH_GPU_SCENE_BATCH_FLAGS2_* bits, the batch flags' second byte (since 0.12.0: byte 254 on 64-bit, right after
+     * flags, which was ssao_reserved[0], so the struct keeps its 288 bytes; it was in the run key already, and still
+     * is). Its bits are its own: they don't go in flags. 0 draws as before; a bit the renderer doesn't know fails the
+     * present with BTBH_GPU_INVALID_ARGUMENT (0.11.0 and older ignore this byte). */
+    uint8_t flags2;
+    uint8_t ssao_reserved[1];
     /* NULL: drawn as before. Otherwise the batch is ground that this terrain may dig through
      * (btbh_gpu_sdf_terrain.h, since 0.5.0): where the terrain's patch has taken over from the base (a crater,
      * a mound's foot, paint), its fragments that don't lie more than a tenth of a cell under the patch's top
@@ -1202,6 +1207,29 @@ enum {
 #define BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT 1
 /* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR exists (since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR 1
+
+/* BTBHGPUSceneGeometryBatch.flags2, the batch flags' second byte (since 0.12.0). */
+enum {
+    /* The batch keeps the radiance cascades' look under BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO (since 0.12.0,
+     * asked for by Be The Bullet Hell v2 for its weapon beams and glow sources, while its light overlays draw as
+     * without the cascades). That flag draws a transparent unlit batch under additive cascades with the fast unlit
+     * shader, as without the cascades, which adds no point light; with this bit the batch draws as it does under the
+     * cascades without that flag: with the cascades' scene shader (production_model_rc*.frag), which adds the point
+     * lights (eased by point_light_ceiling), the dark scene's darkening, spot and glow (unlit_darkness), and unlit 2
+     * and 3's sun shadow. Byte for byte as under the cascades without KEEP_HBAO, over whatever lies behind it.
+     * - It matters only for a batch the fast unlit shader would draw (unlit, drawn in the transparent pass, with no
+     *   surface variant, no world detail texture and no table with map_layers), under additive cascades with
+     *   KEEP_HBAO, outside the cascades' debug views. Everywhere else it changes nothing: without the cascades (the
+     *   fast unlit shader, as before), under cascades that aren't additive or without KEEP_HBAO (the scene shader
+     *   already), and on opaque or lit batches.
+     * - The batch takes the pipeline it takes under the cascades without KEEP_HBAO: no new one, and
+     *   btbh_gpu_window_scene_prewarm makes it for a batch with the bit. Needs no new shader. */
+    BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK = 1u << 0
+};
+
+/* Defined when BTBHGPUSceneGeometryBatch.flags2 and BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK exist (since
+   0.12.0). */
+#define BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK 1
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
  * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
@@ -1369,7 +1397,8 @@ typedef struct BTBHGPUSceneLighting {
     // green, blue, energy. They light lit surfaces (diffuse) and brighten opaque unlit ones.
     // Transparent unlit batches take them only under the radiance cascades, unless they are additive
     // and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO is set. Without the cascades, or with that
-    // flag under additive ones, those batches draw with the fast unlit shader, which adds no point light.
+    // flag under additive ones, those batches draw with the fast unlit shader, which adds no point light
+    // (but those with BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK, since 0.12.0, which take them there).
     uint32_t point_light_count;
     float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
     /* A dark scene: unlit surfaces keep 1 - unlit_darkness of their colour (0: all of it, as

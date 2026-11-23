@@ -3001,13 +3001,28 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
    with any ambient occlusion or none, BTBHGPUSceneFrameSetup.cascades_fast_unlit). The fast shader takes no point
    light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent pass draws
    as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came out up to 200
-   levels brighter). Cascades without the flag keep the scene shader, as before. */
+   levels brighter). Cascades without the flag keep the scene shader, as before; so does, under the flag, a batch with
+   BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (since 0.12.0: v2's beams and glows keep the cascades' look). */
 static bool btbh_gpu_scene_batch_fast_unlit(
     const BTBHGPUSceneGeometryBatch *batch,
     bool radiance_cascades_active,
     bool cascades_fast_unlit
 ) {
-    return (!radiance_cascades_active || cascades_fast_unlit) &&
+    return (!radiance_cascades_active ||
+            (cascades_fast_unlit &&
+             (batch->flags2 & BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK) == 0u)) &&
+        btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+}
+
+/* BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK where it changes something: a batch the fast unlit shader would draw
+   under KEEP_HBAO's transparent part (cascades_fast_unlit) draws with the cascades' scene shader instead, and with the
+   fragment block it has under the cascades without KEEP_HBAO (the flag's scene-target bits cleared). */
+static bool btbh_gpu_scene_batch_keeps_cascades_look(
+    const BTBHGPUSceneGeometryBatch *batch,
+    bool cascades_fast_unlit
+) {
+    return cascades_fast_unlit &&
+        (batch->flags2 & BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK) != 0u &&
         btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
 }
 
@@ -4970,6 +4985,7 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW |
                 BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
             )) == 0u &&
+            (batch->flags2 & ~(uint32_t)BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
@@ -5269,6 +5285,7 @@ bool btbh_gpu_scene_batch_continues_run(
         BTBH_GPU_SCENE_RUN_SAME(detail_parameters) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_mode) &&
         BTBH_GPU_SCENE_RUN_SAME(flags) &&
+        BTBH_GPU_SCENE_RUN_SAME(flags2) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_reserved) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_library) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_pose) &&
@@ -9977,7 +9994,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         ? 32u | ((uint32_t)batch->ssao_mode << 3u)
                         : 0u) |
                     (ssr_surface_reflectivity ? 64u : 0u) |
-                    (scene_ambient_targets ? 128u : 0u) |
+                    (scene_ambient_targets &&
+                     !btbh_gpu_scene_batch_keeps_cascades_look(batch, cascades_fast_unlit)
+                        ? 128u
+                        : 0u) |
                     ((batch->flags &
                       BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
                         ? 256u

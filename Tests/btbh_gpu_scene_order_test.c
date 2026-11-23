@@ -6,7 +6,7 @@
  * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
  * don't, and the shared-mesh flag's constants. And RFC 0012's height lift: its struct's layout, the batch's pointer
  * at 280 (288 bytes), the queued mesh updates' constants, and a lifted batch's sort key. And RFC 0013's variant, batch
- * bit and macros. */
+ * bit and macros. And 0.12.0's second batch flags byte (flags2, byte 254), in the run key. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -24,7 +24,10 @@
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, dug_by) == 256u, "dug_by is appended after 0.4.0's 256 bytes");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_mode) == 252u, "ssao_mode keeps its place");
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u, "flags is the old ssao_reserved[0]");
-_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_reserved) == 254u, "the rest stays reserved");
+/* 0.12.0: the batch flags' second byte is the old ssao_reserved[0] (254); the last byte stays reserved. */
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, flags2) == 254u, "flags2 is the old ssao_reserved[0]");
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, ssao_reserved) == 255u, "the last byte stays reserved");
+_Static_assert(sizeof(((BTBHGPUSceneGeometryBatch *)0)->ssao_reserved) == 1u, "one reserved byte is left");
 /* RFC 0008 appends world_detail after 0.5.0's 264 bytes; dug_by keeps its place. */
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail) == 264u, "world_detail is appended at 264");
 /* RFC 0009 phase 2 (0.8.0) appends world_detail_table after 0.6.0's and 0.7.0's 272 bytes. */
@@ -199,6 +202,18 @@ _Static_assert((BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR & (BTBH_GPU_SCENE_BAT
     (1u << 4) | BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW)) == 0, "the light factor's bit is its own");
 #if !defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
 #error "BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR is defined with the flag"
+#endif
+
+/* 0.12.0 (Be The Bullet Hell v2's beams and glows under KEEP_HBAO): the batch flags' second byte, a byte that was there
+   (batch bit 7 stays free, bit 4 is RFC 0013 phase 2's), and its first bit. */
+_Static_assert(sizeof(((BTBHGPUSceneGeometryBatch *)0)->flags2) == 1u, "flags2 is a byte");
+_Static_assert(BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK == 1, "KEEP_CASCADES_LOOK is flags2 bit 0");
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 288u && offsetof(BTBHGPUSceneGeometryBatch, flags2) == 254u,
+    "the batch keeps its size; flags2 is byte 254");
+#endif
+#if !defined(BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK)
+#error "BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK is defined with flags2 and its bit"
 #endif
 
 #define MAX_INSTANCES 32u
@@ -377,6 +392,7 @@ static const RunField run_fields[] = {
     RUN_FIELD(detail_parameters, false),
     RUN_FIELD(ssao_mode, false),
     RUN_FIELD(flags, false),
+    RUN_FIELD(flags2, false),
     RUN_FIELD(ssao_reserved, false),
     RUN_FIELD(dug_by, false),
     RUN_FIELD(world_detail, false),
