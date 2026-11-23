@@ -213,6 +213,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_particle_lit.frag|fragment"
         "production_particle_lit_2d_shadows.frag|fragment"
         "production_particle_lit_unshadowed.frag|fragment"
+        "production_particle_transmittance.vert|vertex"
+        "production_particle_transmittance.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
@@ -367,6 +369,17 @@ if(BTBH_BUILD_GPU_SPIKE)
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_temporal.hlsli"
+            )
+        endif()
+        # RFC 0013 phase 2 (0.14.0): the particle transmittance map's read, in the lit particles and the scene shaders.
+        if(
+            _shader_name MATCHES "^production_model.*\.frag$" OR
+            _shader_name MATCHES "^production_particle_lit"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_particle_shadow.hlsli"
             )
         endif()
         # The instance's light factor (BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR, since 0.11.0).
@@ -903,6 +916,8 @@ if(BTBH_BUILD_GPU_SPIKE)
                 BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit.frag.json"
                 BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit_2d_shadows.frag.json"
                 BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit_unshadowed.frag.json"
+                BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_transmittance.vert.json"
+                BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_transmittance.frag.json"
                 BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
                 BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
                 BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"

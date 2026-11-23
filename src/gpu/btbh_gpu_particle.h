@@ -5,7 +5,9 @@
  * BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT may be, the lit particles' frame block, and C copies of
  * production_particle_lit.frag.hlsl's wrap, phase and fog for the native tests and the smoke's references (as
  * btbh_gpu_world_detail.h is for RFC 0008). Also (0.11.0) what a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
- * may be, which reads a custom float as the rect does. Header-only: btbh_gpu_scene.c and the tests include it. */
+ * may be, which reads a custom float as the rect does. RFC 0013 phase 2 (0.14.0): what a batch with
+ * BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW may be, the particle_shadow byte's values and the map's size, and C copies of
+ * the map's optical depth and of a slab's transmittance. Header-only: btbh_gpu_scene.c and the tests include it. */
 
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_world_detail.h"
@@ -54,10 +56,83 @@ static inline const char *btbh_gpu_particle_lit_problem(const BTBHGPUSceneGeomet
         batch->detail_parameters[2] != 0.0f || batch->detail_parameters[3] != 0.0f) {
         return "a lit particle takes no procedural detail: detail_parameters must be 0";
     }
-    if (batch->surface_parameters1[3] != 0.0f) {
-        return "surface_parameters1[3] is reserved and must be 0";
+    /* (Reserved, and refused unless 0, in 0.11.0 to 0.13.0; since 0.14.0 the density the particle shadow takes.) */
+    if (batch->surface_parameters1[3] < 0.0f) {
+        return "surface_parameters1[3], the particle shadow's density, must be 0 or more";
     }
     return NULL;
+}
+
+/* RFC 0013 phase 2 (0.14.0): BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW. */
+static inline bool btbh_gpu_particle_shadow(const BTBHGPUSceneGeometryBatch *batch) {
+    return ((uint32_t)batch->flags & BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW) != 0u;
+}
+
+/* Why a batch with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW can't draw into the particle transmittance map, or NULL. */
+static inline const char *btbh_gpu_particle_shadow_problem(const BTBHGPUSceneGeometryBatch *batch) {
+    if (batch->transparency_enabled == 0u && batch->blend_mode == BTBH_GPU_SCENE_BLEND_ALPHA) {
+        return "the particle shadow is for see-through batches: transparency_enabled must be 1 (or the blend other "
+            "than BTBH_GPU_SCENE_BLEND_ALPHA)";
+    }
+    if (batch->surface_variant != BTBH_GPU_SCENE_SURFACE_NONE &&
+        batch->surface_variant != BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE &&
+        batch->surface_variant != BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE) {
+        return "the particle shadow takes surface variant NONE, SOFT_PARTICLE or LIT_PARTICLE";
+    }
+    if (batch->animation_library != NULL || batch->animation_pose != NULL) {
+        return "the particle shadow needs a static batch: animation_library and animation_pose must be NULL";
+    }
+    if (batch->height_lift != NULL && batch->height_lift->heightfield != NULL) {
+        return "the particle shadow can't be lifted: height_lift's heightfield must be NULL";
+    }
+    if (batch->dug_by != NULL) {
+        return "the particle shadow can't be dug (dug_by must be NULL)";
+    }
+    return NULL;
+}
+
+/* Whether BTBHGPUSceneLighting.particle_shadow is one the renderer knows: readers 0, 1 or 2 (bits 0-1), the quarter
+   size (bit 2), nothing above. */
+static inline bool btbh_gpu_particle_shadow_setting_valid(uint8_t particle_shadow) {
+    const uint32_t known = BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS | BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER;
+    return (particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) <= BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND &&
+        (particle_shadow & ~known) == 0u;
+}
+
+/* The particle transmittance map's size for a sun map's: half of it each way, or a quarter with
+   BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER; at least 1. */
+static inline uint32_t btbh_gpu_particle_shadow_size(uint32_t sun_map_size, uint8_t particle_shadow) {
+    const uint32_t size =
+        sun_map_size / ((particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER) != 0u ? 4u : 2u);
+    return size > 0u ? size : 1u;
+}
+
+/* production_particle_transmittance.frag.hlsl: the optical depth a fragment of alpha `alpha` adds, -ln(1 - min(alpha,
+   0.999)) times the density (a lit particle's surface_parameters1[3], 0 taken as 1); 0 where the shader discards it
+   (alpha 1/255 or less, or below the batch's alpha_cutoff). */
+static inline float btbh_gpu_particle_optical_depth(float alpha, float density, float alpha_cutoff) {
+    if (alpha <= 1.0f / 255.0f || alpha < alpha_cutoff) {
+        return 0.0f;
+    }
+    const float scale = density > 0.0f ? density : 1.0f;
+    return -logf(1.0f - (alpha < 0.999f ? alpha : 0.999f)) * scale;
+}
+
+/* production_particle_shadow.hlsli's btbh_particle_slab_transmittance: the share of the sun a texel's slab (`optical`
+   the summed optical depth, `weighted` its depth-weighted sum, `nearest` the nearest depth) leaves at `depth`. */
+static inline float btbh_gpu_particle_slab_transmittance(float optical, float weighted, float nearest, float depth) {
+    const float r = optical > 0.0f ? optical : 0.0f;
+    const float mean = weighted / (r > 1.0e-6f ? r : 1.0e-6f);
+    const float front = nearest < mean ? nearest : mean;
+    const float span = 2.0f * (mean - front);
+    float share = 0.0f;
+    if (span > 1.0e-6f) {
+        share = (depth - front) / span;
+        share = share < 0.0f ? 0.0f : (share > 1.0f ? 1.0f : share);
+    } else {
+        share = depth >= front ? 1.0f : 0.0f;
+    }
+    return expf(-r * share);
 }
 
 /* Why a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT can't draw, or NULL. */
@@ -110,7 +185,7 @@ static inline const char *btbh_gpu_scene_light_factor_problem(const BTBHGPUScene
 }
 
 /* production_particle_lit.frag.hlsl's ParticleFrame (b1): what every lit particle of a pass shares, pushed once a
-   pass. 176 bytes. */
+   pass. 192 bytes (176 in 0.11.0 to 0.13.0; RFC 0013 phase 2 added shadow_controls). */
 typedef struct BTBHGPUSceneParticleFrameUniforms {
     /* The frame's inverse view-projection, as the HDR composite's and the distance pass's. */
     float inverse_view_projection[16];
@@ -126,6 +201,9 @@ typedef struct BTBHGPUSceneParticleFrameUniforms {
        its width and height in cells, 1 with the sources' tops, 0. */
     float cascade_origin[4];
     float cascade_field[4];
+    /* RFC 0013 phase 2 (0.14.0): x 1 when the particle transmittance map is drawn this frame (the shader reads it),
+       yzw 0. */
+    float shadow_controls[4];
 } BTBHGPUSceneParticleFrameUniforms;
 
 /* ---------------------------------------------------------------------------------------- the shader's light */

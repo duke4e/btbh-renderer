@@ -99,6 +99,19 @@ SamplerState world_detail_maps_sampler : register(s13, space2);
 Texture2DArray<float4> world_detail_maps : register(t9, space2);
 SamplerState world_detail_maps_sampler : register(s9, space2);
 #endif
+// RFC 0013 phase 2 (0.14.0): the particle transmittance map in sun space (BTBHGPUSceneLighting.particle_shadow 2),
+// after the table's maps, in the shadowed variants only: the full variant's 16th and last sampler, _2d_shadows' 15th.
+// A fallback, never sampled, when the frame's surfaces don't read it (directional_shadow_controls.w 0).
+#if BTBH_DIRECTIONAL_SHADOWS && BTBH_OMNI_SHADOWS
+Texture2D<float4> particle_transmittance_texture : register(t15, space2);
+SamplerState particle_transmittance_sampler : register(s15, space2);
+#elif BTBH_DIRECTIONAL_SHADOWS
+Texture2D<float4> particle_transmittance_texture : register(t14, space2);
+SamplerState particle_transmittance_sampler : register(s14, space2);
+#endif
+#if BTBH_DIRECTIONAL_SHADOWS
+#include "production_particle_shadow.hlsli"
+#endif
 
 // The batch's second fragment uniform buffer (DigMask until 0.6.0, the same slot): the dig mask's placement, then
 // the world detail's.
@@ -184,6 +197,8 @@ cbuffer MaterialPBR : register(b0, space3)
     float4x4 directional_shadow_view_projection;
     float4x4 secondary_directional_shadow_view_projection;
     float4x4 spot_shadow_view_projection;
+    // x on, y softness, z 1 with the soft filter; w (RFC 0013 phase 2, since 0.14.0) 1 when the surfaces the sun
+    // shadows read the particle transmittance map (particle_shadow 2, the map drawn this frame)
     float4 directional_shadow_controls;
     // x on, y softness; z the spot occluder's flags (BTBHGPUSceneLighting.spot_occluder_flags, since 0.10.0: 1 the
     // sun only, 2 an orthographic spot matrix; spot_occluder_mode); w 0
@@ -2428,12 +2443,23 @@ FragmentOutput shade_fragment(FragmentInput input)
         // the soft filter's plain lookup.
         if ((unlit_enabled & 3u) >= 2u)
         {
-            const float shadow_visibility = primary_directional_visibility(
+            float shadow_visibility = primary_directional_visibility(
                 input.world_position,
                 normal,
                 shadow_face_normal,
                 (unlit_enabled & 3u) == 3u
             );
+            // RFC 0013 phase 2: the particles' shadow too (particle_shadow 2).
+            [branch]
+            if (directional_shadow_controls.w > 0.5f)
+            {
+                shadow_visibility *= btbh_particle_transmittance(
+                    particle_transmittance_texture,
+                    particle_transmittance_sampler,
+                    directional_shadow_view_projection,
+                    input.world_position
+                );
+            }
             albedo_sample.rgb *= lerp(
                 BTBH_UNLIT_SHADOW_LIGHT,
                 1.0f,
@@ -2686,6 +2712,17 @@ FragmentOutput shade_fragment(FragmentInput input)
             shadow_normal,
             shadow_face_normal,
             false
+        );
+    }
+    // RFC 0013 phase 2: the particles' shadow on the surface (particle_shadow 2: a smoke column's on the street).
+    [branch]
+    if (directional_shadow_controls.w > 0.5f)
+    {
+        sun_visibility *= btbh_particle_transmittance(
+            particle_transmittance_texture,
+            particle_transmittance_sampler,
+            directional_shadow_view_projection,
+            input.world_position
         );
     }
 #endif

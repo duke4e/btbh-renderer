@@ -7,7 +7,8 @@
 //
 // Three variants, as production_model.frag: this file (the sun's map, the fill's, the spot's and the omni light's
 // cube), production_particle_lit_2d_shadows (no cube) and production_particle_lit_unshadowed (no maps). Its textures
-// put the shadow maps last, so that each variant's are the next one's and some more.
+// put the shadow maps last, so that each variant's are the next one's and some more. RFC 0013 phase 2 (0.14.0) adds
+// the particle transmittance map after them in the two shadowed variants: the sun's share times its transmittance.
 // src/gpu/btbh_gpu_particle.h holds C copies of the wrap, the phase and the fog, for the native tests.
 
 #ifndef BTBH_DIRECTIONAL_SHADOWS
@@ -50,7 +51,15 @@ SamplerState spot_shadow_sampler : register(s7, space2);
 #if BTBH_OMNI_SHADOWS
 TextureCube<float> omni_shadow_texture : register(t8, space2);
 SamplerState omni_shadow_sampler : register(s8, space2);
+// RFC 0013 phase 2 (0.14.0): the particle transmittance map in sun space, last (t9; t8 in _2d_shadows), or a fallback
+// never read when the frame draws none (particle_shadow_controls.x 0).
+Texture2D<float4> particle_transmittance_texture : register(t9, space2);
+SamplerState particle_transmittance_sampler : register(s9, space2);
+#else
+Texture2D<float4> particle_transmittance_texture : register(t8, space2);
+SamplerState particle_transmittance_sampler : register(s8, space2);
 #endif
+#include "production_particle_shadow.hlsli"
 #endif
 
 // The scene fragment shaders' material block (production_model.frag.hlsl's MaterialPBR, BTBHGPUSceneFragmentUniforms),
@@ -129,6 +138,9 @@ cbuffer ParticleFrame : register(b1, space3)
     float4 particle_cascade_origin;
     // x, y its width and height in cells, z 1 with the sources' tops (read half a texel back, as the resolve), w 0
     float4 particle_cascade_field;
+    // RFC 0013 phase 2 (0.14.0): x 1 when the particle transmittance map is drawn this frame and read here
+    // (BTBHGPUSceneLighting.particle_shadow 1 or 2), yzw 0
+    float4 particle_shadow_controls;
 };
 
 struct FragmentInput
@@ -588,6 +600,17 @@ FragmentOutput main(FragmentInput input)
             float visibility = particle_cloud_light(input.world_position);
 #if BTBH_DIRECTIONAL_SHADOWS
             visibility *= particle_sun_visibility(input.world_position);
+            // RFC 0013 phase 2: the other puffs between this one and the sun (a column's lee side).
+            [branch]
+            if (particle_shadow_controls.x > 0.5f)
+            {
+                visibility *= btbh_particle_transmittance(
+                    particle_transmittance_texture,
+                    particle_transmittance_sampler,
+                    directional_shadow_view_projection,
+                    input.world_position
+                );
+            }
 #endif
             lighting += directional_color.rgb * (directional_direction_energy.w * visibility * share * inverse_pi);
         }

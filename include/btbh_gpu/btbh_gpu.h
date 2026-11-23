@@ -604,13 +604,19 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      *   y + z on; z 0 none); w the wrap (0 Lambert, 1 lit all the way round to the back).
      * surface_parameters1: x the transmission (0 none); y the asymmetry, clamped to -0.99..0.99 (above 0 the light
      *   goes on forward, so a puff glows looking toward the light); z the optical depth at thickness 1 (taken as 0
-     *   when below); w reserved, 0.
+     *   when below); w the density it shadows with in the particle transmittance map, a scale of its optical depth
+     *   there (BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW, since 0.14.0; 0 taken as 1; reserved and refused unless 0 in
+     *   0.11.0 to 0.13.0).
+     * With BTBHGPUSceneLighting.particle_shadow 1 or 2 and a particle transmittance map drawn this frame (since
+     * 0.14.0), the sun's share is times the map's transmittance at its flat world position, read after the shadow
+     * maps (t9 in production_particle_lit.frag, t8 in _2d_shadows; the unshadowed variant never reads it).
      * Needs transparency_enabled 1 with BTBH_GPU_SCENE_BLEND_ALPHA (straight alpha), unlit_enabled 0, a static
      * geometry (animation_library and animation_pose NULL), dug_by NULL, no world_detail with a texture, no
      * world_detail_table with map_layers, no height_lift with a heightfield, detail_parameters 0 and
-     * surface_parameters1[3] 0: otherwise the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
-     * casts no shadow, writes no motion and is never a source of the radiance cascades' light, with an emission or
-     * without (as if it had BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
+     * surface_parameters1[3] 0 or more: otherwise the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch.
+     * It casts no shadow (but into the particle transmittance map with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW), writes
+     * no motion and is never a source of the radiance cascades' light, with an emission or without (as if it had
+     * BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
     BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE = 11,
     BTBH_GPU_SCENE_SURFACE_COUNT = 12
 } BTBHGPUSceneSurfaceVariant;
@@ -1172,8 +1178,33 @@ enum {
      * with the surface variants that read the custom floats (DISSOLVE, SHATTER, GLITTER) nor a world detail or table
      * seeded by one (seed_component not 0), nor with BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR: the present fails
      * with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It needs this release's static vertex shaders: with SPIR-V
-     * ones that don't read it, the present fails with the shader's path. (Bit 4 is kept for RFC 0013's phase 2.) */
+     * ones that don't read it, the present fails with the shader's path. */
     BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT = 1u << 3,
+    /* The batch shadows the sun's light in the particle transmittance map (RFC 0013 phase 2, since 0.14.0, asked for
+     * by Be The Bullet Hell v2), on frames where BTBHGPUSceneLighting.particle_shadow is set and the sun's shadow is
+     * on (directional_shadow_enabled); otherwise the flag does nothing. Lit particles then darken where other puffs
+     * stand between them and the sun (a smoke column's lee side), and with particle_shadow 2 so does the ground.
+     * - The map is drawn in sun space, with the sun map's matrix (the one the receivers read, kept over frames as the
+     *   sun map is), every frame, after the shadow maps. A billboard faces the sun there (FRONT: its quad in the
+     *   matrix's x and y; Y_AXIS: turned round y toward the sun), so a puff shadows with its whole disc; other
+     *   batches are drawn as they stand. The camera's fades (soft and near) don't apply.
+     * - A fragment's alpha (the albedo's, the vertex's, the instance's and the material's, with the UV rect when the
+     *   batch has it) becomes optical depth -ln(1 - min(alpha, 0.999)), times surface_parameters1[3] for a
+     *   LIT_PARTICLE (its density, 0 meaning 1); a fragment at alpha 1/255 or less, or below alpha_cutoff, adds
+     *   nothing. Each texel keeps one slab: the sum of the optical depths, their mean depth along the sun and the
+     *   nearest depth. A receiver before the slab takes all the light, one past it exp(-sum), one inside it the
+     *   share of the sum between the front and its depth (the coverage taken as even from the front to twice the
+     *   mean). Puffs stacked along a ray count as one column.
+     * - The batch casts no other shadow (transparent batches cast none), and every pass draws it as before.
+     * - It takes its place in the batch's directional_shadow_visibility byte with the _with_visibility calls (0: it
+     *   isn't drawn into the map); BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW doesn't keep it out.
+     * - Only on a static (animation_library and animation_pose NULL), unlifted (no height_lift with a heightfield),
+     *   undug (dug_by NULL) batch drawn in the transparent pass (transparency_enabled, or a blend other than ALPHA) of
+     *   surface variant NONE, SOFT_PARTICLE or LIT_PARTICLE: the present fails with BTBH_GPU_INVALID_ARGUMENT, naming
+     *   the batch, on any other. The map's shaders are production_particle_transmittance.vert and .frag, beside the
+     *   host's static vertex shader (production_model.vert); a present that draws the map without them fails, naming
+     *   the file. */
+    BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW = 1u << 4,
     /* The batch receives no spot (or omni) shadow (since 0.10.0, asked
      * for by Be The Bullet Hell v2: its kaiju, the only thing in its spot map, was darkened by its own map): the
      * spot light lights it unshadowed, and spot_occluder_shadow_strength takes none of its light. What it casts is
@@ -1205,6 +1236,9 @@ enum {
 #define BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW 1
 /* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT exists (RFC 0013, since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT 1
+/* Defined when BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW, BTBHGPUSceneLighting.particle_shadow and the
+   BTBH_GPU_SCENE_PARTICLE_SHADOW_* values exist (RFC 0013 phase 2, since 0.14.0). */
+#define BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW 1
 /* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR exists (since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR 1
 
@@ -1413,7 +1447,18 @@ typedef struct BTBHGPUSceneLighting {
     /* How the primary directional (sun) shadow is filtered: BTBHGPUSceneShadowFilter (0: the tent
      * as before). */
     uint8_t directional_shadow_filter;
-    uint8_t directional_shadow_reserved[1];
+    /* The particle transmittance map (RFC 0013 phase 2, since 0.14.0, byte 3,337 on 64-bit, which was
+     * directional_shadow_reserved[0], so the struct keeps its 3,340 bytes): BTBH_GPU_SCENE_PARTICLE_SHADOW_* values.
+     * Bits 0-1 who reads it: 0 nobody, as before (the map isn't drawn); 1 the lit particles (the sun's share of their
+     * light, BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE); 2 those and the opaque surfaces the sun shadows (lit, and unlit
+     * modes 2 and 3: the visibility of the sun's shadow, times the map's). Bit 2 (4) the map at a quarter of the sun
+     * map's size each way instead of half (BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER; nothing with bits 0-1 at 0). The
+     * map is drawn only on frames whose sun shadow is on and that have a batch with
+     * BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW: one RGBA16F texture, 8 MiB at half under the default 2048 sun map (2 at a
+     * quarter). Bits 0-1 at 3 or a bit above 2 fails the present with BTBH_GPU_INVALID_ARGUMENT. The readers need this
+     * release's shaders: with SPIR-V ones that don't read the map (production_particle_lit*.frag, and for 2 the scene
+     * fragment shader the frame draws with), a present that draws it fails with the shader's path. */
+    uint8_t particle_shadow;
     /* BTBH_GPU_SCENE_SPOT_OCCLUDER_* bits (since 0.10.0, byte 3,338, which was directional_shadow_reserved[1], so
      * the struct keeps its 3,340 bytes): how spot_occluder_shadow_strength darkens. 0 as before; a bit the renderer
      * doesn't know fails the present with BTBH_GPU_INVALID_ARGUMENT. */
@@ -1444,6 +1489,23 @@ enum {
 
 /* Defined when BTBHGPUSceneLighting.spot_occluder_flags and its two bits exist (since 0.10.0). */
 #define BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS 1
+
+/* BTBHGPUSceneLighting.particle_shadow (RFC 0013 phase 2, since 0.14.0, asked for by Be The Bullet Hell v2): who reads
+ * the particle transmittance map that batches with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW draw, and its size. */
+enum {
+    /* Nobody: the map isn't drawn (0, as before). */
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_OFF = 0,
+    /* The lit particles: their sun's share times the map's transmittance (a smoke column's lee side darkens). */
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_PARTICLES = 1,
+    /* The lit particles and the opaque surfaces the sun shadows (the column's shadow on the street). It takes the scene
+       fragment shader's last free texture slot (production_model.frag and its _2d_shadows and _rc siblings). */
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND = 2,
+    /* Bits 0-1: one of the three above. */
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS = 3,
+    /* Or'd in: the map at a quarter of the sun map's size each way (a sixteenth of its texels) instead of half (a
+       quarter of them). Half is the default; a quarter suits a 1024 sun map (Be The Bullet Hell v2's Deck). */
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER = 4
+};
 
 /* The order the opaque pass draws its batches in (BTBHGPUScenePost.opaque_sort, since 0.5.0). */
 typedef enum BTBHGPUSceneOpaqueSort {

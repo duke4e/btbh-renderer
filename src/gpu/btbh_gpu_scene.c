@@ -47,8 +47,8 @@
 
 /* RFC 0009: what a scene fragment shader file samples, read from its SPIR-V names (btbh_gpu_scene_check_scene_shader).
    Six variants, and room for a host that switches shader directories; RFC 0013 adds the static vertex shaders a
-   batch with the UV rect draws with (up to five). */
-#define BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY 16u
+   batch with the UV rect draws with (up to five), and its phase 2 the two shadowed lit particle shaders. */
+#define BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY 24u
 typedef struct BTBHGPUSceneShaderCheck {
     char *path;
     bool has_dig_mask;
@@ -58,6 +58,9 @@ typedef struct BTBHGPUSceneShaderCheck {
     bool has_source_top;
     /* RFC 0013: a static vertex shader reads the instance's UV rect (btbh_gpu_scene_check_uv_rect_shaders). */
     bool has_instance_uv_rect;
+    /* RFC 0013 phase 2: a lit particle or scene fragment shader reads the particle transmittance map
+       (btbh_gpu_scene_check_particle_shadow_shaders). */
+    bool has_particle_transmittance;
 } BTBHGPUSceneShaderCheck;
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -376,6 +379,13 @@ struct BTBHGPUSceneRuntime {
         [BTBH_GPU_SCENE_DEPTH_COUNT]
         [BTBH_GPU_SCENE_CULL_COUNT]
         [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
+    /* RFC 0013 phase 2: the particle transmittance map (RGBA16F in sun space, half or a quarter of the sun map's size)
+       and its pipeline (production_particle_transmittance.vert and .frag), made by the first frame (or prewarm) that
+       draws it, so a host that never sets BTBHGPUSceneLighting.particle_shadow holds neither. */
+    SDL_GPUTexture *particle_transmittance_texture;
+    uint32_t particle_transmittance_width;
+    uint32_t particle_transmittance_height;
+    SDL_GPUGraphicsPipeline *particle_transmittance_pipeline;
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
@@ -2610,6 +2620,20 @@ static bool btbh_gpu_scene_batches_have_lit_particles(
     return false;
 }
 
+/* RFC 0013 phase 2: a batch draws into the particle transmittance map (with particle_shadow set and the sun's shadow
+   on, the map is drawn this frame). */
+static bool btbh_gpu_scene_batches_have_particle_shadow(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count
+) {
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        if (btbh_gpu_particle_shadow(&batches[index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Refracting batches draw in a pass of their own after the transparent one, over a copy of the scene. */
 static bool btbh_gpu_scene_batches_have_refraction(
     const BTBHGPUSceneGeometryBatch *batches,
@@ -3358,7 +3382,8 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             project_format,
             false,
             false,
-            !shadows_active ? 5u : (omni_shadows_active ? 9u : 8u),
+            /* (RFC 0013 phase 2: the shadowed variants' last, the particle transmittance map.) */
+            !shadows_active ? 5u : (omni_shadows_active ? 10u : 9u),
             2u,
             /* Transparent: the pass's own targets, with the auxiliary outputs or without. */
             false,
@@ -3498,11 +3523,13 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         animated,
         lifted,
         /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
-           (RFC 0008) and the world-detail table's array (RFC 0009); the last four not in the fast unlit shader. */
+           (RFC 0008) and the world-detail table's array (RFC 0009), then in the shadowed variants the particle
+           transmittance map (RFC 0013 phase 2: the full variant's 16th and last); the last five not in the fast unlit
+           shader. */
         fast_unlit
             ? 3u
             : (shadows_active
-                ? (omni_shadows_active ? 15u : 14u)
+                ? (omni_shadows_active ? 16u : 15u)
                 : 10u),
         fast_unlit ? 2u : 3u,
         auxiliary_geometry_outputs,
@@ -4982,6 +5009,7 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
                 BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE |
                 BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT |
+                BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW |
                 BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW |
                 BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
             )) == 0u &&
@@ -5066,9 +5094,10 @@ static void btbh_gpu_scene_refuse_batch(
 
 /* RFC 0008: each batch's world detail, and RFC 0009: its world-detail table, and no array texture in a 2D slot.
    RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
-   UV rect may be; and (0.11.0) one with the light factor. Batches often share a detail, a table or a lift, so a run of
-   batches pointing at the same one checks it once. directional_shadow_visibility: the _with_visibility calls' array, or
-   NULL. False with the report naming the batch and the fault. */
+   UV rect may be; and (0.11.0) one with the light factor; and (phase 2, 0.14.0) one with the particle shadow. Batches
+   often share a detail, a table or a lift, so a run of batches pointing at the same one checks it once.
+   directional_shadow_visibility: the _with_visibility calls' array, or NULL. False with the report naming the batch and
+   the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -5116,6 +5145,13 @@ static bool btbh_gpu_scene_validate_world_details(
             const char *problem = btbh_gpu_scene_light_factor_problem(batch);
             if (problem != NULL) {
                 btbh_gpu_scene_refuse_batch(report, index, "flags INSTANCE_LIGHT_FACTOR", problem);
+                return false;
+            }
+        }
+        if (btbh_gpu_particle_shadow(batch)) {
+            const char *problem = btbh_gpu_particle_shadow_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "flags PARTICLE_SHADOW", problem);
                 return false;
             }
         }
@@ -6066,6 +6102,7 @@ bool btbh_gpu_scene_lighting_valid(
             BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY |
             BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC
         )) != 0u ||
+        !btbh_gpu_particle_shadow_setting_valid(lighting->particle_shadow) ||
         !isfinite(lighting->point_light_ceiling) ||
         lighting->point_light_ceiling < 0.0f ||
         !isfinite(lighting->directional_shadow_softness) ||
@@ -6385,6 +6422,7 @@ static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRu
     fresh.has_world_detail_table = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_maps");
     fresh.has_source_top = btbh_gpu_scene_bytes_name(bytes, byte_count, "source_top_texture");
     fresh.has_instance_uv_rect = btbh_gpu_scene_bytes_name(bytes, byte_count, "instance_uv_rect");
+    fresh.has_particle_transmittance = btbh_gpu_scene_bytes_name(bytes, byte_count, "particle_transmittance_texture");
     SDL_free(bytes);
     const size_t path_length = strlen(path);
     fresh.path = (char *)malloc(path_length + 1u);
@@ -6623,6 +6661,89 @@ static bool btbh_gpu_scene_check_uv_rect_shaders(
     return true;
 }
 
+/* RFC 0013 phase 2: older lit particle and scene shaders would draw a frame with the particle transmittance map without
+   a word (its binding goes unread), so no puff or street would take the smoke's shadow. On a frame that draws the map
+   (particle_shadow_active), the lit particles' shader (production_particle_lit.frag or its _2d_shadows sibling, beside
+   the host's fragment shader), when a lit particle draws, and with particle_shadow 2 the scene fragment shaders (the
+   host's and the variant the frame draws with, as btbh_gpu_scene_check_scene_shader reads them) must name
+   particle_transmittance_texture. Each path is read once; Metal libraries aren't checked; a file that can't be read is
+   left to the shader load, which names it. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path), when one
+   doesn't name it. */
+static bool btbh_gpu_scene_check_particle_shadow_shaders(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    bool particle_shadow_active,
+    uint8_t particle_shadow,
+    bool shadows_active,
+    bool omni_shadows_active,
+    bool radiance_cascades_active,
+    BTBHGPUSceneReport *report
+) {
+    if (!particle_shadow_active || shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV || fragment_shader_path == NULL ||
+        unshadowed_fragment_shader_path == NULL) {
+        return true;
+    }
+    char message[sizeof(report->message)];
+    if (btbh_gpu_scene_batches_have_lit_particles(batches, batch_count)) {
+        char particle_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        const char *name = omni_shadows_active
+            ? "production_particle_lit.frag.spv"
+            : "production_particle_lit_2d_shadows.frag.spv";
+        if (btbh_gpu_scene_sibling_path(fragment_shader_path, name, particle_path)) {
+            const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, particle_path);
+            if (checked != NULL && !checked->has_particle_transmittance) {
+                (void)snprintf(
+                    message,
+                    sizeof(message),
+                    "particle_shadow is set, and a lit particle shader doesn't read its map (build the shaders from "
+                    "0.14.0 or later): %s",
+                    particle_path
+                );
+                btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+                return false;
+            }
+        }
+    }
+    if ((particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) != BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND) {
+        return true;
+    }
+    char variant_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (!btbh_gpu_scene_variant_fragment_shader_path(
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            shadows_active,
+            omni_shadows_active,
+            radiance_cascades_active,
+            variant_path,
+            report
+        )) {
+        return false;
+    }
+    const char *const paths[2] = { fragment_shader_path, variant_path };
+    const uint32_t path_count = strcmp(fragment_shader_path, variant_path) != 0 ? 2u : 1u;
+    for (uint32_t which = 0u; which < path_count; ++which) {
+        const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, paths[which]);
+        if (checked == NULL || checked->has_particle_transmittance) {
+            continue;
+        }
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "particle_shadow is 2, and a scene shader doesn't read its map (build the shaders from 0.14.0 or later): "
+            "%s",
+            paths[which]
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
 static void btbh_gpu_scene_dig_uniforms(
     const BTBHGPUSdfTerrainMaskBinding *binding,
     BTBHGPUSceneDigMaskUniforms *uniforms
@@ -6675,7 +6796,8 @@ static void btbh_gpu_scene_world_detail_samplers(
 /* RFC 0013: the lit particles' block for a pass (production_particle_lit.frag.hlsl's ParticleFrame): the frame's
    inverse view-projection and render size, whether the scene's distance is bound, the HDR composite's fog when it
    fogs (hdr_composite_active and the post's fog on), and the radiance cascades' field when they lit this frame
-   (their light, this frame's, is in hrc_quadrant_textures[hrc_history_read_index] once their compose ran). */
+   (their light, this frame's, is in hrc_quadrant_textures[hrc_history_read_index] once their compose ran), and (phase
+   2) whether the particle transmittance map is drawn this frame. */
 static void btbh_gpu_scene_particle_frame(
     const BTBHGPUSceneRuntime *runtime,
     const BTBHGPUScenePost *post,
@@ -6685,9 +6807,13 @@ static void btbh_gpu_scene_particle_frame(
     bool scene_distance_ready,
     bool hdr_composite_active,
     bool radiance_cascades_lit,
+    bool particle_shadow_active,
     BTBHGPUSceneParticleFrameUniforms *frame
 ) {
     SDL_zerop(frame);
+    /* RFC 0013 phase 2: the particle transmittance map, drawn this frame (BTBHGPUSceneLighting.particle_shadow 1 or
+       2). */
+    frame->shadow_controls[0] = particle_shadow_active ? 1.0f : 0.0f;
     (void)memcpy(frame->inverse_view_projection, inverse_view_projection, sizeof(frame->inverse_view_projection));
     frame->controls[0] = 1.0f / (float)render_width;
     frame->controls[1] = 1.0f / (float)render_height;
@@ -6730,7 +6856,8 @@ static void btbh_gpu_scene_particle_frame(
 /* RFC 0013: a lit particle's textures, in production_particle_lit.frag's slots: the albedo, the normal (rg) and
    thickness (b), the scene's distance (a fallback never read without it), the emission, the cascades' quadrant atlas
    (a fallback never read when they didn't light this frame), then the variant's shadow maps: the sun's through the
-   comparison sampler, the fill's and the spot's, and the omni cube. */
+   comparison sampler, the fill's and the spot's, and the omni cube; then (RFC 0013 phase 2) the particle
+   transmittance map, or a fallback never read when the frame draws none. */
 static void btbh_gpu_scene_bind_lit_particle(
     SDL_GPURenderPass *pass,
     const BTBHGPUSceneRuntime *runtime,
@@ -6740,9 +6867,10 @@ static void btbh_gpu_scene_bind_lit_particle(
     bool scene_distance_ready,
     bool radiance_cascades_lit,
     bool shadows_active,
-    bool omni_shadows_active
+    bool omni_shadows_active,
+    bool particle_shadow_active
 ) {
-    SDL_GPUTextureSamplerBinding samplers[9];
+    SDL_GPUTextureSamplerBinding samplers[10];
     SDL_zeroa(samplers);
     samplers[0].texture = albedo->texture;
     samplers[0].sampler = albedo->sampler;
@@ -6780,8 +6908,303 @@ static void btbh_gpu_scene_bind_lit_particle(
             samplers[8].sampler = runtime->directional_shadow_sampler;
             count = 9u;
         }
+        samplers[count].texture = particle_shadow_active
+            ? runtime->particle_transmittance_texture
+            : runtime->fallback_texture->texture;
+        samplers[count].sampler = particle_shadow_active
+            ? runtime->directional_shadow_sampler
+            : runtime->fallback_texture->sampler;
+        count += 1u;
     }
     SDL_BindGPUFragmentSamplers(pass, 0u, samplers, count);
+}
+
+/* RFC 0013 phase 2: production_particle_transmittance.vert.hlsl's TransmittanceUniforms (the vertex block; 112
+   bytes). The fragment block is four floats: the optical depth's scale and the alpha cutoff. */
+typedef struct BTBHGPUSceneTransmittanceUniforms {
+    float light_view_projection[16];
+    float material_color[4];
+    float uv_transform[4];
+    /* x the billboard mode, y 1 with the UV rect, zw 0 */
+    uint32_t options[4];
+} BTBHGPUSceneTransmittanceUniforms;
+
+/* RFC 0013 phase 2's name check: the map's shaders, production_particle_transmittance.vert and .frag, are new in 0.14.0
+   and sit beside the host's static vertex shader. A missing one fails the present with its path; a SPIR-V one must
+   name its block's member (transmittance_options, transmittance_controls), so that a file of that name that doesn't
+   draw the map isn't drawn with. Read when the map's pipeline is made (once). */
+static bool btbh_gpu_scene_check_transmittance_shader(
+    const char *path,
+    const char *name,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUSceneReport *report
+) {
+    size_t byte_count = 0u;
+    uint8_t *bytes = (uint8_t *)SDL_LoadFile(path, &byte_count);
+    char message[sizeof(report->message)];
+    if (bytes == NULL || byte_count == 0u) {
+        SDL_free(bytes);
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A particle shadow's map shader is missing (build the shaders from 0.14.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    const bool named =
+        project_format != BTBH_GPU_SHADER_FORMAT_SPIRV || btbh_gpu_scene_bytes_name(bytes, byte_count, name);
+    SDL_free(bytes);
+    if (!named) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A particle shadow's map shader doesn't draw the map (build the shaders from 0.14.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
+/* RFC 0013 phase 2: the particle transmittance map and its pipeline, made where missing on a frame that draws the map
+   (BTBHGPUSceneFrameSetup.particle_shadow_active; `particle_shadow` the lighting's byte): shared by the present and
+   the prewarms through btbh_gpu_scene_ensure_model_pipelines.
+   The map is RGBA16F at half the sun map's size each way, or a quarter (BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER), made
+   anew when that changes. Its pipeline draws the flagged batches with no depth target, the colour blended ADD (one,
+   one) and the alpha MIN, culling nothing. False, with the report set, when one can't be made. */
+static bool btbh_gpu_scene_ensure_particle_shadow(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    BTBHGPUShaderFormat project_format,
+    bool particle_shadow_active,
+    uint8_t particle_shadow,
+    BTBHGPUSceneReport *report
+) {
+    if (!particle_shadow_active) {
+        return true;
+    }
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    const uint32_t width = btbh_gpu_particle_shadow_size(runtime->directional_shadow_width, particle_shadow);
+    const uint32_t height = btbh_gpu_particle_shadow_size(runtime->directional_shadow_height, particle_shadow);
+    if (runtime->particle_transmittance_texture != NULL &&
+        (runtime->particle_transmittance_width != width || runtime->particle_transmittance_height != height)) {
+        SDL_ReleaseGPUTexture(device, runtime->particle_transmittance_texture);
+        runtime->particle_transmittance_texture = NULL;
+    }
+    if (runtime->particle_transmittance_texture == NULL) {
+        SDL_GPUTextureCreateInfo info;
+        SDL_zero(info);
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = width;
+        info.height = height;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        runtime->particle_transmittance_texture = SDL_CreateGPUTexture(device, &info);
+        if (runtime->particle_transmittance_texture == NULL) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+        runtime->particle_transmittance_width = width;
+        runtime->particle_transmittance_height = height;
+    }
+    if (runtime->particle_transmittance_pipeline != NULL) {
+        return true;
+    }
+    const char *extension = project_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "metallib" : "spv";
+    char vertex_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    char fragment_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    char filename[128];
+    (void)snprintf(filename, sizeof(filename), "production_particle_transmittance.vert.%s", extension);
+    const bool vertex_named = btbh_gpu_scene_sibling_path(vertex_shader_path, filename, vertex_path);
+    (void)snprintf(filename, sizeof(filename), "production_particle_transmittance.frag.%s", extension);
+    if (!vertex_named || !btbh_gpu_scene_sibling_path(vertex_shader_path, filename, fragment_path)) {
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Particle transmittance shader path is too long");
+        return false;
+    }
+    if (!btbh_gpu_scene_check_transmittance_shader(vertex_path, "transmittance_options", project_format, report) ||
+        !btbh_gpu_scene_check_transmittance_shader(fragment_path, "transmittance_controls", project_format, report)) {
+        return false;
+    }
+    const SDL_GPUShaderFormat format = btbh_gpu_scene_shader_format(project_format);
+    const char *entrypoint = project_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "main0" : "main";
+    /* The vertex stage: the instances, the block; the fragment stage: the albedo, its block. */
+    SDL_GPUShader *vertex_shader = btbh_gpu_scene_load_shader(
+        device, vertex_path, entrypoint, format, SDL_GPU_SHADERSTAGE_VERTEX, 1u, 0u, 1u, report);
+    if (vertex_shader == NULL) {
+        return false;
+    }
+    SDL_GPUShader *fragment_shader = btbh_gpu_scene_load_shader(
+        device, fragment_path, entrypoint, format, SDL_GPU_SHADERSTAGE_FRAGMENT, 0u, 1u, 1u, report);
+    if (fragment_shader == NULL) {
+        SDL_ReleaseGPUShader(device, vertex_shader);
+        return false;
+    }
+    SDL_GPUColorTargetDescription color_target;
+    SDL_GPUVertexBufferDescription vertex_buffer;
+    SDL_GPUVertexAttribute attributes[3];
+    SDL_GPUGraphicsPipelineCreateInfo info;
+    SDL_zero(color_target);
+    SDL_zero(vertex_buffer);
+    SDL_zeroa(attributes);
+    SDL_zero(info);
+    color_target.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    color_target.blend_state.enable_blend = true;
+    color_target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color_target.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color_target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    color_target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color_target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    color_target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MIN;
+    color_target.blend_state.color_write_mask = 0x0fu;
+    vertex_buffer.slot = 0u;
+    vertex_buffer.pitch = BTBH_GPU_MODEL_VERTEX_STRIDE;
+    vertex_buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    attributes[0].location = 0u;
+    attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    attributes[0].offset = 0u;
+    attributes[1].location = 1u;
+    attributes[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
+    attributes[1].offset = BTBH_GPU_MODEL_COLOR_OFFSET;
+    attributes[2].location = 2u;
+    attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+    attributes[2].offset = 24u;
+    info.vertex_shader = vertex_shader;
+    info.fragment_shader = fragment_shader;
+    info.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer;
+    info.vertex_input_state.num_vertex_buffers = 1u;
+    info.vertex_input_state.vertex_attributes = attributes;
+    info.vertex_input_state.num_vertex_attributes = 3u;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.target_info.color_target_descriptions = &color_target;
+    info.target_info.num_color_targets = 1u;
+    info.target_info.has_depth_stencil_target = false;
+    runtime->particle_transmittance_pipeline = btbh_gpu_create_graphics_pipeline(device, &info);
+    SDL_ReleaseGPUShader(device, fragment_shader);
+    SDL_ReleaseGPUShader(device, vertex_shader);
+    if (runtime->particle_transmittance_pipeline == NULL) {
+        btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+/* RFC 0013 phase 2: the particle transmittance map, drawn after the shadow maps with the sun map's matrix (the one the
+   receivers read). Cleared to (0, 0, 0, 1); each batch with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW (that its
+   directional_shadow_visibility byte lets in) draws its instances there, with its albedo, colour, UV transform and
+   rect, as production_particle_transmittance.vert lays them out. False, with SDL's error set, when the pass failed. */
+static bool btbh_gpu_scene_render_particle_transmittance(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const float light_view_projection[16],
+    SDL_GPUBuffer *transient_instance_buffer,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count
+) {
+    SDL_GPUColorTargetInfo target;
+    SDL_zero(target);
+    target.texture = runtime->particle_transmittance_texture;
+    target.clear_color.r = 0.0f;
+    target.clear_color.g = 0.0f;
+    target.clear_color.b = 0.0f;
+    target.clear_color.a = 1.0f;
+    target.load_op = SDL_GPU_LOADOP_CLEAR;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    target.cycle = true;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &target, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, runtime->particle_transmittance_pipeline);
+    BTBHGPUSceneTransmittanceUniforms uniforms;
+    SDL_zero(uniforms);
+    (void)memcpy(uniforms.light_view_projection, light_view_projection, sizeof(uniforms.light_view_projection));
+    SDL_GPUBuffer *bound_index_buffer = NULL;
+    for (uint32_t batch_index = 0u; batch_index < batch_count; ++batch_index) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
+        if (!btbh_gpu_particle_shadow(batch) ||
+            (directional_shadow_visibility != NULL && directional_shadow_visibility[batch_index] == 0u)) {
+            continue;
+        }
+        uniforms.material_color[0] = (float)batch->albedo_red / 255.0f;
+        uniforms.material_color[1] = (float)batch->albedo_green / 255.0f;
+        uniforms.material_color[2] = (float)batch->albedo_blue / 255.0f;
+        uniforms.material_color[3] = (float)batch->albedo_alpha / 255.0f;
+        uniforms.uv_transform[0] = batch->uv_scale_x;
+        uniforms.uv_transform[1] = batch->uv_scale_y;
+        uniforms.uv_transform[2] = batch->uv_offset_x;
+        uniforms.uv_transform[3] = batch->uv_offset_y;
+        uniforms.options[0] = (uint32_t)batch->billboard_mode;
+        uniforms.options[1] = btbh_gpu_particle_uv_rect(batch) ? 1u : 0u;
+        SDL_PushGPUVertexUniformData(command, 0u, &uniforms, (uint32_t)sizeof(uniforms));
+        const float controls[4] = {
+            btbh_gpu_particle_lit(batch) && batch->surface_parameters1[3] > 0.0f ? batch->surface_parameters1[3] : 1.0f,
+            batch->alpha_cutoff,
+            0.0f,
+            0.0f,
+        };
+        SDL_PushGPUFragmentUniformData(command, 0u, controls, (uint32_t)sizeof(controls));
+        const BTBHGPUTexture *albedo =
+            batch->albedo_texture != NULL ? batch->albedo_texture : runtime->fallback_texture;
+        SDL_GPUTextureSamplerBinding albedo_binding;
+        SDL_zero(albedo_binding);
+        albedo_binding.texture = albedo->texture;
+        albedo_binding.sampler = albedo->sampler;
+        SDL_BindGPUFragmentSamplers(pass, 0u, &albedo_binding, 1u);
+        SDL_GPUBuffer *instance_buffer =
+            batch->instance_buffer != NULL ? batch->instance_buffer->buffer : transient_instance_buffer;
+        SDL_BindGPUVertexStorageBuffers(pass, 0u, &instance_buffer, 1u);
+        const uint32_t geometry_count =
+            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL ? batch->model->primitive_count : 1u;
+        for (uint32_t geometry_index = 0u; geometry_index < geometry_count; ++geometry_index) {
+            if (!btbh_gpu_scene_batch_uses_geometry(batch, geometry_index)) {
+                continue;
+            }
+            const BTBHGPUSceneGeometryDraw geometry = btbh_gpu_scene_geometry_draw(batch, geometry_index);
+            SDL_GPUBufferBinding vertex_binding;
+            SDL_zero(vertex_binding);
+            vertex_binding.buffer = geometry.vertex_buffer;
+            SDL_BindGPUVertexBuffers(pass, 0u, &vertex_binding, 1u);
+            if (geometry.index_buffer != NULL && geometry.index_count > 0u) {
+                if (geometry.index_buffer != bound_index_buffer) {
+                    SDL_GPUBufferBinding index_binding;
+                    SDL_zero(index_binding);
+                    index_binding.buffer = geometry.index_buffer;
+                    SDL_BindGPUIndexBuffer(pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                    bound_index_buffer = geometry.index_buffer;
+                }
+                SDL_DrawGPUIndexedPrimitives(
+                    pass,
+                    geometry.index_count,
+                    batch->instance_count,
+                    geometry.first_index,
+                    geometry.vertex_base,
+                    batch->first_instance
+                );
+            } else {
+                SDL_DrawGPUPrimitives(
+                    pass,
+                    geometry.vertex_count,
+                    batch->instance_count,
+                    (uint32_t)geometry.vertex_base,
+                    batch->first_instance
+                );
+            }
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+    return true;
 }
 
 static bool btbh_gpu_scene_render_directional_shadow(
@@ -7531,6 +7954,11 @@ typedef struct BTBHGPUSceneFrameSetup {
     uint32_t shadow_enabled[3];
     bool omni_shadows_active;
     bool shadows_active;
+    /* RFC 0013 phase 2: the particle transmittance map is drawn this frame (BTBHGPUSceneLighting.particle_shadow's
+       readers not 0, the sun's shadow on, a batch with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW), and its setting (who
+       reads it, its size). Off, nothing of it is made, drawn or bound but the scene shaders' fallback. */
+    bool particle_shadow_active;
+    uint8_t particle_shadow;
     /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO where it applies (the HBAO, since 0.12.0 its contact mode and the
        SSAO too): the opaque pass writes the scene's own ambient targets under the cascades (unlit_enabled bit 7 for
        production_model_rc*.frag), the cascades' resolve takes the albedo from the emission target, and the occlusion's
@@ -7889,6 +8317,14 @@ static bool btbh_gpu_scene_prepare_frame(
     (void)memcpy(setup->shadow_enabled, shadow_enabled, sizeof(setup->shadow_enabled));
     setup->omni_shadows_active = omni_shadows_active;
     setup->shadows_active = shadows_active;
+    /* RFC 0013 phase 2: the map needs the sun's map (its matrix and size) and a batch to draw. */
+    setup->particle_shadow = lighting->particle_shadow;
+    setup->particle_shadow_active =
+        (lighting->particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) != 0u &&
+        shadow_enabled[0] != 0u &&
+        batch_count > 0u &&
+        batches != NULL &&
+        btbh_gpu_scene_batches_have_particle_shadow(batches, batch_count);
     /* Since 0.12.0 with the HBAO in either mode and with the SSAO (0.9.0 to 0.11.0: the HBAO, ssao_contact 0). With no
        ambient occlusion nothing darkens the scene, which the cascades then only add their bounce light to: the flag's
        transparent part alone (cascades_fast_unlit). */
@@ -7914,7 +8350,8 @@ static bool btbh_gpu_scene_prepare_frame(
 }
 
 /* The model pipelines a frame's batches need (each geometry's, and a transparent one's without the auxiliary
-   outputs too), made where missing: shared by the present and btbh_gpu_window_scene_prewarm. bone_offsets is
+   outputs too), and (RFC 0013 phase 2) the particle transmittance map's, made where missing: shared by the present and
+   btbh_gpu_window_scene_prewarm. bone_offsets is
    btbh_gpu_scene_prepare_bones' (UINT32_MAX for a geometry drawn without bones). opaque_geometry_base, when not
    NULL, gets where each batch's geometries start among them (for the opaque order). */
 static bool btbh_gpu_scene_ensure_model_pipelines(
@@ -8012,7 +8449,15 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
         );
         return false;
     }
-    return true;
+    /* RFC 0013 phase 2: the particle transmittance map and its pipeline, on a frame that draws it. */
+    return btbh_gpu_scene_ensure_particle_shadow(
+        window,
+        vertex_shader_path,
+        shader_format,
+        setup->particle_shadow_active,
+        setup->particle_shadow,
+        report
+    );
 }
 
 /* The frame's targets at its render (and drawable) size and the post chain's pipelines, made where missing: shared
@@ -8598,6 +9043,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             shader_format,
             setup.radiance_cascades_active,
             report
+        ) ||
+        !btbh_gpu_scene_check_particle_shadow_shaders(
+            runtime,
+            batches,
+            batch_count,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            setup.particle_shadow_active,
+            setup.particle_shadow,
+            setup.shadows_active,
+            setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
         )) {
         free(bone_matrices);
         free(bone_offsets);
@@ -9030,6 +9489,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         runtime->retained_shadow_ready[shadow_index] = 1u;
     }
     runtime->shadow_frame_serial += 1u;
+    if (setup.particle_shadow_active) {
+        /* RFC 0013 phase 2: the particle transmittance map, with the sun matrix the receivers read (the retained one
+           when the sun's map is kept over several frames), redrawn every frame (the puffs move). */
+        SDL_InsertGPUDebugLabel(command, "BTBH Particle Transmittance");
+        if (!btbh_gpu_scene_render_particle_transmittance(
+                command,
+                runtime,
+                runtime->retained_shadow_ready[0] != 0u
+                    ? runtime->retained_shadow_view_projection[0]
+                    : lighting->directional_shadow_view_projection,
+                transient_instance_buffer,
+                batches,
+                directional_shadow_visibility,
+                batch_count
+            )) {
+            btbh_gpu_scene_cancel_submission(window, command);
+            free(bone_offsets);
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return report->result;
+        }
+    }
     if (shadows_active) {
         report->cpu_shadow_encode_milliseconds =
             (double)(SDL_GetTicksNS() - shadow_started_ticks) /
@@ -9517,6 +9997,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 scene_distance_ready,
                 hdr_composite_active,
                 radiance_cascades_lit,
+                setup.particle_shadow_active,
                 &particle_frame
             );
         }
@@ -9854,6 +10335,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         fragment_uniforms.directional_shadow_controls[2] =
             lighting->directional_shadow_filter ==
                     BTBH_GPU_SCENE_SHADOW_FILTER_SOFT
+                ? 1.0f
+                : 0.0f;
+        /* RFC 0013 phase 2: the surfaces the sun shadows read the particle transmittance map (particle_shadow 2). */
+        fragment_uniforms.directional_shadow_controls[3] =
+            setup.particle_shadow_active &&
+                    (setup.particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) ==
+                        BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND
                 ? 1.0f
                 : 0.0f;
         fragment_uniforms
@@ -10220,7 +10708,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         scene_distance_ready,
                         radiance_cascades_lit,
                         shadows_active,
-                        omni_shadows_active
+                        omni_shadows_active,
+                        setup.particle_shadow_active
                     );
                     if (!particle_frame_pushed) {
                         SDL_PushGPUFragmentUniformData(
@@ -10232,7 +10721,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         particle_frame_pushed = true;
                     }
                 } else {
-                    SDL_GPUTextureSamplerBinding samplers[15];
+                    SDL_GPUTextureSamplerBinding samplers[16];
                     SDL_zeroa(samplers);
                     samplers[0].texture = texture->texture;
                     samplers[0].sampler = texture->sampler;
@@ -10318,6 +10807,21 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         samplers[bound_sampler_count].texture = maps->texture;
                         samplers[bound_sampler_count].sampler = maps->sampler;
                         bound_sampler_count += 1u;
+                        if (shadows_active) {
+                            /* RFC 0013 phase 2: the particle transmittance map (particle_shadow 2), or the fallback,
+                               never sampled, in the shadowed variants' last slot. */
+                            const bool ground_reads_map =
+                                setup.particle_shadow_active &&
+                                (setup.particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) ==
+                                    BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND;
+                            samplers[bound_sampler_count].texture = ground_reads_map
+                                ? runtime->particle_transmittance_texture
+                                : runtime->fallback_texture->texture;
+                            samplers[bound_sampler_count].sampler = ground_reads_map
+                                ? runtime->directional_shadow_sampler
+                                : runtime->fallback_texture->sampler;
+                            bound_sampler_count += 1u;
+                        }
                         if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
                             /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
                                never read the slot. */
@@ -11559,6 +12063,20 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             setup.radiance_cascades_active,
             report
         ) ||
+        !btbh_gpu_scene_check_particle_shadow_shaders(
+            window->scene_runtime,
+            batches,
+            batch_count,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            setup.particle_shadow_active,
+            setup.particle_shadow,
+            setup.shadows_active,
+            setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
+        ) ||
         !btbh_gpu_scene_ensure_model_pipelines(
             window,
             vertex_shader_path,
@@ -12389,6 +12907,9 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 window->scene_runtime->scene_distance_texture
             );
         }
+        if (window->scene_runtime->particle_transmittance_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, window->scene_runtime->particle_transmittance_texture);
+        }
         if (window->scene_runtime->refraction_texture != NULL) {
             SDL_ReleaseGPUTexture(
                 device,
@@ -12596,6 +13117,9 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 device,
                 window->scene_runtime->scene_distance_pipeline
             );
+        }
+        if (window->scene_runtime->particle_transmittance_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, window->scene_runtime->particle_transmittance_pipeline);
         }
         if (window->scene_runtime->ssao_denoise_pipeline != NULL) {
             SDL_ReleaseGPUGraphicsPipeline(
