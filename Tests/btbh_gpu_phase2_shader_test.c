@@ -345,9 +345,10 @@ int main(void)
             BTBH_PRODUCTION_HBAO_RESOLVE_REFLECTION_PATH,
             "\"samplers\": 6, \"storage_textures\": 0"
         ) ||
+        /* RFC 0010: the emitters' records and their tops. */
         !require_text(
             BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH,
-            "\"storage_buffers\": 1"
+            "\"storage_buffers\": 2"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_SOURCE_VERTEX_REFLECTION_PATH,
@@ -421,9 +422,10 @@ int main(void)
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
             "\"uniform_buffers\": 3"
         ) ||
+        /* RFC 0010: the trace's and the finish's last texture is the sources' tops. */
         !require_text(
             BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH,
-            "\"samplers\": 3"
+            "\"samplers\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_MERGE_UP_REFLECTION_PATH,
@@ -443,7 +445,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_FINISH_REFLECTION_PATH,
-            "\"samplers\": 4"
+            "\"samplers\": 5"
         ) ||
         !require_text(
             BTBH_PRODUCTION_HRC_BLUR_REFLECTION_PATH,
