@@ -187,6 +187,8 @@ struct BTBHGPUWindow {
        Made by the first such scene. */
     BTBHGPUSceneRuntime *aside_scene_runtime;
     BTBHGPUSceneTelemetryReport scene_telemetry;
+    /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0, btbh_gpu_scene.c): the window's counts so far. */
+    BTBHGPUSceneRunVerifyReport scene_run_verify;
     uint32_t scene_shadow_update_period_frames[3];
     uint32_t scene_directional_shadow_size[2];  /* the primary directional shadow map's; 0: the default */
     BTBHGPUCanvasRuntime *canvas_runtime;

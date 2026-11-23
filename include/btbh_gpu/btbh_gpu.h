@@ -2280,7 +2280,14 @@ void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
  * 2. by material (every field but the six), mesh after mesh;
  * and by making the meshes drawn so with BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, so that neighbours share their vertex
  * and index buffers. The instance buffer is part of the material: a run never spans two. With
- * BTBHGPUScenePost.opaque_sort, the opaque pass draws the batches it may move in its own order. */
+ * BTBHGPUScenePost.opaque_sort, the opaque pass draws the batches it may move in its own order.
+ * The environment variable BTBH_GPU_SCENE_RUNS, read once a present, is for measuring and debugging them: 0 turns runs
+ * off (every batch binds and pushes its whole state); verify (since 0.13.0) keeps them on and checks every draw that
+ * continues a run: it builds the uniforms, samplers, storage buffers, pipeline and stencil reference the batch would
+ * push and bind without the run and compares them with what the pass holds. Each difference is logged with SDL_Log
+ * (the first 64 a window finds), as a line starting "BTBH_GPU_SCENE_RUNS=verify: mismatch" that names the pass, the
+ * batch and the field, and a window destroyed after it checked says how many draws it checked and how many
+ * mismatches it found. The frames are those with runs on; verify costs the CPU work runs save, unset nothing. */
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,

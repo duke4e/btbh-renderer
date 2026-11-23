@@ -1576,6 +1576,14 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
     }
     btbh_gpu_window_release_frame_telemetry(window);
+    if (window->scene_run_verify.checked_draw_count > 0u || window->scene_run_verify.mismatch_count > 0u) {
+        /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): the window's totals. */
+        SDL_Log(
+            "BTBH_GPU_SCENE_RUNS=verify: the window checked %llu run draws and found %llu mismatches",
+            (unsigned long long)window->scene_run_verify.checked_draw_count,
+            (unsigned long long)window->scene_run_verify.mismatch_count
+        );
+    }
     btbh_gpu_window_release_canvas(window);
     btbh_gpu_window_release_aside_scene(window);
     btbh_gpu_window_release_scene(window);

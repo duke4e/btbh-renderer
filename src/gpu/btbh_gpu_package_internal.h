@@ -28,7 +28,20 @@ typedef struct BTBHGPUSceneTelemetryReport {
     uint32_t geometry_run_draw_count;
     uint32_t shadow_run_draw_count;
     uint32_t rc_source_run_draw_count;
+    /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0; 0 otherwise): the draws above that rebuilt their batch's state and
+       compared it with what the pass held, and the differences found (each field of each draw counts once). */
+    uint32_t run_verify_draw_count;
+    uint32_t run_verify_mismatch_count;
 } BTBHGPUSceneTelemetryReport;
+
+/* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): the run_verify_* counts over a window's life, its presents and the scenes
+   it rendered into a target (whose telemetry the window doesn't keep) alike (btbh_gpu_window_scene_read_run_verify). */
+typedef struct BTBHGPUSceneRunVerifyReport {
+    uint64_t checked_draw_count;
+    uint64_t mismatch_count;
+} BTBHGPUSceneRunVerifyReport;
+/* Defined when BTBHGPUSceneRunVerifyReport and btbh_gpu_window_scene_read_run_verify exist (since 0.13.0). */
+#define BTBH_GPU_SCENE_HAS_RUN_VERIFY 1
 
 void btbh_gpu_delay_precise(uint64_t nanoseconds);
 uint8_t btbh_gpu_window_scene_shadow_resources_ready(
@@ -43,6 +56,10 @@ uint8_t btbh_gpu_window_scene_set_shadow_update_periods(
 uint8_t btbh_gpu_window_scene_read_telemetry(
     const BTBHGPUWindow *window,
     BTBHGPUSceneTelemetryReport *report
+);
+uint8_t btbh_gpu_window_scene_read_run_verify(
+    const BTBHGPUWindow *window,
+    BTBHGPUSceneRunVerifyReport *report
 );
 BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUWindow *window,
