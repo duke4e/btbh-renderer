@@ -3195,19 +3195,6 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         );
         return false;
     }
-    const bool lifted = !animated && btbh_gpu_height_lift_active(batch);
-    if (lifted && window->scene_runtime->lift_pipelines == NULL) {
-        window->scene_runtime->lift_pipelines =
-            (BTBHGPUSceneLiftPipelines *)calloc(1u, sizeof(BTBHGPUSceneLiftPipelines));
-        if (window->scene_runtime->lift_pipelines == NULL) {
-            btbh_gpu_scene_error(
-                report,
-                BTBH_GPU_PLATFORM_FAILURE,
-                "Could not allocate the lifted batches' pipelines"
-            );
-            return false;
-        }
-    }
     SDL_GPUGraphicsPipeline **slot = btbh_gpu_scene_pipeline_slot(
         window->scene_runtime,
         auxiliary_geometry_outputs,
@@ -3219,8 +3206,33 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         batch,
         stencil_variant
     );
-    if (*slot != NULL) {
+    if (slot != NULL && *slot != NULL) {
         return true;
+    }
+    const bool lifted = !animated && btbh_gpu_height_lift_active(batch);
+    if (slot == NULL) {
+        /* RFC 0012: the first lifted batch makes the lifted pipelines' sets (only a lifted batch finds none). */
+        window->scene_runtime->lift_pipelines =
+            (BTBHGPUSceneLiftPipelines *)calloc(1u, sizeof(BTBHGPUSceneLiftPipelines));
+        if (window->scene_runtime->lift_pipelines == NULL) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_PLATFORM_FAILURE,
+                "Could not allocate the lifted batches' pipelines"
+            );
+            return false;
+        }
+        slot = btbh_gpu_scene_pipeline_slot(
+            window->scene_runtime,
+            auxiliary_geometry_outputs,
+            temporal,
+            radiance_cascades_active,
+            shadows_active,
+            omni_shadows_active,
+            animated,
+            batch,
+            stencil_variant
+        );
     }
     const bool fast_unlit =
         !radiance_cascades_active &&
