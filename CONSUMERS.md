@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.8.0` (tag `v0.8.0`; BTBH `59af919b`, 2026-11-22) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.9.0` (tag `v0.9.0`; BTBH `a14a54bc`, 2026-11-23) |
 
 ## Features used
 
@@ -58,14 +58,29 @@ shadows, water normals, rain and wetness, bloom, vignette, LUT grading, FSR 1, a
 a reactive mask. Since 0.6.0: the world detail (RFC 0008 phase 1), a world-projected second texture set per batch
 for its kit's coarse relief. Since 0.7.0: the scene prewarm and pattern 7 (RFC 0009 phase 1). Since 0.8.0:
 the world-detail table chosen per vertex (RFC 0009 phase 2) on its merged distance models, full kit models and
-outskirts ring. Adopting with 0.9.0, as it asked: `BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE`, the HBAO of no cascades
-under additive ones and the reflections' surface reflectivity (`BTBHGPUScenePost.flags`), and
-`btbh_gpu_window_scene_prewarm_render_to_target`. Requested:
-- for 0.10.0: an emitter height in the cascades' field and cheaper draws for meshes sharing a material (RFCs 0010
-  and 0011);
-- for 0.11.0: a vertex lift from a heightfield, with mesh updates queued into the frame (RFC 0012);
-- drafting: lit particles (RFC 0013);
-- later: BC texture formats (RFC 0008 phase 2) and descriptor pools made before the first frames.
+outskirts ring. Since 0.9.0:
+- `BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE` on its panes, lamp heads, power lines, traffic, ambulance and boat lights, enemy
+  and boss bodies, the cocoon, the kaiju's plates, hurt flash and rims, and its lit smoke;
+- `SSR_SURFACE_REFLECTIVITY`, with `ssr_thickness` 0.1;
+- `btbh_gpu_window_scene_prewarm_render_to_target` for its V1 cards' pictures.
+
+Adopting with 0.10.0 (tested on the candidate):
+- the cheaper draws, with its kit libraries in the shared mesh buffers (RFC 0011 phase 1);
+- `SSR_FACING_HITS`, with `ssr_thickness` 0.6;
+- the kaiju's spot shadow with `SPOT_OCCLUDER_SUN_ONLY | SPOT_OCCLUDER_ORTHOGRAPHIC`, strength about 0.8, and the kaiju
+  out of the sun's map.
+
+RC source tops (RFC 0010) are kept for when its lamps return as explicit emitters.
+
+Requested for 0.11.0:
+- a vertex lift from a heightfield and mesh updates queued into the frame (RFC 0012);
+- lit particles (RFC 0013 phase 1);
+- queued partial instance-buffer uploads;
+- a log of what the prewarm missed;
+- a per-instance light factor for blackouts.
+
+Later: the particles' transmittance map (RFC 0013 phase 2), BC texture formats (RFC 0008 phase 2), and descriptor
+pools made before the first frames.
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
