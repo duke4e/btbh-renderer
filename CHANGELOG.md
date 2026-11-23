@@ -220,6 +220,21 @@ its blackouts with it yet.
   `skinned-quad.gltf`. The particle test's refusals; the order test's bit and macro; the frame bench's `light-off`,
   `light` and `light-mixed` modes.
 - Swift: nothing. The Swift layer sets no batch flags, so the light factor has no Swift API (as the UV rect).
+- **`BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`'s transparent part applies with any ambient occlusion** (asked
+  for by Be The Bullet Hell v2, which draws with contact AO): under additive cascades with the flag, transparent unlit
+  batches take the fast unlit shader, as without the cascades, with `ssao_contact` 1, `ssao_enabled` 1 or no ambient
+  occlusion too. In 0.10.0 that needed the HBAO (`ssao_enabled` 2, `ssao_contact` 0), so with contact AO v2's overlays
+  by its neon still took the point lights (+0.94 levels on 19 % of its pixels, up to 203, round a sign-lit building's
+  base). The flag's other part (the scene's ambient targets, the bounce light's albedo, the reflections'
+  reflectivity) still needs the HBAO; the header's doc says which part applies where. This changes frames only where
+  the flag is set under additive cascades with contact AO, the SSAO or none, wherever a point light (or the dark scene,
+  or unlit 2 or 3) meets a transparent unlit batch.
+  - The flags smoke: additive cascades, nothing glowing, the overlays by the neon, with no shadow and the sun's. With
+    the flag, contact AO and none render the frame without the cascades (0 pixels differ) and the SSAO changes the
+    overlays; without it they are brighter. The gallery's new unset `neon-contact-additive`, `neon-ssao-additive` and
+    `neon-no-ao-additive` match the frames of the core before the change, to the byte.
+  - Not changed: an opaque unlit surface by point lights under additive cascades with contact AO draws as the cascades
+    draw it, with the flag or without (in the smoke the unlit box's own pixels: 237, up to 26 levels).
 
 ### Measured
 Windows, RTX 3070 Ti, Vulkan, without a debug device. The machine's shared perf lock was held for the runs marked
@@ -303,6 +318,8 @@ The light factor's runs, on the same machine and bench (the Deck preset, 2,001 k
   every instance's light in custom x (1 powered, 0 dark; between them for the wave and the flicker); a blackout rewrites
   that float (0.11.0's queued uploads can carry it). `KitKey::Dark` and the dark `SurfaceLook` copy can go. Keep the
   world detail's seed out of custom x (`seed_component` 2 to 4).
+- `KEEP_HBAO` with contact AO (v2): it now draws the transparent pass as without the cascades. Set it with additive
+  cascades if the overlays should not take the point lights there.
 
 ## [Unreleased]
 

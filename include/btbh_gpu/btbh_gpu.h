@@ -1367,9 +1367,9 @@ typedef struct BTBHGPUSceneLighting {
     float rain;
     // Small point lights without shadows (explosions' flashes): per light x, y, z, radius, red,
     // green, blue, energy. They light lit surfaces (diffuse) and brighten opaque unlit ones.
-    // Transparent unlit batches take them only under the radiance cascades without
-    // BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO. Without the cascades, or with that flag, those
-    // batches draw with the fast unlit shader, which adds no point light.
+    // Transparent unlit batches take them only under the radiance cascades, unless they are additive
+    // and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO is set. Without the cascades, or with that
+    // flag under additive ones, those batches draw with the fast unlit shader, which adds no point light.
     uint32_t point_light_count;
     float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
     /* A dark scene: unlit surfaces keep 1 - unlit_darkness of their colour (0: all of it, as
@@ -1593,12 +1593,14 @@ enum {
      * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off). Under the omni
      *   shadow a pixel may differ by a level now and then: the cascades' variant of the scene shader rounds that light
      *   apart from the plain one.
-     * - The transparent pass draws as without the cascades too (since 0.10.0): a transparent unlit batch takes the
-     *   fast unlit shader, which adds no point light (nor the dark scene's darkening and spot, nor unlit 2 and 3's sun
-     *   shadow). Under the cascades without the flag, and in 0.9.0 with it, such a batch draws with the cascades'
-     *   scene shader, which does add them: v2's additive night overlays by its neon point lights (reach 2.6, energy
-     *   2.1) came out up to 200 sRGB levels brighter than without the cascades. This changes the frames drawn with
-     *   the flag wherever a point light (or the dark scene, or unlit 2 or 3) meets a transparent unlit batch.
+     * - The transparent pass draws as without the cascades too (since 0.10.0), whatever the ambient occlusion (since
+     *   0.11.0: the HBAO, ssao_contact 1, the SSAO of ssao_enabled 1, or none; 0.10.0 needed the HBAO): a transparent
+     *   unlit batch takes the fast unlit shader, which adds no point light (nor the dark scene's darkening and spot,
+     *   nor unlit 2 and 3's sun shadow). Under the cascades without the flag, and in 0.9.0 with it, such a batch draws
+     *   with the cascades' scene shader, which does add them: v2's additive night overlays by its neon point lights
+     *   (reach 2.6, energy 2.1) came out up to 200 sRGB levels brighter than without the cascades. This changes the
+     *   frames drawn with the flag wherever a point light (or the dark scene, or unlit 2 or 3) meets a transparent
+     *   unlit batch.
      * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't.
      * - How: the opaque pass writes the scene's own ambient light to the targets the cascades' resolve reads its
      *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission
@@ -1607,8 +1609,10 @@ enum {
      *   instead of each apart.
      * - Screen-space reflections then weigh each surface by its reflectivity's luminance, as with
      *   BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY (the cascades' targets kept its colour).
-     * - Ignored, rendering as without it: without the cascades or with them not additive, with ssao_contact 1
-     *   (which is the same either way), with ssao_enabled 0 or 1, and in the cascades' debug views. */
+     * - Ignored, rendering as without it: without the cascades or with them not additive, and in the cascades' debug
+     *   views. Everything but the transparent pass (the ambient light, the bounce light's albedo, the reflections'
+     *   reflectivity) applies with ssao_enabled 2 and ssao_contact 0 only: with ssao_contact 1 (whose darkening is the
+     *   same either way), ssao_enabled 0 or 1, the flag changes the transparent pass alone. */
     BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO = 1u << 0,
     /* Screen-space reflections without the radiance cascades weigh each surface by its own reflectivity, as with
      * the cascades: its F0 (0.04 for a dielectric, 0.12 for glass, detail pattern 5, its albedo for a metal,

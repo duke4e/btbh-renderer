@@ -2995,17 +2995,18 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
 }
 
 /* Whether a batch draws with the fast unlit shader (production_model_unlit.frag, btbh_gpu_scene_uses_fast_unlit_pipeline:
-   a transparent unlit batch): without the radiance cascades, and under them with
-   BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO (scene_ambient_targets, since 0.10.0). The fast shader takes no
-   point light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent
-   pass draws as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came
-   out up to 200 levels brighter). Cascades without the flag keep the scene shader, as before. */
+   a transparent unlit batch): without the radiance cascades, and under them with cascades_fast_unlit
+   (BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO under additive cascades: since 0.10.0 with the HBAO, since 0.11.0
+   with any ambient occlusion or none, BTBHGPUSceneFrameSetup.cascades_fast_unlit). The fast shader takes no point
+   light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent pass draws
+   as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came out up to 200
+   levels brighter). Cascades without the flag keep the scene shader, as before. */
 static bool btbh_gpu_scene_batch_fast_unlit(
     const BTBHGPUSceneGeometryBatch *batch,
     bool radiance_cascades_active,
-    bool scene_ambient_targets
+    bool cascades_fast_unlit
 ) {
-    return (!radiance_cascades_active || scene_ambient_targets) &&
+    return (!radiance_cascades_active || cascades_fast_unlit) &&
         btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
 }
 
@@ -3014,7 +3015,7 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
-    bool scene_ambient_targets,
+    bool cascades_fast_unlit,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -3030,7 +3031,7 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     const uint32_t fast_unlit = btbh_gpu_scene_batch_fast_unlit(
         batch,
         radiance_cascades_active,
-        scene_ambient_targets
+        cascades_fast_unlit
     ) ? 1u : 0u;
     const uint32_t color_target_variant =
         (temporal ? 4u : 0u) +
@@ -3278,7 +3279,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
-    bool scene_ambient_targets,
+    bool cascades_fast_unlit,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -3299,7 +3300,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         auxiliary_geometry_outputs,
         temporal,
         radiance_cascades_active,
-        scene_ambient_targets,
+        cascades_fast_unlit,
         shadows_active,
         omni_shadows_active,
         animated,
@@ -3370,7 +3371,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             auxiliary_geometry_outputs,
             temporal,
             radiance_cascades_active,
-            scene_ambient_targets,
+            cascades_fast_unlit,
             shadows_active,
             omni_shadows_active,
             animated,
@@ -3381,7 +3382,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     const bool fast_unlit = btbh_gpu_scene_batch_fast_unlit(
         batch,
         radiance_cascades_active,
-        scene_ambient_targets
+        cascades_fast_unlit
     );
     char variant_fragment_shader_path[
         BTBH_GPU_SCENE_PATH_CAPACITY
@@ -7517,6 +7518,10 @@ typedef struct BTBHGPUSceneFrameSetup {
        takes the albedo from the emission target, and the HBAO resolve and the SSR read them as without the
        cascades. */
     bool scene_ambient_targets;
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO's transparent part (with any ambient occlusion since 0.11.0; it
+       needed the HBAO's in 0.10.0): under additive cascades, transparent unlit batches take the fast unlit shader, as
+       without the cascades (btbh_gpu_scene_batch_fast_unlit). True wherever scene_ambient_targets is. */
+    bool cascades_fast_unlit;
     /* BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY where it applies (the reflections on, the cascades off): the
        opaque pass writes the reflectivity to the ambient target's alpha and marks unlit surfaces in the emission
        target's (unlit_enabled bit 6), and the SSR reads them. */
@@ -7783,6 +7788,10 @@ static bool btbh_gpu_scene_prepare_frame(
         post->radiance_cascades.additive != 0u &&
         post->ssao_contact == 0u &&
         (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
+    setup->cascades_fast_unlit =
+        radiance_cascades_active &&
+        post->radiance_cascades.additive != 0u &&
+        (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
     setup->ssr_surface_reflectivity =
         ssr_active &&
         !radiance_cascades_active &&
@@ -7844,7 +7853,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     setup->auxiliary_geometry_outputs,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
-                    setup->scene_ambient_targets,
+                    setup->cascades_fast_unlit,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -7869,7 +7878,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     false,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
-                    setup->scene_ambient_targets,
+                    setup->cascades_fast_unlit,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -8277,6 +8286,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const bool omni_shadows_active = setup.omni_shadows_active;
     const bool shadows_active = setup.shadows_active;
     const bool scene_ambient_targets = setup.scene_ambient_targets;
+    const bool cascades_fast_unlit = setup.cascades_fast_unlit;
     const bool ssr_surface_reflectivity = setup.ssr_surface_reflectivity;
     if (!runtime->temporal_debug_view_read) {
         /* BTBH_DEBUG_MOTION_VECTORS=1 shows the upscaler's inputs, =2 the motion vectors' reprojection
@@ -10038,7 +10048,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         phase_auxiliary_geometry_outputs,
                         temporal_active,
                         radiance_cascades_active,
-                        scene_ambient_targets,
+                        cascades_fast_unlit,
                         shadows_active,
                         omni_shadows_active,
                         animated,
@@ -10201,7 +10211,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     const bool batch_fast_unlit = btbh_gpu_scene_batch_fast_unlit(
                         batch,
                         radiance_cascades_active,
-                        scene_ambient_targets
+                        cascades_fast_unlit
                     );
                     const uint32_t material_sampler_count =
                         batch_fast_unlit

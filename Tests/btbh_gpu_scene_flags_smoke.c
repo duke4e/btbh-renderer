@@ -25,7 +25,7 @@
  *   are darker (printed). With glowing boxes and an HBAO that darkens nothing, the bounce light is the same with the
  *   flag as without (metalness 0 or 1). With the reflections, additive cascades, the HBAO and the flag render as no
  *   cascades with SSR_SURFACE_REFLECTIVITY. Ignored where it doesn't apply: cascades not additive, ssao_contact,
- *   the SSAO, no cascades.
+ *   the SSAO, no cascades (scenes without a transparent unlit batch).
  * - SSR_SURFACE_REFLECTIVITY: without the cascades the reflections (which reflect nothing there unset) appear; on
  *   the dielectric ground, the glass and the grey metal they are byte for byte the additive cascades' with nothing
  *   glowing (which read the F0 from their targets), through the three shadow variants; a gold metal reflects
@@ -43,6 +43,13 @@
  * - The spot occluder's flags (an orthographic spot map along the sun round a tall box) and
  *   BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW; the new refusals.
  * - BTBH_SMOKE_BENCH=facing: SSR_FACING_HITS's cost on the steep street.
+ *
+ * Set (0.11.0): KEEP_HBAO's transparent part with any ambient occlusion (v2 draws with contact AO): additive
+ * cascades, nothing glowing, the overlays by the neon, with no shadow and the sun's: with contact AO or none the flag
+ * renders the frame without the cascades, byte for byte; with the SSAO it changes the overlays; without it they are
+ * brighter. With an opaque unlit box by the neon as well (contact AO), only that box's pixels differ from the frame
+ * without the cascades. The gallery's neon-contact-additive, neon-ssao-additive and neon-no-ao-additive are those
+ * frames unset.
  *
  * Set (0.11.0, Be The Bullet Hell v2's district blackouts): BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR on the street at
  * night with its windows lit (window_glow 2), its light batches each one of v2's light-carrying kit pieces: glass
@@ -873,6 +880,14 @@ static const Options gallery[] = {
     { .name = "kaiju-spot-rc", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON, .kaiju = true },
     { .name = "kaiju-spot-hbao-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
       .occlusion = OCCLUSION_HBAO, .kaiju = true },
+    /* Since 0.11.0's KEEP_HBAO with any ambient occlusion: the overlays by the neon under additive cascades with contact
+       AO, the SSAO and none, unset (as 0.10.0 draws them). */
+    { .name = "neon-contact-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO_CONTACT, .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    { .name = "neon-ssao-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_SSAO, .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    { .name = "neon-no-ao-additive", .shadows = SHADOWS_NONE, .cascades = CASCADES_ADDITIVE,
+      .gold = true, .unlit_box = true, .neon = true, .overlay = true },
 };
 #define GALLERY_COUNT (sizeof(gallery) / sizeof(gallery[0]))
 
@@ -1250,7 +1265,8 @@ static void check_keep_hbao(SmokeWindow *smoke) {
         free(kept);
         free(both);
     }
-    /* Ignored where it doesn't apply. */
+    /* Ignored where it doesn't apply. (No transparent unlit batch here: since 0.11.0 the flag's transparent part
+       applies with contact AO and the SSAO too, check_keep_hbao_any_ao.) */
     {
         struct { const char *what; Options options; Cascades cascades; } cases[4] = {
             { "cascades not additive", { .name = "keep-ignored-rc", .shadows = SHADOWS_SUN,
@@ -1420,6 +1436,92 @@ static void check_keep_hbao_point_lights(SmokeWindow *smoke) {
         free(kept);
     }
 }
+
+#if defined(SMOKE_HAS_0110)
+/* 0.11.0: KEEP_HBAO's transparent part with any ambient occlusion (Be The Bullet Hell v2 draws with contact AO, where
+   0.10.0 ignored the flag). Additive cascades, nothing glowing, the overlays by the neon: with contact AO or none the
+   flag renders the frame without the cascades; with the SSAO (whose own darkening differs under the cascades) it
+   changes the overlays. Without it the overlays are brighter (the gallery's unset neon-*-additive frames keep
+   0.10.0's). With an opaque unlit box by the neon too, contact AO leaves that box as the cascades draw it (the flag's
+   other part, which draws opaque surfaces as without the cascades, needs the HBAO): only its pixels differ from the
+   frame without the cascades. */
+static void check_keep_hbao_any_ao(SmokeWindow *smoke) {
+    const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    static const struct {
+        const char *what;
+        Occlusion occlusion;
+        bool as_off;
+    } cases[3] = {
+        { "contact AO", OCCLUSION_HBAO_CONTACT, true },
+        { "no AO", OCCLUSION_NONE, true },
+        { "the SSAO", OCCLUSION_SSAO, false },
+    };
+    static const char *const shadow_names[2] = { "no shadow", "the sun's shadow" };
+    for (uint32_t shadows = 0u; shadows < 2u; ++shadows) {
+        for (uint32_t index = 0u; index < 3u; ++index) {
+            const Options options = { .name = "keep-any-ao", .shadows = (Shadows)shadows,
+                .occlusion = cases[index].occlusion, .gold = true, .neon = true, .overlay = true };
+            uint8_t *off = render_with(smoke, options, CASCADES_OFF, 0u, true);
+            uint8_t *additive = render_with(smoke, options, CASCADES_ADDITIVE, 0u, true);
+            uint8_t *kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, true);
+            char what[200];
+            (void)snprintf(what, sizeof(what),
+                "KEEP_HBAO, %s, %s, nothing glowing, point lights by the overlays: additive cascades with it against "
+                "without", cases[index].what, shadow_names[shadows]);
+            (void)expect_different(what, kept, additive);
+            (void)snprintf(what, sizeof(what),
+                "KEEP_HBAO, %s, %s, nothing glowing, point lights by the overlays: additive cascades with it against "
+                "none", cases[index].what, shadow_names[shadows]);
+            if (cases[index].as_off) {
+                expect_same(what, kept, off);
+            } else {
+                int largest = 0;
+                printf("%s: %u pixels differ (largest %d levels; the SSAO's own)\n", what,
+                    differing_pixels(kept, off, &largest), largest);
+            }
+            (void)snprintf(what, sizeof(what),
+                "KEEP_HBAO, %s, %s, nothing glowing, point lights by the overlays: additive cascades without it "
+                "against none", cases[index].what, shadow_names[shadows]);
+            (void)expect_different(what, additive, off);
+            if (shadows == 1u && index == 0u) {
+                dump_image("keep-contact-neon-off", off);
+                dump_image("keep-contact-neon-additive", additive);
+                dump_image("keep-contact-neon-kept", kept);
+            }
+            free(off);
+            free(additive);
+            free(kept);
+        }
+    }
+    static Scene scene;
+    const Options unlit = { .name = "keep-contact-unlit", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO_CONTACT,
+        .gold = true, .unlit_box = true, .neon = true, .overlay = true };
+    uint8_t *off = render_with(smoke, unlit, CASCADES_OFF, 0u, true);
+    uint8_t *kept = render_with(smoke, unlit, CASCADES_ADDITIVE, keep, true);
+    build_scene(smoke, &unlit, &scene);
+    int rectangle[4];
+    box_rectangle(&scene, scene.unlit_box, rectangle);
+    uint32_t inside = 0u;
+    uint32_t outside = 0u;
+    for (uint32_t y = 0u; y < TARGET_SIZE; ++y) {
+        for (uint32_t x = 0u; x < TARGET_SIZE; ++x) {
+            const uint32_t at = (y * TARGET_SIZE + x) * 4u;
+            if (memcmp(&off[at], &kept[at], 4u) != 0) {
+                const bool in = (int)x >= rectangle[0] && (int)x <= rectangle[2] && (int)y >= rectangle[1] &&
+                    (int)y <= rectangle[3];
+                inside += in ? 1u : 0u;
+                outside += in ? 0u : 1u;
+            }
+        }
+    }
+    printf("KEEP_HBAO, contact AO, the sun's shadow, an opaque unlit box by the point lights too: additive cascades "
+           "with it against none: %u pixels differ on the box's rectangle (the cascades' own unlit shading), %u outside it\n",
+        inside, outside);
+    assert(outside == 0u);
+    free(off);
+    free(kept);
+}
+#endif
 
 /* Pixels below a box on the screen (its rectangle's columns, from its bottom row to the image's) where a and b differ. */
 static uint32_t differing_below(const Scene *scene, uint32_t box_index, const uint8_t *a, const uint8_t *b) {
@@ -2458,6 +2560,7 @@ int main(void) {
         check_spot_occluder(&smoke);
 #endif
 #if defined(SMOKE_HAS_0110)
+        check_keep_hbao_any_ao(&smoke);
         check_light_factor(&smoke, device);
 #endif
         check_refusals(&smoke);
