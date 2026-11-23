@@ -8,6 +8,10 @@
  *   KEEP_NORMALS 0.07 over it (unlit alpha: the fast unlit pipeline; additive; a soft particle), a refracting
  *   overlay, and the terrain with a world-detail table (production_model_detail_table_lift.vert). The two pictures
  *   agree within the GPU filter's 8-bit weights (a few pixels at edges); each differs from the unlifted picture.
+ * - Be The Bullet Hell v2's overlays at night (0.10.0's KEEP_HBAO meets the lift): a lifted unlit alpha overlay
+ *   (KEEP_NORMALS) by two point lights under additive cascades with BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO
+ *   and the HBAO, nothing glowing, draws with the fast unlit pipeline under the cascades: as the CPU-lifted overlay,
+ *   and as the frame without the cascades, to the byte (the flag's promise).
  * - A lift whose heightfield is NULL draws byte for byte as height_lift NULL.
  * - The refusals: the heightfield's creation; the lift's fields; a heightfield that isn't one or is another
  *   window's; a heightfield in every other slot (a batch's four, a world detail, the post LUT, the canvas's texture
@@ -485,10 +489,16 @@ typedef enum Layer {
     LAYER_REFRACT,       /* a refracting overlay */
 } Layer;
 
+/* Additive radiance cascades with nothing glowing (0.10.0's KEEP_HBAO case), without the flag or with it. */
+typedef enum Additive { ADDITIVE_OFF = 0, ADDITIVE_ON = 1, ADDITIVE_KEEP_HBAO = 2 } Additive;
+
 typedef struct Options {
     const char *name;
     Shadows shadows;
-    bool cascades;
+    bool cascades;       /* the cascades (not additive), the standing box glowing */
+    Additive additive;
+    bool hbao;           /* the horizon-based ambient occlusion */
+    bool neon;           /* two point lights by the overlay, which is no source of the cascades' light */
     bool sorted;
     bool transparent;    /* the terrain transparent over an unlifted floor */
     bool table;          /* the terrain with a world-detail table */
@@ -508,6 +518,8 @@ static const Options gallery[] = {
     { .name = "refraction", .shadows = SHADOWS_SUN, .layer = LAYER_REFRACT },
     { .name = "table", .shadows = SHADOWS_SUN, .table = true },
     { .name = "table-omni", .shadows = SHADOWS_OMNI, .table = true },
+    { .name = "keep-hbao-overlay", .shadows = SHADOWS_SUN, .additive = ADDITIVE_KEEP_HBAO, .hbao = true,
+      .neon = true, .layer = LAYER_UNLIT },
 };
 #define GALLERY_COUNT (sizeof(gallery) / sizeof(gallery[0]))
 
@@ -690,12 +702,40 @@ static void build_scene(SmokeWindow *smoke, const Options *options, Mode mode, S
     post->tonemap_mode = BTBH_GPU_SCENE_TONEMAP_REINHARD;
     post->upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
     post->opaque_sort = options->sorted ? (uint8_t)BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK : 0u;
-    if (options->cascades) {
+    if (options->cascades || options->additive != ADDITIVE_OFF) {
         post->radiance_cascades.tier = BTBH_GPU_SCENE_RC_LOW;
         post->radiance_cascades.auto_frame_budget_milliseconds = 16.0f;
         post->radiance_cascades.indirect_intensity = 1.0f;
         post->radiance_cascades.hero_omni_emitter_index = -1;
         post->radiance_cascades.invalidate = 1u;
+        post->radiance_cascades.additive = options->additive != ADDITIVE_OFF ? 1u : 0u;
+    }
+    if (options->additive == ADDITIVE_KEEP_HBAO) {
+        post->flags = (uint8_t)BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    }
+    if (options->hbao) {
+        post->ssao_enabled = 2u;
+        post->ssao_radius = 1.2f;
+        post->ssao_intensity = 1.5f;
+        post->ssao_power = 1.0f;
+        post->ssao_bias = 0.03f;
+    }
+    if (options->neon) {
+        /* Be The Bullet Hell v2's neon signs at night: point lights of reach 2.6 and energy 2.1, 0.15 over the lifted
+           overlay. They light the lit terrain; the fast unlit shader adds none to the overlay. */
+        static const float spots[2][2] = { { -0.6f, -0.3f }, { 0.7f, 0.4f } };
+        static const float colours[2][3] = { { 1.0f, 0.35f, 0.85f }, { 0.3f, 0.9f, 1.0f } };
+        scene->lighting.point_light_count = 2u;
+        for (uint32_t light = 0u; light < 2u; ++light) {
+            float *point = scene->lighting.point_lights[light];
+            point[0] = spots[light][0];
+            point[1] = btbh_gpu_height_lift_height(&smoke->overlay_lift, smoke->field->heights, FIELD_SIZE, FIELD_SIZE,
+                spots[light][0], spots[light][1]) + 0.15f;
+            point[2] = spots[light][1];
+            point[3] = 2.6f;
+            memcpy(&point[4], colours[light], sizeof(colours[light]));
+            point[7] = 2.1f;
+        }
     }
     static const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
     static const float stone[4] = { 0.75f, 0.72f, 0.66f, 1.0f };
@@ -770,6 +810,10 @@ static void build_scene(SmokeWindow *smoke, const Options *options, Mode mode, S
         layer.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
         layer.cull_mode = BTBH_GPU_SCENE_CULL_NONE;
         layer.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+        if (options->neon) {
+            /* It draws over the frame and lights nothing: under the cascades nothing glows. */
+            layer.flags |= BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+        }
         const BTBHGPUSceneHeightLift *lift = &smoke->overlay_lift;
         switch (options->layer) {
             case LAYER_UNLIT:
@@ -891,6 +935,62 @@ static void check_gallery(SmokeWindow *smoke) {
     }
     printf("gallery: %u scenes; lifted and CPU-lifted agree (at most %u px off by more than %d)\n",
         (unsigned)GALLERY_COUNT, worst_differing, PIXEL_TOLERANCE);
+}
+
+/* Be The Bullet Hell v2's overlays at night, where 0.10.0's KEEP_HBAO meets the lift: the gallery's
+   keep-hbao-overlay, a lifted unlit alpha overlay (KEEP_NORMALS, no source of the cascades' light) by two point
+   lights, under additive cascades with BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO and the HBAO, nothing glowing.
+   Under the flag a transparent unlit batch takes the fast unlit shader under the cascades too (0.10.0), lifted with
+   production_model_lift.vert, and that shader adds no point light: so the frame is the frame without the cascades,
+   to the byte, as the flag promises, the overlay lifted on the GPU as on the CPU. Under the omni shadow a pixel or two
+   may differ by a level (the scene shader's two variants round that light apart, as in 0.10.0). Without the flag
+   the cascades' scene shader draws the overlay, brightened by the point lights, and their HBAO darkens more
+   (printed). */
+static void check_keep_hbao_overlay(SmokeWindow *smoke) {
+    static Scene scene;
+    static const char *const shadow_names[3] = { "no shadow", "the sun's shadow", "the omni shadow" };
+    static const char *const mode_names[2] = { "lifted", "CPU-lifted" };
+    static const char *const dump_modes[2] = { "gpu", "cpu" };
+    for (uint32_t shadows = 0u; shadows < 3u; ++shadows) {
+        uint8_t *kept_by_mode[2];
+        for (uint32_t mode = 0u; mode < 2u; ++mode) {
+            Options options = { .name = "keep-hbao-overlay", .shadows = (Shadows)shadows, .hbao = true,
+                .neon = true, .layer = LAYER_UNLIT };
+            uint8_t *pictures[3];
+            for (uint32_t additive = 0u; additive < 3u; ++additive) {
+                options.additive = (Additive)additive;
+                build_scene(smoke, &options, (Mode)mode, &scene);
+                pictures[additive] = render(smoke, &scene);
+                destroy_scene_meshes(&scene);
+            }
+            const uint8_t *off = pictures[ADDITIVE_OFF];
+            const Difference kept = compare_pictures(pictures[ADDITIVE_KEEP_HBAO], off);
+            const Difference without = compare_pictures(pictures[ADDITIVE_ON], off);
+            printf("KEEP_HBAO, %s, a %s overlay by point lights: additive cascades with it against none %u px "
+                "differ (largest %d); without it %u px\n", shadow_names[shadows], mode_names[mode], kept.any,
+                kept.largest, without.any);
+            if (shadows == (uint32_t)SHADOWS_OMNI) {
+                assert(kept.any <= 4u && kept.largest <= 1);
+            } else {
+                assert(memcmp(pictures[ADDITIVE_KEEP_HBAO], off, (size_t)TEXELS * 4u) == 0);
+            }
+            assert(without.differing > 0u);
+            if (shadows == (uint32_t)SHADOWS_SUN) {
+                dump("keep-hbao-overlay-off", dump_modes[mode], off);
+                dump("keep-hbao-overlay-additive", dump_modes[mode], pictures[ADDITIVE_ON]);
+            }
+            kept_by_mode[mode] = pictures[ADDITIVE_KEEP_HBAO];
+            free(pictures[ADDITIVE_OFF]);
+            free(pictures[ADDITIVE_ON]);
+        }
+        const Difference against_cpu = compare_pictures(kept_by_mode[0], kept_by_mode[1]);
+        printf("KEEP_HBAO, %s: the lifted overlay against the CPU-lifted one %u px differ (%u by more than %d, "
+            "largest %d)\n", shadow_names[shadows], against_cpu.any, against_cpu.differing, PIXEL_TOLERANCE,
+            against_cpu.largest);
+        assert(against_cpu.differing <= DIFFERING_LIMIT);
+        free(kept_by_mode[0]);
+        free(kept_by_mode[1]);
+    }
 }
 
 static void expect_refused(SmokeWindow *smoke, Scene *scene, const uint8_t *visibility, const char *what,
@@ -1435,6 +1535,7 @@ int main(void) {
     SmokeWindow smoke = open_smoke_window(device);
     SmokeWindow other = open_smoke_window(device);
     check_gallery(&smoke);
+    check_keep_hbao_overlay(&smoke);
     check_refusals(&smoke, &other);
     close_smoke_window(&other);
     SmokeWindow fresh = open_smoke_window(device);
