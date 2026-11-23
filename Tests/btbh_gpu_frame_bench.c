@@ -32,6 +32,10 @@
  *   mesh").
  *   Every frame of a ring window alternates with the ring and without it (the frame's draws alone). The other modes
  *   take +noruns too, and +arena for the 32 kit pieces (table+noruns, table+arena), for the GPU's time.
+ * - RFC 0012's lift (0.11.0's bench): lift (every piece's draw lifted by a heightfield of 193 x 145 samples, one a
+ *   unit, over the city: hills up to about 3 units), lift-keep (the same with KEEP_NORMALS), lift-flat (the same
+ *   draws without a lift). In all three the pieces cast no shadow (a lifted batch casts none), so lift - lift-flat is
+ *   what the lift costs. Before 0.11.0 lift and lift-keep draw as lift-flat.
  * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
  *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
  *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
@@ -122,6 +126,10 @@ typedef struct BenchWindow {
     BTBHGPUTexture *maps;
     BTBHGPUSceneWorldDetailTable table;
     BTBHGPUSceneWorldDetailTableEntry entries[8];
+#endif
+#if defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT)
+    BTBHGPUTexture *field;
+    BTBHGPUSceneHeightLift lift;
 #endif
     float *instances;
     uint32_t instance_count;
@@ -405,6 +413,16 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
 #else
         (void)mode;
 #endif
+        if (strncmp(mode, "lift", 4) == 0) {
+            /* (A lifted batch casts no shadow; lift-flat draws the same without the lift.) */
+            batch->flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+            batch->spot_shadow_visible = 0u;
+#if defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT)
+            if (strncmp(mode, "lift-flat", 9) != 0) {
+                batch->height_lift = &bench->lift;
+            }
+#endif
+        }
         for (uint32_t instance_index = 0u; instance_index < count; ++instance_index) {
             const uint32_t lot = bench_random(&state) % (64u * 48u);
             const float x = -96.0f + 3.0f * (float)(lot % 64u) + bench_unit(&state);
@@ -728,6 +746,37 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
         bench->table.entries = bench->entries;
         bench->table.entry_count = 8u;
         bench->table.seed_component = 4u;
+    }
+#endif
+#if defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT)
+    if (strncmp(mode, "lift", 4) == 0 && strncmp(mode, "lift-flat", 9) != 0) {
+        /* A field over the city's lots (x -96..96, z -72..72), one sample a unit. */
+        enum { FIELD_W = 193, FIELD_H = 145 };
+        float *heights = malloc(sizeof(float) * FIELD_W * FIELD_H);
+        if (heights == NULL) {
+            fprintf(stderr, "out of memory\n");
+            exit(1);
+        }
+        for (uint32_t j = 0u; j < FIELD_H; ++j) {
+            for (uint32_t i = 0u; i < FIELD_W; ++i) {
+                heights[j * FIELD_W + i] = 1.5f + 1.2f * sinf(0.07f * (float)i) * cosf(0.05f * (float)j) +
+                    0.3f * sinf(0.31f * (float)(i + j));
+            }
+        }
+        BTBHGPUTextureReport texture_report;
+        bench->field = btbh_gpu_window_heightfield_create(bench->window, heights, FIELD_W, FIELD_H, &texture_report);
+        free(heights);
+        if (bench->field == NULL) {
+            fprintf(stderr, "heightfield: %s\n", texture_report.message);
+            exit(1);
+        }
+        memset(&bench->lift, 0, sizeof(bench->lift));
+        bench->lift.heightfield = bench->field;
+        bench->lift.world_to_uv[0] = 1.0f / (float)FIELD_W;
+        bench->lift.world_to_uv[1] = 1.0f / (float)FIELD_H;
+        bench->lift.world_to_uv[2] = 0.5f / (float)FIELD_W + 96.0f / (float)FIELD_W;
+        bench->lift.world_to_uv[3] = 0.5f / (float)FIELD_H + 72.0f / (float)FIELD_H;
+        bench->lift.flags = strncmp(mode, "lift-keep", 9) == 0 ? BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS : 0u;
     }
 #endif
     build_frame(bench, draws);
