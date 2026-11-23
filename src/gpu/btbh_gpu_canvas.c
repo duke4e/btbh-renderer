@@ -1229,6 +1229,57 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     const BTBHGPUCanvasPass *passes,
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
+);
+
+/* The canvas present inside the lazy creation log's scope. Its body, btbh_gpu_window_canvas_present_internal, follows
+   at once (the Swift source probes read the present from here to btbh_gpu_window_release_canvas). */
+BTBHGPUResult btbh_gpu_window_canvas_present(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    BTBHGPUCanvasReport *report
+) {
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
+    const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
+        window,
+        vertex_shader_path,
+        fragment_shader_path,
+        textured_fragment_shader_path,
+        shader_format,
+        vertices,
+        vertex_count,
+        batches,
+        batch_count,
+        passes,
+        pass_count,
+        report
+    );
+    btbh_gpu_lazy_creation_end(&lazy_scope);
+    return result;
+}
+
+static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    BTBHGPUCanvasReport *report
 ) {
     if (report == NULL) {
         return BTBH_GPU_INVALID_ARGUMENT;
@@ -1681,40 +1732,6 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     report->vertex_count = vertex_count;
     report->message[0] = '\0';
     return report->result;
-}
-
-BTBHGPUResult btbh_gpu_window_canvas_present(
-    BTBHGPUWindow *window,
-    const char *vertex_shader_path,
-    const char *fragment_shader_path,
-    const char *textured_fragment_shader_path,
-    BTBHGPUShaderFormat shader_format,
-    const BTBHGPUCanvasVertex *vertices,
-    uint32_t vertex_count,
-    const BTBHGPUCanvasBatch *batches,
-    uint32_t batch_count,
-    const BTBHGPUCanvasPass *passes,
-    uint32_t pass_count,
-    BTBHGPUCanvasReport *report
-) {
-    BTBHGPULazyCreationScope lazy_scope;
-    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
-    const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
-        window,
-        vertex_shader_path,
-        fragment_shader_path,
-        textured_fragment_shader_path,
-        shader_format,
-        vertices,
-        vertex_count,
-        batches,
-        batch_count,
-        passes,
-        pass_count,
-        report
-    );
-    btbh_gpu_lazy_creation_end(&lazy_scope);
-    return result;
 }
 
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window) {
