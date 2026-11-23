@@ -14,10 +14,18 @@
  *   the load and the prewarm), flush (one canvas-only present, a loading screen's last frame, after the load),
  *   resize (the window is resized at each switch, 1280x800 <-> 1440x900), small (no texture over 1024^2), shared (every
  *   kit mesh in the shared geometry buffers, as v2 makes its kit; else every other one), staging (an upload staging
- *   budget of 128 MiB, btbh_gpu_device_set_upload_staging_budget).
+ *   budget of 128 MiB, btbh_gpu_device_set_upload_staging_budget; BTBH_STAGE_BENCH_STAGING_MB, since 0.13.0, another
+ *   size).
  * - BTBH_STAGE_BENCH_SWITCHES (default 4), BTBH_STAGE_BENCH_FRAMES (frames after each switch, default 10),
  *   BTBH_STAGE_BENCH_DRAWS (default 2000), BTBH_STAGE_BENCH_HIDDEN=1 (a hidden window: no swapchain image, so the
  *   frames neither present nor run SDL's presenting clean-up).
+ * - The exit (0.13.0, Be The Bullet Hell v1's exit stall), timed step by step after the last frame:
+ *   BTBH_STAGE_BENCH_EXIT_EXTRA=<n> (default 0) makes n more textures (256^2 with mips), n custom meshes with buffers
+ *   of their own and n instance buffers just before it, each its own upload, with no frame after them (a level that
+ *   streamed more in, then quit); BTBH_STAGE_BENCH_EXIT ('+'-separated): nodestroy (the host destroys nothing itself:
+ *   the window's destroy releases it), idle (SDL_WaitForGPUIdle before anything is destroyed), flush (after the
+ *   resources are destroyed, one canvas-only present: SDL frees released memory in a submit that presents). The
+ *   staging mode's budget applies to the extra uploads too. Output: "STAGE exit ..." with each step's milliseconds.
  *
  * Output: "STAGE load ..." per switch (the CPU time of each part of the load), then one "STAGE frame ..." line per
  * frame (stage, frame after the switch, the scene present's wall clock and its report's split, the canvas present's
@@ -111,6 +119,14 @@ typedef struct Options {
     bool small;
     bool staging;
 } Options;
+
+/* What the exit makes just before it (BTBH_STAGE_BENCH_EXIT_EXTRA). */
+typedef struct ExitExtra {
+    BTBHGPUTexture **textures;
+    BTBHGPUCustomMesh **meshes;
+    BTBHGPUInstanceBuffer **buffers;
+    uint32_t count;
+} ExitExtra;
 
 static uint32_t bench_random(uint32_t *state) {
     *state = *state * 1664525u + 1013904223u;
@@ -771,6 +787,8 @@ static void run_frame(BTBHGPUWindow *window, const Stage *stage, const Camera *c
 }
 
 int main(void) {
+    /* (Unbuffered: the lines keep their order among SDL_Log's.) */
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     const char *mode = SDL_getenv("BTBH_STAGE_BENCH_MODE");
     if (mode == NULL) {
@@ -802,7 +820,9 @@ int main(void) {
         fprintf(stderr, "skipped: no device (%s)\n", device_report.message);
         return BENCH_SKIP;
     }
-    if (options.staging && btbh_gpu_device_set_upload_staging_budget(device, 128u << 20) != BTBH_GPU_OK) {
+    /* (BTBH_STAGE_BENCH_STAGING_MB, since 0.13.0: the staging mode's budget in MiB; 128 by default, 0 sets none.) */
+    const uint32_t staging_mb = (uint32_t)env_int("BTBH_STAGE_BENCH_STAGING_MB", 128, 0, 4095);
+    if (options.staging && btbh_gpu_device_set_upload_staging_budget(device, staging_mb << 20) != BTBH_GPU_OK) {
         fail("staging", "refused");
     }
     for (uint32_t index = 0u; index < 11u; ++index) {
@@ -895,12 +915,86 @@ int main(void) {
     }
     printf("STAGE done\n");
     (void)fflush(stdout);
-    destroy_stage(&stages[current]);
-    for (uint32_t index = 0u; index < kept_count; ++index) {
-        destroy_stage(&kept[index]);
+    /* The exit (0.13.0): each step timed. */
+    const char *exit_mode = SDL_getenv("BTBH_STAGE_BENCH_EXIT");
+    if (exit_mode == NULL) {
+        exit_mode = "";
     }
+    ExitExtra extra;
+    memset(&extra, 0, sizeof(extra));
+    extra.count = (uint32_t)env_int("BTBH_STAGE_BENCH_EXIT_EXTRA", 0, 0, 100000);
+    uint64_t started = SDL_GetTicksNS();
+    if (extra.count > 0u) {
+        extra.textures = calloc(extra.count, sizeof(*extra.textures));
+        extra.meshes = calloc(extra.count, sizeof(*extra.meshes));
+        extra.buffers = calloc(extra.count, sizeof(*extra.buffers));
+        if (extra.textures == NULL || extra.meshes == NULL || extra.buffers == NULL) {
+            fail("extra", "out of memory");
+        }
+        float instances[8u * BENCH_FLOATS];
+        memset(instances, 0, sizeof(instances));
+        for (uint32_t index = 0u; index < extra.count; ++index) {
+            extra.textures[index] = noise_texture(window, 256u, 9000u + index, BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB);
+            extra.meshes[index] = make_piece(window, index % BENCH_PIECES, 77u + index);
+            BTBHGPUInstanceBufferReport buffer_report;
+            memset(&buffer_report, 0, sizeof(buffer_report));
+            extra.buffers[index] = btbh_gpu_window_instance_buffer_create(window, 8u,
+                BENCH_FLOATS * (uint32_t)sizeof(float), &buffer_report);
+            if (extra.buffers[index] == NULL ||
+                btbh_gpu_instance_buffer_upload(extra.buffers[index], 0u, instances, (uint32_t)sizeof(instances),
+                    &buffer_report) != BTBH_GPU_OK) {
+                fail("extra instance buffer", buffer_report.message);
+            }
+        }
+    }
+    const double extra_ms = ms_since(started);
+    started = SDL_GetTicksNS();
+    if (mode_has(exit_mode, "idle")) {
+        (void)SDL_WaitForGPUIdle(device->gpu);
+    }
+    const double idle_ms = ms_since(started);
+    started = SDL_GetTicksNS();
+    if (!mode_has(exit_mode, "nodestroy")) {
+        destroy_stage(&stages[current]);
+        for (uint32_t index = 0u; index < kept_count; ++index) {
+            destroy_stage(&kept[index]);
+        }
+        for (uint32_t index = 0u; index < extra.count; ++index) {
+            btbh_gpu_texture_destroy(extra.textures[index]);
+            btbh_gpu_custom_mesh_destroy(extra.meshes[index]);
+            btbh_gpu_instance_buffer_destroy(extra.buffers[index]);
+        }
+    }
+    const double destroy_ms = ms_since(started);
+    started = SDL_GetTicksNS();
+    if (mode_has(exit_mode, "flush")) {
+        (void)canvas_only(window);
+    }
+    const double flush_ms = ms_since(started);
+    started = SDL_GetTicksNS();
     btbh_gpu_window_destroy(window);
+    const double window_ms = ms_since(started);
+    started = SDL_GetTicksNS();
+    /* (The staging pool's release waits for the GPU when the device has one; timed on its own.) */
+    btbh_gpu_staging_release_device(device->gpu);
+    const double staging_ms = ms_since(started);
+    started = SDL_GetTicksNS();
     btbh_gpu_device_shutdown(device);
+    const double device_ms = ms_since(started);
     btbh_gpu_device_destroy(device);
+    if (mode_has(exit_mode, "nodestroy")) {
+        for (uint32_t index = 0u; index < kept_count; ++index) {
+            free(kept[index].instances);
+            free(kept[index].batches);
+        }
+        free(stages[current].instances);
+        free(stages[current].batches);
+    }
+    free(extra.textures);
+    free(extra.meshes);
+    free(extra.buffers);
+    printf("STAGE exit mode=%s extra=%u made=%.3f idle=%.3f destroy=%.3f flush=%.3f window=%.3f staging=%.3f "
+        "device=%.3f total=%.3f\n", exit_mode, extra.count, extra_ms, idle_ms, destroy_ms, flush_ms, window_ms,
+        staging_ms, device_ms, idle_ms + destroy_ms + flush_ms + window_ms + staging_ms + device_ms);
     return 0;
 }
