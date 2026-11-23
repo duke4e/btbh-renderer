@@ -1186,9 +1186,8 @@ enum {
      * without the flag; at 0 as the same batch with emission_energy 0, and detail_parameters[1] 0 on glass or
      * detail_parameters[3] 0 on a lamp lens. Between them the emission and the lens's glow scale with it and the
      * glass keeps that share of its lit panes, each at its full light: as it falls they go out one by one. Read per
-     * pixel, taken to the nearest 1/4096 (a value interpolated across a triangle may come a rounding off), so 0, 1 and
-     * every k/4096 are exact; give all of an instance's vertices the same value (it is per instance anyway). Skinned
-     * batches take it too. Not with INSTANCE_UV_RECT, DISSOLVE or GLITTER (they read custom x), a world detail or
+     * pixel and taken to the nearest 1/4096 (the value interpolated across a triangle may come a rounding off), so 0,
+     * 1 and every k/4096 are exact. Skinned batches take it too. Not with INSTANCE_UV_RECT, DISSOLVE or GLITTER (they read custom x), a world detail or
      * table seeded by custom x (seed_component 1; 2 to 4 are free), a lit particle (its shader doesn't take it) nor a
      * refracting batch (it draws no material): the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
      * reaches the shaders as a bit of a uniform word and adds no pipeline. Needs this release's scene shaders
