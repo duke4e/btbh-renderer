@@ -92,6 +92,11 @@
  *   beam's pixels alone. It changes nothing without the cascades, under cascades not additive, without KEEP_HBAO, in a
  *   debug view, on an opaque unlit box, on every batch of the street, on the beam drawn lit. Prewarming the flagged
  *   scenes leaves their renders no pipeline to make. Refusals: flags2's bits 1 to 7 (present and prewarm).
+ * - Runs next to KEEP_CASCADES_LOOK (check_look_runs, since 0.13.0): flagged and unflagged beams in runs in both
+ *   orders and alternating, and an opaque unlit box before flagged beams, by the neon and the lamps under additive
+ *   cascades with KEEP_HBAO and contact AO: each renders with runs as without (BTBH_GPU_SCENE_RUNS=0), byte for byte
+ *   (the gallery's look-runs-* frames). With flags2 taken out of the run key it fails, and its *_runs_verify run logs
+ *   the mismatches (unlit_enabled, the pipeline, the extension block, the samplers).
  * - The gallery's lamps-*, dark-bounce-contact-additive and beam-* frames are those scenes unset (as 0.11.0 draws
  *   them).
  *
@@ -118,7 +123,7 @@
 #define SMOKE_SKIP 77
 #define TARGET_SIZE 160u
 #define TEXELS (TARGET_SIZE * TARGET_SIZE)
-#define MAX_BOXES 16u
+#define MAX_BOXES 32u
 
 #if defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE) && defined(BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO) && \
     defined(BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY)
@@ -2538,6 +2543,82 @@ static void differing_around(const Scene *scene, uint32_t box_index, const uint8
     }
 }
 
+/* 0.13.0 (the arrangement Be The Bullet Hell v2 suspected behind its heat ray capture's variant, which turned out to
+   come from elsewhere): runs next to FLAGS2_KEEP_CASCADES_LOOK. The street at night by the neon (strong point lights)
+   and its lamps, additive cascades with KEEP_HBAO and contact AO, the sun's shadow; beams (long thin additive unlit
+   boxes, the same material but flags2) over it in one transparent pass, flagged and unflagged in runs in both orders
+   and alternating, and an opaque unlit box (unflagged) right before flagged beams. Each arrangement renders the same
+   with runs (the process's mode: unset or verify) as without (BTBH_GPU_SCENE_RUNS=0), byte for byte; the gallery keeps
+   each (look-runs-*), so that v0.12.0's build can be compared. */
+static void set_runs_off(bool off, const char *on_value) {
+    if (off) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
+    } else if (on_value != NULL) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", on_value, true);
+    } else {
+        (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
+    }
+}
+
+static void build_look_runs(SmokeWindow *smoke, Scene *scene, const char *pattern) {
+    const Options options = { .name = "look-runs", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+        .occlusion = OCCLUSION_HBAO_CONTACT, .neon = true, .lamps = true, .beam = true };
+    build_scene(smoke, &options, scene);
+    scene->post.flags = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    const BTBHGPUSceneGeometryBatch beam = scene->batches[scene->beam_box];
+    static const float beam_colour[4] = { 0.15f, 0.3f, 0.45f, 1.0f };
+    static const float block_colour[4] = { 0.9f, 0.5f, 0.2f, 1.0f };
+    /* The scene's own beam stays unflagged; the pattern's batches follow it: F a flagged beam, U an unflagged one,
+       O an opaque unlit box (unflagged, a source of nothing). */
+    for (uint32_t index = 0u; pattern[index] != '\0'; ++index) {
+        const float z = -0.6f + 0.22f * (float)index;
+        BTBHGPUSceneGeometryBatch batch = beam;
+        if (pattern[index] == 'O') {
+            batch.transparency_enabled = 0u;
+            batch.blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+            batch.albedo_alpha = 255u;
+            (void)scene_add(scene, make_box(0.6f, 0.35f, z, 0.3f, 0.3f, 0.12f, block_colour), batch);
+            continue;
+        }
+        batch.flags2 = pattern[index] == 'F' ? (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK : 0u;
+        (void)scene_add(scene, make_box(-0.4f, 0.32f + 0.05f * (float)(index % 2u), z, 3.0f, 0.12f, 0.12f,
+            beam_colour), batch);
+    }
+}
+
+static void check_look_runs(SmokeWindow *smoke) {
+    static const char *const patterns[] = { "FFUU", "UUFF", "FUFU", "UFUF", "OOFF", "FFOO" };
+    const char *mode = SDL_getenv("BTBH_GPU_SCENE_RUNS");
+    char on_value[16] = "";
+    const bool verify = mode != NULL && strcmp(mode, "verify") == 0;
+    if (verify) {
+        (void)snprintf(on_value, sizeof(on_value), "%s", mode);
+    }
+    static Scene scene;
+    uint32_t failures = 0u;
+    for (uint32_t index = 0u; index < sizeof(patterns) / sizeof(patterns[0]); ++index) {
+        build_look_runs(smoke, &scene, patterns[index]);
+        set_runs_off(false, verify ? on_value : NULL);
+        uint8_t *with = render(smoke, &scene);
+        set_runs_off(true, NULL);
+        uint8_t *without = render(smoke, &scene);
+        set_runs_off(false, verify ? on_value : NULL);
+        char what[200];
+        (void)snprintf(what, sizeof(what), "KEEP_CASCADES_LOOK in runs, beams %s by the neon and the lamps, contact "
+            "AO, KEEP_HBAO: runs on against off", patterns[index]);
+        int largest = 0;
+        const uint32_t differing = differing_pixels(with, without, &largest);
+        printf("%s: %u pixels differ (largest %d)\n", what, differing, largest);
+        failures += differing != 0u ? 1u : 0u;
+        char name[64];
+        (void)snprintf(name, sizeof(name), "look-runs-%s", patterns[index]);
+        dump_image(name, with);
+        free(with);
+        free(without);
+    }
+    assert(failures == 0u);
+}
+
 /* 0.12.0: BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (Be The Bullet Hell v2's weapon beams and glows keep the
    cascades' point-light boost under KEEP_HBAO, while its light overlays draw as without the cascades). A beam (a long
    thin additive unlit box) over the street by the neon, nothing glowing, additive cascades:
@@ -3096,6 +3177,7 @@ int main(void) {
 #endif
 #if defined(SMOKE_HAS_0120)
         check_keep_cascades_look(&smoke, device);
+        check_look_runs(&smoke);
 #endif
         check_refusals(&smoke);
 #endif
