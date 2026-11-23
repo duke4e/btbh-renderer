@@ -51,6 +51,8 @@ typedef struct BTBHGPUSceneShaderCheck {
     bool has_dig_mask;
     bool has_world_detail;
     bool has_world_detail_table;
+    /* RFC 0010: the radiance cascades' trace shader reads the sources' tops (btbh_gpu_scene_check_rc_shader). */
+    bool has_source_top;
 } BTBHGPUSceneShaderCheck;
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -6022,6 +6024,7 @@ static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRu
     fresh.has_dig_mask = btbh_gpu_scene_bytes_name(bytes, byte_count, "dig_mask_texture");
     fresh.has_world_detail = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_normal_texture");
     fresh.has_world_detail_table = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_maps");
+    fresh.has_source_top = btbh_gpu_scene_bytes_name(bytes, byte_count, "source_top_texture");
     SDL_free(bytes);
     const size_t path_length = strlen(path);
     fresh.path = (char *)malloc(path_length + 1u);
@@ -6130,6 +6133,43 @@ static bool btbh_gpu_scene_check_scene_shader(
         }
     }
     return true;
+}
+
+/* RFC 0010: older radiance-cascade shaders draw a frame with BTBHGPUSceneRadianceCascades.source_tops on without a
+   word (the tops texture and the switch go unread), so every source would light every height. With the switch on and
+   the cascades running, the trace shader beside the post shaders (production_hrc_trace.comp, built with its
+   siblings) must name source_top_texture. Read once per path, as the scene shaders are; Metal libraries aren't
+   checked. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path), when it doesn't. */
+static bool btbh_gpu_scene_check_rc_shader(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUScenePost *post,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    bool radiance_cascades_active,
+    BTBHGPUSceneReport *report
+) {
+    if (!radiance_cascades_active || post->radiance_cascades.source_tops == 0u ||
+        shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV || post_fragment_shader_path == NULL) {
+        return true;
+    }
+    char trace_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (!btbh_gpu_scene_sibling_path(post_fragment_shader_path, "production_hrc_trace.comp.spv", trace_path)) {
+        return true;
+    }
+    const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, trace_path);
+    if (checked == NULL || checked->has_source_top) {
+        return true;
+    }
+    char message[sizeof(report->message)];
+    (void)snprintf(
+        message,
+        sizeof(message),
+        "radiance_cascades.source_tops is on, and the radiance-cascade shaders don't read the sources' tops (build "
+        "them from 0.10.0 or later): %s",
+        trace_path
+    );
+    btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+    return false;
 }
 
 static void btbh_gpu_scene_dig_uniforms(
@@ -6616,6 +6656,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
         (batches == NULL && batch_count > 0u) ||
         (bone_offsets == NULL && prepared_geometry_count > 0u) ||
         runtime->radiance_cascades.source_field_texture == NULL ||
+        runtime->radiance_cascades.source_top_texture == NULL ||
         runtime->radiance_cascades.material_source_pipelines[0] == NULL ||
         runtime->radiance_cascades.material_source_pipelines[1] == NULL ||
         runtime->radiance_cascades.source_field_width == 0u ||
@@ -6640,16 +6681,20 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     const float inverse_world_height = 1.0f /
         ((float)runtime->radiance_cascades.source_field_height * cell_size);
 
-    SDL_GPUColorTargetInfo target;
-    SDL_zero(target);
-    target.texture = runtime->radiance_cascades.source_field_texture;
-    target.load_op = SDL_GPU_LOADOP_LOAD;
-    target.store_op = SDL_GPU_STOREOP_STORE;
+    /* The source field and (RFC 0010) the sources' tops, both as the emitter pass left them. */
+    SDL_GPUColorTargetInfo targets[2];
+    SDL_zeroa(targets);
+    targets[0].texture = runtime->radiance_cascades.source_field_texture;
+    targets[0].load_op = SDL_GPU_LOADOP_LOAD;
+    targets[0].store_op = SDL_GPU_STOREOP_STORE;
+    targets[1].texture = runtime->radiance_cascades.source_top_texture;
+    targets[1].load_op = SDL_GPU_LOADOP_LOAD;
+    targets[1].store_op = SDL_GPU_STOREOP_STORE;
     SDL_InsertGPUDebugLabel(command, "BTBH RC Material Sources");
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
         command,
-        &target,
-        1u,
+        targets,
+        2u,
         NULL
     );
     if (pass == NULL) {
@@ -7848,6 +7893,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             shader_format,
             setup.shadows_active,
             setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
+        ) ||
+        !btbh_gpu_scene_check_rc_shader(
+            runtime,
+            post,
+            post_fragment_shader_path,
+            shader_format,
             setup.radiance_cascades_active,
             report
         )) {
@@ -10663,6 +10716,14 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             shader_format,
             setup.shadows_active,
             setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
+        ) ||
+        !btbh_gpu_scene_check_rc_shader(
+            window->scene_runtime,
+            post,
+            post_fragment_shader_path,
+            shader_format,
             setup.radiance_cascades_active,
             report
         ) ||

@@ -31,7 +31,15 @@ struct FragmentInput
     float3 world_position : TEXCOORD2;
 };
 
-float4 main(FragmentInput input) : SV_Target0
+struct FragmentOutput
+{
+    float4 source : SV_Target0;
+    // RFC 0010: the glowing fragment's world height, blended with MAX into the R16F tops texture: the highest in
+    // each texel is that texel's top. A discarded fragment writes nothing.
+    float top : SV_Target1;
+};
+
+FragmentOutput main(FragmentInput input)
 {
     const float4 raw_albedo = albedo_texture.Sample(
         albedo_sampler,
@@ -61,5 +69,8 @@ float4 main(FragmentInput input) : SV_Target0
     {
         discard;
     }
-    return float4(radiance, saturate(coverage));
+    FragmentOutput output;
+    output.source = float4(radiance, saturate(coverage));
+    output.top = input.world_position.y;
+    return output;
 }

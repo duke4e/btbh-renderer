@@ -134,6 +134,19 @@ bool btbh_gpu_radiance_cascades_config_valid(
             return false;
         }
     }
+    /* RFC 0010: source_tops is 0 or 1. With 1 every emitter's top_above is finite and at least 0; with 0 it isn't
+       read, so a host that left garbage in what was the reserved word still draws. */
+    if (config->source_tops > 1u) {
+        return false;
+    }
+    if (config->source_tops != 0u) {
+        for (uint32_t index = 0u; index < config->emitter_count; ++index) {
+            const float top_above = config->emitters[index].top_above;
+            if (!isfinite(top_above) || top_above < 0.0f) {
+                return false;
+            }
+        }
+    }
     return
         btbh_gpu_radiance_cascades_tier_valid(config->tier) &&
         btbh_gpu_radiance_cascades_backend_valid(config->backend) &&
@@ -146,6 +159,54 @@ bool btbh_gpu_radiance_cascades_config_valid(
         (config->tier != BTBH_GPU_SCENE_RC_AUTO ||
          (isfinite(config->auto_frame_budget_milliseconds) &&
           config->auto_frame_budget_milliseconds > 0.0f));
+}
+
+float btbh_gpu_radiance_cascades_emitter_top(
+    const BTBHGPUSceneRadianceEmitter *emitter
+) {
+    return emitter != NULL ? emitter->position_y + emitter->top_above : 0.0f;
+}
+
+bool btbh_gpu_radiance_cascades_piece_passes_over(
+    float start_height,
+    float top,
+    float cell_size
+) {
+    return start_height > top + cell_size * BTBH_GPU_RC_SOURCE_TOP_MARGIN;
+}
+
+float btbh_gpu_radiance_cascades_half_round(float value) {
+    if (!isfinite(value) || value == 0.0f) {
+        return value;
+    }
+    const float magnitude = fabsf(value);
+    /* Past the largest half float (65504) and half its last step: infinite, as the conversion rounds it. */
+    if (magnitude >= 65520.0f) {
+        return copysignf(INFINITY, value);
+    }
+    int exponent = 0;
+    (void)frexpf(magnitude, &exponent);
+    /* A half keeps 11 significant bits down to 2^-14, and steps of 2^-24 below (subnormals). */
+    const int step_exponent = exponent - 11 < -24 ? -24 : exponent - 11;
+    const float steps = ldexpf(magnitude, -step_exponent);
+    return copysignf(ldexpf(nearbyintf(steps), step_exponent), value);
+}
+
+void btbh_gpu_radiance_cascades_tops_lookup_offset(
+    const float normal[3],
+    float offset[2]
+) {
+    offset[0] = -0.5f;
+    offset[1] = -0.5f;
+    if (normal == NULL || fabsf(normal[1]) >= 0.7f) {
+        return;
+    }
+    const float level = sqrtf(normal[0] * normal[0] + normal[2] * normal[2]);
+    if (level <= 0.0f) {
+        return;
+    }
+    offset[0] += normal[0] / level * 0.5f;
+    offset[1] += normal[2] / level * 0.5f;
 }
 
 static bool btbh_gpu_radiance_emitter_is_directional(
@@ -442,7 +503,8 @@ typedef struct BTBHGPUHRCTraceUniforms {
     float origin_cell[4];
     uint32_t field_dimensions[2];
     uint32_t max_step_count;
-    uint32_t padding;
+    /* RFC 0010: BTBHGPUSceneRadianceCascades.source_tops (was padding). */
+    uint32_t source_tops;
     float environment_radiance[4];
     float directional_direction_energy[4];
     float directional_color_lobe[4];
@@ -505,6 +567,9 @@ typedef struct BTBHGPUHRCFinishUniforms {
     float secondary_directional_color_lobe[4];
     float sky_top_energy[4];
     float sky_horizon_curve[4];
+    /* RFC 0010: BTBHGPUSceneRadianceCascades.source_tops. Earlier finish shaders read the block's first 176 bytes. */
+    uint32_t source_tops;
+    uint32_t padding[3];
 } BTBHGPUHRCFinishUniforms;
 
 typedef struct BTBHGPUHRCBlurUniforms {
@@ -527,7 +592,10 @@ typedef struct BTBHGPUHRCResolveUniforms {
     float inverse_view_projection[16];
     float origin_cell[4];
     uint32_t field_dimensions[2];
-    uint32_t padding1[2];
+    /* RFC 0010: BTBHGPUSceneRadianceCascades.source_tops (was padding): steep faces read the field half a texel out
+       from their wall. */
+    uint32_t source_tops;
+    uint32_t padding1;
     float irradiance_sh[9][4];
     float environment_controls[4];
     float hero_omni_shadow_position_range[4];
@@ -554,7 +622,10 @@ typedef struct BTBHGPUSceneRadianceEmitterGPU {
 typedef struct BTBHGPUSceneRadianceSourceUniforms {
     float origin_cell[4];
     uint32_t dimensions[2];
-    uint32_t padding[2];
+    /* RFC 0010: BTBHGPUSceneRadianceCascades.source_tops (was padding; production_rc_source only): a spot then draws
+       its top over at least 1.5 texels round it, as the directional-source pass draws its light. */
+    uint32_t source_tops;
+    uint32_t padding;
 } BTBHGPUSceneRadianceSourceUniforms;
 
 typedef struct BTBHGPUSceneRadianceDirectionalSourceUniforms {
@@ -583,7 +654,7 @@ _Static_assert(sizeof(BTBHGPUHRCMergeDownUniforms) == 48u,
     "HRC merge-down uniform block must match shader layout");
 _Static_assert(sizeof(BTBHGPUHRCReprojectUniforms) == 64u,
     "HRC reproject uniform block must match shader layout");
-_Static_assert(sizeof(BTBHGPUHRCFinishUniforms) == 176u,
+_Static_assert(sizeof(BTBHGPUHRCFinishUniforms) == 192u,
     "HRC finish uniform block must match shader layout");
 _Static_assert(sizeof(BTBHGPUHRCBlurUniforms) == 16u,
     "HRC blur uniform block must match shader layout");
@@ -851,6 +922,25 @@ btbh_gpu_radiance_cascades_create_compose_pipeline(
     return pipeline;
 }
 
+/* RFC 0010: the second colour target of both source passes, the R16F tops texture. MAX keeps the highest top of the
+   sources in a texel, so a texel shared by a low and a high source errs toward lighting every height. */
+static void btbh_gpu_radiance_cascades_top_target_description(
+    SDL_GPUColorTargetDescription *target
+) {
+    SDL_zerop(target);
+    target->format = SDL_GPU_TEXTUREFORMAT_R16_FLOAT;
+    target->blend_state.enable_blend = true;
+    target->blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R;
+    target->blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;
+    target->blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
+    target->blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+}
+
+/* top_target (the emitter pass, RFC 0010): the vertex shader also reads the emitters' tops (a second storage buffer),
+   and the pass has a second colour target, the R16F tops texture, blended with MAX. */
 static SDL_GPUGraphicsPipeline *
 btbh_gpu_radiance_cascades_create_source_pipeline(
     SDL_GPUDevice *device,
@@ -858,6 +948,7 @@ btbh_gpu_radiance_cascades_create_source_pipeline(
     const char *fragment_path,
     BTBHGPUShaderFormat shader_format,
     uint32_t fragment_sampler_count,
+    bool top_target,
     bool *shaders_loaded,
     char *message,
     size_t message_capacity
@@ -870,7 +961,7 @@ btbh_gpu_radiance_cascades_create_source_pipeline(
         vertex_path,
         shader_format,
         SDL_GPU_SHADERSTAGE_VERTEX,
-        1u,
+        top_target ? 2u : 1u,
         0u,
         1u,
         message,
@@ -899,17 +990,19 @@ btbh_gpu_radiance_cascades_create_source_pipeline(
     if (shaders_loaded != NULL) {
         *shaders_loaded = true;
     }
-    SDL_GPUColorTargetDescription target;
-    SDL_zero(target);
-    target.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
-    target.blend_state.enable_blend = true;
-    target.blend_state.color_write_mask = 0x0fu;
-    target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
-    target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-    target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    SDL_GPUColorTargetDescription targets[2];
+    SDL_zeroa(targets);
+    SDL_GPUColorTargetDescription *target = &targets[0];
+    target->format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    target->blend_state.enable_blend = true;
+    target->blend_state.color_write_mask = 0x0fu;
+    target->blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    target->blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    target->blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    btbh_gpu_radiance_cascades_top_target_description(&targets[1]);
     SDL_GPUGraphicsPipelineCreateInfo info;
     SDL_zero(info);
     info.vertex_shader = vertex;
@@ -920,8 +1013,8 @@ btbh_gpu_radiance_cascades_create_source_pipeline(
     info.rasterizer_state.front_face =
         SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    info.target_info.color_target_descriptions = &target;
-    info.target_info.num_color_targets = 1u;
+    info.target_info.color_target_descriptions = targets;
+    info.target_info.num_color_targets = top_target ? 2u : 1u;
     SDL_GPUGraphicsPipeline *pipeline =
         btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment);
@@ -987,23 +1080,26 @@ btbh_gpu_radiance_cascades_create_material_source_pipeline(
         *shaders_loaded = true;
     }
 
-    SDL_GPUColorTargetDescription target;
+    /* The source field, and (RFC 0010) the tops texture: each glowing fragment's world height. */
+    SDL_GPUColorTargetDescription targets[2];
     SDL_GPUVertexBufferDescription vertex_buffer;
     SDL_GPUVertexAttribute attributes[7];
     SDL_GPUGraphicsPipelineCreateInfo info;
-    SDL_zero(target);
+    SDL_zeroa(targets);
     SDL_zero(vertex_buffer);
     SDL_zeroa(attributes);
     SDL_zero(info);
-    target.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
-    target.blend_state.enable_blend = true;
-    target.blend_state.color_write_mask = 0x0fu;
-    target.blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;
-    target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
-    target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    SDL_GPUColorTargetDescription *target = &targets[0];
+    target->format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    target->blend_state.enable_blend = true;
+    target->blend_state.color_write_mask = 0x0fu;
+    target->blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;
+    target->blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
+    target->blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    target->blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    btbh_gpu_radiance_cascades_top_target_description(&targets[1]);
 
     vertex_buffer.slot = 0u;
     vertex_buffer.pitch = BTBH_GPU_RC_MODEL_VERTEX_STRIDE;
@@ -1052,8 +1148,8 @@ btbh_gpu_radiance_cascades_create_material_source_pipeline(
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    info.target_info.color_target_descriptions = &target;
-    info.target_info.num_color_targets = 1u;
+    info.target_info.color_target_descriptions = targets;
+    info.target_info.num_color_targets = 2u;
     SDL_GPUGraphicsPipeline *pipeline =
         btbh_gpu_create_graphics_pipeline(device, &info);
     SDL_ReleaseGPUShader(device, fragment);
@@ -1285,6 +1381,7 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
     }
 
     if (runtime->emitter_buffer == NULL ||
+        runtime->emitter_top_buffer == NULL ||
         runtime->emitter_transfer_buffer == NULL ||
         runtime->emitter_capacity < config->emitter_count) {
         uint32_t capacity = runtime->emitter_capacity > 0u
@@ -1299,7 +1396,9 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
         }
         const uint64_t buffer_size_64 =
             (uint64_t)capacity * sizeof(BTBHGPUSceneRadianceEmitterGPU);
-        if (buffer_size_64 == 0u || buffer_size_64 > UINT32_MAX) {
+        const uint64_t top_size_64 = (uint64_t)capacity * sizeof(float);
+        if (buffer_size_64 == 0u ||
+            buffer_size_64 + top_size_64 > UINT32_MAX) {
             return false;
         }
         SDL_GPUBufferCreateInfo buffer_info;
@@ -1310,20 +1409,30 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
         if (buffer == NULL) {
             return false;
         }
+        buffer_info.size = (uint32_t)top_size_64;
+        SDL_GPUBuffer *top_buffer = SDL_CreateGPUBuffer(device, &buffer_info);
+        if (top_buffer == NULL) {
+            SDL_ReleaseGPUBuffer(device, buffer);
+            return false;
+        }
         SDL_GPUTransferBufferCreateInfo transfer_info;
         SDL_zero(transfer_info);
         transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        transfer_info.size = (uint32_t)buffer_size_64;
+        transfer_info.size = (uint32_t)(buffer_size_64 + top_size_64);
         SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
             device,
             &transfer_info
         );
         if (transfer == NULL) {
+            SDL_ReleaseGPUBuffer(device, top_buffer);
             SDL_ReleaseGPUBuffer(device, buffer);
             return false;
         }
         if (runtime->emitter_buffer != NULL) {
             SDL_ReleaseGPUBuffer(device, runtime->emitter_buffer);
+        }
+        if (runtime->emitter_top_buffer != NULL) {
+            SDL_ReleaseGPUBuffer(device, runtime->emitter_top_buffer);
         }
         if (runtime->emitter_transfer_buffer != NULL) {
             SDL_ReleaseGPUTransferBuffer(
@@ -1332,6 +1441,7 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
             );
         }
         runtime->emitter_buffer = buffer;
+        runtime->emitter_top_buffer = top_buffer;
         runtime->emitter_transfer_buffer = transfer;
         runtime->emitter_capacity = capacity;
     }
@@ -1345,6 +1455,8 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
     if (mapped == NULL) {
         return false;
     }
+    /* The tops follow the records, from the capacity's end of them (the upload copies both). */
+    float *mapped_tops = (float *)(void *)(mapped + runtime->emitter_capacity);
     const uint32_t directional_count =
         btbh_gpu_radiance_cascades_directional_emitter_count(config);
     uint32_t directional_cursor = 0u;
@@ -1375,6 +1487,9 @@ static bool btbh_gpu_radiance_cascades_ensure_emitter_buffer(
         destination->outer_shape[2] =
             source->direct_energy / source->energy;
         destination->outer_shape[3] = (float)source->light_class;
+        mapped_tops[destination_index] = config->source_tops != 0u
+            ? btbh_gpu_radiance_cascades_emitter_top(source)
+            : 0.0f;
     }
     SDL_UnmapGPUTransferBuffer(device, runtime->emitter_transfer_buffer);
     runtime->emitter_count = config->emitter_count;
@@ -1418,6 +1533,10 @@ static void btbh_gpu_radiance_cascades_release_resources(
     if (runtime->source_field_texture != NULL) {
         SDL_ReleaseGPUTexture(device, runtime->source_field_texture);
         runtime->source_field_texture = NULL;
+    }
+    if (runtime->source_top_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->source_top_texture);
+        runtime->source_top_texture = NULL;
     }
     if (runtime->directional_source_texture != NULL) {
         SDL_ReleaseGPUTexture(
@@ -1496,6 +1615,10 @@ void btbh_gpu_radiance_cascades_runtime_release(
     if (runtime->emitter_buffer != NULL) {
         SDL_ReleaseGPUBuffer(device, runtime->emitter_buffer);
         runtime->emitter_buffer = NULL;
+    }
+    if (runtime->emitter_top_buffer != NULL) {
+        SDL_ReleaseGPUBuffer(device, runtime->emitter_top_buffer);
+        runtime->emitter_top_buffer = NULL;
     }
     if (runtime->emitter_transfer_buffer != NULL) {
         SDL_ReleaseGPUTransferBuffer(
@@ -1694,6 +1817,7 @@ static bool btbh_gpu_radiance_cascades_ensure_pipelines(
                 source_fragment_path,
                 shader_format,
                 0u,
+                true,
                 &shader_loaded,
                 message,
                 message_capacity
@@ -1743,6 +1867,7 @@ static bool btbh_gpu_radiance_cascades_ensure_pipelines(
                 directional_source_fragment_path,
                 shader_format,
                 0u,
+                false,
                 &shader_loaded,
                 message,
                 message_capacity
@@ -1792,6 +1917,7 @@ static bool btbh_gpu_radiance_cascades_ensure_pipelines(
                 direct_light_fragment_path,
                 shader_format,
                 1u,
+                false,
                 &shader_loaded,
                 message,
                 message_capacity
@@ -1877,8 +2003,9 @@ static bool btbh_gpu_radiance_cascades_ensure_pipelines(
         "production_hrc_resolve.comp",
         "production_hrc_reconstruct.comp"
     };
+    /* RFC 0010: the trace's fourth and the finish's fifth texture are the sources' tops. */
     static const uint32_t hrc_sampler_counts[] = {
-        3u, 1u, 3u, 3u, 4u, 1u, 8u, 3u
+        4u, 1u, 3u, 3u, 5u, 1u, 8u, 3u
     };
     for (uint32_t index = 0u;
          index < (uint32_t)(sizeof(hrc_pipelines) / sizeof(hrc_pipelines[0]));
@@ -1966,6 +2093,7 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
     if (runtime->indirect_texture != NULL &&
         runtime->composed_texture != NULL &&
         runtime->source_field_texture != NULL &&
+        runtime->source_top_texture != NULL &&
         runtime->directional_source_texture != NULL &&
         runtime->direct_light_texture != NULL &&
         runtime->fallback_cube_texture != NULL &&
@@ -1986,6 +2114,15 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
         btbh_gpu_radiance_cascades_create_texture(
             device,
             SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                SDL_GPU_TEXTUREUSAGE_SAMPLER,
+            source_field_width,
+            source_field_height
+        );
+    runtime->source_top_texture =
+        btbh_gpu_radiance_cascades_create_texture(
+            device,
+            SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
             SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
                 SDL_GPU_TEXTUREUSAGE_SAMPLER,
             source_field_width,
@@ -2100,6 +2237,7 @@ static bool btbh_gpu_radiance_cascades_ensure_textures(
             render_height
         );
     if (runtime->source_field_texture == NULL ||
+        runtime->source_top_texture == NULL ||
         runtime->directional_source_texture == NULL ||
         runtime->direct_light_texture == NULL ||
         runtime->fallback_cube_texture == NULL ||
@@ -2427,6 +2565,24 @@ bool btbh_gpu_radiance_cascades_runtime_prepare(
         );
         return false;
     }
+    if (!SDL_GPUTextureSupportsFormat(
+            device,
+            SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
+            SDL_GPU_TEXTURETYPE_2D,
+            SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                SDL_GPU_TEXTUREUSAGE_SAMPLER
+        )) {
+        btbh_gpu_radiance_cascades_message(
+            message,
+            message_capacity,
+            "R16F source-top render targets are unavailable"
+        );
+        btbh_gpu_radiance_cascades_mark_failure(
+            &runtime->state,
+            BTBH_GPU_SCENE_RC_FALLBACK_CAPABILITY_UNAVAILABLE
+        );
+        return false;
+    }
     if (!btbh_gpu_radiance_cascades_ensure_occlusion_textures(
             device,
             runtime,
@@ -2512,6 +2668,7 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
         runtime->directional_source_pipeline == NULL ||
         runtime->direct_light_pipeline == NULL ||
         runtime->source_field_texture == NULL ||
+        runtime->source_top_texture == NULL ||
         runtime->directional_source_texture == NULL ||
         runtime->direct_light_texture == NULL ||
         runtime->occlusion_textures[0] == NULL) {
@@ -2583,6 +2740,18 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
                 &destination_region,
                 true
             );
+            /* RFC 0010: the tops, from the records' capacity on. */
+            source_location.offset = runtime->emitter_capacity *
+                (uint32_t)sizeof(BTBHGPUSceneRadianceEmitterGPU);
+            destination_region.buffer = runtime->emitter_top_buffer;
+            destination_region.size =
+                runtime->emitter_count * (uint32_t)sizeof(float);
+            SDL_UploadToGPUBuffer(
+                copy,
+                &source_location,
+                &destination_region,
+                true
+            );
         }
         SDL_EndGPUCopyPass(copy);
         for (uint32_t index = 0u;
@@ -2596,16 +2765,22 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
         }
         runtime->occlusion_upload_pending_mask = 0u;
     }
-    SDL_GPUColorTargetInfo target;
-    SDL_zero(target);
-    target.texture = runtime->source_field_texture;
-    target.load_op = SDL_GPU_LOADOP_CLEAR;
-    target.store_op = SDL_GPU_STOREOP_STORE;
-    target.cycle = true;
+    /* The source field, and (RFC 0010) the sources' tops, cleared to no source. */
+    SDL_GPUColorTargetInfo targets[2];
+    SDL_zeroa(targets);
+    targets[0].texture = runtime->source_field_texture;
+    targets[0].load_op = SDL_GPU_LOADOP_CLEAR;
+    targets[0].store_op = SDL_GPU_STOREOP_STORE;
+    targets[0].cycle = true;
+    targets[1].texture = runtime->source_top_texture;
+    targets[1].clear_color.r = BTBH_GPU_RC_SOURCE_TOP_NONE;
+    targets[1].load_op = SDL_GPU_LOADOP_CLEAR;
+    targets[1].store_op = SDL_GPU_STOREOP_STORE;
+    targets[1].cycle = true;
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
         command,
-        &target,
-        1u,
+        targets,
+        2u,
         NULL
     );
     if (pass == NULL) {
@@ -2632,12 +2807,17 @@ bool btbh_gpu_radiance_cascades_runtime_encode_emitters(
         }
         uniforms.dimensions[0] = runtime->source_field_width;
         uniforms.dimensions[1] = runtime->source_field_height;
+        uniforms.source_tops = config->source_tops != 0u ? 1u : 0u;
         SDL_BindGPUGraphicsPipeline(pass, runtime->source_pipeline);
+        SDL_GPUBuffer *source_buffers[2] = {
+            runtime->emitter_buffer,
+            runtime->emitter_top_buffer
+        };
         SDL_BindGPUVertexStorageBuffers(
             pass,
             0u,
-            &runtime->emitter_buffer,
-            1u
+            source_buffers,
+            2u
         );
         SDL_PushGPUVertexUniformData(
             command,
@@ -3110,12 +3290,13 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     telemetry->reconstruct_dispatch_count = 0u;
     telemetry->compose_draw_count = 0u;
 
-    SDL_GPUTextureSamplerBinding trace_samplers[3];
+    SDL_GPUTextureSamplerBinding trace_samplers[4];
     SDL_zeroa(trace_samplers);
     trace_samplers[0].texture = runtime->source_field_texture;
     trace_samplers[1].texture = runtime->occlusion_textures[0];
     trace_samplers[2].texture = runtime->directional_source_texture;
-    for (uint32_t index = 0u; index < 3u; ++index) {
+    trace_samplers[3].texture = runtime->source_top_texture;
+    for (uint32_t index = 0u; index < 4u; ++index) {
         trace_samplers[index].sampler = runtime->sampler;
     }
     for (uint32_t level = 0u; level < layout->level_count; ++level) {
@@ -3142,6 +3323,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
             uniforms.field_dimensions[0] = runtime->source_field_width;
             uniforms.field_dimensions[1] = runtime->source_field_height;
             uniforms.max_step_count = 128u;
+            uniforms.source_tops = config->source_tops != 0u ? 1u : 0u;
             btbh_gpu_hrc_fill_lighting_uniforms(
                 lighting,
                 config->additive != 0u,
@@ -3166,7 +3348,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
                     runtime->hrc_trace_pipeline,
                     runtime->hrc_acceleration_textures[level],
                     trace_samplers,
-                    3u,
+                    4u,
                     &uniforms,
                     (uint32_t)sizeof(uniforms),
                     level_layout->acceleration_atlas_width,
@@ -3325,6 +3507,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     finish_uniforms.field_dimensions[0] = runtime->source_field_width;
     finish_uniforms.field_dimensions[1] = runtime->source_field_height;
     finish_uniforms.max_step_count = 64u;
+    finish_uniforms.source_tops = config->source_tops != 0u ? 1u : 0u;
     btbh_gpu_hrc_fill_lighting_uniforms(
         lighting,
         config->additive != 0u,
@@ -3336,14 +3519,15 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
         finish_uniforms.sky_top_energy,
         finish_uniforms.sky_horizon_curve
     );
-    SDL_GPUTextureSamplerBinding finish_samplers[4];
+    SDL_GPUTextureSamplerBinding finish_samplers[5];
     SDL_zeroa(finish_samplers);
     finish_samplers[0].texture =
         runtime->hrc_radiance_textures[current_radiance];
     finish_samplers[1].texture = runtime->source_field_texture;
     finish_samplers[2].texture = runtime->occlusion_textures[0];
     finish_samplers[3].texture = runtime->directional_source_texture;
-    for (uint32_t index = 0u; index < 4u; ++index) {
+    finish_samplers[4].texture = runtime->source_top_texture;
+    for (uint32_t index = 0u; index < 5u; ++index) {
         finish_samplers[index].sampler = runtime->sampler;
     }
     if (!temporal_history_valid) {
@@ -3355,7 +3539,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
                 runtime->hrc_finish_pipeline,
                 runtime->hrc_quadrant_textures[0],
                 finish_samplers,
-                4u,
+                5u,
                 &finish_uniforms,
                 (uint32_t)sizeof(finish_uniforms),
                 layout->quadrant_atlas_width,
@@ -3383,7 +3567,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
                     runtime->hrc_finish_pipeline,
                     runtime->hrc_quadrant_textures[0],
                     finish_samplers,
-                    4u,
+                    5u,
                     &finish_uniforms,
                     (uint32_t)sizeof(finish_uniforms),
                     layout->quadrant_atlas_width,
@@ -3486,6 +3670,7 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     resolve_uniforms.origin_cell[3] = 1.0f / field_cell_size;
     resolve_uniforms.field_dimensions[0] = runtime->source_field_width;
     resolve_uniforms.field_dimensions[1] = runtime->source_field_height;
+    resolve_uniforms.source_tops = config->source_tops != 0u ? 1u : 0u;
     for (uint32_t coefficient = 0u; coefficient < 9u; ++coefficient) {
         for (uint32_t channel = 0u; channel < 3u; ++channel) {
             resolve_uniforms.irradiance_sh[coefficient][channel] =

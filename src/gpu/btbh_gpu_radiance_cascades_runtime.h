@@ -27,12 +27,18 @@ typedef struct BTBHGPUSceneRadianceCascadesRuntime {
     SDL_GPUGraphicsPipeline *compose_pipeline;
     SDL_GPUSampler *sampler;
     SDL_GPUBuffer *emitter_buffer;
+    /* RFC 0010: each emitter's top, one float in the records' order (0 with source_tops 0), for production_rc_source.
+       The transfer buffer holds the records, then the tops from emitter_capacity records on. */
+    SDL_GPUBuffer *emitter_top_buffer;
     SDL_GPUTransferBuffer *emitter_transfer_buffer;
     uint32_t emitter_capacity;
     uint32_t emitter_count;
     uint32_t directional_emitter_count;
     uint32_t emitter_upload_size;
     SDL_GPUTexture *source_field_texture;
+    /* RFC 0010: R16F at the source field's size, the highest top of the sources in each texel (MAX blend; cleared to
+       BTBH_GPU_RC_SOURCE_TOP_NONE). Made, cleared, written and bound whatever source_tops says; read with it on. */
+    SDL_GPUTexture *source_top_texture;
     SDL_GPUTexture *directional_source_texture;
     SDL_GPUTexture *direct_light_texture;
     SDL_GPUTexture *fallback_cube_texture;

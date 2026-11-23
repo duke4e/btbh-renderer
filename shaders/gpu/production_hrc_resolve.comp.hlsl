@@ -32,7 +32,9 @@ cbuffer HRCResolveUniforms : register(b0, space2)
     float4x4 inverse_view_projection;
     float4 origin_cell;
     uint2 field_dimensions;
-    uint2 padding1;
+    // RFC 0010: BTBHGPUSceneRadianceCascades.source_tops: steep faces read the field half a texel out from their wall.
+    uint source_tops;
+    uint padding1;
     float4 irradiance_sh[9];
     float4 environment_controls;
     float4 hero_omni_shadow_position_range;
@@ -257,6 +259,20 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         ? normalize(encoded_normal.xyz * 2.0f - 1.0f)
         : float3(0.0f, 1.0f, 0.0f);
     const float occlusion = saturate(encoded_normal.a);
+    // RFC 0010: with sources' tops the trace and finish read the field where its texels lie (their frame 0), and so
+    // does the resolve: half a texel back toward -x and -z of field_cell. A wall's texel then starts its pieces at
+    // the roof and no longer takes the street's glow, so a steep face (less than 45 degrees from level) reads the
+    // field half a texel along its normal's level part, on the street side of its wall. With source_tops 0 the
+    // lookup is as before.
+    float2 light_cell = field_cell;
+    if (source_tops != 0u)
+    {
+        light_cell -= 0.5f;
+        if (abs(normal.y) < 0.7f)
+        {
+            light_cell += normalize(normal.xz) * 0.5f;
+        }
+    }
     const float4 albedo_material = albedo_in_emission != 0u
         ? float4(emission, 0.0f)
         : albedo_material_texture.SampleLevel(
@@ -287,7 +303,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         {
             const float2 direction = rotation_vector(rotation);
             const float3 light = normalize(float3(direction.x, 0.65f, direction.y));
-            bounce += quadrant_radiance(field_cell, rotation).rgb * saturate(dot(normal, light));
+            bounce += quadrant_radiance(light_cell, rotation).rgb * saturate(dot(normal, light));
         }
         indirect_output[dispatch_id.xy] = float4(
             albedo * (1.0f - metalness) * bounce * (2.0f * indirect_strength),
@@ -346,7 +362,7 @@ void main(uint3 dispatch_id : SV_DispatchThreadID)
         {
             continue;
         }
-        const float4 quadrant = quadrant_radiance(field_cell, rotation);
+        const float4 quadrant = quadrant_radiance(light_cell, rotation);
         reflected_radiance += quadrant.rgb * evaluate_brdf(
             albedo,
             metalness,

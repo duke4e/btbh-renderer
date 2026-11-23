@@ -4,6 +4,9 @@ Texture2D<float2> occlusion_texture : register(t1, space0);
 SamplerState occlusion_sampler : register(s1, space0);
 Texture2D<float4> directional_source_texture : register(t2, space0);
 SamplerState directional_source_sampler : register(s2, space0);
+// RFC 0010: the sources' tops (R16F, the highest in each texel; -65504 where none is).
+Texture2D<float> source_top_texture : register(t3, space0);
+SamplerState source_top_sampler : register(s3, space0);
 RWTexture2D<float4> acceleration_output : register(u0, space1);
 
 cbuffer HRCTraceUniforms : register(b0, space2)
@@ -17,7 +20,8 @@ cbuffer HRCTraceUniforms : register(b0, space2)
     float4 origin_cell;
     uint2 field_dimensions;
     uint max_step_count;
-    uint padding;
+    // RFC 0010: BTBHGPUSceneRadianceCascades.source_tops.
+    uint source_tops;
     float4 environment_radiance;
     float4 directional_direction_energy;
     float4 directional_color_lobe;
@@ -147,9 +151,15 @@ float4 trace_display_segment(float2 start, float2 end)
     const float segment_length = max(length(delta), 0.0001f);
     const float2 ray_direction = delta / segment_length;
     const float angle = atan2(ray_direction.y, ray_direction.x);
+    // RFC 0010: with sources' tops the field is read where its texels lie: display position d stands for the field
+    // point d / linear_scale texels from the field's origin, whose texel centres lie half a texel in. 0.9.0's
+    // cascades read it half a texel further toward +x and +z (frame 0.5), which sets the two directions along each
+    // axis a texel apart: unseen in a smooth field, but it made the tops' shield depend on the way a street runs.
+    // With source_tops 0 the frame is as before, byte for byte.
+    const float frame = source_tops != 0u ? 0.0f : 0.5f;
     const float2 start_field = start / float(linear_scale);
     const float2 start_uv = saturate(
-        (start_field + 0.5f) / float2(field_dimensions)
+        (start_field + frame) / float2(field_dimensions)
     );
     const float2 start_occlusion = occlusion_texture.SampleLevel(
         occlusion_sampler,
@@ -182,7 +192,7 @@ float4 trace_display_segment(float2 start, float2 end)
         }
         const float2 field_cell = display_position / float(linear_scale);
         const float2 uv =
-            (field_cell + 0.5f) / float2(field_dimensions);
+            (field_cell + frame) / float2(field_dimensions);
         const float2 field = occlusion_texture.SampleLevel(
             occlusion_sampler,
             uv,
@@ -204,7 +214,17 @@ float4 trace_display_segment(float2 start, float2 end)
             0.0f
         );
         const float4 directed_source = directional_source(uv, angle);
-        if (hrc_source_composite(
+        // RFC 0010: a piece that starts higher than a source's top (plus a twentieth of a texel, for the half
+        // float's rounding) passes over it: none of its light, and no dimming. The source sample is bilinear, so the
+        // top is the highest of the four texels it read. Only where a source is: most steps compare one uniform.
+        bool passes_over = false;
+        if (source_tops != 0u && max(source.a, directed_source.a) > 0.001f)
+        {
+            const float4 tops = source_top_texture.GatherRed(source_top_sampler, uv);
+            const float top = max(max(tops.x, tops.y), max(tops.z, tops.w));
+            passes_over = receiver_height > top + origin_cell.z * 0.05f;
+        }
+        if (!passes_over && hrc_source_composite(
                 source,
                 directed_source,
                 background_luminance,
