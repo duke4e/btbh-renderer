@@ -1,17 +1,21 @@
 # RFC 0013: Lit particles
 
-- **Status:** Draft (2026-11-23), waiting for v2's answers
+- **Status:** Phase 1 accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator); phase 2 after
+  v2's phase 1 captures. See "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-23, after it shipped fake-lit smoke)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in. They rebuild the scene shaders with the C core, as every release. `SOFT_PARTICLE`, which CHIMERA and v2 draw,
-  doesn't change
-- **Issue:** none yet
-- **Target:** 0.11.0 for phase 1, or later; phase 2 after phase 1's captures
-- **Depends on:** nothing. Written against 0.10.0's work in progress (`c5390f0b`). On 64-bit the batch is 280 bytes
-  with `flags` at 253, `BTBHGPUScenePost` is 432 bytes with `flags` at 427, and `BTBHGPUSceneLighting` is 3,340 bytes
-  with `directional_shadow_reserved` at 3,337 (`tests/btbh_gpu_scene_order_test.c:24`, `:31`, `:112-115`; the last
-  offset worked out from the header). No struct grows. The new values go in an enum, in free bits of the two flag
-  bytes and, in phase 2, in one reserved byte of the lighting
+  doesn't change. `production_model.vert` and the four files built from it gain the UV rect's test: their SPIR-V
+  changes, their pictures don't
+- **Issue:** none. v2 answered all 13 questions through its session on 2026-11-23 (see "Decisions")
+- **Target:** 0.11.0 for phase 1; phase 2 after phase 1's captures
+- **Depends on:** nothing. Drafted against 0.10.0's work in progress (`c5390f0b`) and re-checked against
+  `release/0.11.0` (`fc2784ea`: 0.9.0, RFC 0011 phase 1, 0.10.0's fixes, RFC 0010 and RFC 0012); every line reference
+  below is `fc2784ea`'s. On 64-bit the batch is 288 bytes (RFC 0012's `height_lift` at 280) with `flags` at 253,
+  `BTBHGPUScenePost` is 432 bytes with `flags` at 427, and `BTBHGPUSceneLighting` is 3,340 bytes with
+  `directional_shadow_reserved[0]` at 3,337 and 0.10.0's `spot_occluder_flags` at 3,338
+  (`Tests/btbh_gpu_scene_order_test.c:25`, `:33-34`, `:122`, `:125`, `:149-152`). No struct grows. Phase 1 takes an enum
+  value and a free bit of the batch's flags; phase 2 a second bit and the lighting's reserved byte
 
 ## Need
 
@@ -19,7 +23,7 @@ v2 has shipped smoke that only looks lit. From its request:
 
 - It bakes lit puffs at five light tilts and turns each sprite toward the sun or a nearby fire, picking the tilt.
 - It draws them with the renderer's soft particles (`SOFT_PARTICLE`) and unlit mode 3, so the sun's shadow darkens them.
-- It needs 6–20 draws for its smoke.
+- It needs 9–11 draws for its smoke (13 at most; the request said 6–20, answer 4 corrected it).
 - Lamps, point lights and the radiance cascades don't light the puffs. The puffs shadow neither each other nor the
   street.
 
@@ -47,112 +51,111 @@ It asks for five things to replace this:
 
 - **The surface variants** are an enum, `NONE` (0) to `REFRACT` (10), with `COUNT` 11 (`include/btbh_gpu/btbh_gpu.h:548-581`).
   `SOFT_PARTICLE` (6) has no comment in the header. The present refuses a variant at or past `COUNT`
-  (`src/gpu/btbh_gpu_scene.c:4676-4679`) and a batch flag it doesn't know (`:4701-4705`).
-- **Soft particles** (`shaders/gpu/production_model.frag.hlsl:496-511`):
+  (`src/gpu/btbh_gpu_scene.c:4817-4820`) and a batch flag it doesn't know (`:4844-4849`).
+- **Soft particles** (`shaders/gpu/production_model.frag.hlsl:498-513`):
   - The normal slot carries the opaque scene's distance from the camera. The billboard's alpha fades over
     `surface_parameters0.x` render units where it meets the scene.
-  - The core swaps the texture into slot 2 (`btbh_gpu_scene.c:9417-9424`). Outside the transparent pass, or without the
-    distance, it draws the batch as `NONE` (`:9275-9280`).
-  - The distance is an R32F target at the render size (`:2447-2490`), written by `production_scene_distance.frag`
-    between the opaque and transparent passes (`:8664-8698`). Its pipeline is made on first use (`:2409-2445`), and the
-    pass runs only on frames that draw a soft particle or a refracting batch (`:2540-2555`, `:7462-7476`). The
+  - The core swaps the texture into slot 2 (`btbh_gpu_scene.c:9739-9746`). Outside the transparent pass, or without the
+    distance, it draws the batch as `NONE` (`:9575-9580`).
+  - The distance is an R32F target at the render size (`:2473-2516`), written by `production_scene_distance.frag`
+    between the opaque and transparent passes (`:8953-8987`). Its pipeline is made on first use (`:2435-2471`), and the
+    pass runs only on frames that draw a soft particle or a refracting batch (`:2566-2581`, `:7706-7720`). The
     background's distance is 10⁶ (`production_scene_distance.frag.hlsl:24-27`).
   - A soft particle still runs the full shader: it samples the albedo, emission, "normal" and ORM slots
-    (`production_model.frag.hlsl:2295-2318`), then loads the distance again.
-- **Unlit modes 2 and 3** (`btbh_gpu.h:961-963`, `production_model.frag.hlsl:2386-2404`):
+    (`production_model.frag.hlsl:2315-2338`), then loads the distance again.
+- **Unlit modes 2 and 3** (`btbh_gpu.h:1036-1038`, `production_model.frag.hlsl:2406-2425`):
   - The albedo is multiplied by `lerp(0.45, 1, visibility)` of the sun's shadow.
-  - Mode 3 asks for the "plain" lookup: four comparison taps with the receiver plane's gradient (`:1109-1123`). That
-    lookup belongs to the soft filter only. Under the tent filter, the default (`btbh_gpu.h:1079-1087`), mode 3 takes
-    the tent's 16 gathers (`production_model.frag.hlsl:1253-1318`).
-  - Point lights brighten unlit surfaces too (`:2468-2471`).
+  - Mode 3 asks for the "plain" lookup: four comparison taps with the receiver plane's gradient (`:1111-1125`). That
+    lookup belongs to the soft filter only. Under the tent filter, the default (`btbh_gpu.h:1178-1187`), mode 3 takes
+    the tent's 16 gathers (`production_model.frag.hlsl:1244-1321`, `:973-1004`).
+  - Point lights brighten unlit surfaces too (`:2488-2491`).
 
 ### The transparent pass
 
 - **Which batches.** `transparency_enabled`, or a blend other than `ALPHA`, puts a batch in the transparent pass
-  (`btbh_gpu_scene.c:1189-1195`). Its pipelines write no depth (`:1500-1505`). It writes the colour, plus the reactive
-  mask under FSR 3 (`:1532-1537`, `:1565-1577`, `:8723-8745`).
+  (`btbh_gpu_scene.c:1213-1219`). Its pipelines write no depth (`:1527-1531`). It writes the colour, plus the reactive
+  mask under FSR 3 (`:1561-1563`, `:1591-1603`, `:9012-9034`).
 - **What runs before it, in order:**
   - the opaque pass;
-  - the radiance cascades, whose compose adds their light to the opaque pixels (`:9624-9660`;
-    `btbh_gpu_radiance_cascades.c:3604-3640`);
-  - the HBAO (`btbh_gpu_scene.c:8463-8558`);
-  - the SSAO and SSR resolve (`:8559-8663`);
-  - the distance pass.
+  - the radiance cascades, whose compose adds their light to the opaque pixels (`:9948-10063`;
+    `btbh_gpu_radiance_cascades.c:3604-3852`);
+  - the HBAO (`btbh_gpu_scene.c:8752-8847`);
+  - the SSAO and SSR resolve (`:8848-8952`);
+  - the distance pass (`:8953-8987`).
 - **What it draws over.** The transparent pass draws on the result of all that (`radiance_cascades_post_input`,
-  `:8725`). Refracting batches follow in a pass of their own, over a copy that includes the transparent pass
-  (`:8699-8722`).
+  `:9014`). Refracting batches follow in a pass of their own, over a copy that includes the transparent pass
+  (`:8988-9011`).
 - **The order.** The batches draw in the order given. The opaque sort walks its own order, but only in the opaque pass
-  (`:9142-9150`; `btbh_gpu.h:1233-1234`). Its key is the view depth of the batch's mean instance centre
-  (`btbh_gpu_scene.c:5040-5087`), sorted in runs between pinned batches (`:5153-5214`).
-- **Shadows.** Transparent batches cast none (`:6277-6285`).
+  (`:9438-9449`; `btbh_gpu.h:1376`). Its key is the view depth of the batch's mean instance centre
+  (`btbh_gpu_scene.c:5228-5282`), sorted in runs between pinned batches (`:5346-5408`).
+- **Shadows.** Transparent batches cast none.
 - **The cascades' light.** No transparent batch takes it. The compose adds it to the opaque pixels before the
   transparent pass draws. In the transparent pass, even the cascades' fragment shader (`production_model_rc*.frag`)
   writes only its lit colour.
 
 ### Instances and texture coordinates
 
-- **The instance** is 24 floats (`btbh_gpu_scene.c:21-23`): `float4x4 model`, `float4 color`, `float4 custom`
-  (`production_model.vert.hlsl:18-23`). The packer writes the matrix by columns: the x axis times its scale in floats
+- **The instance** is 24 floats (`btbh_gpu_scene.c:22-24`): `float4x4 model`, `float4 color`, `float4 custom`
+  (`production_model.vert.hlsl:27-32`). The packer writes the matrix by columns: the x axis times its scale in floats
   0–2, the y axis in 4–6, the translation in 12–14. The colour goes in 16–19 and the custom floats in 20–23
-  (`src/gpu/btbh_gpu_instance_buffer.c:346-385`).
+  (`src/gpu/btbh_gpu_instance_buffer.c`).
 - **Who reads the custom floats:**
-  - `DISSOLVE` reads x, y and z; `SHATTER` reads y, z and w; `GLITTER` reads x (`btbh_gpu.h:852-853`;
-    `production_surface.hlsli:231-290`).
-  - A world detail's seed reads the one its `seed_component` names (`production_world_detail.hlsli:110`).
-  - Nothing else does. The vertex shader passes them on (`production_model.vert.hlsl:279`).
+  - `DISSOLVE` reads x, y and z; `SHATTER` reads y, z and w; `GLITTER` reads x (`btbh_gpu.h:899-900`;
+    `production_surface.hlsli`).
+  - A world detail's seed reads the one its `seed_component` names (`production_world_detail.hlsli`).
+  - Nothing else does. The vertex shader passes them on (`production_model.vert.hlsl:316`).
 - **The texture coordinate** is the mesh's, times the batch's `uv_scale` plus its `uv_offset`
-  (`production_model.vert.hlsl:274-275`). Both are in the same-material run key (`btbh_gpu_scene.c:4904-4907`). So
-  batches that differ only in their atlas cell don't run together, which matches v2's 6–20 draws.
-- **The vertex uniforms** use only `surface_controls.x`, the surface time (`production_model.vert.hlsl:49`;
-  `btbh_gpu_scene.c:9227`, and `:6751` in the cascades' source pass). Its y, z and w are free, and so are the block's
-  three `temporal_reserved` words (`production_temporal.hlsli:13-17`; `btbh_gpu_scene.c:91-92`).
+  (`production_model.vert.hlsl:311-312`). Both are in the same-material run key (`btbh_gpu_scene.c:5091-5094`). So
+  batches that differ only in their atlas cell don't run together, which matches v2's 9–11 draws.
+- **The vertex uniforms** use only `surface_controls.x`, the surface time (`btbh_gpu_scene.c:9523`, and `:6993` in the
+  cascades' source pass). Its y, z and w are free, and so are the block's three `temporal_reserved` words
+  (`production_temporal.hlsli:13-17`; `btbh_gpu_scene.c:95`).
 - **A billboard's frame.** The instance's linear part takes the vertex's offset, normal and tangent, which are then
-  laid out along the camera's right, up and `cross(right, up)` (`production_model.vert.hlsl:153-198`). The outputs are
-  normalized world normal, tangent and bitangent, the bitangent being `cross(normal, tangent)` times the tangent's w
-  (`:200-219`).
-- **What the shadow vertex shader passes on:** no texture coordinate (`production_shadow.vert.hlsl:31-37`). Shadow
-  passes never sample a texture.
+  laid out along the camera's right, up and `cross(right, up)` (`production_model.vert.hlsl:150-217`). The outputs are
+  normalized world normal, tangent and bitangent, the bitangent being `cross(normal, tangent)` times the tangent's w.
+- **What the shadow vertex shader passes on:** no texture coordinate (`production_shadow.vert.hlsl:31`). Shadow passes
+  never sample a texture.
 
 ### What a lit pixel's light is made of
 
 | Light | Function (`production_model.frag.hlsl`) | Per pixel |
 | --- | --- | --- |
-| Sky ambient | SH irradiance at the normal with IBL, else the flat ambient (`:2586-2614`, `:1554-1577`) | 9 SH terms |
-| Sun | `evaluate_directional_light` (`:664-738`): Disney diffuse and GGX, times 1/π; the shadow through `primary_directional_visibility` (`:1242-1319`): the tent's 16 gathers, or the soft filter's search and 4–32 taps (`:1067-1236`); the clouds (`:847-865`) | 16+ fetches |
-| Fill (secondary) | the same BRDF; its shadow a 3×3 tent of gathers at 512 (`:1321-1366`) | 9 gathers |
-| Spot | `evaluate_spot_light` (`:782-841`); its shadow a 3×3 tent at 1024 (`:1443-1494`), or 9 cube samples for the omni light (`:1382-1440`) | 9 fetches |
-| Street lamps | `evaluate_lamps` (`:870-910`): up to 40, each through the full BRDF, 1/π included | ALU |
-| Point lights | `evaluate_point_lights` (`:742-763`): up to 32, diffuse, facing `n·l × 0.7 + 0.3`, no 1/π; eased under a ceiling (`:769-780`) | ALU |
+| Sky ambient | SH irradiance at the normal with IBL, else the flat ambient (`:2602-2647`, `:1574-1597`) | 9 SH terms |
+| Sun | `evaluate_directional_light` (`:666-740`): Disney diffuse and GGX, times 1/π; the shadow through `primary_directional_visibility` (`:1244-1321`): the tent's 16 gathers, or the soft filter's search and 4–32 taps (`:1069-1238`); the clouds (`:849-867`) | 16+ fetches |
+| Fill (secondary) | the same BRDF; its shadow a 3×3 tent of gathers at 512 (`:1323-1368`) | 9 gathers |
+| Spot | `evaluate_spot_light` (`:784-843`); its shadow a 3×3 tent at 1024 (`:1452-1507`), or 9 cube samples for the omni light (`:1384-1442`) | 9 fetches |
+| Street lamps | `evaluate_lamps` (`:872-912`): up to 40, each through the full BRDF, 1/π included | ALU |
+| Point lights | `evaluate_point_lights` (`:744-765`): up to 32, diffuse, facing `n·l × 0.7 + 0.3`, no 1/π; eased under a ceiling (`:771-782`) | ALU |
 
-The frame's lighting is one fragment uniform block (`MaterialPBR`, `:131-191`). Since RFC 0011 the core fills it once a
+The frame's lighting is one fragment uniform block (`MaterialPBR`, `:131-193`). Since RFC 0011 the core fills it once a
 pass and each batch writes only its material fields over it.
 
 ### The radiance cascades
 
 - **Sources.** A batch is a source when it is unlit and no receiver, or when it has an emission
-  (`btbh_gpu_scene.c:6688-6695`). The source pass's fragment shader writes its emission, plus its albedo when it is
-  unlit, times alpha (`production_rc_material_source.frag.hlsl:35-64`). The source pass's vertex shader is
-  `production_model.vert` with `BTBH_RC_SOURCE_PROJECTION` (`production_model.vert.hlsl:222-233`).
+  (`btbh_gpu_scene.c:6930-6937`). The source pass's fragment shader writes its emission, plus its albedo when it is
+  unlit, times alpha (`production_rc_material_source.frag.hlsl:42`). The source pass's vertex shader is
+  `production_model.vert` with `BTBH_RC_SOURCE_PROJECTION` (`production_model.vert.hlsl:252`).
 - **The light at a place** is a four-quadrant atlas: the light arriving at each field texel from four directions,
   each `(±1, 0.65, 0)` or `(0, 0.65, ±1)`.
-  - The reproject pass writes it to `hrc_quadrant_textures[history_write_index]` (`btbh_gpu_radiance_cascades.c:3443-3460`).
-  - The compose reads it (`:3632`), then makes that index the history's read index, with the field's origin and cell
-    size (`:3660-3663`; `src/gpu/btbh_gpu_radiance_cascades_runtime.h:44`, `:76-82`).
+  - The reproject pass writes it to `hrc_quadrant_textures[history_write_index]` (`btbh_gpu_radiance_cascades.c:3631`).
+  - The resolve and compose read it (`:3708`), then the compose makes that index the history's read index, with the
+    field's origin and cell size (`:3845-3852`; `src/gpu/btbh_gpu_radiance_cascades_runtime.h:84-87`).
   - So during the transparent pass, `hrc_quadrant_textures[hrc_history_read_index]` holds this frame's light.
-- **The resolve's unlit receivers** read it at the pixel's xz (`production_hrc_resolve.comp.hlsl:70-84`, `:233-234`).
-  So do all surfaces under additive cascades. Their bounce light is
-  `albedo · Σ quadrant · saturate(n·l) · 2 · indirect_strength` over the four directions (`:282-296`).
+- **The resolve's unlit receivers** read it at the pixel's xz (`production_hrc_resolve.comp.hlsl:72-84`). So do all
+  surfaces under additive cascades. Their bounce light is `albedo · Σ quadrant · saturate(n·l) · 2 · indirect_strength`
+  over the four directions (`:298-312`).
 
 ### Fog
 
 - **The HDR composite fogs every pixel at the depth of the opaque surface behind it**
-  (`production_hdr_composite.frag.hlsl:40-71`, `:79-82`). The fog's opacity is `1 - exp(-((view depth - start) ·
+  (`production_hdr_composite.frag.hlsl:40-77`, `:81`). The fog's opacity is `1 - exp(-((view depth - start) ·
   density)²)`, capped, plus the edge fog at the world's rim.
 - **Transparent pixels write no depth,** so a puff over far ground is fogged as the far ground is.
-- **Over the background** the composite adds no fog. The scene pass clears the background to the fog's colour instead,
-  so that transparent pixels over it keep their colour (`btbh_gpu_scene.c:8313-8326`). A puff over the sky is not
-  fogged at all.
-- **Bloom** reads the image before the fog (`:9753-9790`).
+- **Over the background** the composite adds no fog (`:45-48`). The scene pass clears the background to the fog's colour
+  instead, so that transparent pixels over it keep their colour (`btbh_gpu_scene.c:8594-8610`). A puff over the sky is
+  not fogged at all.
+- **Bloom** reads the image before the fog (`:10081-10153`).
 
 ### The scene fragment shader's slots
 
@@ -166,225 +169,243 @@ pass and each batch writes only its material fields over it.
 | t11, t12, t13 | the world detail's albedo, normal, ORM (RFC 0008) |
 | t14 | the world-detail table's array (RFC 0009) |
 
-- **Fifteen of SDL's 16 sampler slots** are taken. The shader says so (`production_model.frag.hlsl:88-90`), and the core
-  makes the pipeline with 15, 14 or 10 samplers (`btbh_gpu_scene.c:3225-3230`).
-- **The comparison binding (t8)** is bound for every batch (`:9451-9455`).
+- **Fifteen of SDL's 16 sampler slots** are taken (`production_model.frag.hlsl:88-100`), and the core makes the pipeline
+  with 15, 14 or 10 samplers (`btbh_gpu_scene.c:3364-3371`).
+- **The comparison binding (t8)** is bound for every batch (`:9773-9777`).
 - **The fast unlit shader** (`production_model_unlit.frag`) is a separate file, loaded beside the host's fragment
-  shader. It has its own sampler and uniform counts and its own index in the pipeline arrays (`:1197-1211`,
-  `:2942-3006`, `:3158-3184`).
+  shader. It has its own sampler and uniform counts and its own index in the pipeline arrays (`:32`, `:259-362`,
+  `:2983-3062`, `:3287-3313`).
 
 ## Proposal
 
-**Phase 1** brings items 1–3, and item 5 between batches:
-- a new surface, `LIT_PARTICLE`, drawn by fragment shader files of its own;
-- a batch flag for the UV rect, read in the static vertex shader;
-- a post flag that draws the transparent batches far to near.
+**Phase 1** brings items 1–3:
+- a new surface, `LIT_PARTICLE`, drawn by fragment shader files of its own, with the scene's distance in a slot of its
+  own and the soft and near fades;
+- a batch flag for the UV rect, read in every static vertex shader.
+
+Item 5 is v2's: it sorts its puffs far to near on the CPU every frame, and the renderer draws a batch's instances in
+their order (decision 8). The draft's batch sort (1d, `BTBH_GPU_SCENE_POST_SORT_TRANSPARENT` and its macro) is dropped.
 
 **Phase 2** brings item 4: a batch flag and a lighting byte for a transmittance map in sun space.
-
-**Within one batch,** the instances draw in the order given. v2 sorts them on the CPU.
 
 ### Where this differs from the request
 
 - **Its own shader, not a branch of `production_model.frag`.** The full scene shader has one sampler slot left
-  ("The scene fragment shader's slots"). The particle needs three textures that shader doesn't bind: the distance in a
-  slot of its own beside the normal, the cascades' atlas and, in phase 2, the transmittance map. A branch would also
-  grow the shader every batch runs. Its own files keep both at today's cost and leave the last slot for phase 2's ground.
+  ("The scene fragment shader's slots"). The particle needs textures that shader doesn't bind: the distance in a slot
+  of its own beside the normal, the cascades' atlas and, in phase 2, the transmittance map. A branch would also grow
+  the shader every batch runs. Its own files keep both at today's cost and leave the last slot for phase 2's ground.
 - **The distance's own binding comes with the new shader.** `SOFT_PARTICLE` keeps its slot swap, and it doesn't get
   the near fade. Its `p0.y` and `p0.z` were never read, and CHIMERA (`CONSUMERS.md:37`) and v2 draw it, so giving them
   a meaning there could change a look nobody asked to change.
-- **Each light keeps the scale lit surfaces give it.** The sun, fill, spot and lamps go through
-  `evaluate_directional_light`, which divides by π. The point lights don't (`evaluate_point_lights`). A puff then sits
-  in the same light as the ground beside it. The phase is Henyey-Greenstein times 4π, which is 1 at every angle for
-  g = 0, and it is tinted by the albedo (question 2).
+- **Each light keeps the scale lit surfaces give it** (decision 2). The sun, fill, spot and lamps divide by π, as
+  `evaluate_directional_light` does. The point lights don't (`evaluate_point_lights`). A puff then sits in the same
+  light as the ground beside it. The phase is Henyey-Greenstein times 4π, which is 1 at every angle for g = 0, and the
+  transmission is tinted by the albedo.
+- **The transmission for the sun and the point lights only** (decision 3). Fire glowing through smoke is v2's night
+  look; lamps on poles below the smoke light its undersides, so the fill, the spot and the lamps take the wrap alone.
 - **The sun's shadow is always the four plain taps,** whatever `directional_shadow_filter` says, and with a constant
   bias instead of the receiver plane. A billboard's plane isn't the smoke's surface, and seen edge-on from the sun its
   gradient would push the bias anywhere. The fill and the spot take one gather each, the omni light one cube sample.
+- **Lights out of reach exit early** (decision 4): a lamp or point light beyond its reach costs its distance test. No
+  per-vertex fallback.
+- **Straight alpha only** (decision 5): `BTBH_GPU_SCENE_BLEND_ALPHA`. `PREMULTIPLIED_ALPHA` is refused, and can be
+  added later.
 - **Fog.** The particle fogs itself at its own depth. It also writes the colour that comes out right after the
   composite fogs the pixel again at the depth behind it (below). Where that second fog is total, nothing in the
-  transparent pass can show (question 6).
+  transparent pass can show; v2's fog never is (decision 6), so the make-up is exact for it.
+- **Never a source of the cascades' light** (decision 7). Lit particles stay out of the cascades' source field, with an
+  emission or without, as if they had `NO_RC_SOURCE`: the cleaner of the two options, since the fades need the
+  camera's distance that the source pass doesn't have. v2's embers and flames stay additive unlit sprites.
 - **The transmittance map holds a slab per texel in one RGBA16F texture,** so that a receiver reads it with one
-  sampler slot and one fetch. Puffs stacked along a sun ray are treated as one column (question 11).
-- **Sorting.** Batches sort far to near in phase 1: the opaque sort's code does it, at the opaque sort's cost.
-  Instances are left to v2 ("Sorting" below).
+  sampler slot and one fetch. Puffs stacked along a sun ray are treated as one column (decision 11).
 
-### API (phase 1)
+### API (phase 1, as built)
 
 ```c
 typedef enum BTBHGPUSceneSurfaceVariant {
-    /* ... NONE (0) to REFRACT (10) as before ... */
-    /* A see-through surface lit per pixel, for smoke, dust and steam (RFC 0013, since 0.11.0). Drawn in the transparent
-     * pass with production_particle_lit.frag (or its _2d_shadows or _unshadowed sibling, by the frame's shadows), found
-     * beside the host's fragment shader; a present without it fails, naming the file. Diffuse only, no specular.
-     * Its light: the sky's ambient; the sun, its shadow through four plain comparison taps, and the clouds; the fill
-     * and its shadow; the spot or omni light and its shadow; the street lamps; the point lights; with the radiance
-     * cascades on, their light at its world xz; its emission (as a lit batch's). Then fog at its own view depth.
-     * The normal: normal_texture, linear, on the albedo's texture coordinate. Its rg is a tangent-space normal (OpenGL
-     * +Y, z rebuilt) whose tilt is scaled by normal_scale (0 flat); its b is the thickness, 0..1. The frame is the
-     * vertex's: a billboard's is its mesh's tangent and normal through the instance's matrix, laid in the camera's
-     * plane, so a quad in local x and y with normal +z and tangent +x (w +1) takes the instance's x and y axes. The
-     * normal is turned toward the side seen. Without normal_texture the surface is flat and its thickness is 1.
+    /* ... NONE (0) to REFRACT (10) as before; SOFT_PARTICLE (6) gains its comment ... */
+    /* A see-through surface lit per pixel, for smoke, dust and steam (RFC 0013, since 0.11.0). Drawn in the
+     * transparent pass with production_particle_lit.frag (its _2d_shadows or _unshadowed sibling by the frame's
+     * shadows), found beside the host's fragment shader: a present without it fails, naming the file. Diffuse only.
+     * Its light, each at the scale a lit surface takes it: the sky's ambient (the SH irradiance at its normal with
+     * IBL, else the flat ambient); the sun, its shadow through four plain comparison taps whatever
+     * directional_shadow_filter says, and the clouds; the fill and its shadow; the spot (or omni) light and its
+     * shadow; the street lamps and the point lights, each skipped beyond its reach; with the radiance cascades on
+     * (additive or not), their light at its world x and z from four directions; its emission, as a lit batch's.
+     * A light's share is albedo * (wrap + transmission) * light, where wrap = saturate((n.l + w) / (1 + w)) and
+     * the transmission (light from behind, through it) = x * exp(-thickness * z) * 4 pi * HG(y, the angle the
+     * light turns to reach the eye), HG being Henyey-Greenstein's phase; only the sun and the point lights give a
+     * transmission, the fill, the spot, the lamps and the cascades the wrap alone. Then fog at its own depth:
+     * written so that the HDR composite's fog at the opaque depth behind it leaves the puff fogged at its own depth
+     * over the background fogged at its own (exact while the fog's opacity there stays below 1).
+     * Its alpha: the albedo's times the vertex's, the instance's and the material's, times the fades.
+     * Its normal: normal_texture, linear, on the albedo's texture coordinate: rg a tangent-space normal (OpenGL +Y,
+     * z rebuilt) whose tilt normal_scale scales (0 flat), b the thickness 0..1. The frame is the vertex's: a
+     * billboard's lies in the camera's plane, so a quad in local x and y with normal +z and tangent +x (w +1) takes
+     * the instance's x and y axes. It is turned toward the side seen. Without normal_texture it is flat, 1 thick.
      * surface_parameters0: x the soft fade (render units over which it fades where it meets the opaque scene behind
-     *   it; 0 none); y, z the near fade (gone nearer the camera than y, whole from y + z on; z 0 none); w the wrap of
-     *   its diffuse light (0 Lambert, 1 lit all the way round to the back).
-     * surface_parameters1: x the transmission (light from behind, through it; 0 none); y the Henyey-Greenstein
-     *   asymmetry, -1..1 (above 0 the light goes on forward); z the optical depth at thickness 1; w 0 (phase 2: the
-     *   density it shadows with).
-     * Needs transparency_enabled 1 with BTBH_GPU_SCENE_BLEND_ALPHA or _PREMULTIPLIED_ALPHA, unlit_enabled 0, a static
-     * geometry, dug_by NULL, no world detail or table texture and detail_parameters 0; otherwise the present fails
-     * with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It casts no shadow and writes no motion. */
+     *   it, as SOFT_PARTICLE's; 0 none); y, z the near fade (gone nearer the camera than y render units, whole from
+     *   y + z on; z 0 none); w the wrap (0 Lambert, 1 lit all the way round to the back).
+     * surface_parameters1: x the transmission (0 none); y the asymmetry, clamped to -0.99..0.99 (above 0 the light
+     *   goes on forward, so a puff glows looking toward the light); z the optical depth at thickness 1 (taken as 0
+     *   when below); w reserved, 0.
+     * Needs transparency_enabled 1 with BTBH_GPU_SCENE_BLEND_ALPHA (straight alpha), unlit_enabled 0, a static
+     * geometry (animation_library and animation_pose NULL), dug_by NULL, no world_detail with a texture, no
+     * world_detail_table with map_layers, no height_lift with a heightfield, detail_parameters 0 and
+     * surface_parameters1[3] 0: otherwise the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
+     * casts no shadow, writes no motion and is never a source of the radiance cascades' light, with an emission or
+     * without (as if it had BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
     BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE = 11,
     BTBH_GPU_SCENE_SURFACE_COUNT = 12
 } BTBHGPUSceneSurfaceVariant;
 
+/* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (RFC 0013, since 0.11.0). */
+#define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
+
 /* BTBHGPUSceneGeometryBatch.flags, after BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: */
-    /* The instance's four custom floats are a rectangle of the texture (RFC 0013, since 0.11.0): the texture
-     * coordinate, after uv_scale and uv_offset, is multiplied by custom x and y and offset by z and w, so one batch draws
-     * every cell of an atlas, a cell per instance. The radiance cascades' source pass takes the rectangle too; shadows
-     * sample no texture and don't change. Static batches only, and not with the surface variants that read custom
-     * floats (DISSOLVE, SHATTER, GLITTER) or a world detail or table seeded by one: the present fails with
-     * BTBH_GPU_INVALID_ARGUMENT, naming the batch. */
+    /* The instance's four custom floats are a rectangle of its textures (RFC 0013, since 0.11.0, asked for by Be The
+     * Bullet Hell v2): the texture coordinate, after uv_scale and uv_offset, is multiplied by custom x and y and
+     * offset by z and w, so one batch draws every cell of an atlas, a cell per instance. Every static vertex shader
+     * takes it (production_model.vert and the table's and the lift's), so it works in every pass that draws the
+     * batch: opaque or transparent, lit, unlit (the fast unlit shader too), soft and lit particles, lifted, and the
+     * radiance cascades' source pass. Shadows sample no texture and don't change. Static batches only, and not
+     * with the surface variants that read the custom floats (DISSOLVE, SHATTER, GLITTER) nor a world detail or table
+     * seeded by one (seed_component not 0): the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
+     * needs this release's static vertex shaders: with SPIR-V ones that don't read it, the present fails with the
+     * shader's path. (Bit 4 is kept for RFC 0013's phase 2.) */
     BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT = 1u << 3
 
-/* BTBHGPUScenePost.flags, after BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY: */
-    /* The transparent pass draws its batches far to near (RFC 0013, since 0.11.0), by the key
-     * BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK uses (the view depth of the batch's mean instance centre). The sort runs
-     * within each run between batches that keep their place: BTBH_GPU_SCENE_BATCH_KEEP_ORDER, persistent instance
-     * buffers, bounds not known, a stencil in use. Equal depths keep the order given. Refracting batches keep their
-     * own pass, in the order given. A batch's instances draw in their own order: sort them before the present. */
-    BTBH_GPU_SCENE_POST_SORT_TRANSPARENT = 1u << 3
-
-/* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (since 0.11.0). */
-#define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
-/* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT exists (since 0.11.0). */
+/* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT exists (RFC 0013, since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT 1
-/* Defined when BTBH_GPU_SCENE_POST_SORT_TRANSPARENT exists (since 0.11.0). */
-#define BTBH_GPU_SCENE_HAS_TRANSPARENT_SORT 1
 ```
 
 | Where | What | Offset (64-bit) | Was |
 | --- | --- | --- | --- |
 | `BTBHGPUSceneSurfaceVariant` | `LIT_PARTICLE` 11, `COUNT` 12 | – | `COUNT` 11 |
-| `BTBHGPUSceneGeometryBatch.flags` (280 bytes) | bit 3, and bit 4 in phase 2 | 253 | free bits |
-| `BTBHGPUScenePost.flags` (432 bytes) | bit 3 | 427 | a free bit (0.10.0 takes bit 2 for `SSR_FACING_HITS`) |
-| `BTBHGPUSceneLighting` (3,340 bytes), phase 2 | `particle_shadow` | 3,337 | `directional_shadow_reserved[0]` (0.10.0 keeps it free; `spot_occluder_flags` is at 3,338) |
+| `BTBHGPUSceneGeometryBatch.flags` (288 bytes) | bit 3; bit 4 in phase 2 | 253 | free bits (0.10.0 took bit 5) |
+| `BTBHGPUSceneLighting` (3,340 bytes), phase 2 | `particle_shadow` | 3,337 | `directional_shadow_reserved[0]` (0.10.0's `spot_occluder_flags` is at 3,338) |
 
-**Zero values.** A batch that doesn't use variant 11 and leaves bits 3 and 4 clear draws as before. So does a post
-without bit 3, and (phase 2) a lighting whose `particle_shadow` is 0.
+**Zero values.** A batch that doesn't use variant 11 and leaves bits 3 and 4 clear draws as before, to the byte
+("Implementation notes"). So does (phase 2) a lighting whose `particle_shadow` is 0.
 
-**Refusals** (`BTBH_GPU_INVALID_ARGUMENT`, naming the batch, as the other batch checks):
-- `LIT_PARTICLE` with `transparency_enabled` 0, or a blend other than `ALPHA` and `PREMULTIPLIED_ALPHA`;
-- `LIT_PARTICLE` with `unlit_enabled` set, a skinned geometry, `dug_by`, a world detail with a texture, a table with
-  `map_layers`, or non-zero `detail_parameters`;
-- `LIT_PARTICLE` with `surface_parameters1[3]` not 0 (phase 1 only);
-- `INSTANCE_UV_RECT` on a skinned geometry, on `DISSOLVE`, `SHATTER` or `GLITTER`, or with a world detail or table
+**Refusals** (`BTBH_GPU_INVALID_ARGUMENT`, "GPU scene batch N: surface_variant LIT_PARTICLE: …" or "… flags
+INSTANCE_UV_RECT: …", beside the other batch checks):
+- `LIT_PARTICLE` with `transparency_enabled` 0, or a blend other than `ALPHA`;
+- `LIT_PARTICLE` with `unlit_enabled` set, an animated geometry, `dug_by`, a world detail with a texture, a table with
+  `map_layers`, a height lift with a heightfield, or non-zero `detail_parameters`;
+- `LIT_PARTICLE` with `surface_parameters1[3]` not 0 (phase 2's density);
+- `INSTANCE_UV_RECT` on an animated geometry, on `DISSOLVE`, `SHATTER` or `GLITTER`, or with a world detail or table
   whose `seed_component` isn't 0.
 
 ### The lit particle shader
 
-`production_particle_lit.frag.hlsl` comes in three variants, as `production_model.frag` does: the full one (the sun's
-map and the spot's, or the omni cube), `_2d_shadows` (no cube) and `_unshadowed` (no maps).
-
-The vertex stage is the host's static vertex shader, with the UV rect below.
+`production_particle_lit.frag.hlsl` comes in three variants, as `production_model.frag` does: the full one (the sun's,
+the fill's and the spot's maps and the omni cube), `_2d_shadows` (no cube) and `_unshadowed` (no maps). The vertex
+stage is the host's static vertex shader (`production_model.vert`), with the UV rect below.
 
 | Slot (full variant) | Texture | Sampler |
 | --- | --- | --- |
 | t0 | albedo | the texture's |
-| t1 | normal (rg) and thickness (b) | the texture's |
-| t2 | the scene's distance (R32F, loaded per pixel) | the scene's colour sampler |
+| t1 | normal (rg) and thickness (b) | the texture's (the normal fallback, flat and 1 thick, without one) |
+| t2 | the scene's distance (R32F), read at the pixel | nearest (a texture only loaded would be reflected as a storage texture) |
 | t3 | emission | the texture's |
-| t4 | the sun's map | the comparison sampler |
-| t5 | the fill's map | the shadow sampler |
-| t6 | the spot's map | the shadow sampler |
-| t7 | the omni light's cube | the shadow sampler |
-| t8 | the cascades' quadrant atlas (a fallback never sampled when they are off) | linear, clamped |
-| t9 | phase 2: the transmittance map (a fallback never sampled when off) | linear, clamped |
+| t4 | the cascades' quadrant atlas (a fallback never sampled when they didn't light this frame) | the cascades' (linear, clamped) |
+| t5 | the sun's map | the comparison sampler |
+| t6 | the fill's map | the shadow sampler |
+| t7 | the spot's map | the shadow sampler |
+| t8 | the omni light's cube | the shadow sampler |
 
-That is 9 samplers (10 in phase 2) of 16. The 2D-shadow variant drops the cube, the unshadowed one the four maps.
+That is 9 samplers of 16 (8 in `_2d_shadows`, 5 unshadowed: each variant's are the next one's and some more). Phase 2's
+map takes t9 in the full variant.
 
 **Uniforms.**
 - **b0:** `MaterialPBR`, declared exactly as in `production_model.frag`. The core pushes the same
-  `BTBHGPUSceneFragmentUniforms`, filled once a pass.
-- **b1:** a 112-byte `ParticleFrame`, the same for every particle batch in a pass, pushed once:
-  - the cascades' field origin, cell size and texel count;
-  - whether the cascades are on and additive, and their `indirect_intensity`;
-  - the composite's four fog vectors (`BTBHGPUSceneCompositeUniforms`' `fog_color_density`, `fog_shape`,
-    `fog_edge_bounds` and `fog_edge`).
+  `BTBHGPUSceneFragmentUniforms`, filled once a pass; a lit particle without a `normal_texture` gets `normal_scale` 0
+  (the fallback's rg is 127/255).
+- **b1:** the 176-byte `ParticleFrame` (`BTBHGPUSceneParticleFrameUniforms`, `src/gpu/btbh_gpu_particle.h`), the same
+  for every particle batch of a pass, pushed by the first and again after another batch's block took the slot:
+  - the frame's inverse view-projection and render size;
+  - whether the scene's distance is bound, and whether the HDR composite fogs this frame;
+  - the composite's four fog vectors (`fog_color_density`, `fog_shape`, `fog_edge_bounds`, `fog_edge`);
+  - the cascades' field origin, cell, size and source tops, and `2 · indirect_intensity` (0 when they didn't light this
+    frame).
 
-  Phase 2 adds 16 bytes: whether to read the map, and its texel size. The map reuses the sun's matrix in b0.
+  Phase 2 adds whether to read the map and its texel size. The map reuses the sun's matrix in b0.
+
+**Where the fragment lies.** From its pixel and its depth, through the frame's inverse view-projection: the point the
+depth buffer would hold (the world bent by its curvature, as drawn), its view depth as the composite measures it
+(`abs(1 / w)`), and its distance from the camera as the distance pass measures the scene's. The fades and the fog use
+these; the light uses the flat world position.
 
 **Alpha and fades.** The alpha is the albedo's, times the vertex's, the instance's and the material's.
 
 ```hlsl
-const float d = length(input.world_position - camera_position.xyz);
-if (surface_parameters0.x > 0.0f)   // the soft fade, as SOFT_PARTICLE's
-    alpha *= saturate((scene_distance.Load(int3(input.pixel_position.xy, 0)) - d) / surface_parameters0.x);
-if (surface_parameters0.z > 0.0f)   // the near fade
-    alpha *= saturate((d - surface_parameters0.y) / surface_parameters0.z);
-// PREMULTIPLIED_ALPHA: the fades scale the colour too.
+if (surface_parameters0.x > 0.0f && has_distance)   // the soft fade, as SOFT_PARTICLE's
+    alpha *= saturate((scene_distance - camera_distance) / surface_parameters0.x);
+if (surface_parameters0.z > 0.0f)                    // the near fade
+    alpha *= saturate((camera_distance - surface_parameters0.y) / surface_parameters0.z);
+if (alpha <= 0.0f || alpha < alpha_cutoff) discard;  // a fully faded fragment lights nothing
 ```
 
-**One light's share.** `l` points toward the light, `v` toward the camera, and `radiance` is the light's colour times
-its energy, falloff and visibility.
+**One light's share.** `l` points toward the light, `v` toward the camera.
 
 ```hlsl
-float btbh_particle_wrap(float3 n, float3 l)                 // p0.w: 0 is Lambert
+float particle_wrap(float3 n, float3 l)            // p0.w: 0 is Lambert
 {
-    return saturate((dot(n, l) + surface_parameters0.w) / (1.0f + surface_parameters0.w));
+    const float w = max(surface_parameters0.w, 0.0f);
+    return saturate((dot(n, l) + w) / (1.0f + w));
 }
 
-float btbh_particle_phase(float g, float cos_theta)          // Henyey-Greenstein times 4 pi: 1 everywhere at g = 0
+float particle_phase(float cos_theta)              // Henyey-Greenstein times 4 pi: 1 everywhere at g = 0
 {
+    const float g = clamp(surface_parameters1.y, -0.99f, 0.99f);
     const float g2 = g * g;
     const float d = max(1.0f + g2 - 2.0f * g * cos_theta, 1.0e-4f);
     return (1.0f - g2) / (d * sqrt(d));
 }
 
-float3 btbh_particle_light(float3 albedo, float3 n, float3 v, float3 l, float thickness, float3 radiance)
-{
-    const float front = btbh_particle_wrap(n, l);
-    // The light travels along -l; what reaches the eye has turned by acos(dot(-l, v)).
-    const float back = surface_parameters1.x * exp(-thickness * surface_parameters1.z) *
-        btbh_particle_phase(surface_parameters1.y, dot(-l, v));
-    return albedo * (front + back) * radiance;
-}
+// once a pixel: the transmission's factor
+const float transmission = max(surface_parameters1.x, 0.0f) * exp(-thickness * max(surface_parameters1.z, 0.0f));
+// the sun and each point light: wrap + transmission * phase(dot(-l, v)); the others: wrap
 ```
 
 **The sum:**
 
 | Term | How |
 | --- | --- |
-| Ambient | `albedo ·` the SH irradiance at `n` times the ambient energy with IBL, else the flat ambient (as `:2586-2614`) |
-| Sun | `btbh_particle_light(...) / π`. The visibility is four `SampleCmpLevelZero` taps half a texel round the point, with a constant bias of a texel and a half, times `btbh_cloud_light` (skipped when the clouds are off) and, in phase 2, the transmittance |
-| Fill | the same, its shadow one gather with bilinear weights |
-| Spot | the same, its range and cone as `evaluate_spot_light`, its shadow one gather (2D) or one cube sample (omni) |
-| Lamps | the same per lamp, each with `evaluate_lamps`' falloff (`fade² · core² / (d² + core²)`) |
-| Point lights | `btbh_particle_light` without 1/π, each with `falloff²` (as `evaluate_point_lights`), then `ease_point_light` |
-| Cascades | `albedo · 2 · indirect_strength · Σ quadrant(xz, k) · btbh_particle_wrap(n, l_k)` over the four directions `l_k` = `normalize(±1, 0.65, 0)`, `normalize(0, 0.65, ±1)`: the resolve's receiver term (`production_hrc_resolve.comp.hlsl:282-296`) with the wrap |
-| Emission | as a lit batch's: texture times colour times energy |
+| Ambient | `albedo ·` the SH irradiance at `n` times the ambient energy with IBL, else the flat ambient |
+| Sun | `albedo · colour · energy · (wrap + transmission · phase) / π`, times the visibility: four `SampleCmpLevelZero` taps half a texel round the point, with a constant bias of a texel and a half, times the clouds and, in phase 2, the transmittance. Looked up only where the share isn't 0 |
+| Fill | `albedo · colour · energy · wrap / π`, its shadow one gather with bilinear weights (bias 0.0025) |
+| Spot | the same, its range and cone as `evaluate_spot_light`, its shadow one gather (2D, bias 0.0006) or one cube sample (omni, a world bias of 0.125), looked up only where the light reaches; none with `RECEIVES_NO_SPOT_SHADOW` |
+| Lamps | the same per lamp, each with `evaluate_lamps`' falloff (`fade² · core² / (d² + core²)`); a lamp beyond its reach costs its distance test |
+| Point lights | `albedo · colour · energy · falloff² · (wrap + transmission · phase)`, no 1/π (as `evaluate_point_lights`), then `ease_point_light`; a light beyond its reach costs its distance test |
+| Cascades | `albedo · 2 · indirect_strength · Σ quadrant(xz, k) · wrap(n, l_k)` over the four directions `l_k` = `normalize(±1, 0.65, 0)`, `normalize(0, 0.65, ±1)`: the resolve's receiver term with the wrap, read where the resolve reads (half a texel back with source tops), none outside the field. Additive or not |
+| Emission | as a lit batch's: texture times colour times energy, read only when the energy isn't 0 |
 
 **Fog.**
-- **f_p** is the fog's opacity at the particle's own view depth and world xz, with the composite's formula, edge fog
+- **own** is the fog's opacity at the particle's own view depth and drawn xz, with the composite's formula, edge fog
   included.
-- **f_b** is the composite's at the opaque surface behind it. Its view depth is the particle's times
-  `scene distance / d`, because both lie on one pixel's ray, and its xz is `camera + (P - camera) · scene distance / d`.
-  It is 0 over the background (distance 10⁶), where the composite adds none.
-- **The colour written** is `c' = (c · (1 - f_p) + F · (f_p - f_b)) / (1 - f_b)`, with F the fog colour.
-  Premultiplied, the F term is times alpha. The composite's `lerp(pixel, F, f_b)` then gives exactly the particle
-  fogged at its own depth over the background fogged at its own.
+- **behind** is the composite's at the opaque surface behind it. Its view depth is the particle's times
+  `scene distance / camera distance`, because both lie on one pixel's ray, and its xz is
+  `camera + (P - camera) · scene distance / camera distance`. It is 0 over the background (distance 10⁶), where the
+  composite adds none.
+- **The colour written** is `c' = (c · (1 - own) + F · (own - behind)) / (1 - behind)`, with F the fog colour. The
+  composite's `lerp(pixel, F, behind)` then gives exactly the particle fogged at its own depth over the background
+  fogged at its own, for every layer of puffs over the pixel (the blend and the composite are affine; native test).
 - **Below zero.** `c'` can be below zero where a dark puff covers far, fogged ground. The target is RGBA16F, the
   composite brings the result back above zero, and bloom thresholds the intermediate image.
-- **Where f_b is 1** (`fog_maximum_opacity` 1 over far ground, or the edge fog), the composite overwrites the pixel and
-  nothing drawn in the transparent pass shows, as today. Fogging the opaque scene before the transparent pass would
-  cure it, but that changes every transparent batch (Alternatives).
-- With fog on, the distance pass runs whenever a lit particle draws, soft fade or not.
+- **Where behind is 1** (`fog_maximum_opacity` 1 over far ground, or the edge fog), the composite overwrites the pixel
+  and nothing drawn in the transparent pass shows, as today. v2's fog never gets there (decision 6).
+- **Without the distance** (its pass couldn't be made) the particle writes its colour unfogged and the composite fogs it
+  as any transparent batch; the soft fade is skipped.
+- The distance pass runs on every frame that draws a lit particle, as for soft particles.
 
 **Its outputs.** The colour with its alpha, and the reactive mask under FSR 3 as every transparent batch writes it
-(`btbh_temporal_reactive`, `production_model.frag.hlsl:2929-2940`).
+(`btbh_temporal_reactive`).
 
 ### The UV rect
 
-In `production_model.vert.hlsl`, after line 275:
+In `production_model.vert.hlsl`, after the batch's `uv_scale` and `uv_offset`:
 
 ```hlsl
 if (instance_uv_rect != 0u)   // BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (RFC 0013)
@@ -393,41 +414,31 @@ if (instance_uv_rect != 0u)   // BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (RFC 0013
 }
 ```
 
-- **The uniform** is a named word, `instance_uv_rect`, the first of the vertex block's three `temporal_reserved` words
-  (`BTBH_TEMPORAL_UNIFORMS`, `production_temporal.hlsli:13-17`; `BTBHGPUSceneUniforms`, `btbh_gpu_scene.c:91-92`). The
-  block keeps its size. `surface_controls.y` is free too, but a lane has no name, and the old-shader check below needs
-  one. The main pass (beside `btbh_gpu_scene.c:9227`) and the cascades' source pass (beside `:6751`) set it to 1 for a
-  flagged batch.
-- **Every shader that includes the file takes it:** `production_rc_material_source.vert` and
-  `production_model_detail_table.vert`. The skinned vertex shader doesn't need it, since the flag is refused on skinned
-  geometry.
+- **The uniform** is a named word, `instance_uv_rect`, the first of the vertex block's three `temporal_reserved` words.
+  The static vertex shaders declare their block with `BTBH_TEMPORAL_UNIFORMS_STATIC` (`production_temporal.hlsli`),
+  which names it; the skinned ones keep `BTBH_TEMPORAL_UNIFORMS`, so their SPIR-V doesn't change. The block keeps its
+  size and layout. The main pass and the cascades' source pass set it to 1 for a flagged batch, 0 for every other (as
+  the reserved word was).
+- **Every file built from `production_model.vert` takes it:** `production_model_detail_table.vert`,
+  `production_model_lift.vert`, `production_model_detail_table_lift.vert` and `production_rc_material_source.vert`. So
+  the rect works on every path that draws a static batch: the scene shader, the fast unlit shader, soft and lit
+  particles, the lifted and the table variants, and the cascades' sources (decision 9 asked for the fast unlit path).
 - **Unflagged batches** skip the branch, so their texture coordinate is bit for bit what it was.
 - **A rect batch draws all its cells in one draw.** The cells no longer differ in `uv_offset`, which is in the run key.
 - **Mip bleed** at a cell's edge is the atlas's to pad, as for any atlas.
+- **Old shaders.** A rect batch drawn with an older vertex shader would show the whole atlas, so a present with the
+  flag reads each static vertex shader a flagged batch draws with (the host's `production_model.vert`, its table or
+  lifted sibling, and with the cascades on, for a flagged source, `production_rc_material_source.vert`) for the name
+  `instance_uv_rect`, as the core reads the scene shader for the dig mask and the world detail, and fails with the
+  path. Metal libraries aren't checked, as before.
 
 ### Sorting
 
-- **Between batches** (the post flag), `btbh_gpu_scene_opaque_order` (`btbh_gpu_scene.c:5153-5214`) gains two
-  parameters: which pass it orders, and the direction.
-  - For the transparent pass it keeps the transparent, non-refracting batches and inverts the key's bits, so the
-    farthest batch draws first.
-  - The rules for a movable batch are the opaque pass's (`:5024-5035`), less the depth compare: a batch writes no depth
-    in the transparent pass. KEEP_ORDER, persistent instances, unknown bounds and a stencil pin a batch.
-  - The phase loop walks that order in the transparent pass as it does in the opaque one (`:9142-9153`). The geometry
-    bases it needs come from the same walk that fills them for the opaque order (`:7227-7230`), which then runs
-    whenever either order is used (today only with the opaque sort, `:7905`).
-- **Within a batch, the renderer does nothing.** A draw's instances blend in instance order, which is the graphics
-  APIs' primitive order. v2 builds its transient instances on the CPU each frame and knows its emitters, so it can sort
-  the instances it writes. A sort in the renderer would cost about what v2's does, and would have to:
-  - copy each sorted range, since batches may share a transient range;
-  - permute `temporal_instance_motions`, which follow the transient instances' order (`btbh_gpu.h:1310-1316`);
-  - leave persistent buffers alone.
-
-  A GPU sort (bitonic, in compute) would also need a sorted index buffer read through `SV_InstanceID` by every vertex
-  shader that draws the batch. None of that is worth it for particles the host already holds. Question 8 asks whether
-  v2's own order is enough.
-- **With the UV rect,** v2's smoke can be one batch, so the batch sort matters only between smoke, fire and sparks.
-  Puffs of two different batches can't interleave in any case.
+Within a batch the renderer draws the instances in their order, which is the graphics APIs' primitive order; between
+batches, in the order given. v2 builds its transient instances on the CPU each frame and sorts its lit puffs far to
+near; its draw order is plain alpha particles, then the lit smoke, then the additive ones (decision 8). With the UV
+rect its smoke is one batch, so a sort between batches isn't needed. The draft's 1d is dropped, with its post flag
+(`SORT_TRANSPARENT`, post bit 3) and its macro; post bit 3 stays free.
 
 ### Phase 2: the transmittance map
 
@@ -440,12 +451,11 @@ if (instance_uv_rect != 0u)   // BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (RFC 0013
      * batch, on any other. */
     BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW = 1u << 4
 
-/* BTBHGPUSceneLighting, in the byte that was directional_shadow_reserved[0]: */
+/* BTBHGPUSceneLighting, in the byte that is directional_shadow_reserved[0]: */
     /* The particle transmittance map (RFC 0013 phase 2): 0 none, as before; 1 lit particles read it; 2 so do the
      * opaque surfaces the sun shadows (lit, and unlit modes 2 and 3). Drawn only on frames whose sun shadow is on and
      * that draw a batch with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW. Other values fail the present. */
     uint8_t particle_shadow;
-    uint8_t directional_shadow_reserved[2];
 
 /* Defined when BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW and BTBHGPUSceneLighting.particle_shadow exist. */
 #define BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW 1
@@ -453,13 +463,14 @@ if (instance_uv_rect != 0u)   // BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (RFC 0013
 
 **The map.**
 - **Format and size.** One RGBA16F texture at half the sun map's size each way: 1024 × 1024, 8 MiB, under the default
-  2048 map (`btbh_gpu_scene.c:26`).
+  2048 map. v2's maps are 2048, 1536 and 1024 (Deck), redrawn every frame; half is plenty, a quarter would do on the
+  Deck (decision 12).
 - **What it holds.** Cleared to (0, 0, 0, 1). r is the optical depth τ, summed; g is τ times the sun-space depth d,
   summed; a is the nearest d. b is unused.
-- **Blending.** One blend state does it, because SDL blends colour and alpha with separate operations (the reactive
-  mask already sets both, `:1565-1577`): colour `ADD` (one, one), alpha `MIN`. It is order-independent.
+- **Blending.** One blend state does it, because SDL blends colour and alpha with separate operations: colour `ADD`
+  (one, one), alpha `MIN`. It is order-independent.
 - **When it is drawn.** Every frame, after the shadow maps, with the matrix the receivers read: the retained one when
-  the sun's map is kept over several frames (`:9053-9056`).
+  the sun's map is kept over several frames.
 - **The draw.** `production_particle_transmittance.vert` draws the flagged batches, with billboards facing the light,
   so that a puff shadows with its whole disc. The light's right and up are the matrix's first two rows, normalized.
   The fragment shader, `production_particle_transmittance.frag`, writes `τ = -ln(1 - min(α, 0.999))`, `τ · d`, 0 and
@@ -474,14 +485,14 @@ if (instance_uv_rect != 0u)   // BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (RFC 0013
 - `T = exp(-r · (d - front) / (back - front))` between them.
 
 So a puff on a column's sunny side keeps its light, and one on the lee side takes the column's shadow. The ground
-under the column takes all of it.
+under the column takes all of it. One slab per texel is enough for v2's columns (decision 11).
 
 **Who reads it.**
-- **Lit particles,** when `particle_shadow` ≥ 1, multiply the sun's share by T.
-- **Opaque surfaces,** with mode 2 (phase 2b, question 10). The scene fragment shader's next free slot takes the map
-  (t15 in the full variant, its 16th and last; t14 in `_2d_shadows`; a 1×1 fallback when off), and T multiplies `sun_visibility` in the lit path (`production_model.frag.hlsl:2642-2669`) and
-  the visibility of unlit modes 2 and 3 (`:2391-2404`). That is every shadowed variant: `production_model.frag`,
-  `_2d_shadows`, `_rc`, `_rc_2d_shadows`.
+- **Lit particles,** when `particle_shadow` ≥ 1, multiply the sun's share by T (t9 in the full variant).
+- **Opaque surfaces,** with mode 2 (2b; v2 wants it on desktop and will measure it on the Deck, decision 10). The scene
+  fragment shader's next free slot takes the map (t15 in the full variant, its 16th and last; t14 in `_2d_shadows`; a
+  1×1 fallback when off), and T multiplies `sun_visibility` in the lit path and the visibility of unlit modes 2 and 3.
+  That is every shadowed variant: `production_model.frag`, `_2d_shadows`, `_rc`, `_rc_2d_shadows`.
 
 ## Minimal example
 
@@ -493,8 +504,8 @@ smoke.custom_mesh = puff_quad;           /* local xy, normal +z, tangent +x (w +
 smoke.material_slot = -1;
 smoke.first_instance = first_puff;       /* each puff's custom = { cell width, cell height, cell u, cell v } */
 smoke.instance_count = puff_count;
-smoke.albedo_texture = smoke_atlas;      /* sRGB colour, alpha the coverage */
-smoke.normal_texture = smoke_normals;    /* linear: rg the normal, b the thickness; the same cells */
+smoke.albedo_texture = smoke_atlas;      /* sRGB colour, straight alpha the coverage */
+smoke.normal_texture = smoke_normals;    /* its own texture, linear: rg the normal, b the thickness; the same cells */
 smoke.normal_scale = 1.0f;
 smoke.albedo_red = smoke.albedo_green = smoke.albedo_blue = smoke.albedo_alpha = 255;
 smoke.uv_scale_x = smoke.uv_scale_y = 1.0f;
@@ -509,11 +520,8 @@ smoke.surface_parameters0[2] = 1.0f;     /* ... whole from 1.5 on */
 smoke.surface_parameters0[3] = 0.5f;     /* wrap */
 smoke.surface_parameters1[0] = 0.8f;     /* transmission */
 smoke.surface_parameters1[1] = 0.6f;     /* forward scattering */
-smoke.surface_parameters1[2] = 3.0f;     /* optical depth at thickness 1 */
+smoke.surface_parameters1[2] = 9.0f;     /* optical depth at thickness 1 (v2 bakes b = tau / 9) */
 smoke.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
-
-/* Fire, sparks and the smoke batch sorted among themselves: */
-post.flags |= BTBH_GPU_SCENE_POST_SORT_TRANSPARENT;
 
 /* Phase 2: the smoke darkens itself and the street. */
 smoke.flags |= BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW;
@@ -526,156 +534,121 @@ floats.
 
 ## Implementation
 
-### Files
+### Files (phase 1, as built)
 
-| File | Phase | Change |
-| --- | --- | --- |
-| `include/btbh_gpu/btbh_gpu.h` | 1 | The variant and its comment (and one for `SOFT_PARTICLE`, which has none: `p0.x` the fade), the batch flag, the post flag, three macros |
-| `include/btbh_gpu/btbh_gpu.h` | 2 | The second batch flag, `particle_shadow`, the macro |
-| `shaders/gpu/production_particle_lit.frag.hlsl` | 1 | New: the lit particle (full variant) |
-| `shaders/gpu/production_particle_lit_2d_shadows.frag.hlsl`, `..._unshadowed.frag.hlsl` | 1 | New: two-line wrappers with the shadow defines, as `production_model_2d_shadows.frag.hlsl` |
-| `shaders/gpu/production_model.vert.hlsl` | 1 | The UV rect, behind `instance_uv_rect` |
-| `shaders/gpu/production_temporal.hlsli` | 1 | `instance_uv_rect` named in `BTBH_TEMPORAL_UNIFORMS`, from the first `temporal_reserved` word (the skinned vertex shader shares the macro and doesn't read it) |
-| `shaders/gpu/production_particle_transmittance.vert.hlsl`, `.frag.hlsl` | 2 | New: the map's pass |
-| `shaders/gpu/production_particle_lit*.frag.hlsl` | 2 | Read the map (t9) |
-| `shaders/gpu/production_model.frag.hlsl` | 2b | The map in the next free slot (t15 in the full variant, t14 in `_2d_shadows`) and T in the sun's visibility, behind `particle_shadow` 2. Its including files change with it; the unshadowed ones declare no map |
-| `src/gpu/btbh_gpu_particle.h` | 1, 2 | New: C copies of the wrap, the phase, the fog's make-up and the map's reading, for the native tests (as `btbh_gpu_world_detail.h` was for 0.6.0) |
-| `src/gpu/btbh_gpu_scene.c` | 1, 2 | Below |
-| `CMakeLists.txt` | 1, 2 | The new files after their bases in `BTBH_GPU_SHADER_SPECS` |
+| File | Change |
+| --- | --- |
+| `include/btbh_gpu/btbh_gpu.h` | The variant and its comment (and one for `SOFT_PARTICLE`), the batch flag, two macros |
+| `shaders/gpu/production_particle_lit.frag.hlsl` | New: the lit particle (full variant) |
+| `shaders/gpu/production_particle_lit_2d_shadows.frag.hlsl`, `..._unshadowed.frag.hlsl` | New: wrappers with the shadow defines, as `production_model_2d_shadows.frag.hlsl` |
+| `shaders/gpu/production_model.vert.hlsl` | The UV rect, behind `instance_uv_rect`; its block through `BTBH_TEMPORAL_UNIFORMS_STATIC` |
+| `shaders/gpu/production_temporal.hlsli` | `BTBH_TEMPORAL_UNIFORMS_STATIC`: `BTBH_TEMPORAL_UNIFORMS` with the first reserved word named `instance_uv_rect` (the skinned shaders keep the old macro and their SPIR-V) |
+| `src/gpu/btbh_gpu_particle.h` | New: the refusals, the frame block, C copies of the wrap, the phase, the transmission and the fog's amount and make-up |
+| `src/gpu/btbh_gpu_scene.c` | Below |
+| `CMakeLists.txt` | The three files after the scene shaders in `BTBH_GPU_SHADER_SPECS` (76 shaders), their dependencies; the native test and the smoke |
+| `Sources/BTBHRendererGPU/*.swift` | `GPUSceneSurfaceVariant.litParticle` (11), classified from a `lit_particle` surface shader as `soft_particle` is |
+| Phase 2: `production_particle_transmittance.vert/.frag`, the particle shader's t9, the scene shaders' last slot (2b) | Later |
 
-Unchanged:
-- `production_model.frag`, in phase 1. `SOFT_PARTICLE`, unlit mode 3 and every other surface draw as before.
-- The shadow shaders, the cascades' and the post chain's shaders. `production_animated_model.vert` changes only by the
-  renamed reserved word it shares through `BTBH_TEMPORAL_UNIFORMS`.
+Unchanged: `production_model.frag` and every other fragment shader, the skinned vertex shaders, the shadow shaders, the
+cascades' and the post chain's shaders.
 
 ### The core
 
-- **Checks.** The refusals above, beside the variant and flag checks (`btbh_gpu_scene.c:4676-4705`).
-- **Pipelines.**
-  - The pipeline arrays' last index (`BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT`, today 0 full and 1 fast unlit,
-    `btbh_gpu_scene.c:31`, `:253-339`) gains a third value: lit particle.
-  - `btbh_gpu_scene_ensure_model_pipeline` picks the particle file by the frame's shadows, as it picks the fast unlit
-    one (`:3158-3184`). It makes the pipeline with 9 samplers (10 in phase 2) and two uniform buffers.
-  - They are made on first use, and `btbh_gpu_scene_ensure_model_pipelines` makes them for prewarm (`:7203-7291`).
-- **Bindings in the transparent pass** (`:9394-9520`). For a lit particle:
-  - the samplers above;
-  - `hrc_quadrant_textures[hrc_history_read_index]`, with the history's origin and cell size, when the cascades ran
-    this frame;
-  - the 112-byte block in slot 1, pushed once a pass (as the world-detail table's, `:8758-8761`).
-- **The distance pass** runs when a visible lit particle has a soft fade, or fog is on (`btbh_gpu_scene_batches_have_soft_particles`,
-  `:2540-2555`; `:7462-7476`). So does prewarm, which makes "the distance pass ... where a batch needs them"
-  (`btbh_gpu.h:1940-1941`).
-- **The UV rect:** `instance_uv_rect` in both passes that fill the vertex uniforms, and the SPIR-V name check.
-- **The sort:** above. Phase 1 only.
-- **Phase 2:**
-  - the map (create, release, resize with the sun's map);
-  - its pipeline (cull none, the RGBA16F target with the blend above);
-  - its pass after the shadow maps;
-  - the binding in the particle and, with mode 2, the scene shaders;
-  - the same in `btbh_gpu_scene_prewarm_internal` (`:10525`).
-- **Missing files.** A present with a lit particle (or, in phase 2, a flagged batch) and a shader directory without the
-  new files fails with the file's path, as 0.8.0 does for the table's vertex shader (`:3185-3187`). Older shaders draw
-  everything else as before.
+- **Checks.** The refusals above, in the batch checks every present and prewarm runs
+  (`btbh_gpu_scene_validate_world_details`), and bit 3 among the known flags.
+- **Pipelines.** A small array of their own, `lit_particle_pipelines[3 shadow sets][2 temporal][depth][cull][stencil]`:
+  always transparent with straight alpha, so their colour targets are the transparent pass's alone (the auxiliary
+  outputs don't index them). `btbh_gpu_scene_pipeline_slot` and `btbh_gpu_scene_ensure_model_pipeline` pick it for a lit
+  particle; the fragment file is a sibling of the host's fragment shader, by the frame's shadows, made with 9, 8 or 5
+  samplers and two uniform buffers. Made on first use, and by `btbh_gpu_scene_ensure_model_pipelines` for prewarm (the
+  window's and the render target's).
+- **Bindings in the transparent pass.** For a lit particle: the slots above, the frame block in fragment slot 1 when
+  the slot doesn't hold it; every other batch's block there marks it gone.
+- **The distance pass** runs on frames with a lit particle (`lit_particles_active`, beside the soft particles' and the
+  refraction's), and prewarm makes it.
+- **The cascades.** Lit particles never feed the source field (`btbh_gpu_scene_batch_material_source`). The frame block
+  carries the cascades' field when they lit this frame (their encode ran, not the fallback view), and the binding their
+  atlas, `hrc_quadrant_textures[hrc_history_read_index]`.
+- **The UV rect:** `instance_uv_rect` in both passes that fill the vertex uniforms, and the SPIR-V name check
+  (`btbh_gpu_scene_check_uv_rect_shaders`, present and prewarm); the shader check cache grows from 8 to 16 paths.
+- **Missing files.** A lit particle whose `production_particle_lit*.frag` is missing fails the present with the file's
+  path ("… its fragment shader is missing (build the shaders from 0.11.0 or later): <path>"); a SPIR-V file of that name
+  that doesn't name `particle_scene_distance` is refused too. Older shaders draw everything else as before.
 
 ### Cost
 
-Estimates, to measure with a smoke mode in the frame bench (`btbh_gpu_frame_bench`): N puffs at overdraw K, lit
-against unlit mode 3 with a soft fade.
+Estimates before it was built; measured in "Implementation notes".
 
 | Item | Estimate |
 | --- | --- |
-| Off (no lit particle, bits clear) | One uniform test per static vertex for the UV rect, branch not taken. If the bench shows it, the rect moves to a vertex shader of its own (`production_model_uv_rect.vert`), as 0.8.0 moved the table's index |
+| Off (no lit particle, bit 3 clear) | One uniform test per static vertex for the UV rect, branch not taken; on the CPU, a flag test and a variant test per batch |
 | A soft particle in unlit mode 3 today | 5 texture reads (albedo, emission, the distance in the normal slot, ORM, the distance again) plus 4 comparison taps under the soft filter, or 16 gathers under the tent |
 | A lit particle | 14 reads (13 without an emission, which is skipped when its energy is 0): albedo, normal, distance, emission, 4 comparison taps, the fill's gather, the spot's, 4 from the cascades' atlas. About 150 ALU, plus about 20 for each lamp or point light in reach and 6 for each out of reach |
-| So | About as many reads as today's smoke (fewer under the tent filter); more ALU, most of it in the lamp loop at night |
-| Example: 1280 × 800, a quarter of the screen 6 puffs deep (1.5 million fragments), 10 of 40 lamps in reach | About 20 million reads and 0.8 billion ALU operations: a few tenths of a millisecond more than today's smoke on a Deck, well under 0.1 ms on the bench's RTX 3070 Ti. Blending 6 layers of RGBA16F costs the same either way |
 | Memory, phase 1 | The distance target (R32F at the render size), made already when soft particles draw |
-| CPU, phase 1 | Per lit particle batch: 9 samplers; the 112-byte block once a pass. The sort: one pass over the transparent batches' instances and a sort, as the opaque sort's |
+| CPU, phase 1 | Per lit particle batch: 9 samplers; the 176-byte block once a pass |
 | Phase 2 pass | The flagged puffs again, at half the sun map's resolution, one read and about 10 ALU per fragment |
 | Phase 2 reads | One bilinear RGBA16F read and about 10 ALU per lit particle fragment and, with mode 2, per sun-lit opaque pixel |
 | Phase 2 memory | 8 MiB under a 2048 sun map |
-| Phase 2 off | Nothing in the particle shader but a uniform test. With 2b built, every scene draw binds a 16th sampler (a 1×1 fallback) and each lit pixel tests a uniform |
-
-If the lamp loop dominates on the Deck (question 4), the fallback is lighting the lamps and point lights per vertex in a
-particle vertex shader of its own, with the sun, its shadow and the normal map kept per pixel.
 
 ## Interactions
 
 | With | What happens |
 | --- | --- |
-| Radiance cascades, as a source | A lit particle is a source only through its emission, as any lit batch (`btbh_gpu_scene.c:6688-6695`). Without an emission it is none. With one (embers), the source pass draws its emission times alpha, without the fades (they need the camera's distance); `NO_RC_SOURCE` keeps it out |
-| Radiance cascades, as a receiver | It reads the field at its xz from four directions, as an unlit receiver does. The field is at street level, so a puff high above a street takes the street's light. Under replacing (non-additive) cascades it keeps the scene's ambient and adds the bounce; v2's are additive (RFC 0010) |
-| RFC 0010's source tops | An emissive lit particle writes its fragment's height as its top, as every material source does. A non-emissive one writes nothing. Its own reading is at its xz, not its height: with tops, a texel under a roof holds what pieces starting on the roof gather |
-| SSR | Computed in the SSAO resolve, before the transparent pass (`:8559-8663`): wet streets don't reflect the puffs, as with every transparent batch |
-| Refraction | Refracting batches draw after, over a copy that includes the puffs (`:8699-8722`). A refracting batch behind a puff draws over it, showing it displaced, as for every transparent batch |
+| Radiance cascades, as a source | Never: a lit particle stays out of the source field, emission or not (decision 7) |
+| Radiance cascades, as a receiver | It reads the field at its xz from four directions, as an unlit receiver does, additive or not. The field is at street level, so a puff high above a street takes the street's light. v2's are additive (RFC 0010) |
+| RFC 0010's source tops | Its reading is half a texel back, as the resolve's |
+| SSR | Computed in the SSAO resolve, before the transparent pass: wet streets don't reflect the puffs, as with every transparent batch |
+| Refraction | Refracting batches draw after, over a copy that includes the puffs. A refracting batch behind a puff draws over it, showing it displaced, as for every transparent batch |
 | HBAO, SSAO | Before the transparent pass: puffs are neither occluded nor occluding |
 | FSR 3 | The reactive mask as every transparent batch, `reactive_mode` included; no motion vectors |
-| Render to target | It has its own runtime (`btbh_gpu.h:2005-2006`): its own distance target, its cascades and, in phase 2, its own map, made by `btbh_gpu_window_scene_prewarm_render_to_target`. Never temporal, so no reactive mask |
-| Prewarm | The particle pipelines join through `btbh_gpu_scene_ensure_model_pipelines`; the distance pass and (phase 2) the map and its pipeline through the prewarm's own steps, when a batch needs them |
-| RFC 0011 runs | Lit particle batches run as any batch. The sort can split runs that the given order kept together |
-| RFC 0012 (draft) | A lift refuses billboards, so a lit particle billboard can't be lifted |
-| World curvature | The vertex shader bends the puffs as everything else. The light, the fog's xz and the map read the flat world position |
+| Render to target | Its own runtime: its own distance target, its cascades and, in phase 2, its own map, made by `btbh_gpu_window_scene_prewarm_render_to_target`. Never temporal, so no reactive mask |
+| Prewarm | The particle pipelines and the distance pass join through the prewarm's own steps |
+| RFC 0011 runs | Lit particle batches run as any batch; the frame block is pushed once a run of them |
+| RFC 0012 | A lit particle can't be lifted (refused). A lifted batch takes the UV rect (`production_model_lift.vert`) |
+| World curvature | The vertex shader bends the puffs as everything else. The light and the cascades read the flat world position; the fades and the fog the drawn one, as the depth buffer and the composite see it |
 | Opaque sort | Unchanged |
 
 ## Compatibility
 
-- **Versioning:** minor (0.11.0 for phase 1). An enum value, free bits of two flag bytes and, in phase 2, a reserved
-  byte, as 0.5.0 took `ssao_reserved[0]` for the batch's flags and 0.9.0 took bits of them. No struct grows.
+- **Versioning:** minor (0.11.0 for phase 1). An enum value and a free bit of the batch's flags, as 0.9.0 and 0.10.0
+  took bits of them; in phase 2 a second bit and the lighting's reserved byte. No struct grows.
   `BTBH_GPU_SCENE_SURFACE_COUNT` goes from 11 to 12, as it went from 10 to 11 with RFC 0005. A host that used it as a
   past-the-end value is refused at 12 as it was at 11.
 - **Shaders.**
-  - Phase 1 changes `production_model.vert` (the rect) and a name in `production_temporal.hlsli`; it adds three
-    fragment shader files. Every unflagged batch draws as before, to the byte.
+  - Phase 1 changes `production_model.vert` (the rect) and the four files built from it; it adds three fragment shader
+    files (76 shaders). Every unflagged batch draws as before, to the byte. The skinned vertex shaders and every
+    existing fragment shader compile to the same SPIR-V.
   - 0.10.0's shaders under the new core draw everything but lit particles and rect batches as before.
-  - A lit particle fails naming its missing file. A rect batch drawn with 0.10.0's vertex shader would show the whole
-    atlas, so a present with the flag checks the vertex shader's SPIR-V for the rect, as the core checks the scene
-    shader's names for the dig mask and the world detail (`btbh_gpu_scene_check_scene_shader`,
-    `btbh_gpu_scene.c:6007-6050`), and fails with its path. The name it looks for is `instance_uv_rect` ("The UV
-    rect"). Metal libraries aren't checked, as before.
+  - A lit particle fails naming its missing file; a rect batch fails naming the vertex shader that doesn't read it.
 - **Be The Bullet Hell v2 (Rust, bindgen):** nothing changes until it opts in. bindgen gives the new enum value and
-  flags; `batch_of` already ends in `..Default::default()`. To adopt:
-  - bump the pin and build the three particle shaders;
+  flag; `batch_of` already ends in `..Default::default()`. To adopt:
+  - bump the pin and build the three particle shaders (`CMakeLists.txt`'s list, which `build_shaders.py` reads);
   - bake the normal and thickness atlas;
-  - replace the five tilts and the sprite turning with the variant;
-  - merge its smoke draws with the rect;
-  - sort its puffs.
-- **Be The Bullet Hell (v1, Swift):** nothing changes. Its `softParticle` case (`Sources/BTBHRendererGPU/GPUResourceBackend.swift:38`,
-  mapped at `BTBHRendererGPU.swift:3439-3440`) keeps its value; a `litParticle` case can follow when it asks.
+  - replace the five tilts, the sprite turning, the emission's sky fill and the CPU light gathering with the variant;
+  - merge its smoke draws with the rect (and its plain particles, flipbooks, weather and city-life sprites);
+  - keep sorting its puffs.
+- **Be The Bullet Hell (v1, Swift):** nothing changes. Its `softParticle` case keeps its value; a `litParticle` case
+  (11) classifies a `lit_particle` surface shader, with `u_softFade`, `u_nearStart`, `u_nearFade`, `u_wrap`,
+  `u_transmission`, `u_asymmetry` and `u_opticalDepth`. The Swift layer sets no batch flags, so the UV rect has no Swift
+  API.
 - **CHIMERA (Rust, bindgen):** nothing changes. `SOFT_PARTICLE` is untouched and its list of 14 shaders can stay.
 - **Tyrian3D (C):** nothing changes. It zeroes its batches and is pinned at v0.2.1.
 
 ## Platforms and testing
 
 - **Native:**
-  - `btbh_gpu_scene_order_test`:
-    - `LIT_PARTICLE == 11`, `COUNT == 12`, the flag bits 8 and 16 and the post bit 4;
-    - in phase 2, `offsetof(BTBHGPUSceneLighting, particle_shadow) == 3337` and the size 3,340;
-    - the refusals.
-  - `btbh_gpu_particle_test` (new, on `btbh_gpu_particle.h`):
-    - the phase is 1 at g = 0 and integrates to 4π for any g;
-    - the wrap is Lambert at 0;
-    - the fog's make-up gives the reference for random `f_p ≤ f_b < 1` and the three blends;
-    - the map's reading: 1 before the front, `exp(-τ)` past the back, continuous between.
-- **GPU smoke** (Windows/Vulkan, `btbh_gpu_particle_smoke`, new):
-  - **Off, byte for byte:** the galleries and suites with 0.10.0's core and shaders, no lit particle and the bits clear.
-  - **A puff against a CPU reference** at chosen pixels: the sun alone, wrap 0 and 0.5, transmission at g = 0 and 0.6
-    looking toward the sun.
-  - **The sun's shadow:** a puff half in a wall's shadow, under both filters (the same four taps).
-  - **Lamps, point lights, the spot:** a puff between two lamps at night.
-  - **The cascades:** a glow under a puff lights its underside (additive).
-  - **Fades:** the soft fade against `SOFT_PARTICLE`'s at the same `p0.x` (the same alpha), the near fade at the camera.
-  - **Fog:** a puff over the fogged background, and over near and far ground, against the formula.
-  - **The rect:** one batch of 16 atlas cells against 16 batches with `uv_offset`, byte for byte.
-  - **The sort:** two overlapping batches given far-last come out far-first; KEEP_ORDER holds one.
-  - **Prewarm:** after prewarm a lit particle's first frame makes no pipeline (`btbh_gpu_scene_prewarm_smoke`).
-  - **Old shaders:** a lit particle with 0.10.0's shader directory fails with `production_particle_lit.frag`'s path; a
-    rect batch fails with the vertex shader's.
-  - **Phase 2:** a column's lee side darker than its sunny side; its shadow on the ground (mode 2); a receiver above the
-    column untouched.
-- **Bench:** the smoke mode above, lit against unlit mode 3 at Deck and desktop sizes; the kit pieces with 0.11.0's
-  vertex shader against 0.10.0's (the rect's off cost).
+  - `btbh_gpu_scene_order_test`: `LIT_PARTICLE == 11`, `COUNT == 12`, the flag bit 8, the batch's size and flags'
+    byte, phase 2's byte still reserved at 3,337, the macros.
+  - `btbh_gpu_particle_test` (new, on `btbh_gpu_particle.h`): the phase is 1 at g = 0 and its mean over the sphere 1
+    for any g; the wrap is Lambert at 0; the fog's make-up gives the reference for random puffs, backgrounds and fogs,
+    stacks included; the fog's amount; every refusal; the frame block's layout.
+  - `btbh_gpu_phase2_shader_test`: the three variants' samplers (9, 8, 5), uniform buffers and interfaces.
+- **GPU smoke** (Windows/Vulkan, `btbh_gpu_lit_particle_smoke`, new): see "Implementation notes".
+- **Off, byte for byte:** the image smokes against `release/0.11.0`'s, and the shader artefacts.
+- **Bench:** the frame bench's smoke modes (`smoke-off`, `smoke-soft`, `smoke-lit`), and mode `none` against
+  `fc2784ea`'s shaders and core (the off cost).
 - **Platforms:** Windows/Vulkan runs the smokes. The Mac session runs `check.sh` (the new files through shadercross to
-  MSL). Linux and the Deck through v2.
+  MSL; they translate here too). Linux and the Deck through v2.
 - **Games:** v2's smoke captures by day, at dusk and at night, with its fake lighting and with the variant; its frame
   times on the Deck preset.
 
@@ -683,77 +656,137 @@ particle vertex shader of its own, with the sun, its shadow and the normal map k
 
 | Alternative | Why not (now) |
 | --- | --- |
-| **A branch of `production_model.frag`** (variant 11 in the shared shader) | One sampler slot left; the particle needs three more textures. Every batch would carry the longer shader |
+| **A branch of `production_model.frag`** (variant 11 in the shared shader) | One sampler slot left; the particle needs more textures. Every batch would carry the longer shader |
 | **Keep the five baked tilts** | v2's current smoke; no lamps, point lights, cascades or self-shadow, and a turn per sprite |
 | **Six-way lightmaps** (light from six directions baked from a simulation, two RGBA textures) | Richer for simulated smoke at the same cost class, but v2 bakes a normal and a thickness. A later variant if v2 bakes from simulations |
-| **All light per vertex** | Cheaper, but loses the normal map's detail. Kept as the fallback for lamps and point lights only (Cost) |
-| **Fog before the transparent pass** (a post flag: the composite's fog moves between the opaque and transparent passes, and transparent shaders fog themselves) | Correct where the composite's fog is total, but changes every transparent batch's look under that flag and needs every transparent shader to fog itself. Later, if v2's fog needs it (question 6) |
-| **Deep or Fourier opacity maps** (layers of opacity along the sun's ray) | They separate puffs stacked along a ray, but need two textures (or a second pass). The scene shader has one slot for the ground. Phase 2's slab first (question 11) |
+| **All light per vertex** | Cheaper, but loses the normal map's detail. Not needed: lights out of reach exit early (decision 4) |
+| **Fog before the transparent pass** (a post flag: the composite's fog moves between the opaque and transparent passes, and transparent shaders fog themselves) | Correct where the composite's fog is total, but changes every transparent batch's look under that flag. v2's fog is never total (decision 6) |
+| **Deep or Fourier opacity maps** (layers of opacity along the sun's ray) | They separate puffs stacked along a ray, but need two textures (or a second pass). One slab is enough for v2 (decision 11) |
 | **Puffs in the sun's depth map** (alpha-tested) | A hard, binary shadow, and the map is retained over frames while puffs move |
+| **A batch sort in the renderer** (the draft's 1d) | v2 doesn't need it: its smoke is one batch with the rect, and its draw order is fixed (decision 8) |
 | **Sorting instances on the GPU** | A compute sort, a sorted index read by every vertex shader of the batch and a permuted motion buffer, to redo what v2 does on the CPU with the positions in hand |
 | **Sorting instances on the CPU in the renderer** | The same work as v2's, plus a copy per batch (ranges may be shared) and a permutation of the motions |
 | **Order-independent transparency** (weighted, blended) | It would remove sorting, but changes the transparent pass's targets for every batch |
+| **Premultiplied alpha** | v2 draws straight alpha (decision 5); refused in phase 1, easy to add (the fades and the fog's F term times alpha) |
+| **Lit particles as cascade sources** | The source pass has no camera distance for the fades; v2 keeps its embers additive and unlit (decision 7) |
 
 ## Open questions for v2
+
+These were the draft's questions; "Decisions" holds the answers.
 
 1. **The normal map.** Linear, OpenGL +Y (green up), xy from `rg · 2 - 1` and z rebuilt, the tilt scaled by
    `normal_scale` (0 flat)? Thickness in b, linear 0..1, made optical depth by `p1.z`: is that the range you bake, or do
    you need more than 1? Is it a texture of its own on the albedo's cells?
-2. **The light model.**
-   - The wrap as `(n·l + w) / (1 + w)`?
-   - The transmission as `albedo / π · p1.x · exp(-b · p1.z) · 4π·HG(g, cos θ)`, so that it is tinted by the albedo
-     and p1.x = 1 at g = 0 matches the front's peak?
-   - Every light at the scale lit surfaces give it (1/π for the sun, fill, spot and lamps; none for point lights)?
-3. **The phase for which lights.** The proposal gives every light both terms: the sun, the fill, the spot, the lamps
-   and the point lights, so a fire glows through the smoke in front of it. Or the sun only? That saves about 10 ALU per
-   lamp and point light in reach.
-4. **Counts.**
-   - How many puffs on screen, on the Deck preset and on desktop, and how large?
-   - How many layers deep at the thickest, and over what share of the screen?
-   - At night, how many lamps and point lights in reach of a column?
+2. **The light model.** The wrap as `(n·l + w) / (1 + w)`? The transmission as
+   `albedo / π · p1.x · exp(-b · p1.z) · 4π·HG(g, cos θ)`? Every light at the scale lit surfaces give it?
+3. **The phase for which lights.** Every light both terms, or the sun only?
+4. **Counts.** Puffs on screen, their size, layers, lamps and point lights in reach at night: does it need the
+   per-vertex fallback?
+5. **Blend.** Alpha or premultiplied for the lit smoke?
+6. **Fog.** Your fog by stage; is the particle's make-up enough, or do you need the post flag that fogs before the
+   transparent pass?
+7. **The cascades.** Should puffs take the field's light at their xz? Should emissive puffs stay sources, or will you
+   set `NO_RC_SOURCE`?
+8. **Sorting.** Is your own instance order enough? Do you need the batch sort?
+9. **The rect.** Which batches would use it? Do any of them need their custom floats for something else?
+10. **The ground.** In phase 2, do you need the street to take the smoke's shadow (mode 2)?
+11. **Stacked puffs.** One slab per texel, or layers?
+12. **The sun's map.** Its size and update period; is half its resolution enough?
+13. **Release.** Phase 1 in 0.11.0, phase 2 once your phase 1 captures are in?
 
-   This decides whether lamps and point lights need the per-vertex fallback.
-5. **Blend.** Alpha or premultiplied for the lit smoke? With premultiplied, the fades scale the colour.
-6. **Fog.**
-   - Your fog's density, start, maximum opacity and edge fog by stage?
-   - The particle's make-up is exact up to where the composite's fog is total. Is that enough, or do you need the
-     post flag that fogs before the transparent pass, which changes all your transparent batches?
-7. **The cascades.**
-   - Should puffs take the field's light at their xz (street level, four directions), so that night glows light the
-     smoke from below?
-   - Should emissive puffs (embers) stay sources, or will you set `NO_RC_SOURCE`?
-8. **Sorting.** Is your own instance order enough, the renderer drawing a batch's instances in that order? With all
-   smoke in one rect batch, do you need the batch sort for smoke against fire and sparks?
-9. **The rect.** Beyond the lit smoke, which batches would use it (fire, sparks, unlit dust)? Do any of them need their
-   custom floats for something else (a dissolve, a world detail's seed), which the flag refuses?
-10. **The ground.** In phase 2, do you need the street to take the smoke's shadow (mode 2)? That takes the scene
-    shader's last sampler slot and a read per sun-lit pixel. Or is the lee-side darkening on the puffs enough?
-11. **Stacked puffs.** Each map texel holds one column, from its nearest puff to its farthest along the sun's ray. Two
-    puffs at different heights on one ray darken the gap between them. Acceptable for your columns, or do you need
-    layers (a second texture and pass)?
-12. **The sun's map.** What size and update period do your presets use? The transmittance map is half the sun map's
-    size and drawn every frame. Is half enough for a column's shadow on the street?
-13. **Release.** Phase 1 (the variant, the rect, the batch sort) in 0.11.0, and phase 2 once your phase 1 captures are
-    in?
+## Decisions (v2, 2026-11-23)
+
+v2 answered all 13 questions on 2026-11-23, through its session (relayed from the agent who built its fake-lit smoke).
+The owner left the decision to the coordinator, who accepted phase 1 (1a, 1b, 1c) for 0.11.0, dropped 1d, and left
+phase 2 (2a, 2b) for after v2's phase 1 captures.
+
+**v2's finding first: the tent filter's cost.** Under `TENT`, unlit mode 3's sun-shadow test was about 60 % of a smoke
+layer's GPU cost: per full screen of smoke, 0.028 ms with the sun's shadow in unlit mode 3, 0.011 ms for soft particles
+without it, 0.004 ms for the fast unlit shader. v2 now shadows only smoke reaching below 2.5 cells, by day and at dusk
+(columns and smoke over roofs use unlit 1, nothing is shadowed at night): the smoke's added transparent cost in a
+burning fight went from +0.022 to +0.009 ms. Its lit smoke takes 9–11 draws a frame (13 at most).
+
+1. **The normal map: as proposed.** Linear, OpenGL +Y, xy = rg·2−1, z rebuilt, the tilt scaled by `normal_scale`. A
+   texture of its own on the albedo's cell rects; the atlas shrinks to 4 cells of 128 px once the five tilts go. The
+   thickness is b, linear 0..1, b = τ / 9 with `p1.z` ≈ 9: the view optical depth peaks at 8.75 (p95 8.0), 7.7, 3.6 and
+   3.3, and 8 bits give steps of 0.035 in τ. The normal comes from the density gradient where the view ray reaches half
+   its coverage.
+2. **The light model: yes to all three.** The wrap is `(n·l + w) / (1 + w)`; the transmission is tinted by the albedo,
+   divided by π, with 4π·HG; every light at the scale lit surfaces take (v2's fake was calibrated to it: its key light
+   about 0.9 of a Lambert surface).
+3. **The phase for the sun and the point lights.** Fire glowing through smoke is the night look. The fill, the spot and
+   the lamps take the front (wrap) term only, since lamps on poles below the smoke light its undersides.
+4. **Counts** (a burning fight, 60 one-second samples, the same on the Deck and High 1080p):
+   - lit puffs: median 107, p90 154, max 185; at most 300 particles in all, plus 4 columns on the Deck (7 on High) of
+     6–12 puffs each;
+   - puff size: a median coverage disc of 5.6 % of the screen's height (45 px at 800p); the largest reach 0.5–1.1
+     screens near the camera;
+   - shaded cards: median 0.38–0.40 screens, p90 0.85–0.94, max 1.3;
+   - layers: ≥1 over 10 % of the screen (p90 25 %, max 38 %), ≥3 over 3 % (6.5 %, 12 %), ≥6 over 0.5 % (max 2.9 %); the
+     deepest stacks are 10–19 layers;
+   - lights at night: up to 8 lamps (16 on High), 6 fire point lights (10), the kaiju's glow, blast flashes and 8 neon
+     signs; about 3 lights in reach of a puff on average (p90 6, max 27 in a fire cluster).
+
+   No per-vertex fallback is needed if lights out of reach exit early: they do.
+5. **Blend: straight alpha** (`BLEND_ALPHA`) with straight-alpha textures. Each sprite's alpha is capped at 0.5 and
+   thinned where enemies are behind it. So phase 1 takes `BLEND_ALPHA` alone.
+6. **Fog: the make-up is enough.** v2's fog by look (start, density, greatest opacity, colour): day 30, 0.03, 0.40;
+   dusk 30, 0.03, 0.45; storm 28, 0.032, 0.55; night 30, 0.03, 0.50; storm night 30, 0.03, 0.55. The game divides the
+   start by 1.2, multiplies the density by 1.2 and adds the camera's extra distance from the classic camera; edge fog
+   is off. The fog never reaches full opacity, so the make-up is exact. No post flag.
+7. **The cascades: puffs take their light** at their xz when glow lighting is on (v2's additive experiment). No lit puff
+   emits: embers and flames stay additive unlit sprites, and v2 would set `NO_RC_SOURCE` on any emissive lit batch.
+   (Today's fake puts the sky fill in the emission, which makes smoke a weak source; the variant removes that.) The
+   coordinator took the cleaner option: lit particles never feed the source field.
+8. **Sorting: v2's own order is enough.** It sorts its lit puffs far to near on the CPU every frame; its draw order is
+   plain alpha particles, then the lit smoke, then the additive ones. The batch sort isn't needed: 1d is dropped.
+9. **The rect** would merge the lit smoke (9–11 draws become 1), plain particles (up to 12 cells × blend become 2),
+   effect flipbooks (one draw a book, not a book and frame), and weather and city-life sprites. None of them use the
+   custom floats (v2 uses them only on bodies, the wreck dissolve, and on the kit's world-detail seed, never on
+   billboards). v2 asked that the rect work on the fast unlit shader too: it works on every path that uses
+   `production_model.vert`.
+10. **The ground (2b): yes on desktop.** A column's shadow on the street is the landmark cue the owner asked for. The sun
+    is low (28° by day, 16° at dusk), so a 12-cell column lays a long shadow. On the Deck, v2 starts with
+    `particle_shadow` 1 and measures 2.
+11. **Stacked puffs: one slab is fine.** One column per fire, at least 5 cells apart, 4–7 at most; the low sun crosses
+    one column per ray. No layers.
+12. **The sun's map:** High 2048, Medium 1536, Low and Deck 1024, redrawn every frame. It spans about 70–80 cells on the
+    classic camera (about 0.035 cells a texel at 2048, 0.07 on the Deck). Columns are 1–7 cells wide, so half is plenty
+    and a quarter would do on the Deck.
+13. **Release: phase 1 in 0.11.0, phase 2 after v2's phase 1 captures.** On phase 1 v2 rewrites `smoke.rs` in one step:
+    bake the normal and thickness, one sorted rect batch, and drop the five tilts, the per-sprite turn, the emission's
+    sky fill and the CPU light gathering. It keeps the columns, the readability thinning and the coverage parity.
+
+**What the answers change in the design** (applied above): the transmission for the sun and the point lights only;
+lights out of reach exit early; straight alpha only; the fog's make-up with no post flag; lit particles never cascade
+sources; no batch sort (1d and its post flag and macro gone); the rect on every static vertex shader's path; `p1.z`
+about 9 in the examples.
+
+## Implementation notes (phase 1, 2026-11-23)
+
+Filled in when phase 1 was built (`feature/0.11.0-lit-particles`, on `fc2784ea`); see the CHANGELOG's
+`[Unreleased] (0.11.0)` for the release's view.
 
 ## Phases
 
-1. **Phase 1 (0.11.0): items 1, 2 and 3, and item 5 between batches.**
+1. **Phase 1 (0.11.0): items 1, 2 and 3** (Decisions).
    - 1a: `LIT_PARTICLE` and its three fragment shader files. The ambient, the sun with four plain taps and the clouds,
-     the fill, the spot and omni light, lamps, point lights, the cascades, emission and fog with its make-up.
+     the fill, the spot and omni light, lamps, point lights (the transmission for the sun and the point lights), the
+     cascades, emission and fog with its make-up.
    - 1b: the soft and near fades, with the distance in its own slot. Part of 1a's shader; `SOFT_PARTICLE` unchanged.
-   - 1c: `BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT` in `production_model.vert`, behind the named `instance_uv_rect` word.
-   - 1d: `BTBH_GPU_SCENE_POST_SORT_TRANSPARENT` (no shader), if v2 wants it (question 8).
+   - 1c: `BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT` in every static vertex shader, behind the named `instance_uv_rect` word.
+   - ~~1d: `BTBH_GPU_SCENE_POST_SORT_TRANSPARENT`~~: dropped (decision 8). v2 sorts its instances; post bit 3 stays free.
 
-   Plus the checks, the C copies, the tests, the bench's smoke mode, prewarm and render to target.
-2. **Phase 2 (0.12.0 or later, after phase 1's captures): item 4.**
-   - 2a: `BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW`, `particle_shadow` 1, the RGBA16F map, its two shader files, the read in
-     the particle shader.
-   - 2b, if v2 answers yes to question 10: `particle_shadow` 2, the map in the scene shader's last free slot.
-3. **Not planned:** sorting instances in the renderer, on the GPU or the CPU (item 5 within a batch is v2's).
+   Plus the checks, the C copies, the tests, the bench's smoke modes, prewarm and render to target.
+2. **Phase 2 (after v2's phase 1 captures): item 4.**
+   - 2a: `BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW`, `particle_shadow` 1, the RGBA16F map at half the sun map's size, its two
+     shader files, the read in the particle shader.
+   - 2b: `particle_shadow` 2, the map in the scene shader's last free slot (decision 10: yes on desktop).
+3. **Not planned:** sorting in the renderer, between batches or within one, on the GPU or the CPU (item 5 is v2's).
 4. **Later, only if asked:**
-   - fog before the transparent pass (question 6);
-   - lamps and point lights per vertex (question 4);
-   - layers in the map (question 11);
+   - premultiplied alpha;
+   - fog before the transparent pass;
+   - lamps and point lights per vertex;
+   - layers in the map;
    - six-way lightmaps;
    - particles in SSR.
