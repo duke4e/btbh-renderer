@@ -51,6 +51,12 @@
  *   smoke-lit as one lit particle batch with the UV rect, a normal and thickness atlas, the soft fade and the
  *   transmission; smoke-off draws none (the same lights). The cost log's transparent_ms holds the distance pass and
  *   the puffs. Before 0.11.0 smoke-lit draws as smoke-off.
+ * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
+ *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
+ *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
+ *   BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR at custom x 1 (the same pixels as light-off: light - light-off is what
+ *   the flag costs); light-mixed at 1, 0.5 and 0 by instance (a district going dark). Before 0.11.0 both draw as
+ *   light-off.
  * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
  *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
  *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
@@ -139,6 +145,8 @@ typedef struct BenchWindow {
     char mode[48];
     /* RFC 0013's smoke: 0 none, 1 smoke-off, 2 smoke-soft, 3 smoke-lit. */
     int smoke;
+    /* The light factor: 0 none, 1 light-off, 2 light, 3 light-mixed. */
+    int light;
     BTBHGPUTexture *smoke_atlas;
     BTBHGPUTexture *smoke_normals;
     BTBHGPUCustomMesh *puff;
@@ -439,6 +447,23 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->normal_texture = bench->normal;
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
+        if (bench->light != 0) {
+            /* v2's lit kit at night: a glow on every piece, glass on every fourth. */
+            batch->emission_red = 255u;
+            batch->emission_green = 190u;
+            batch->emission_blue = 120u;
+            batch->emission_energy = 1.5f;
+            if (draw % 4u == 0u) {
+                batch->detail_parameters[1] = 0.5f;
+                batch->detail_parameters[2] = 3.0f;
+                batch->detail_parameters[3] = 5.0f;
+            }
+#if defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
+            if (bench->light >= 2) {
+                batch->flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+            }
+#endif
+        }
         if (bench->rc && draw % 10u == 0u) {
             /* A glow: a material source of the cascades. */
             batch->emission_red = 255u;
@@ -484,6 +509,10 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
             instance[18] = 0.6f + 0.4f * bench_unit(&state);
             instance[19] = 1.0f;
             instance[23] = (float)(lot % 97u);   /* the lot's seed in custom.w */
+            if (bench->light != 0) {
+                /* The light factor in custom x: 1, or (light-mixed) 1, 0.5 and 0 by instance. */
+                instance[20] = bench->light == 3 ? 0.5f * (float)(bench->instance_count % 3u) : 1.0f;
+            }
             bench->triangles += (uint64_t)piece_boxes(piece) * 12u;
         }
     }
@@ -1024,6 +1053,8 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     bench->rc = mode_has(bench->mode, "rc");
     bench->rc_low = mode_has(bench->mode, "low");
     bench->rc_tops = mode_has(bench->mode, "tops");
+    bench->light = strncmp(bench->mode, "light-off", 9) == 0 ? 1 :
+        (strncmp(bench->mode, "light-mixed", 11) == 0 ? 3 : (strncmp(bench->mode, "light", 5) == 0 ? 2 : 0));
     bench->smoke = strncmp(bench->mode, "smoke-off", 9) == 0 ? 1 :
         (strncmp(bench->mode, "smoke-soft", 10) == 0 ? 2 : (strncmp(bench->mode, "smoke-lit", 9) == 0 ? 3 : 0));
     char title[64];
@@ -1210,6 +1241,9 @@ static BTBHGPUScenePost window_post(const BenchWindow *bench, const BTBHGPUScene
 /* The window's lighting: the smoke modes add the fires' and four neon signs' point lights, and a second row of lamps. */
 static BTBHGPUSceneLighting window_lighting(const BenchWindow *bench, const BTBHGPUSceneLighting *lighting) {
     BTBHGPUSceneLighting result = *lighting;
+    if (bench->light != 0) {
+        result.window_glow = 1.5f;
+    }
     if (bench->smoke == 0) {
         return result;
     }
