@@ -10,7 +10,8 @@
  *   the composite's lerp(pixel, fog, behind) of the made-up colour blended over the background gives the puff fogged
  *   at its own depth over the background fogged at its own; for stacks of up to six layers too.
  * - The fog's amount: the composite's formula, its cap and its edge fog.
- * - Every refusal, and a batch each rule lets through. */
+ * - Every refusal, and a batch each rule lets through.
+ * - The light factor's (BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR, 0.11.0) refusals, and what it lets through. */
 #undef NDEBUG
 
 #include "btbh_gpu_particle.h"
@@ -277,6 +278,69 @@ static void check_refusals(void) {
     assert(btbh_gpu_particle_uv_rect_problem(&rect) == NULL);
     table.seed_component = 4u;
     expect_problem(btbh_gpu_particle_uv_rect_problem(&rect), "world_detail_table's seed_component", "a seeded table");
+
+    /* The light factor (0.11.0): custom x. Not with the rect (which reports nothing of it: the factor's check does),
+       a lit particle, a refracting batch, DISSOLVE or GLITTER, a detail or table seeded by x. Skinned batches, SHATTER
+       (y, z, w), the other variants and seeds 2..4 (v2's world detail seed is custom w) are free. */
+    BTBHGPUSceneGeometryBatch light;
+    memset(&light, 0, sizeof(light));
+    assert(!btbh_gpu_scene_light_factor(&light));
+    light.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+    assert(btbh_gpu_scene_light_factor(&light) && btbh_gpu_scene_light_factor_problem(&light) == NULL);
+    checks += 1;
+    light.flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+    expect_problem(btbh_gpu_scene_light_factor_problem(&light), "INSTANCE_UV_RECT", "the light factor and the rect");
+    assert(btbh_gpu_particle_uv_rect_problem(&light) == NULL);
+    checks += 1;
+    light.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+    light.surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
+    expect_problem(btbh_gpu_scene_light_factor_problem(&light), "lit particle", "a lit particle's light factor");
+    light.surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
+    expect_problem(btbh_gpu_scene_light_factor_problem(&light), "refracting", "a refracting batch's light factor");
+    light.surface_variant = BTBH_GPU_SCENE_SURFACE_DISSOLVE;
+    expect_problem(btbh_gpu_scene_light_factor_problem(&light), "custom x", "DISSOLVE's light factor");
+    light.surface_variant = BTBH_GPU_SCENE_SURFACE_GLITTER;
+    expect_problem(btbh_gpu_scene_light_factor_problem(&light), "custom x", "GLITTER's light factor");
+    static const BTBHGPUSceneSurfaceVariant lit_by_factor[] = {
+        BTBH_GPU_SCENE_SURFACE_NONE, BTBH_GPU_SCENE_SURFACE_GLITTER_STATIC, BTBH_GPU_SCENE_SURFACE_WATER,
+        BTBH_GPU_SCENE_SURFACE_SHATTER, BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE, BTBH_GPU_SCENE_SURFACE_RIM,
+        BTBH_GPU_SCENE_SURFACE_GLINTS, BTBH_GPU_SCENE_SURFACE_PIXEL_WATER,
+    };
+    for (size_t variant = 0u; variant < sizeof(lit_by_factor) / sizeof(lit_by_factor[0]); ++variant) {
+        light.surface_variant = lit_by_factor[variant];
+        assert(btbh_gpu_scene_light_factor_problem(&light) == NULL);
+        checks += 1;
+    }
+    light.surface_variant = BTBH_GPU_SCENE_SURFACE_NONE;
+    light.animation_library = (BTBHGPUAnimationLibrary *)(uintptr_t)&stand_in;
+    assert(btbh_gpu_scene_light_factor_problem(&light) == NULL);
+    checks += 1;
+    light.animation_library = NULL;
+    memset(&detail, 0, sizeof(detail));
+    light.world_detail = &detail;
+    for (uint8_t seed = 0u; seed <= 4u; ++seed) {
+        detail.seed_component = seed;
+        if (seed == 1u) {
+            expect_problem(btbh_gpu_scene_light_factor_problem(&light), "world_detail's seed_component 1",
+                "a detail seeded by custom x");
+        } else {
+            assert(btbh_gpu_scene_light_factor_problem(&light) == NULL);
+            checks += 1;
+        }
+    }
+    light.world_detail = NULL;
+    memset(&table, 0, sizeof(table));
+    light.world_detail_table = &table;
+    for (uint8_t seed = 0u; seed <= 4u; ++seed) {
+        table.seed_component = seed;
+        if (seed == 1u) {
+            expect_problem(btbh_gpu_scene_light_factor_problem(&light), "world_detail_table's seed_component 1",
+                "a table seeded by custom x");
+        } else {
+            assert(btbh_gpu_scene_light_factor_problem(&light) == NULL);
+            checks += 1;
+        }
+    }
 }
 
 int main(void) {

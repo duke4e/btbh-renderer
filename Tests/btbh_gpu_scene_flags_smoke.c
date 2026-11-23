@@ -43,6 +43,24 @@
  * - The spot occluder's flags (an orthographic spot map along the sun round a tall box) and
  *   BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW; the new refusals.
  * - BTBH_SMOKE_BENCH=facing: SSR_FACING_HITS's cost on the steep street.
+ *
+ * Set (0.11.0, Be The Bullet Hell v2's district blackouts): BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR on the street at
+ * night with its windows lit (window_glow 2), its light batches each one of v2's light-carrying kit pieces: glass
+ * (pattern 5, 0.6 of its panes lit), a lamp lens (pattern 6), an emissive box, a see-through unlit card with an
+ * emission lying on the street (the fast unlit shader where it applies), the skinned quad with an emission laid flat,
+ * an emissive box outside the view (the radiance cascades' source field only), an unlit source and an unlit glow
+ * outside the view. Through no cascades (the sun's shadow, none), cascades,
+ * additive cascades with the omni shadow and the HBAO, and additive cascades with KEEP_HBAO:
+ * - every light batch at custom x 1 (or 3) renders byte for byte as unflagged (with custom x 0.25: only the flag reads
+ *   it); at 0 (or -1.5, or NaN) as v2's Dark batches (emission_energy 0, the glass's share 0, the lens's pattern 0);
+ *   at 0.5 as half the emission's energy and half the glass's share, and the lens at 0.5 as half the window light;
+ * - each light batch alone, at 0, is its own Dark look and differs from unflagged, and at 0.5 its half; but the unlit
+ *   source without an emission, whose colour stays a source (at 0 it renders as unflagged). Under the cascades the
+ *   glows outside the view (lit and unlit) and the skinned quad at 0 and 0.5 are the same batches with no emission and
+ *   half its energy, and differ from unflagged across the frame: the source field is scaled, the animated pass too;
+ * - prewarming the unflagged scenes in a fresh window leaves the flagged ones no pipeline or shader to make;
+ * - refusals, naming the batch (present and prewarm): with INSTANCE_UV_RECT, DISSOLVE, GLITTER, a lit particle, a
+ *   refracting batch, a world detail or table seeded by custom x; a detail seeded by w and SHATTER are taken.
  * - BTBH_SMOKE_BENCH=1 (or =ssr, =hbao): the flags' cost at 1920x1080, in interleaved turns (prints only):
  *   the reflections without the cascades unset (which return before they march), with the flag and off; the HBAO
  *   and the reflections under additive cascades with KEEP_HBAO and without, and without the cascades.
@@ -83,6 +101,10 @@
     defined(BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS) && defined(BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW)
 #define SMOKE_HAS_0100 1
 #endif
+/* 0.11.0: the instance's light factor (Be The Bullet Hell v2's blackouts). */
+#if defined(SMOKE_HAS_0100) && defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR) && defined(BTBH_GPU_SMOKE_FIXTURE_DIR)
+#define SMOKE_HAS_0110 1
+#endif
 
 #if defined(__APPLE__)
 #define SMOKE_SHADER_EXTENSION ".metallib"
@@ -114,6 +136,10 @@ typedef struct SmokeWindow {
     BTBHGPUCustomMesh *cube;
     BTBHGPUTexture *target;   /* TARGET_SIZE^2 */
     BTBHGPUTexture *glow;     /* an emission texture */
+#if defined(SMOKE_HAS_0110)
+    BTBHGPUModel *skinned;    /* skinned-quad.gltf */
+    BTBHGPUAnimationLibrary *animation;
+#endif
 } SmokeWindow;
 
 /* ------------------------------------------------------------------------------------------------- helpers */
@@ -1658,16 +1684,455 @@ static void check_spot_occluder(SmokeWindow *smoke) {
 }
 #endif
 
+#if defined(SMOKE_HAS_0110)
+/* ------------------------------------------------------------------------------ set: the light factor (0.11.0) */
+
+static SmokeWindow open_smoke_window(BTBHGPUDevice *device, const char *title);
+static void close_smoke_window(SmokeWindow *smoke);
+
+/* The blackout scene's light batches: Be The Bullet Hell v2's kit pieces that carry light, by role. */
+enum {
+    LIGHT_GLASS = 0,     /* glass, detail pattern 5, 0.6 of its panes lit at night */
+    LIGHT_LENS,          /* a lamp lens (pattern 6) on the building's front: v2's signs */
+    LIGHT_GLOW,          /* a lit box with an emission texture */
+    LIGHT_CARD,          /* a see-through unlit card with an emission: the fast unlit shader where it applies */
+    LIGHT_SKINNED,       /* the skinned quad with an emission */
+    LIGHT_FAR_GLOW,      /* an emissive box outside the view: the radiance cascades' source field only */
+    LIGHT_SOURCE,        /* an unlit box without an emission: its colour is a source of the cascades, and stays one */
+    LIGHT_FAR_SOURCE,    /* an unlit box with an emission outside the view: the emission goes, the colour stays */
+    LIGHT_COUNT
+};
+#define LIGHT_BIT(role) (1u << (role))
+#define LIGHT_ALL (LIGHT_BIT(LIGHT_COUNT) - 1u)
+
+static const char *const light_names[LIGHT_COUNT] = {
+    "glass", "lamp lens", "glow", "unlit card", "skinned quad", "glow outside the view", "unlit source",
+    "unlit glow outside the view",
+};
+
+typedef struct LightConfig {
+    const char *name;
+    Shadows shadows;
+    Cascades cascades;
+    Occlusion occlusion;
+    uint8_t post_flags;
+} LightConfig;
+
+static const LightConfig light_configs[] = {
+    { .name = "sun", .shadows = SHADOWS_SUN },
+    { .name = "unshadowed", .shadows = SHADOWS_NONE },
+    { .name = "rc-sun", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON },
+    { .name = "additive-omni-hbao", .shadows = SHADOWS_OMNI, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO },
+    { .name = "additive-keep-hbao", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO, .post_flags = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO },
+};
+#define LIGHT_CONFIG_COUNT ((uint32_t)(sizeof(light_configs) / sizeof(light_configs[0])))
+
+/* The street at night with its windows lit (window_glow 2) and the light batches; light[role] is each one's box. */
+static void build_blackout_scene(const SmokeWindow *smoke, const LightConfig *config, Scene *scene,
+    uint32_t light[LIGHT_COUNT]) {
+    const Options options = { .name = config->name, .shadows = config->shadows, .cascades = config->cascades,
+        .occlusion = config->occlusion, .glow = true, .far_glow = true };
+    build_scene(smoke, &options, scene);
+    scene->post.flags = config->post_flags;
+    scene->lighting.ambient_energy = 0.15f;
+    scene->lighting.directional_energy = 0.25f;
+    scene->lighting.window_glow = 2.0f;
+    light[LIGHT_GLASS] = MAX_BOXES;
+    for (uint32_t index = 0u; index < scene->count; ++index) {
+        if (scene->batches[index].detail_parameters[3] == 5.0f) {
+            light[LIGHT_GLASS] = index;
+        }
+    }
+    assert(light[LIGHT_GLASS] != MAX_BOXES);
+    scene->batches[light[LIGHT_GLASS]].detail_parameters[1] = 0.6f;
+    BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube);
+    batch.detail_parameters[2] = 1.0f;   /* (patterns 1..6 take a scale) */
+    batch.detail_parameters[3] = 6.0f;
+    light[LIGHT_LENS] = scene_add(scene, make_box(-2.2f, 1.3f, -0.85f, 1.0f, 0.45f, 0.1f, hot), batch);
+    light[LIGHT_GLOW] = scene->glow_box;
+    batch = cube_batch(smoke->cube);
+    batch.unlit_enabled = 1u;
+    batch.transparency_enabled = 1u;
+    batch.albedo_alpha = 200u;
+    batch.emission_texture = smoke->glow;
+    batch.emission_red = 255u;
+    batch.emission_green = 255u;
+    batch.emission_blue = 255u;
+    batch.emission_energy = 1.5f;
+    batch.spot_shadow_visible = 0u;
+    batch.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+    /* (Lying on the street, as v2's washes do: the cascades' sources are drawn from above.) */
+    light[LIGHT_CARD] = scene_add(scene, make_box(1.0f, 0.04f, 0.8f, 0.9f, 0.02f, 0.9f, slate), batch);
+    batch = cube_batch(smoke->cube);
+    batch.kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+    batch.custom_mesh = NULL;
+    batch.model = smoke->skinned;
+    batch.animation_library = smoke->animation;
+    batch.animation_time = 0.25f;
+    batch.cull_mode = BTBH_GPU_SCENE_CULL_NONE;
+    batch.emission_red = 120u;
+    batch.emission_green = 220u;
+    batch.emission_blue = 255u;
+    batch.emission_energy = 3.0f;
+    light[LIGHT_SKINNED] = scene_add(scene, make_box(-0.4f, 0.03f, 2.0f, 0.8f, 0.8f, 0.8f, warm), batch);
+    /* The quad (x -0.5..0.5, y 0..1, facing +z) laid flat, facing up: (x, y, z) to (x, z, -y), so the cascades'
+       source pass, which projects straight down, sees its face. */
+    float *quad = scene->instances[light[LIGHT_SKINNED]];
+    quad[5] = 0.0f;
+    quad[6] = -0.8f;
+    quad[9] = 0.8f;
+    quad[10] = 0.0f;
+    light[LIGHT_FAR_GLOW] = scene->far_glow_box;
+    light[LIGHT_SOURCE] = scene->source_box;
+    light[LIGHT_FAR_SOURCE] = scene->far_source_box;
+    BTBHGPUSceneGeometryBatch *far_source = &scene->batches[light[LIGHT_FAR_SOURCE]];
+    far_source->emission_red = 255u;
+    far_source->emission_green = 120u;
+    far_source->emission_blue = 60u;
+    far_source->emission_energy = 6.0f;
+}
+
+/* Custom x of the chosen light batches' instances, and (flag) the flag on them. */
+static void set_light_factor(Scene *scene, const uint32_t light[LIGHT_COUNT], uint32_t which, float factor, bool flag) {
+    for (uint32_t role = 0u; role < LIGHT_COUNT; ++role) {
+        if ((which & LIGHT_BIT(role)) != 0u) {
+            if (flag) {
+                scene->batches[light[role]].flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+            }
+            scene->instances[light[role]][20] = factor;
+        }
+    }
+}
+
+/* The chosen light batches as a host scales them without the flag: the emission's energy and the glass's share of lit
+   panes times scale; at 0 the lamp lens loses its pattern (v2's Dark batches). The lens's glow at another scale is the
+   window light's (the caller scales window_glow). */
+static void scale_light(Scene *scene, const uint32_t light[LIGHT_COUNT], uint32_t which, float scale) {
+    for (uint32_t role = 0u; role < LIGHT_COUNT; ++role) {
+        if ((which & LIGHT_BIT(role)) == 0u) {
+            continue;
+        }
+        BTBHGPUSceneGeometryBatch *batch = &scene->batches[light[role]];
+        batch->emission_energy *= scale;
+        if (role == LIGHT_GLASS) {
+            batch->detail_parameters[1] *= scale;
+        }
+        if (role == LIGHT_LENS && scale == 0.0f) {
+            batch->detail_parameters[3] = 0.0f;
+        }
+    }
+}
+
+/* The blackout scene with the `flagged` light batches at `factor`, the `scaled` ones scaled. */
+static uint8_t *render_blackout(SmokeWindow *smoke, const LightConfig *config, uint32_t flagged, float factor,
+    uint32_t scaled, float scale) {
+    static Scene scene;
+    uint32_t light[LIGHT_COUNT];
+    build_blackout_scene(smoke, config, &scene, light);
+    set_light_factor(&scene, light, flagged, factor, true);
+    scale_light(&scene, light, scaled, scale);
+    return render(smoke, &scene);
+}
+
+/* Every light batch at 1, 0 and 0.5 against the batches scaled as v2 does without the flag. */
+static void check_light_factor_config(SmokeWindow *smoke, const LightConfig *config) {
+    static Scene scene;
+    uint32_t light[LIGHT_COUNT];
+    char what[200];
+    /* Unflagged, with 0.25 in custom x: only the flag reads it. */
+    build_blackout_scene(smoke, config, &scene, light);
+    set_light_factor(&scene, light, LIGHT_ALL, 0.25f, false);
+    uint8_t *unflagged = render(smoke, &scene);
+    /* At 1, and above (clamped to 1). */
+    build_blackout_scene(smoke, config, &scene, light);
+    set_light_factor(&scene, light, LIGHT_ALL & 0x55u, 1.0f, true);
+    set_light_factor(&scene, light, LIGHT_ALL & 0xaau, 3.0f, true);
+    uint8_t *powered = render(smoke, &scene);
+    (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: every light batch at 1 (or 3) against unflagged",
+        config->name);
+    expect_same(what, powered, unflagged);
+    /* At 0, below it and NaN (0). */
+    build_blackout_scene(smoke, config, &scene, light);
+    set_light_factor(&scene, light, LIGHT_ALL & 0x49u, 0.0f, true);
+    set_light_factor(&scene, light, LIGHT_ALL & 0x92u, -1.5f, true);
+    set_light_factor(&scene, light, LIGHT_ALL & 0x24u, NAN, true);
+    uint8_t *dark = render(smoke, &scene);
+    uint8_t *old_dark = render_blackout(smoke, config, 0u, 0.0f, LIGHT_ALL, 0.0f);
+    (void)snprintf(what, sizeof(what),
+        "LIGHT_FACTOR, %s: every light batch at 0 (or -1.5, or NaN) against v2's Dark batches", config->name);
+    expect_same(what, dark, old_dark);
+    (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: unflagged against v2's Dark batches", config->name);
+    (void)expect_different(what, unflagged, old_dark);
+    /* At 0.5: half the emissions' energy and half the glass's share (the lens apart). */
+    const uint32_t but_lens = LIGHT_ALL & ~LIGHT_BIT(LIGHT_LENS);
+    uint8_t *half = render_blackout(smoke, config, but_lens, 0.5f, 0u, 1.0f);
+    uint8_t *old_half = render_blackout(smoke, config, 0u, 0.0f, but_lens, 0.5f);
+    (void)snprintf(what, sizeof(what),
+        "LIGHT_FACTOR, %s: the light batches but the lens at 0.5 against half the energy and half the share",
+        config->name);
+    expect_same(what, half, old_half);
+    (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: at 0.5 against 1", config->name);
+    (void)expect_different(what, half, unflagged);
+    (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: at 0.5 against 0", config->name);
+    (void)expect_different(what, half, dark);
+    /* The lens at 0.5: half the window light (the glass without lit panes in both). */
+    build_blackout_scene(smoke, config, &scene, light);
+    scene.batches[light[LIGHT_GLASS]].detail_parameters[1] = 0.0f;
+    set_light_factor(&scene, light, LIGHT_BIT(LIGHT_LENS), 0.5f, true);
+    uint8_t *half_lens = render(smoke, &scene);
+    build_blackout_scene(smoke, config, &scene, light);
+    scene.batches[light[LIGHT_GLASS]].detail_parameters[1] = 0.0f;
+    scene.lighting.window_glow *= 0.5f;
+    uint8_t *old_half_lens = render(smoke, &scene);
+    (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: the lens at 0.5 against half the window light",
+        config->name);
+    expect_same(what, half_lens, old_half_lens);
+    char name[96];
+    (void)snprintf(name, sizeof(name), "light-%s-1", config->name);
+    dump_image(name, unflagged);
+    (void)snprintf(name, sizeof(name), "light-%s-0.5", config->name);
+    dump_image(name, half);
+    (void)snprintf(name, sizeof(name), "light-%s-0", config->name);
+    dump_image(name, dark);
+    free(unflagged);
+    free(powered);
+    free(dark);
+    free(old_dark);
+    free(half);
+    free(old_half);
+    free(half_lens);
+    free(old_half_lens);
+}
+
+/* Each light batch alone: at 0 its own Dark look (and unlike unflagged, but for the unlit source without an emission,
+   whose colour stays); at 0.5 half its energy or share. */
+static void check_light_factor_alone(SmokeWindow *smoke, const LightConfig *config, uint32_t roles) {
+    uint8_t *unflagged = render_blackout(smoke, config, 0u, 0.0f, 0u, 1.0f);
+    for (uint32_t role = 0u; role < LIGHT_COUNT; ++role) {
+        if ((roles & LIGHT_BIT(role)) == 0u) {
+            continue;
+        }
+        char what[200];
+        uint8_t *dark = render_blackout(smoke, config, LIGHT_BIT(role), 0.0f, 0u, 1.0f);
+        uint8_t *old_dark = render_blackout(smoke, config, 0u, 0.0f, LIGHT_BIT(role), 0.0f);
+        (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: the %s alone at 0 against its Dark look", config->name,
+            light_names[role]);
+        expect_same(what, dark, old_dark);
+        (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: the %s alone at 0 against unflagged", config->name,
+            light_names[role]);
+        if (role == LIGHT_SOURCE) {
+            expect_same(what, dark, unflagged);
+        } else {
+            (void)expect_different(what, dark, unflagged);
+        }
+        if (role != LIGHT_LENS) {
+            uint8_t *half = render_blackout(smoke, config, LIGHT_BIT(role), 0.5f, 0u, 1.0f);
+            uint8_t *old_half = render_blackout(smoke, config, 0u, 0.0f, LIGHT_BIT(role), 0.5f);
+            (void)snprintf(what, sizeof(what), "LIGHT_FACTOR, %s: the %s alone at 0.5 against half", config->name,
+                light_names[role]);
+            expect_same(what, half, old_half);
+            free(half);
+            free(old_half);
+        }
+        free(dark);
+        free(old_dark);
+    }
+    free(unflagged);
+}
+
+static void check_light_factor_refusals(SmokeWindow *smoke) {
+    static Scene scene;
+    uint32_t light[LIGHT_COUNT];
+    BTBHGPUSceneReport report;
+    const LightConfig *config = &light_configs[0];
+    BTBHGPUSceneWorldDetail detail;
+    memset(&detail, 0, sizeof(detail));
+    detail.level_tile[0] = detail.level_tile[1] = detail.wall_tile[0] = detail.wall_tile[1] = 1.0f;
+    BTBHGPUSceneWorldDetailTableEntry entry;
+    memset(&entry, 0, sizeof(entry));
+    entry.level_tile[0] = entry.level_tile[1] = entry.wall_tile[0] = entry.wall_tile[1] = 1.0f;
+    BTBHGPUSceneWorldDetailTable table;
+    memset(&table, 0, sizeof(table));
+    table.entries = &entry;
+    table.entry_count = 1u;
+    uint32_t refused = 0u;
+    for (int which = 0; which < 9; ++which) {
+        build_blackout_scene(smoke, config, &scene, light);
+        const uint32_t index = light[LIGHT_GLOW];
+        BTBHGPUSceneGeometryBatch *batch = &scene.batches[index];
+        set_light_factor(&scene, light, LIGHT_BIT(LIGHT_GLOW), 0.5f, true);
+        const char *needle = NULL;
+        switch (which) {
+            case 0:
+                batch->flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+                needle = "INSTANCE_UV_RECT";
+                break;
+            case 1:
+                batch->surface_variant = BTBH_GPU_SCENE_SURFACE_DISSOLVE;
+                needle = "custom x";
+                break;
+            case 2:
+                batch->surface_variant = BTBH_GPU_SCENE_SURFACE_GLITTER;
+                needle = "custom x";
+                break;
+            case 3:
+                /* (A lit particle the lit particle's own rules take.) */
+                batch->surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
+                batch->transparency_enabled = 1u;
+                batch->blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+                needle = "lit particle";
+                break;
+            case 4:
+                batch->surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
+                batch->transparency_enabled = 1u;
+                batch->blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+                needle = "refracting";
+                break;
+            case 5:
+                detail.seed_component = 1u;
+                batch->world_detail = &detail;
+                needle = "world_detail's seed_component 1";
+                break;
+            case 6:
+                table.seed_component = 1u;
+                batch->world_detail_table = &table;
+                needle = "world_detail_table's seed_component 1";
+                break;
+            case 7:
+                /* Taken: a detail seeded by custom w (v2's), a table by y, and SHATTER (y, z, w). */
+                detail.seed_component = 4u;
+                batch->world_detail = &detail;
+                table.seed_component = 2u;
+                scene.batches[light[LIGHT_LENS]].world_detail_table = &table;
+                set_light_factor(&scene, light, LIGHT_BIT(LIGHT_LENS), 0.5f, true);
+                scene.batches[light[LIGHT_CARD]].surface_variant = BTBH_GPU_SCENE_SURFACE_SHATTER;
+                set_light_factor(&scene, light, LIGHT_BIT(LIGHT_CARD), 0.5f, true);
+                break;
+            default:
+                /* Prewarm refuses too. */
+                batch->flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+                needle = "INSTANCE_UV_RECT";
+                break;
+        }
+        BTBHGPUResult result;
+        memset(&report, 0, sizeof(report));
+        if (which == 8) {
+            result = btbh_gpu_window_scene_prewarm_render_to_target(smoke->window, smoke->target,
+                shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+                shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+                shader_paths[8], shader_paths[9], shader_paths[10],
+                SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE, &scene.lighting, &scene.post, scene.batches, scene.count,
+                &report);
+        } else {
+            result = btbh_gpu_window_scene_render_to_target(smoke->window, smoke->target,
+                shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+                shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+                shader_paths[8], shader_paths[9], shader_paths[10],
+                SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE,
+                scene.camera.view_projection, scene.camera.right, scene.camera.up, scene.camera.position,
+                &scene.lighting, &scene.post, &scene.instances[0][0], scene.count, scene.count,
+                scene.batches, NULL, NULL, scene.count, 12u, 14u, 20u, 255u, &report);
+        }
+        if (needle == NULL) {
+            if (result != BTBH_GPU_OK) {
+                fprintf(stderr, "light factor, taken: %s\n", report.message);
+            }
+            assert(result == BTBH_GPU_OK);
+            continue;
+        }
+        char prefix[96];
+        (void)snprintf(prefix, sizeof(prefix), "GPU scene batch %u: flags INSTANCE_LIGHT_FACTOR: ", index);
+        const bool named = strstr(report.message, prefix) != NULL && strstr(report.message, needle) != NULL;
+        if (result != BTBH_GPU_INVALID_ARGUMENT || !named) {
+            fprintf(stderr, "light factor refusal %d: %d \"%s\" (expected \"%s...%s\")\n", which, (int)result,
+                report.message, prefix, needle);
+        }
+        assert(result == BTBH_GPU_INVALID_ARGUMENT && named);
+        refused += 1u;
+        if (which == 0) {
+            printf("LIGHT_FACTOR refusal: %s\n", report.message);
+        }
+    }
+    printf("LIGHT_FACTOR: %u refusals naming the batch (present and prewarm); a detail seeded by w, a table by y and "
+           "SHATTER taken\n", refused);
+}
+
+/* Prewarming the unflagged scenes in a fresh window makes every pipeline and shader the flagged ones draw with. */
+static void check_light_factor_prewarm(BTBHGPUDevice *device) {
+    SmokeWindow fresh = open_smoke_window(device, "BTBH scene flags smoke (light factor prewarm)");
+    static Scene scene;
+    uint32_t light[LIGHT_COUNT];
+    BTBHGPUCreationStats before;
+    btbh_gpu_creation_stats(&before);
+    for (uint32_t index = 0u; index < LIGHT_CONFIG_COUNT; ++index) {
+        build_blackout_scene(&fresh, &light_configs[index], &scene, light);
+        BTBHGPUSceneReport report;
+        memset(&report, 0, sizeof(report));
+        const BTBHGPUResult result = btbh_gpu_window_scene_prewarm_render_to_target(fresh.window, fresh.target,
+            shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+            shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+            shader_paths[8], shader_paths[9], shader_paths[10],
+            SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE, &scene.lighting, &scene.post, scene.batches, scene.count,
+            &report);
+        if (result != BTBH_GPU_OK) {
+            fprintf(stderr, "light factor prewarm %s: %s\n", light_configs[index].name, report.message);
+        }
+        assert(result == BTBH_GPU_OK);
+    }
+    BTBHGPUCreationStats prewarmed;
+    btbh_gpu_creation_stats(&prewarmed);
+    for (uint32_t index = 0u; index < LIGHT_CONFIG_COUNT; ++index) {
+        free(render_blackout(&fresh, &light_configs[index], LIGHT_ALL, 0.5f, 0u, 1.0f));
+    }
+    BTBHGPUCreationStats rendered;
+    btbh_gpu_creation_stats(&rendered);
+    printf("LIGHT_FACTOR prewarm: %llu pipelines and %llu shaders made by prewarming %u unflagged scenes in a fresh "
+           "window; their flagged renders then made %llu pipelines and %llu shaders\n",
+        (unsigned long long)(prewarmed.graphics_pipelines - before.graphics_pipelines),
+        (unsigned long long)(prewarmed.shaders - before.shaders), LIGHT_CONFIG_COUNT,
+        (unsigned long long)(rendered.graphics_pipelines - prewarmed.graphics_pipelines),
+        (unsigned long long)(rendered.shaders - prewarmed.shaders));
+    assert(prewarmed.graphics_pipelines > before.graphics_pipelines);
+    assert(rendered.graphics_pipelines == prewarmed.graphics_pipelines);
+    assert(rendered.shaders == prewarmed.shaders);
+    close_smoke_window(&fresh);
+}
+
+static void check_light_factor(SmokeWindow *smoke, BTBHGPUDevice *device) {
+    for (uint32_t index = 0u; index < LIGHT_CONFIG_COUNT; ++index) {
+        check_light_factor_config(smoke, &light_configs[index]);
+    }
+    /* Each alone: without the cascades every one on screen (the card through the fast unlit shader); under the
+       cascades and additive ones the emissive ones, the sources and the glow outside the view. */
+    check_light_factor_alone(smoke, &light_configs[0], LIGHT_BIT(LIGHT_GLASS) | LIGHT_BIT(LIGHT_LENS) |
+        LIGHT_BIT(LIGHT_GLOW) | LIGHT_BIT(LIGHT_CARD) | LIGHT_BIT(LIGHT_SKINNED));
+    for (uint32_t index = 2u; index < 4u; ++index) {
+        check_light_factor_alone(smoke, &light_configs[index], LIGHT_BIT(LIGHT_GLOW) | LIGHT_BIT(LIGHT_CARD) |
+            LIGHT_BIT(LIGHT_SKINNED) | LIGHT_BIT(LIGHT_FAR_GLOW) | LIGHT_BIT(LIGHT_SOURCE) |
+            LIGHT_BIT(LIGHT_FAR_SOURCE));
+    }
+    check_light_factor_refusals(smoke);
+    check_light_factor_prewarm(device);
+}
+#endif
+
 static void check_refusals(SmokeWindow *smoke) {
     static Scene scene;
     const Options options = { .name = "refusal", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO,
         .reflections = true };
     BTBHGPUSceneReport report;
     build_scene(smoke, &options, &scene);
-    /* (Bit 3 is RFC 0013's UV rect since 0.11.0; bit 4 stays unknown until its phase 2.) */
+    /* (Bit 3 is RFC 0013's UV rect since 0.11.0; bit 4 stays unknown until its phase 2. Bit 6 is the light factor
+       since 0.11.0; bit 7 stays unknown.) */
     scene.batches[1].flags = (uint8_t)(1u << 4);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+#if defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
+    scene.batches[1].flags = (uint8_t)(1u << 7);
+#else
     scene.batches[1].flags = (uint8_t)(1u << 6);
+#endif
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
 #if defined(SMOKE_HAS_0100)
     build_scene(smoke, &options, &scene);
@@ -1900,6 +2365,24 @@ static SmokeWindow open_smoke_window(BTBHGPUDevice *device, const char *title) {
     assert(btbh_gpu_window_claim(device, smoke.window, &window_report) == BTBH_GPU_OK);
     smoke.cube = create_cube(smoke.window);
     smoke.glow = create_glow(smoke.window);
+#if defined(SMOKE_HAS_0110)
+    BTBHGPUModelReport model_report;
+    memset(&model_report, 0, sizeof(model_report));
+    smoke.skinned = btbh_gpu_window_model_load(smoke.window, BTBH_GPU_SMOKE_FIXTURE_DIR "/skinned-quad.gltf",
+        &model_report);
+    if (smoke.skinned == NULL) {
+        fprintf(stderr, "skinned-quad.gltf: %s\n", model_report.message);
+    }
+    assert(smoke.skinned != NULL);
+    BTBHGPUAnimationLibraryReport animation_report;
+    memset(&animation_report, 0, sizeof(animation_report));
+    smoke.animation = btbh_gpu_animation_library_load(BTBH_GPU_SMOKE_FIXTURE_DIR "/skinned-quad.gltf",
+        &animation_report);
+    if (smoke.animation == NULL) {
+        fprintf(stderr, "skinned-quad.gltf animation: %s\n", animation_report.message);
+    }
+    assert(smoke.animation != NULL);
+#endif
     BTBHGPUTextureReport texture_report;
     smoke.target = btbh_gpu_window_render_target_create(smoke.window, TARGET_SIZE, TARGET_SIZE,
         BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
@@ -1911,6 +2394,10 @@ static void close_smoke_window(SmokeWindow *smoke) {
     btbh_gpu_texture_destroy(smoke->target);
     btbh_gpu_texture_destroy(smoke->glow);
     btbh_gpu_custom_mesh_destroy(smoke->cube);
+#if defined(SMOKE_HAS_0110)
+    btbh_gpu_model_destroy(smoke->skinned);
+    btbh_gpu_animation_library_destroy(smoke->animation);
+#endif
     btbh_gpu_window_destroy(smoke->window);
     memset(smoke, 0, sizeof(*smoke));
 }
@@ -1969,6 +2456,9 @@ int main(void) {
         check_keep_hbao_point_lights(&smoke);
         check_ssr_facing_hits(&smoke);
         check_spot_occluder(&smoke);
+#endif
+#if defined(SMOKE_HAS_0110)
+        check_light_factor(&smoke, device);
 #endif
         check_refusals(&smoke);
 #endif

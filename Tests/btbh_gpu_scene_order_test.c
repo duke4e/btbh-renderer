@@ -186,6 +186,16 @@ _Static_assert(offsetof(BTBHGPUSceneLighting, directional_shadow_reserved) == 33
 #error "RFC 0013's HAS_ macros are defined with their features"
 #endif
 
+/* 0.11.0 (Be The Bullet Hell v2's blackouts): the instance's light factor is batch bit 6, after RECEIVES_NO_SPOT_SHADOW
+   (bit 5) and clear of RFC 0013's bits 3 and 4. Bit 7 stays free. */
+_Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR == 64, "INSTANCE_LIGHT_FACTOR is batch bit 6");
+_Static_assert((BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR & (BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
+    BTBH_GPU_SCENE_BATCH_KEEP_ORDER | BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE | BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT |
+    (1u << 4) | BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW)) == 0, "the light factor's bit is its own");
+#if !defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
+#error "BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR is defined with the flag"
+#endif
+
 #define MAX_INSTANCES 32u
 
 static float instances[MAX_INSTANCES][24];
