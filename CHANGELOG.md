@@ -10,14 +10,23 @@ RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch t
 it only in its mesh and instance range now binds and pushes nothing new (same-material runs), the frame's lighting is
 filled once a pass instead of once a batch, and a creation flag puts custom meshes in the models' shared geometry
 buffers, so that neighbouring draws share their vertex and index buffers. Every game gains where its batches run by
-material, without changing anything; nothing it draws changes. No struct grows and no shader changes.
+material, without changing anything; nothing it draws changes. No struct grows.
 
-Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (25/25 with the new runs smoke, 71 shaders), the Swift
-build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.9.0's candidate (`d077b5e6`), each smoke's
-images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ, with nothing set, with the
-smokes' custom meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`) and with runs turned off
-(`BTBH_GPU_SCENE_RUNS=0`). macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The
-Bullet Hell v2 hasn't measured it at its map edge yet.
+RFC 0010, asked for by Be The Bullet Hell v2: radiance-cascade sources with a top, so that street glows stay out of
+the roofs they stand next to. With `BTBHGPUSceneRadianceCascades.source_tops` set, a ray piece of the cascades that
+starts on a roof higher than a source's top passes over it. A glowing batch's top comes from its geometry; an
+emitter's is `position_y + top_above`. Off, nothing changes, byte for byte. Neither struct grows (a byte and a float
+from reserved fields); six radiance-cascade shaders changed: rebuild the shaders with the C core.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (26/26 with the runs smoke and the new RC tops smoke, 71
+shaders), the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.9.0's candidate
+(`d077b5e6`), each smoke's images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ,
+with nothing set, with the smokes' custom meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`) and with runs
+turned off (`BTBH_GPU_SCENE_RUNS=0`). Against RFC 0011's tip (`c5390f0b`), with RFC 0010's switch off: 161 images (the
+new smoke's gallery, with garbage in `top_above`, among them), 11,102,080 pixels, 0 differ, three times again; and
+c5390f0b's shaders under this core draw the new gallery byte for byte. macOS (Metal), the Vulkan validation layers and a
+Steam Deck aren't verified, Be The Bullet Hell v2 hasn't measured RFC 0011 at its map edge yet nor seen RFC 0010 in its
+city.
 
 ### Added
 - **`BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`** and **`btbh_gpu_window_custom_mesh_create_ex`** (the plain create's
@@ -34,6 +43,25 @@ Bullet Hell v2 hasn't measured it at its map edge yet.
     should keep buffers of their own.
   - `BTBH_GPU_HAS_SHARED_MESH_BUFFERS`.
 - `BTBH_GPU_SCENE_RUNS=0`, a measurement tool: every batch binds and pushes its whole state again.
+- **`BTBHGPUSceneRadianceCascades.source_tops`** (RFC 0010, the byte that was `reserved[0]`): 1 gives the cascades'
+  sources a top.
+  - A batch the cascades take light from (unlit and no `rc_receiver`, or with an emission) has, in each field texel,
+    the highest world height of its glowing fragments as its top. An emitter's top is `position_y + top_above`.
+  - A ray piece passes over a source whose top lies lower than the height the piece starts from (the top of the
+    occluder it starts in, or 0), less a twentieth of a field texel: none of its light, no dimming. Occluders are
+    as before.
+  - Steep faces read the field half a texel out from their wall, so facades keep the street's glow.
+  - The cascades then read the field where its texels lie: without tops they read it half a texel toward +x and +z,
+    as before, which set the two directions along each axis a texel apart and made the shield depend on the way a
+    street runs. So turning tops on also moves the field's light half a texel toward -x and -z.
+  - Other values, and with 1 an emitter's `top_above` that isn't finite or is below 0, turn the cascades off for that
+    present (`BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION`), as the struct's other bad values do. With older
+    radiance-cascade shaders, a present or prewarm with tops on fails with `BTBH_GPU_INVALID_ARGUMENT`, naming
+    `production_hrc_trace.comp`.
+- **`BTBHGPUSceneRadianceEmitter.top_above`** (RFC 0010, the four bytes that were `reserved`): with `source_tops` 1,
+  how far the emitter's top stands above `position_y` (finite, at least 0); a large value lights every height, as
+  without tops. Not read, nor checked, with `source_tops` 0.
+- `BTBH_GPU_SCENE_HAS_RC_SOURCE_TOPS`.
 
 ### Changed
 - **Same-material runs** (no API). In every pass that draws batches (opaque, transparent, refraction, the shadow maps,
@@ -50,6 +78,12 @@ Bullet Hell v2 hasn't measured it at its map edge yet.
   buffer, batches grouped by static vertex shader first (those with a world-detail table together, the others
   together: each switch changes the pipeline, and SDL then writes every descriptor set again), then by material, mesh
   after mesh; coplanar overlays after what they lie on, grouped the same way; the meshes drawn so made with the flag.
+- The header's comments on `BTBHGPUSceneRadianceEmitter.position_y` and `height` say what the shaders do: the direct
+  light's height, and a segment's width and the direct light's reach. Swift's `RadianceEmitter.height` comment too.
+- RFC 0010's tests: the native test checks the two fields' offsets, the refusals and C copies of the shaders' math;
+  `btbh_gpu_rc_tops_smoke` (new) renders a street of a two-storey and a one-storey house round a lamp head and
+  emitters at v2's Low and High, turned four ways (`BTBH_RC_TOPS_OLD_SHADER_DIR` adds an earlier release's shaders).
+  The frame bench gains the cascades (`+rc`, `+low`, `+tops`) and `tools/frame_bench_summary.py` a `--group`.
 - Tests: `btbh_gpu_scene_order_test` checks the run key byte by byte; `btbh_gpu_scene_runs_smoke` (new) draws a
   street of kit pieces through every pass with and without shared meshes and runs, and the shared meshes' rules; the
   smokes take `BTBH_SMOKE_SHARED_MESHES=1`; the frame bench gains v2's ring (`ring` modes) and a CPU mode
@@ -82,6 +116,45 @@ instance buffers, walls with the world-detail table and glass without). The marg
 - Prepare (0.03 µs) and shadow encode (0.01 µs) a ring batch are unchanged. The GPU's time wasn't measurable beside
   the `v2-game` processes; the GPU gets the same draws and bytes.
 
+RFC 0010, the smoke's street (a lamp head, its top at 0.6, beside a two-storey house with its roof at 0.735; v2's Low
+field, 32^2 texels of a unit, and High, 64^2 of half a unit). The share of the lamp's light kept with tops, against the
+same scene with nothing shielded, the same whichever way the street runs (to 0.1 %):
+
+| The lamp, from the roof's edge | High: band keeping half | High: roof's interior (2.5–4 units in) | Low: band | Low: interior |
+| --- | --- | --- | --- | --- |
+| Half a cell | 1.5 units | 16 % | 0.4 units | 0 % |
+| A cell (the middle of a two-cell street) | the whole roof | 78 % | 0.5 units | 75 % |
+| A cell and a half | the whole roof | 97 % | – | – |
+
+- The one-storey roof (0.385) and the street keep it all (99.4–100 %), and so do the facades facing the lamp
+  (100.0 %, the four ways, both fields).
+- Emitters half a cell out, `top_above` 0: 13–16 % in the two-storey roof's interior; a fire at a one-storey roof's
+  height lights it fully with `top_above` 0.6.
+- So tops keep a glow off the roofs beside it, not off the roofs across the street: the cascades share their ray
+  pieces between heights (RFC 0010's implementation notes). The two-band field would; v2 found it not worth twice the
+  cost.
+
+RFC 0010's cost: the frame bench's new `+rc` modes (v2 at night: additive cascades over its High field, 256^2 texels
+of half a unit, or its Low field, 128^2 of a unit; 200 glowing draws and 32 emitters; 960 x 600, the Deck preset; RTX
+3070 Ti, Vulkan). The cascades' passes (the cost log's `rc_src_ms + rc_field_ms + rc_screen_ms`), windows interleaved in
+one process; the 10th percentile of every split frame (another process on the GPU only adds time), with a 90 %
+bootstrap interval of the difference:
+
+| | High | Low |
+| --- | --- | --- |
+| Tops off | 2.88 ms | 0.65 ms |
+| Tops on | +0.05 ms [−0.10, +0.25] | −0.00 ms [−0.14, +0.16] |
+| 0.9.0's cascade shaders under this core | −0.21 ms [−0.43, +0.15] | – |
+
+- No difference stands out of the noise, off or on, at either tier. The trace and finish gather the tops only where a
+  source is. The spread between turns is large on this machine (the passes take one or two times their best), so a
+  difference under about 0.2 ms (High) or 0.15 ms (Low) can't be told; v2's own frames would.
+- Memory: the tops texture, 128 KiB on High and 32 KiB on Low; 4 bytes an emitter.
+- Against c5390f0b's core in a process of its own: only an unbalanced run (two windows against five) was quiet, and
+  measured the cascades at 1.62 ms (High) and 0.54 ms (Low). The comparison in one process above, which carries every
+  core change but the shaders', doesn't show that gap, so it is put down to the processes' different load; a balanced
+  base run in a quiet spell couldn't be had while Be The Bullet Hell v2's test used the GPU.
+
 ### Upgrading
 - Nothing to set: every game gets the runs and the once-a-pass lighting, and draws as before.
 - Rust hosts with bindgen regenerate the bindings for `btbh_gpu_window_custom_mesh_create_ex` and the flag; no struct
@@ -92,6 +165,18 @@ instance buffers, walls with the world-detail table and glass without). The marg
   - Within each chunk, submit the batches with a table first and those without after them (overlays after their
     ground), each group by material, mesh after mesh. The ring's chunks can share one instance buffer, with offsets.
 - Swift: nothing changes; a `sharedBuffers:` option can follow when Be The Bullet Hell (v1) asks.
+- RFC 0010 (v2): rebuild the shaders with the C core, regenerate the bindings (`BTBHGPUSceneRadianceEmitter.reserved`
+  becomes `top_above`, `BTBHGPUSceneRadianceCascades.reserved` (one byte) becomes `source_tops`: `Emitter::raw` names `reserved: 0`
+  and stops compiling until it names `top_above`), then:
+  - `radiance_cascades.source_tops = 1` in `Radiance::apply`; set `invalidate` for the frame it changes if the cut
+    should be clean;
+  - each emitter's `top_above`, as v2 answered: shots, beams, arcs, drones and XP 0 (`position_y` their own height);
+    blasts about their radius; fires `position_y` the roof's top and `top_above` 0.6; roof gear 0.3 above its height;
+  - the street glows that stay material sources (the kit's glow meshes, the resource buildings, roof gear, and the
+    lamp heads if they stay) need nothing: their tops come from their geometry;
+  - keep the occluder field as it is: 0 inside a column, the distance to the nearest inside texel outside (an exact
+    signed distance that is 0 on the walls classifies the texels on them by direction).
+  Zeroed structs keep `source_tops` 0 and draw as before.
 
 ## [Unreleased]
 

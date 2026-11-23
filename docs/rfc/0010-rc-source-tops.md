@@ -1,7 +1,8 @@
 # RFC 0010: Radiance-cascade sources with a top
 
 - **Status:** Accepted on 2026-11-23 for 0.10.0 (the owner left the decision to the coordinator). The wall falloff
-  v2 prefers (high floors take less light, answer 5) isn't blocking and is deferred to phase 2. See "Decisions"
+  v2 prefers (high floors take less light, answer 5) isn't blocking and is deferred to phase 2. See "Decisions".
+  Phase 1 is implemented for 0.10.0 (unreleased): see "Implementation notes"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift) and Tyrian3D use the radiance
   cascades but don't set it, so nothing changes for them. CHIMERA doesn't use the cascades. All of them rebuild the
@@ -308,6 +309,129 @@ Estimates, to measure with the frame bench (`btbh_gpu_frame_bench`, RFC 0009 pha
 On the bench GPU the cascades' trace and finish are a fraction of a millisecond at High. A gather on the few steps
 that meet a source should stay within the run-to-run noise. If the off path shows a cost, the fallback is a define
 and two more compute pipelines from the same files.
+
+## Implementation notes (phase 1, 2026-11-23)
+
+Branch `feature/0.10.0-rc-tops`, on `feature/0.10.0-cheaper-draws` (0.9.0 and RFC 0011 phase 1). The API is as drafted;
+what differs, and why, is under "Deviations".
+
+### What landed
+
+| Where | What |
+| --- | --- |
+| `include/btbh_gpu/btbh_gpu.h` | `source_tops` (offset 35, was `reserved[0]`), `top_above` (76, was `reserved`), `BTBH_GPU_SCENE_HAS_RC_SOURCE_TOPS`; the comments on `position_y` and `height` say what the shaders do with them |
+| `src/gpu/btbh_gpu_radiance_cascades.c` | The checks in `btbh_gpu_radiance_cascades_config_valid`. The R16F tops texture (the source field's size, made, cleared, written and bound whatever the switch says). A second colour target with MAX in the emitter and material-source pipelines. The emitters' tops in a structured buffer of their own, one float per record (0 with the switch off), from the same transfer buffer in the same copy. The tops texture and the switch in the trace (`padding` became `source_tops`) and the finish (16 bytes appended: 176 to 192); the switch in the resolve (`padding1[0]`) and in the emitter pass's uniforms (a spot's footprint) |
+| `src/gpu/btbh_gpu_scene.c` | The material-source pass binds both targets; `btbh_gpu_scene_check_rc_shader` in the present and the prewarm |
+| `production_rc_source.vert/.frag` | The tops buffer (t1); the top out to `SV_Target1`; with tops, a spot's quad as the directional pass draws it (at least 1.5 texels) and its top over that disk |
+| `production_rc_material_source.frag` | `SV_Target1 = world_position.y` |
+| `production_hrc_trace.comp`, `production_hrc_finish.comp` | The tops texture (t3, t4), the test as drafted, and the frame (below) |
+| `production_hrc_resolve.comp` | The lookup with tops: the frame, and the wall's half texel |
+| `Sources/` | The corrected comment on `RadianceEmitter.height` |
+
+C copies of the shaders' math for the native test (`btbh_gpu_radiance_cascades.h`): `_emitter_top`,
+`_piece_passes_over`, `_half_round` (the R16F texture's rounding) and `_tops_lookup_offset`.
+
+### Deviations
+
+1. **Bad values turn the cascades off for the present; they don't fail it.** The RFC said "fail the present with
+   `BTBH_GPU_INVALID_ARGUMENT`, as the other configuration checks". The struct's other checks never did that: a
+   configuration `btbh_gpu_radiance_cascades_config_valid` refuses leaves the cascades off for that present, with
+   `BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION` in the report's status and a warning logged once, and the frame
+   draws without them. The new checks join them and behave the same. The stale-shader check does fail the present
+   (and the prewarm) with `BTBH_GPU_INVALID_ARGUMENT` and the trace shader's path, as drafted and as the dig mask's
+   does.
+2. **With tops, the cascades read the field where its texels lie** (not in the RFC). The trace and finish sample the
+   field at `(d / linear_scale + 0.5) / size` for display position `d`, half a texel toward +x and +z of where its
+   texels lie (the finish's own occluder test samples without the half). The resolve then reads the probe a texel
+   toward +x and +z of the pixel. In a smooth field nobody saw it. With tops the field is sharp at every wall, and the
+   two directions along each axis came out a texel apart. Measured with the smoke's street, the lamp half a cell out
+   from the two-storey facade, before the change:
+
+   | The two-storey house | West of the street | North | East | South |
+   | --- | --- | --- | --- | --- |
+   | Low: the roof's interior keeps | 0.1 % | 0.2 % | 35 % | 35 % |
+   | High: the roof's interior keeps | 0.0 % | 0.0 % | 50 % | 51 % |
+   | Low: the street keeps | 100 % | 100 % | 80 % | 79 % |
+
+   So with the switch on the trace and finish drop the half (`frame` 0) and the resolve reads half a texel back. The
+   four turns of the street then measure alike to 0.1 % (below). With the switch off the frame is as before, byte for
+   byte. Turning tops on therefore moves the field's light half a texel toward -x and -z, everywhere (the header
+   says so). Making it every game's default would change every game's look, so it waits for a release that says so.
+   The direct-light texture (`direct_energy`, not additive; v2 doesn't use it) is read as before.
+3. **The wall lookup is as drafted**, half a texel along the level normal, from the corrected frame. It keeps every
+   facade's light at street level as with nothing shielded (100.0 %, the four ways, both tiers).
+4. **The occluder field.** v2's field is 0 inside a column and the distance to the nearest inside texel outside, so a
+   probe on a wall reads a positive distance and starts at street level. A field that is exactly 0 on its walls (an
+   exact signed distance) leaves those probes to a 0.001 nudge in the trace's positions, which differs by direction:
+   with one, the first smoke runs lost from a fifth to all of the street's light beside the walls, depending on the
+   side. The smoke uses v2's convention; other hosts should too.
+5. **The shield is narrower than the RFC estimated** (its table assumed a piece that reaches a source starts about
+   half way to it). The smoke's street, the lamp's share of light kept with tops against the same scene with nothing
+   shielded (the lamp's hood, a dimmer glow at 2 units over it, gives its texels a top of 2):
+
+   | Lamp (its texels' distance from the roof's edge) | High: band where it keeps half | High: interior (2.5–4 units in) | Low: band | Low: interior |
+   | --- | --- | --- | --- | --- |
+   | Half a cell (High 0.25 and 0.75; Low 0.5) | 1.5 units | 16 % | 0.4 units | 0 % |
+   | A cell (High 0.75 and 1.25; Low 0.5 and 1.5) | the whole roof | 78 % | 0.5 units | 75 % |
+   | A cell and a half (High 1.25 and 1.75) | the whole roof | 97 % | – | – |
+
+   - The one-storey roof and the street keep all of it (100.0 %, 99.4–99.5 % on Low's street); so do the facades.
+   - Emitters half a cell out: a shot, a rectangle and a spot leave 15.7–15.8 % in the interior, a segment 13.3 %. A
+     fire at a one-storey roof's height leaves the same with `top_above` 0 and lights the roof as a column with 0.6.
+   - So tops keep a street glow off the roofs it stands next to, and only those: a glow on the far side of a two-cell
+     street (a cell and a half from the facade) lights the roof nearly as without tops on High. On Low the field's
+     longer pieces shield a lamp half a cell out completely, and one a cell out hardly more than High. The two-band
+     field (phase 2) is what would shield whole roofs; v2 decided against its cost (Decisions, 3).
+6. A spot's top is drawn over its directional footprint only with tops on, so its quad in the source field is as
+   before with the switch off.
+
+### Old shaders, refusals
+
+- 0.9.0's (c5390f0b's) cascade shaders under this core draw the smoke's gallery byte for byte as this release's with
+  the switch off; with it on, the present and the prewarm fail naming
+  `.../production_hrc_trace.comp.spv`.
+- `source_tops` 2 and 255, and with 1 a `top_above` of NaN, ±infinity, −0.01 or −1e−30: the cascades off for that
+  present (fallback 7), and the next valid present runs them. −0 and 3.4e38 are accepted. With 0 the same values draw
+  as with 0.
+
+### Tests and evidence
+
+- `check.ps1`: 26/26 (with the new smoke), 71 shaders, the headers on their own. The Swift build and the full suite:
+  301 tests, 2 skipped, 0 failures.
+- `btbh_gpu_radiance_cascades_test`: the offsets (35, 76; 168 and 80 bytes), the refusals, and the C copies with v2's
+  heights (half floats of 0.6, 0.735 and 0.385; a two-storey roof passes over a lamp head and a shot on both tiers, a
+  one-storey roof and the street don't; a roof's own glow isn't passed over thanks to the margin; a fire with
+  `top_above` 0 and 0.6; the lookup's offsets).
+- `btbh_gpu_rc_tops_smoke` (new; under 15 s): the numbers above, as bounds; the gallery off; the refusals; the
+  prewarm. `BTBH_RC_TOPS_MEASURE=1` prints a failed bound and goes on, and marks the points it measured.
+- `btbh_gpu_phase2_shader_test` and one Swift source-text check follow the new bindings and outputs.
+- **Identity with the switch off.** A build of c5390f0b with the new smoke overlaid wrote every smoke's images
+  (flags 25, prewarm 32, world detail 56, scene target 9, font 25, SDF terrain 1, runs 5, the new smoke's gallery 8
+  with garbage in `top_above`); this build's: **161 images, 11,102,080 pixels, 0 differ**, with nothing set, with
+  `BTBH_SMOKE_SHARED_MESHES=1` and with `BTBH_GPU_SCENE_RUNS=0`.
+
+### Cost
+
+RFC 0010's cost: the frame bench's new `+rc` modes (v2 at night: additive cascades over its High field, 256^2 texels
+of half a unit, or its Low field, 128^2 of a unit; 200 glowing draws and 32 emitters; 960 x 600, the Deck preset; RTX
+3070 Ti, Vulkan). The cascades' passes (the cost log's `rc_src_ms + rc_field_ms + rc_screen_ms`), windows interleaved in
+one process; the 10th percentile of every split frame (another process on the GPU only adds time), with a 90 %
+bootstrap interval of the difference:
+
+| | High | Low |
+| --- | --- | --- |
+| Tops off | 2.88 ms | 0.65 ms |
+| Tops on | +0.05 ms [−0.10, +0.25] | −0.00 ms [−0.14, +0.16] |
+| 0.9.0's cascade shaders under this core | −0.21 ms [−0.43, +0.15] | – |
+
+- No difference stands out of the noise, off or on, at either tier. The trace and finish gather the tops only where a
+  source is. The spread between turns is large on this machine (the passes take one or two times their best), so a
+  difference under about 0.2 ms (High) or 0.15 ms (Low) can't be told; v2's own frames would.
+- Memory: the tops texture, 128 KiB on High and 32 KiB on Low; 4 bytes an emitter.
+- Against c5390f0b's core in a process of its own: only an unbalanced run (two windows against five) was quiet, and
+  measured the cascades at 1.62 ms (High) and 0.54 ms (Low). The comparison in one process above, which carries every
+  core change but the shaders', doesn't show that gap, so it is put down to the processes' different load; a balanced
+  base run in a quiet spell couldn't be had while Be The Bullet Hell v2's test used the GPU.
 
 ## Compatibility
 
