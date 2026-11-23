@@ -1664,7 +1664,8 @@ static void check_refusals(SmokeWindow *smoke) {
         .reflections = true };
     BTBHGPUSceneReport report;
     build_scene(smoke, &options, &scene);
-    scene.batches[1].flags = (uint8_t)(1u << 3);
+    /* (Bit 3 is RFC 0013's UV rect since 0.11.0; bit 4 stays unknown until its phase 2.) */
+    scene.batches[1].flags = (uint8_t)(1u << 4);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
     scene.batches[1].flags = (uint8_t)(1u << 6);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
