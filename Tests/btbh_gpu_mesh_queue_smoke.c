@@ -11,9 +11,24 @@
  * - a mesh destroyed with an update queued (the others still land); a scene that fails before it draws leaves the
  *   queue for the next; a window closed with updates queued;
  * - the refusals: an unknown flag, no report, invalid data (nothing queued).
+ * Queued instance buffer uploads (BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, _NO_CYCLE; 0.11.0): an instance buffer drawn
+ * by two batches, one per half, byte for byte as a fresh buffer uploaded whole with the data it must hold:
+ * - a queued half keeps the other half (a frame in flight on the buffer before it); overlapping queued uploads in one
+ *   frame (each later one wins, the queue's entries checked); NO_CYCLE and plain uploads after queued ones, and queued
+ *   after plain;
+ * - a render-to-target first, then the present (and the other way round); a presented frame waiting for the canvas
+ *   never shows an upload made after it (queued, NO_CYCLE, the ordering rule, a plain cycling one); frames in flight
+ *   (submitted, not waited for) keep their data;
+ * - a buffer destroyed with an upload queued, and after a present copied one; a failed scene; a frame dropped after it
+ *   copied queued uploads still lands them; the refusals; a window closed with uploads queued.
+ * Partial custom-mesh updates (btbh_gpu_custom_mesh_update_range; 0.11.0), for a mesh with buffers of its own and one in
+ * the shared buffers: plain and queued vertex ranges, indices only, overlapping ranges in one frame, a range over a
+ * queued whole update and a whole update over a queued range, the bounds, a frame waiting for the canvas, the refusals.
  * BTBH_SMOKE_BENCH=mesh-queue: 200 updates of a 64-vertex mesh a frame, plain against queued (and in the shared
  * buffers), against the same frames without updates ("still"), interleaved rounds; prints the CPU time of the updates,
  * of the present and of its upload, per update.
+ * BTBH_SMOKE_BENCH=upload-queue: 60 instance buffers of 4 to 64 KiB uploaded every frame: whole and plain, whole and
+ * queued, a quarter queued, a quarter NO_CYCLE, against no uploads; per upload and per frame.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -351,10 +366,15 @@ static void build_scene(const SmokeWindow *smoke, BTBHGPUCustomMesh *mesh, Scene
     scene->batch_count = 3u;
 }
 
-static BTBHGPUResult render_scene(SmokeWindow *smoke, const Scene *scene, BTBHGPUSceneReport *report) {
+static BTBHGPUResult render_scene_to(
+    SmokeWindow *smoke,
+    BTBHGPUTexture *target,
+    const Scene *scene,
+    BTBHGPUSceneReport *report
+) {
     memset(report, 0, sizeof(*report));
     return btbh_gpu_window_scene_render_to_target(
-        smoke->window, smoke->target,
+        smoke->window, target,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
         shader_paths[8], shader_paths[9], shader_paths[10],
@@ -363,6 +383,10 @@ static BTBHGPUResult render_scene(SmokeWindow *smoke, const Scene *scene, BTBHGP
         &scene->lighting, &scene->post, &scene->instances[0][0], 3u, 3u,
         scene->batches, NULL, NULL, scene->batch_count,
         20u, 24u, 30u, 255u, report);
+}
+
+static BTBHGPUResult render_scene(SmokeWindow *smoke, const Scene *scene, BTBHGPUSceneReport *report) {
+    return render_scene_to(smoke, smoke->target, scene, report);
 }
 
 /* `mesh` drawn into the target and read back. */
@@ -386,23 +410,31 @@ static uint8_t *reference(SmokeWindow *smoke, const MeshData *data) {
     return pixels;
 }
 
-static void present_scene(SmokeWindow *smoke, BTBHGPUCustomMesh *mesh) {
-    Scene scene;
-    build_scene(smoke, mesh, &scene);
-    BTBHGPUSceneReport report;
-    memset(&report, 0, sizeof(report));
-    const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(smoke->window,
+static BTBHGPUResult try_present(SmokeWindow *smoke, const Scene *scene, BTBHGPUSceneReport *report) {
+    memset(report, 0, sizeof(*report));
+    return btbh_gpu_window_scene_present_instances(smoke->window,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
         shader_paths[8], shader_paths[9], shader_paths[10],
         SMOKE_SHADER_FORMAT, 160u, 90u,
-        scene.camera.view_projection, scene.camera.right, scene.camera.up, scene.camera.position,
-        &scene.lighting, &scene.post, &scene.instances[0][0], 3u, 3u, scene.batches, scene.batch_count,
-        20u, 24u, 30u, 255u, &report);
+        scene->camera.view_projection, scene->camera.right, scene->camera.up, scene->camera.position,
+        &scene->lighting, &scene->post, &scene->instances[0][0], 3u, 3u, scene->batches, scene->batch_count,
+        20u, 24u, 30u, 255u, report);
+}
+
+static void present_built(SmokeWindow *smoke, const Scene *scene) {
+    BTBHGPUSceneReport report;
+    const BTBHGPUResult result = try_present(smoke, scene, &report);
     if (result != BTBH_GPU_OK) {
         fprintf(stderr, "present: %s\n", report.message);
     }
     assert(result == BTBH_GPU_OK);
+}
+
+static void present_scene(SmokeWindow *smoke, BTBHGPUCustomMesh *mesh) {
+    Scene scene;
+    build_scene(smoke, mesh, &scene);
+    present_built(smoke, &scene);
 }
 
 /* The presented scene, captured (btbh_gpu_window_capture_pending_scene_texture submits the frame's command buffer
@@ -453,7 +485,7 @@ static void check_queue(SmokeWindow *smoke) {
     }
     assert(memcmp(expected[0], expected[1], (size_t)TEXELS * 4u) != 0);
     assert(memcmp(expected[1], expected[2], (size_t)TEXELS * 4u) != 0);
-    BTBHGPUCustomMeshQueue *queue = &smoke->window->mesh_queue;
+    BTBHGPUUploadQueue *queue = &smoke->window->upload_queue;
 
     /* Buffers of its own. */
     BTBHGPUCustomMesh *own = create_mesh(smoke->window, &shapes[0], false);
@@ -461,10 +493,10 @@ static void check_queue(SmokeWindow *smoke) {
     expect_same(pixels, expected[0], "own mesh as made");
     free(pixels);
     update(own, &shapes[1], true);
-    assert(queue->live_count == 1u && own->queue_entry == 1u);
+    assert(queue->live_count == 2u && own->queue_head == 2u);   /* its vertices and its indices */
     assert(own->vertex_count == shapes[1].vertex_count);   /* the counts change at the call */
     pixels = render(smoke, own);
-    assert(queue->live_count == 0u && queue->entry_count == 0u && own->queue_entry == 0u);
+    assert(queue->live_count == 0u && queue->entry_count == 0u && own->queue_head == 0u);
     expect_same(pixels, expected[1], "own mesh, a queued update, the next render-to-target");
     free(pixels);
     pixels = render(smoke, own);
@@ -473,13 +505,13 @@ static void check_queue(SmokeWindow *smoke) {
     update(own, &shapes[3], true);
     update(own, &shapes[0], true);
     update(own, &shapes[1], true);
-    assert(queue->live_count == 1u && queue->entry_count == 3u);
+    assert(queue->live_count == 2u && queue->entry_count == 6u);
     pixels = render(smoke, own);
     expect_same(pixels, expected[1], "own mesh, three queued updates: the last one");
     free(pixels);
     update(own, &shapes[0], true);
     update(own, &shapes[3], false);
-    assert(queue->live_count == 0u && own->queue_entry == 0u);
+    assert(queue->live_count == 0u && own->queue_head == 0u);
     pixels = render(smoke, own);
     expect_same(pixels, expected[3], "own mesh, a queued update then a plain one: the plain one");
     free(pixels);
@@ -561,9 +593,14 @@ static void check_queue(SmokeWindow *smoke) {
     /* A mesh destroyed with an update queued; the others still land. */
     BTBHGPUCustomMesh *doomed = create_mesh(smoke->window, &shapes[0], false);
     update(doomed, &shapes[2], true);
+    update(doomed, &shapes[1], true);   /* replaces the first: its entries are dropped */
     update(own, &shapes[3], true);
+    const uintptr_t doomed_address = (uintptr_t)doomed;
     btbh_gpu_custom_mesh_destroy(doomed);
-    assert(queue->live_count == 1u && queue->entry_count == 2u);
+    assert(queue->live_count == 2u && queue->entry_count == 6u);
+    for (uint32_t index = 0u; index < queue->entry_count; ++index) {
+        assert((uintptr_t)queue->entries[index].mesh != doomed_address);   /* no entry names it any more */
+    }
     pixels = render(smoke, own);
     expect_same(pixels, expected[3], "a mesh destroyed with an update queued; another's still lands");
     free(pixels);
@@ -576,7 +613,7 @@ static void check_queue(SmokeWindow *smoke) {
         scene.batches[2].instance_count = 0u;
         BTBHGPUSceneReport scene_report;
         assert(render_scene(smoke, &scene, &scene_report) == BTBH_GPU_INVALID_ARGUMENT);
-        assert(queue->live_count == 1u);
+        assert(queue->live_count == 2u);
     }
     pixels = render(smoke, own);
     expect_same(pixels, expected[1], "a failed scene, then the next one shows the update");
@@ -608,6 +645,567 @@ static void check_queue(SmokeWindow *smoke) {
     }
 }
 
+/* ------------------------------------------------------------------------------------------------- instance uploads */
+
+/* BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED and _NO_CYCLE: an instance buffer of 8 boxes, drawn by two batches (its
+   first and its second half), against a fresh buffer uploaded whole with the data it must hold. */
+
+#define CHUNK_INSTANCES 8u
+#define INSTANCE_BYTES (FLOATS * (uint32_t)sizeof(float))
+#define CHUNK_BYTES (CHUNK_INSTANCES * INSTANCE_BYTES)
+
+typedef struct Chunk {
+    float records[CHUNK_INSTANCES][FLOATS];
+} Chunk;
+
+/* State `which` of the 8 instances: a row of boxes, each state's row moved, stretched and tinted its own way. */
+static Chunk chunk_state(uint32_t which) {
+    static const float tints[5][3] = {
+        { 1.0f, 0.35f, 0.25f }, { 0.3f, 1.0f, 0.4f }, { 0.35f, 0.5f, 1.0f }, { 1.0f, 0.95f, 0.3f }, { 0.9f, 0.3f, 1.0f },
+    };
+    Chunk chunk;
+    for (uint32_t index = 0u; index < CHUNK_INSTANCES; ++index) {
+        instance_at(chunk.records[index], -1.05f + 0.3f * (float)index, 0.0f, -0.6f + 0.35f * (float)which,
+            1.0f, 1.0f + 0.5f * (float)((index + which) % 3u), 1.0f);
+        chunk.records[index][16] = tints[which % 5u][0];
+        chunk.records[index][17] = tints[which % 5u][1];
+        chunk.records[index][18] = tints[which % 5u][2];
+    }
+    return chunk;
+}
+
+/* `base` with instances [first, first + count) taken from `over`. */
+static Chunk chunk_mix(const Chunk *base, const Chunk *over, uint32_t first, uint32_t count) {
+    Chunk chunk = *base;
+    memcpy(chunk.records[first], over->records[first], (size_t)count * INSTANCE_BYTES);
+    return chunk;
+}
+
+static BTBHGPUInstanceBuffer *chunk_buffer(BTBHGPUWindow *window) {
+    BTBHGPUInstanceBufferReport report;
+    memset(&report, 0, sizeof(report));
+    BTBHGPUInstanceBuffer *buffer = btbh_gpu_window_instance_buffer_create(window, CHUNK_INSTANCES, INSTANCE_BYTES,
+        &report);
+    assert(buffer != NULL);
+    return buffer;
+}
+
+/* Instances [first, first + count) of `chunk` into `buffer`, with BTBH_GPU_INSTANCE_BUFFER_UPLOAD_* `flags`. */
+static void upload(BTBHGPUInstanceBuffer *buffer, const Chunk *chunk, uint32_t first, uint32_t count, uint32_t flags) {
+    BTBHGPUInstanceBufferReport report;
+    memset(&report, 0, sizeof(report));
+    const BTBHGPUResult result = btbh_gpu_instance_buffer_upload_ex(buffer, first * INSTANCE_BYTES,
+        chunk->records[first], count * INSTANCE_BYTES, flags, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "upload: %s\n", report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    assert(report.byte_capacity == CHUNK_BYTES);
+}
+
+/* The ground, and `box` drawn by the buffer's instances: batch 1 its first half, batch 2 its second. */
+static void build_chunk_scene(const SmokeWindow *smoke, BTBHGPUCustomMesh *box, BTBHGPUInstanceBuffer *buffer,
+    Scene *scene) {
+    build_scene(smoke, box, scene);
+    scene->batches[1] = base_batch(box, 0u);
+    scene->batches[1].instance_buffer = buffer;
+    scene->batches[1].instance_count = CHUNK_INSTANCES / 2u;
+    scene->batches[2] = base_batch(box, CHUNK_INSTANCES / 2u);
+    scene->batches[2].instance_buffer = buffer;
+    scene->batches[2].instance_count = CHUNK_INSTANCES / 2u;
+}
+
+/* Renders the chunk into `target` (submitted, not waited for). */
+static void render_chunk_to(SmokeWindow *smoke, BTBHGPUTexture *target, BTBHGPUCustomMesh *box,
+    BTBHGPUInstanceBuffer *buffer) {
+    Scene scene;
+    build_chunk_scene(smoke, box, buffer, &scene);
+    BTBHGPUSceneReport report;
+    const BTBHGPUResult result = render_scene_to(smoke, target, &scene, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "render: %s\n", report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+}
+
+static uint8_t *render_chunk(SmokeWindow *smoke, BTBHGPUCustomMesh *box, BTBHGPUInstanceBuffer *buffer) {
+    render_chunk_to(smoke, smoke->target, box, buffer);
+    return read_texture(smoke->window, smoke->target);
+}
+
+/* What the chunk must look like: a fresh buffer uploaded whole with `chunk`, drawn. */
+static uint8_t *chunk_reference(SmokeWindow *smoke, BTBHGPUCustomMesh *box, const Chunk *chunk) {
+    BTBHGPUInstanceBuffer *fresh = chunk_buffer(smoke->window);
+    upload(fresh, chunk, 0u, CHUNK_INSTANCES, 0u);
+    uint8_t *pixels = render_chunk(smoke, box, fresh);
+    btbh_gpu_instance_buffer_destroy(fresh);
+    return pixels;
+}
+
+static void expect_chunk(SmokeWindow *smoke, BTBHGPUCustomMesh *box, BTBHGPUInstanceBuffer *buffer,
+    const Chunk *chunk, const char *what) {
+    uint8_t *pixels = render_chunk(smoke, box, buffer);
+    uint8_t *expected = chunk_reference(smoke, box, chunk);
+    expect_same(pixels, expected, what);
+    free(expected);
+    free(pixels);
+}
+
+/* The chunk presented (from a fresh buffer holding `chunk`) and captured: what a presented frame must look like. */
+static uint8_t *chunk_presented_reference(SmokeWindow *smoke, BTBHGPUCustomMesh *box, const Chunk *chunk,
+    uint32_t *byte_count) {
+    BTBHGPUInstanceBuffer *fresh = chunk_buffer(smoke->window);
+    upload(fresh, chunk, 0u, CHUNK_INSTANCES, 0u);
+    Scene scene;
+    build_chunk_scene(smoke, box, fresh, &scene);
+    present_built(smoke, &scene);
+    uint8_t *pixels = capture_frame(smoke, byte_count);
+    finish_frame(smoke);
+    btbh_gpu_instance_buffer_destroy(fresh);
+    return pixels;
+}
+
+static void present_chunk(SmokeWindow *smoke, BTBHGPUCustomMesh *box, BTBHGPUInstanceBuffer *buffer) {
+    Scene scene;
+    build_chunk_scene(smoke, box, buffer, &scene);
+    present_built(smoke, &scene);
+}
+
+/* Captures the presented frame, lets the canvas submit it, and compares it with the presented reference of `chunk`. */
+static void expect_presented_chunk(SmokeWindow *smoke, BTBHGPUCustomMesh *box, const Chunk *chunk, const char *what) {
+    uint32_t frame_bytes = 0u;
+    uint8_t *presented = capture_frame(smoke, &frame_bytes);
+    finish_frame(smoke);
+    uint32_t reference_bytes = 0u;
+    uint8_t *expected = chunk_presented_reference(smoke, box, chunk, &reference_bytes);
+    assert(frame_bytes == reference_bytes);
+    const bool same = memcmp(presented, expected, frame_bytes) == 0;
+    printf("%-78s %s\n", what, same ? "same bytes" : "DIFFERENT");
+    assert(same);
+    free(expected);
+    free(presented);
+}
+
+static void check_instance_uploads(SmokeWindow *smoke) {
+    MeshData box_data;
+    memset(&box_data, 0, sizeof(box_data));
+    add_box(&box_data, (const float[3]){ 0.0f, 0.12f, 0.0f }, (const float[3]){ 0.1f, 0.12f, 0.1f },
+        (const float[3]){ 1.0f, 1.0f, 1.0f });
+    BTBHGPUCustomMesh *box = create_mesh(smoke->window, &box_data, false);
+    BTBHGPUUploadQueue *queue = &smoke->window->upload_queue;
+    Chunk states[5];
+    for (uint32_t which = 0u; which < 5u; ++which) {
+        states[which] = chunk_state(which);
+    }
+    {
+        /* Each half is in view and every state differs in each. */
+        uint8_t *a = chunk_reference(smoke, box, &states[0]);
+        const Chunk first = chunk_mix(&states[0], &states[1], 0u, CHUNK_INSTANCES / 2u);
+        const Chunk second = chunk_mix(&states[0], &states[1], CHUNK_INSTANCES / 2u, CHUNK_INSTANCES / 2u);
+        uint8_t *b = chunk_reference(smoke, box, &first);
+        uint8_t *c = chunk_reference(smoke, box, &second);
+        assert(memcmp(a, b, (size_t)TEXELS * 4u) != 0 && memcmp(a, c, (size_t)TEXELS * 4u) != 0 &&
+            memcmp(b, c, (size_t)TEXELS * 4u) != 0);
+        free(a);
+        free(b);
+        free(c);
+    }
+
+    BTBHGPUInstanceBuffer *buffer = chunk_buffer(smoke->window);
+    upload(buffer, &states[0], 0u, CHUNK_INSTANCES, 0u);
+    expect_chunk(smoke, box, buffer, &states[0], "instance buffer uploaded whole (plain)");
+
+    /* Partial queued uploads keep the rest: a frame in flight on the buffer, then its first half queued. */
+    render_chunk_to(smoke, smoke->target, box, buffer);
+    upload(buffer, &states[1], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    assert(queue->live_count == 1u && buffer->queue_head == 1u);
+    Chunk current = chunk_mix(&states[0], &states[1], 0u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "queued upload of the first half: the second keeps its data");
+    assert(queue->live_count == 0u && queue->entry_count == 0u && buffer->queue_head == 0u);
+    assert(buffer->queue_copied_serial != 0u);
+    upload(buffer, &states[2], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    current = chunk_mix(&current, &states[2], 4u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "then the second half queued: the first keeps its data");
+    upload(buffer, &states[3], 2u, 1u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[4], 6u, 1u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    assert(queue->live_count == 2u);
+    current = chunk_mix(&current, &states[3], 2u, 1u);
+    current = chunk_mix(&current, &states[4], 6u, 1u);
+    expect_chunk(smoke, box, buffer, &current, "two single instances queued in one frame, one in each half");
+
+    /* Overlapping queued uploads in one frame: the later one's bytes land where they overlap. */
+    upload(buffer, &states[3], 0u, 6u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[4], 2u, 2u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);   /* inside the first: it takes them */
+    assert(queue->live_count == 1u && queue->entry_count == 1u);
+    upload(buffer, &states[0], 5u, 3u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);   /* over its end */
+    assert(queue->live_count == 2u && queue->entry_count == 2u);
+    upload(buffer, &states[2], 6u, 2u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);   /* inside the second */
+    assert(queue->live_count == 2u && queue->entry_count == 2u);
+    upload(buffer, &states[1], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);   /* covers the second */
+    assert(queue->live_count == 2u && queue->entry_count == 3u);
+    current = chunk_mix(&current, &states[3], 0u, 6u);
+    current = chunk_mix(&current, &states[4], 2u, 2u);
+    current = chunk_mix(&current, &states[0], 5u, 3u);
+    current = chunk_mix(&current, &states[2], 6u, 2u);
+    current = chunk_mix(&current, &states[1], 4u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "five overlapping queued uploads in one frame: each later one wins");
+
+    /* A later upload outside the queue wins over a queued one. */
+    upload(buffer, &states[2], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[3], 2u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+    current = chunk_mix(&states[2], &states[3], 2u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "queued whole, then NO_CYCLE over its middle: the NO_CYCLE bytes there");
+    upload(buffer, &states[0], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[4], 0u, 4u, 0u);
+    current = chunk_mix(&states[0], &states[4], 0u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "queued whole, then a plain (cycling) upload of a half: its bytes there");
+    upload(buffer, &states[1], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[2], 0u, 8u, 0u);
+    assert(queue->live_count == 0u);   /* covered: dropped */
+    current = states[2];
+    expect_chunk(smoke, box, buffer, &current, "queued half, then a plain upload of the whole: the plain one");
+    upload(buffer, &states[3], 0u, 8u, 0u);
+    upload(buffer, &states[0], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    current = chunk_mix(&states[3], &states[0], 0u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "plain whole, then a queued half: the queued one there, the rest kept");
+    upload(buffer, &states[4], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+    current = chunk_mix(&current, &states[4], 4u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "NO_CYCLE of a half, no frame waiting: the rest kept");
+    upload(buffer, &states[1], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED | BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+    assert(queue->live_count == 1u);   /* QUEUED with NO_CYCLE is queued */
+    current = states[1];
+    expect_chunk(smoke, box, buffer, &current, "QUEUED | NO_CYCLE: queued");
+
+    /* A render-to-target first: it copies the queue; the present after it shows the data too. */
+    upload(buffer, &states[4], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    current = chunk_mix(&current, &states[4], 4u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "queued, then a render-to-target draws it");
+    present_chunk(smoke, box, buffer);
+    expect_presented_chunk(smoke, box, &current, "  and the present after it");
+    upload(buffer, &states[2], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    current = chunk_mix(&current, &states[2], 0u, 4u);
+    present_chunk(smoke, box, buffer);
+    expect_presented_chunk(smoke, box, &current, "queued, then the present first");
+    expect_chunk(smoke, box, buffer, &current, "  and the render-to-target after it");
+
+    /* A presented scene waiting for the canvas never shows an upload made after it. */
+    const Chunk before = current;
+    present_chunk(smoke, box, buffer);
+    upload(buffer, &states[3], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    expect_presented_chunk(smoke, box, &before, "presented, then a queued upload before the canvas: the frame");
+    current = states[3];
+    expect_chunk(smoke, box, buffer, &current, "  and the next scene shows the upload");
+    present_chunk(smoke, box, buffer);
+    upload(buffer, &states[0], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+    assert(queue->pending_holds);   /* recorded into the frame after its draws */
+    expect_presented_chunk(smoke, box, &current, "presented, then a NO_CYCLE upload before the canvas: the frame");
+    assert(!queue->pending_holds);
+    current = chunk_mix(&current, &states[0], 0u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "  and the next scene shows the upload, the rest kept");
+    /* The ordering rule: a queued upload the waiting frame copied, then NO_CYCLE over it before the canvas. */
+    upload(buffer, &states[1], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    present_chunk(smoke, box, buffer);
+    assert(queue->pending_serial != 0u && buffer->queue_copied_serial == queue->pending_serial);
+    upload(buffer, &states[2], 4u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+    expect_presented_chunk(smoke, box, &states[1], "queued, presented, NO_CYCLE before the canvas: the frame");
+    current = chunk_mix(&states[1], &states[2], 4u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "  and the next scene: the NO_CYCLE bytes over the queued ones");
+    upload(buffer, &states[4], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    present_chunk(smoke, box, buffer);
+    upload(buffer, &states[0], 0u, 8u, 0u);
+    expect_presented_chunk(smoke, box, &states[4], "queued, presented, a plain upload before the canvas: the frame");
+    current = states[0];
+    expect_chunk(smoke, box, buffer, &current, "  and the next scene: the plain one");
+
+    /* Frames in flight (submitted, not waited for) keep the data they were drawn with. */
+    {
+        BTBHGPUTextureReport texture_report;
+        memset(&texture_report, 0, sizeof(texture_report));
+        BTBHGPUTexture *second = btbh_gpu_window_render_target_create(smoke->window, TARGET_SIZE, TARGET_SIZE,
+            BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+        assert(second != NULL);
+        for (uint32_t way = 0u; way < 2u; ++way) {
+            const Chunk old_data = current;
+            render_chunk_to(smoke, smoke->target, box, buffer);
+            if (way == 0u) {
+                upload(buffer, &states[2], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+                current = states[2];
+            } else {
+                upload(buffer, &states[3], 2u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE);
+                current = chunk_mix(&current, &states[3], 2u, 4u);
+            }
+            render_chunk_to(smoke, second, box, buffer);
+            uint8_t *first_frame = read_texture(smoke->window, smoke->target);
+            uint8_t *second_frame = read_texture(smoke->window, second);
+            uint8_t *old_expected = chunk_reference(smoke, box, &old_data);
+            uint8_t *new_expected = chunk_reference(smoke, box, &current);
+            expect_same(first_frame, old_expected, way == 0u
+                ? "a frame in flight, then a queued upload and a frame: the first keeps the old data"
+                : "a frame in flight, then a NO_CYCLE upload and a frame: the first keeps the old data");
+            expect_same(second_frame, new_expected, "  and the second shows the new");
+            free(first_frame);
+            free(second_frame);
+            free(old_expected);
+            free(new_expected);
+        }
+        btbh_gpu_texture_destroy(second);
+    }
+
+    /* A buffer destroyed with uploads queued: they go, another buffer's still land. */
+    BTBHGPUInstanceBuffer *doomed = chunk_buffer(smoke->window);
+    upload(doomed, &states[0], 0u, 8u, 0u);
+    upload(doomed, &states[1], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(doomed, &states[2], 0u, 8u, 0u);   /* covers it: dropped */
+    upload(doomed, &states[3], 2u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    upload(buffer, &states[4], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    const uintptr_t doomed_address = (uintptr_t)doomed;
+    btbh_gpu_instance_buffer_destroy(doomed);
+    assert(queue->live_count == 1u && queue->entry_count == 3u);
+    for (uint32_t index = 0u; index < queue->entry_count; ++index) {
+        assert((uintptr_t)queue->entries[index].instance_buffer != doomed_address);
+    }
+    current = states[4];
+    expect_chunk(smoke, box, buffer, &current, "a buffer destroyed with an upload queued; another's still lands");
+    /* Destroyed after a present copied its queued upload, before the canvas: that frame still runs (the debug device
+       would object to a freed buffer). */
+    doomed = chunk_buffer(smoke->window);
+    upload(doomed, &states[0], 0u, 8u, 0u);
+    upload(doomed, &states[2], 0u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    present_chunk(smoke, box, doomed);
+    btbh_gpu_instance_buffer_destroy(doomed);
+    const Chunk doomed_data = chunk_mix(&states[0], &states[2], 0u, 4u);
+    expect_presented_chunk(smoke, box, &doomed_data,
+        "destroyed after a present copied its queued upload: that frame still draws it");
+
+    /* A scene that fails before it draws leaves the queue for the next one. */
+    upload(buffer, &states[1], 2u, 4u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    {
+        Scene scene;
+        build_chunk_scene(smoke, box, buffer, &scene);
+        scene.batches[2].instance_count = 0u;
+        BTBHGPUSceneReport scene_report;
+        assert(render_scene(smoke, &scene, &scene_report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(queue->live_count == 1u);
+    }
+    current = chunk_mix(&current, &states[1], 2u, 4u);
+    expect_chunk(smoke, box, buffer, &current, "a failed scene, then the next one shows the queued upload");
+
+    /* A frame that copied queued uploads and is then dropped (the next scene presented without the canvas) is still
+       submitted: the uploads land. */
+    upload(buffer, &states[3], 0u, 8u, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    present_chunk(smoke, box, buffer);
+    assert(queue->live_count == 0u && queue->pending_holds);
+    {
+        Scene scene;
+        build_chunk_scene(smoke, box, buffer, &scene);
+        BTBHGPUSceneReport scene_report;
+        assert(try_present(smoke, &scene, &scene_report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(strstr(scene_report.message, "Canvas2D") != NULL && !queue->pending_holds);
+        assert(smoke->window->pending_command == NULL);
+    }
+    current = states[3];
+    expect_chunk(smoke, box, buffer, &current, "a dropped frame that copied a queued upload: it still lands");
+
+    /* Refusals: nothing queued, the buffer as it was. */
+    {
+        BTBHGPUInstanceBufferReport report;
+        memset(&report, 0, sizeof(report));
+        assert(btbh_gpu_instance_buffer_upload_ex(buffer, 0u, states[0].records[0], CHUNK_BYTES, 1u << 2, &report) ==
+            BTBH_GPU_INVALID_ARGUMENT);
+        printf("refused an unknown upload flag: %s\n", report.message);
+        assert(strstr(report.message, "flags") != NULL);
+        assert(btbh_gpu_instance_buffer_upload_ex(buffer, 0u, states[0].records[0], CHUNK_BYTES,
+            BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, NULL) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(btbh_gpu_instance_buffer_upload_ex(buffer, INSTANCE_BYTES, states[0].records[0], CHUNK_BYTES,
+            BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        printf("refused a queued upload past the buffer's end: %s\n", report.message);
+        assert(btbh_gpu_instance_buffer_upload_ex(buffer, 0u, NULL, CHUNK_BYTES,
+            BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(btbh_gpu_instance_buffer_upload_ex(buffer, 0u, states[0].records[0], 0u,
+            BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(queue->live_count == 0u && queue->entry_count == 0u);
+    }
+    expect_chunk(smoke, box, buffer, &current, "after the refusals: as it was");
+
+    btbh_gpu_instance_buffer_destroy(buffer);
+    btbh_gpu_custom_mesh_destroy(box);
+}
+
+/* ------------------------------------------------------------------------------------------------- range updates */
+
+/* btbh_gpu_custom_mesh_update_range: part of a mesh's vertices or indices, plain and queued, for a mesh with buffers of
+   its own and one in the shared buffers, against a fresh mesh made with the data it must hold (`current`, the same
+   writes applied on the CPU). */
+
+static void shift_vertices(MeshData *data, uint32_t first, uint32_t count, float dx, float dy, float dz) {
+    for (uint32_t vertex = first; vertex < first + count; ++vertex) {
+        data->vertices[(size_t)vertex * FLOATS + 0u] += dx;
+        data->vertices[(size_t)vertex * FLOATS + 1u] += dy;
+        data->vertices[(size_t)vertex * FLOATS + 2u] += dz;
+    }
+}
+
+static void tint_vertices(MeshData *data, uint32_t first, uint32_t count, float r, float g, float b) {
+    for (uint32_t vertex = first; vertex < first + count; ++vertex) {
+        data->vertices[(size_t)vertex * FLOATS + 12u] = r;
+        data->vertices[(size_t)vertex * FLOATS + 13u] = g;
+        data->vertices[(size_t)vertex * FLOATS + 14u] = b;
+    }
+}
+
+/* Vertices [first, first + count) of `source` (and indices [first_index, first_index + index_count)) into `mesh`, and
+   the same into `current`. */
+static void update_range(BTBHGPUCustomMesh *mesh, MeshData *current, const MeshData *source, uint32_t first,
+    uint32_t count, uint32_t first_index, uint32_t index_count, bool queued) {
+    BTBHGPUCustomMeshReport report;
+    memset(&report, 0, sizeof(report));
+    const BTBHGPUResult result = btbh_gpu_custom_mesh_update_range(mesh, first,
+        count > 0u ? &source->vertices[(size_t)first * FLOATS] : NULL, count * FLOATS * (uint32_t)sizeof(float),
+        first_index, index_count > 0u ? &source->indices[first_index] : NULL, index_count,
+        queued ? BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED : 0u, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "range update: %s\n", report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    assert(report.vertex_count == mesh->vertex_count && report.index_count == mesh->index_count);
+    memcpy(&current->vertices[(size_t)first * FLOATS], &source->vertices[(size_t)first * FLOATS],
+        (size_t)count * FLOATS * sizeof(float));
+    memcpy(&current->indices[first_index], &source->indices[first_index], (size_t)index_count * sizeof(uint32_t));
+}
+
+static void expect_mesh(SmokeWindow *smoke, BTBHGPUCustomMesh *mesh, const MeshData *data, const char *what) {
+    uint8_t *pixels = render(smoke, mesh);
+    uint8_t *expected = reference(smoke, data);
+    expect_same(pixels, expected, what);
+    free(expected);
+    free(pixels);
+}
+
+static void expect_presented_mesh(SmokeWindow *smoke, const MeshData *data, const char *what) {
+    uint32_t frame_bytes = 0u;
+    uint8_t *presented = capture_frame(smoke, &frame_bytes);
+    finish_frame(smoke);
+    BTBHGPUCustomMesh *fresh = create_mesh(smoke->window, data, false);
+    present_scene(smoke, fresh);
+    uint32_t reference_bytes = 0u;
+    uint8_t *expected = capture_frame(smoke, &reference_bytes);
+    finish_frame(smoke);
+    btbh_gpu_custom_mesh_destroy(fresh);
+    assert(frame_bytes == reference_bytes);
+    const bool same = memcmp(presented, expected, frame_bytes) == 0;
+    printf("%-78s %s\n", what, same ? "same bytes" : "DIFFERENT");
+    assert(same);
+    free(expected);
+    free(presented);
+}
+
+static void check_range_updates(SmokeWindow *smoke) {
+    BTBHGPUUploadQueue *queue = &smoke->window->upload_queue;
+    const MeshData two = shape(2);   /* two boxes: vertices 0..23 and 24..47, indices 0..35 and 36..71 */
+    assert(two.vertex_count == 48u && two.index_count == 72u);
+    MeshData moved = two;            /* the second box moved and tinted */
+    shift_vertices(&moved, 24u, 24u, 0.35f, 0.0f, -0.1f);
+    tint_vertices(&moved, 24u, 24u, 1.0f, 0.9f, 0.2f);
+    MeshData lowered = two;          /* the first box moved down and nearer */
+    shift_vertices(&lowered, 0u, 24u, -0.3f, -0.25f, 0.2f);
+    MeshData hidden = two;           /* the first box's triangles degenerate */
+    memset(hidden.indices, 0, 36u * sizeof(uint32_t));
+    MeshData striped = two;          /* faces of both boxes retinted */
+    tint_vertices(&striped, 12u, 18u, 0.2f, 0.9f, 1.0f);
+    MeshData dotted = two;
+    tint_vertices(&dotted, 20u, 2u, 1.0f, 0.2f, 0.9f);
+
+    for (uint32_t kind = 0u; kind < 2u; ++kind) {
+        const bool shared = kind == 1u;
+        char what[128];
+        BTBHGPUCustomMesh *mesh = create_mesh(smoke->window, &two, shared);
+        MeshData current = two;
+#define WHAT(text) ((void)snprintf(what, sizeof(what), "%s mesh, %s", shared ? "shared" : "own", text), what)
+        expect_mesh(smoke, mesh, &current, WHAT("as made"));
+
+        update_range(mesh, &current, &moved, 24u, 24u, 0u, 0u, false);
+        expect_mesh(smoke, mesh, &current, WHAT("a plain range update of the second box's vertices"));
+        float minimum[3];
+        float maximum[3];
+        assert(btbh_gpu_custom_mesh_bounds(moved.vertices, 48u, minimum, maximum));
+        assert(mesh->bounds_valid && mesh->maximum[0] >= maximum[0] && mesh->minimum[2] <= minimum[2]);
+
+        update_range(mesh, &current, &lowered, 0u, 24u, 0u, 0u, true);
+        assert(queue->live_count == 1u && mesh->queue_head == 1u);
+        expect_mesh(smoke, mesh, &current, WHAT("a queued range update of the first box's vertices"));
+        assert(btbh_gpu_custom_mesh_bounds(lowered.vertices, 24u, minimum, maximum));
+        assert(mesh->minimum[1] <= minimum[1] && mesh->maximum[1] >= 0.99f);   /* grown; the old top kept */
+
+        update_range(mesh, &current, &hidden, 0u, 0u, 0u, 36u, true);
+        expect_mesh(smoke, mesh, &current, WHAT("a queued range update of indices only (the first box hidden)"));
+
+        /* Overlapping in one frame: queued whole ranges, a queued range inside them, a plain one over that. */
+        update_range(mesh, &current, &two, 0u, 48u, 0u, 72u, true);
+        update_range(mesh, &current, &striped, 12u, 18u, 0u, 0u, true);
+        assert(queue->live_count == 2u && queue->entry_count == 2u);   /* held by the first: it takes them */
+        update_range(mesh, &current, &dotted, 20u, 2u, 0u, 0u, false);
+        expect_mesh(smoke, mesh, &current, WHAT("queued all, queued inside, plain inside that: each later one wins"));
+
+        /* A partial update after a queued whole one changes its data; a whole update replaces the partial ones. */
+        update(mesh, &two, true);
+        current = two;
+        update_range(mesh, &current, &moved, 24u, 24u, 0u, 0u, true);
+        assert(queue->live_count == 2u && queue->entry_count == 2u);
+        expect_mesh(smoke, mesh, &current, WHAT("queued whole, then queued range: the range over it"));
+        update_range(mesh, &current, &lowered, 0u, 24u, 0u, 0u, true);
+        update(mesh, &moved, true);
+        current = moved;
+        assert(queue->live_count == 2u);
+        expect_mesh(smoke, mesh, &current, WHAT("queued range, then queued whole: the whole one"));
+        /* The whole update measured afresh: the bounds are `moved`'s again. */
+        assert(btbh_gpu_custom_mesh_bounds(moved.vertices, 48u, minimum, maximum));
+        assert(mesh->minimum[1] == minimum[1] && mesh->maximum[0] == maximum[0]);
+
+        /* A frame waiting for the canvas never shows a range update made after it. */
+        present_scene(smoke, mesh);
+        update_range(mesh, &current, &lowered, 0u, 24u, 0u, 0u, false);
+        assert(queue->pending_holds);
+        expect_presented_mesh(smoke, &moved, WHAT("presented, a plain range update before the canvas: the frame"));
+        expect_mesh(smoke, mesh, &current, WHAT("  and the next scene shows it"));
+        update(mesh, &two, true);
+        current = two;
+        present_scene(smoke, mesh);
+        assert(mesh->queue_copied_serial == queue->pending_serial);
+        update_range(mesh, &current, &striped, 12u, 18u, 0u, 0u, false);
+        expect_presented_mesh(smoke, &two, WHAT("queued whole, presented, plain range before the canvas: the frame"));
+        expect_mesh(smoke, mesh, &current, WHAT("  and the next scene: the range over the whole"));
+
+        /* Refusals: the mesh and the queue as they were. */
+        BTBHGPUCustomMeshReport report;
+        memset(&report, 0, sizeof(report));
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 40u, &two.vertices[0], 24u * INSTANCE_BYTES, 0u, NULL, 0u,
+            BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, &report) == BTBH_GPU_INVALID_ARGUMENT);
+        if (!shared) {
+            printf("refused a range past the vertices: %s\n", report.message);
+        }
+        assert(strstr(report.message, "within") != NULL);
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, NULL, 0u, 60u, &two.indices[0], 36u, 0u, &report) ==
+            BTBH_GPU_INVALID_ARGUMENT);
+        const uint32_t bad[3] = { 0u, 1u, 48u };
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, NULL, 0u, 0u, bad, 3u, BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED,
+            &report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(strstr(report.message, "outside") != NULL);
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, NULL, 0u, 0u, NULL, 0u, 0u, &report) ==
+            BTBH_GPU_INVALID_ARGUMENT);
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, &two.vertices[0], 100u, 0u, NULL, 0u, 0u, &report) ==
+            BTBH_GPU_INVALID_ARGUMENT);
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, &two.vertices[0], INSTANCE_BYTES, 0u, NULL, 0u, 1u << 1,
+            &report) == BTBH_GPU_INVALID_ARGUMENT);
+        assert(strstr(report.message, "flags") != NULL);
+        assert(btbh_gpu_custom_mesh_update_range(mesh, 0u, &two.vertices[0], INSTANCE_BYTES, 0u, NULL, 0u, 0u, NULL) ==
+            BTBH_GPU_INVALID_ARGUMENT);
+        assert(queue->live_count == 0u && queue->entry_count == 0u);
+        expect_mesh(smoke, mesh, &current, WHAT("after the refusals: as it was"));
+#undef WHAT
+        btbh_gpu_custom_mesh_destroy(mesh);
+    }
+}
+
 static void check_closed_window(BTBHGPUDevice *device) {
     const BTBHGPUWindowDescriptor descriptor = {
         .title = "BTBH mesh queue smoke (closed)",
@@ -627,15 +1225,25 @@ static void check_closed_window(BTBHGPUDevice *device) {
     BTBHGPUCustomMesh *shared = create_mesh(window, &a, true);
     update(own, &b, true);
     update(shared, &b, true);
+    BTBHGPUInstanceBuffer *buffer = chunk_buffer(window);
+    const Chunk chunk = chunk_state(1u);
+    upload(buffer, &chunk, 0u, CHUNK_INSTANCES, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED);
+    assert(buffer->queue_head != 0u);
     btbh_gpu_window_destroy(window);
-    assert(own->owner == NULL && own->queue_entry == 0u && shared->queue_entry == 0u);
+    assert(own->owner == NULL && own->queue_head == 0u && shared->queue_head == 0u);
+    assert(buffer->owner == NULL && buffer->queue_head == 0u);
+    BTBHGPUInstanceBufferReport buffer_report;
+    memset(&buffer_report, 0, sizeof(buffer_report));
+    assert(btbh_gpu_instance_buffer_upload_ex(buffer, 0u, chunk.records[0], CHUNK_BYTES,
+        BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, &buffer_report) == BTBH_GPU_INVALID_ARGUMENT);
+    btbh_gpu_instance_buffer_destroy(buffer);
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
     assert(btbh_gpu_custom_mesh_update_ex(own, b.vertices, bytes_of(&b), b.indices, b.index_count,
         BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, &report) == BTBH_GPU_INVALID_ARGUMENT);
     btbh_gpu_custom_mesh_destroy(own);
     btbh_gpu_custom_mesh_destroy(shared);
-    printf("a window closed with updates queued: dropped; its meshes destroyed after it\n");
+    printf("a window closed with updates and uploads queued: dropped; its meshes and buffer destroyed after it\n");
 }
 
 /* ------------------------------------------------------------------------------------------------- bench */
@@ -788,6 +1396,160 @@ static void run_bench(SmokeWindow *smoke) {
     }
 }
 
+/* BTBH_SMOKE_BENCH=upload-queue: 60 chunks (instance buffers of 4 to 64 KiB, 42 to 682 instances of a box), each drawn
+   by a batch, all uploaded every frame, in interleaved rounds of five modes: none ("still"), whole with the plain
+   upload (each its own submission, cycling: what a host does today), whole queued, a quarter queued (at an offset that
+   moves every frame), a quarter NO_CYCLE (each its own submission). Prints, per upload, the CPU time at the call and in
+   the present (its upload) over "still", and the frame's CPU total (uploads, present, canvas). */
+#define UPLOAD_BENCH_CHUNKS 60u
+#define UPLOAD_BENCH_MODES 5u
+
+typedef struct UploadBenchMode {
+    const char *name;
+    bool uploads;
+    bool whole;
+    uint32_t flags;
+} UploadBenchMode;
+
+static void run_upload_bench(SmokeWindow *smoke) {
+    static const UploadBenchMode modes[UPLOAD_BENCH_MODES] = {
+        { "still", false, false, 0u },
+        { "plain whole", true, true, 0u },
+        { "queued whole", true, true, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED },
+        { "queued quarter", true, false, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED },
+        { "no-cycle quarter", true, false, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE },
+    };
+    enum { ROUNDS = 12, FRAMES = 10 };
+    MeshData box_data;
+    memset(&box_data, 0, sizeof(box_data));
+    add_box(&box_data, (const float[3]){ 0.0f, 0.02f, 0.0f }, (const float[3]){ 0.015f, 0.02f, 0.015f },
+        (const float[3]){ 1.0f, 1.0f, 1.0f });
+    BTBHGPUCustomMesh *box = create_mesh(smoke->window, &box_data, true);
+    BTBHGPUInstanceBuffer *chunks[UPLOAD_BENCH_CHUNKS];
+    uint32_t counts[UPLOAD_BENCH_CHUNKS];
+    float *data[UPLOAD_BENCH_CHUNKS];
+    uint64_t total_bytes = 0u;
+    uint64_t quarter_bytes = 0u;
+    for (uint32_t chunk = 0u; chunk < UPLOAD_BENCH_CHUNKS; ++chunk) {
+        const uint32_t bytes = 4096u + chunk * (65536u - 4096u) / (UPLOAD_BENCH_CHUNKS - 1u);
+        counts[chunk] = bytes / INSTANCE_BYTES;
+        total_bytes += (uint64_t)counts[chunk] * INSTANCE_BYTES;
+        quarter_bytes += (uint64_t)(counts[chunk] / 4u) * INSTANCE_BYTES;
+        BTBHGPUInstanceBufferReport report;
+        memset(&report, 0, sizeof(report));
+        chunks[chunk] = btbh_gpu_window_instance_buffer_create(smoke->window, counts[chunk], INSTANCE_BYTES, &report);
+        assert(chunks[chunk] != NULL);
+        data[chunk] = malloc((size_t)counts[chunk] * INSTANCE_BYTES);
+        assert(data[chunk] != NULL);
+        for (uint32_t index = 0u; index < counts[chunk]; ++index) {
+            instance_at(&data[chunk][(size_t)index * FLOATS], -2.0f + 0.4f * (float)(chunk % 10u) +
+                0.012f * (float)(index % 30u), 0.0f, -2.0f + 0.6f * (float)(chunk / 10u) + 0.012f * (float)(index / 30u),
+                1.0f, 1.0f, 1.0f);
+        }
+        assert(btbh_gpu_instance_buffer_upload(chunks[chunk], 0u, data[chunk], counts[chunk] * INSTANCE_BYTES,
+            &report) == BTBH_GPU_OK);
+    }
+    static BTBHGPUSceneGeometryBatch batches[UPLOAD_BENCH_CHUNKS];
+    for (uint32_t chunk = 0u; chunk < UPLOAD_BENCH_CHUNKS; ++chunk) {
+        batches[chunk] = base_batch(box, 0u);
+        batches[chunk].instance_buffer = chunks[chunk];
+        batches[chunk].instance_count = counts[chunk];
+    }
+    Scene scene;
+    build_scene(smoke, smoke->ground, &scene);
+    static double upload_ms[UPLOAD_BENCH_MODES][ROUNDS * FRAMES];
+    static double present_ms[UPLOAD_BENCH_MODES][ROUNDS * FRAMES];
+    static double scene_upload_ms[UPLOAD_BENCH_MODES][ROUNDS * FRAMES];
+    static double canvas_ms[UPLOAD_BENCH_MODES][ROUNDS * FRAMES];
+    static double frame_ms[UPLOAD_BENCH_MODES][ROUNDS * FRAMES];
+    uint32_t samples[UPLOAD_BENCH_MODES] = { 0u, 0u, 0u, 0u, 0u };
+    uint32_t frame_serial = 0u;
+    for (uint32_t round = 0u; round < ROUNDS; ++round) {
+        for (uint32_t step = 0u; step < UPLOAD_BENCH_MODES; ++step) {
+            const uint32_t mode = (round + step) % UPLOAD_BENCH_MODES;
+            for (uint32_t frame = 0u; frame < FRAMES + 2u; ++frame) {
+                frame_serial += 1u;
+                const uint64_t upload_started = SDL_GetTicksNS();
+                for (uint32_t chunk = 0u; chunk < UPLOAD_BENCH_CHUNKS && modes[mode].uploads; ++chunk) {
+                    /* The chunk's data changes a little every frame. */
+                    data[chunk][13] = 0.0001f * (float)(frame_serial % 100u);
+                    const uint32_t quarter = counts[chunk] / 4u;
+                    const uint32_t first = modes[mode].whole ? 0u : (frame_serial % 4u) * quarter;
+                    const uint32_t count = modes[mode].whole ? counts[chunk] : quarter;
+                    BTBHGPUInstanceBufferReport report;
+                    const BTBHGPUResult result = btbh_gpu_instance_buffer_upload_ex(chunks[chunk],
+                        first * INSTANCE_BYTES, &data[chunk][(size_t)first * FLOATS], count * INSTANCE_BYTES,
+                        modes[mode].flags, &report);
+                    assert(result == BTBH_GPU_OK);
+                }
+                const uint64_t present_started = SDL_GetTicksNS();
+                BTBHGPUSceneReport report;
+                memset(&report, 0, sizeof(report));
+                const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(smoke->window,
+                    shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+                    shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+                    shader_paths[8], shader_paths[9], shader_paths[10],
+                    SMOKE_SHADER_FORMAT, 320u, 180u,
+                    scene.camera.view_projection, scene.camera.right, scene.camera.up, scene.camera.position,
+                    &scene.lighting, &scene.post, &scene.instances[0][0], 1u, 1u, batches, UPLOAD_BENCH_CHUNKS,
+                    20u, 24u, 30u, 255u, &report);
+                assert(result == BTBH_GPU_OK);
+                const uint64_t present_finished = SDL_GetTicksNS();
+                finish_frame(smoke);
+                const uint64_t canvas_finished = SDL_GetTicksNS();
+                if (frame >= 2u) {
+                    const uint32_t sample = samples[mode];
+                    upload_ms[mode][sample] = (double)(present_started - upload_started) / 1.0e6;
+                    present_ms[mode][sample] = (double)(present_finished - present_started) / 1.0e6;
+                    scene_upload_ms[mode][sample] = report.cpu_upload_milliseconds;
+                    canvas_ms[mode][sample] = (double)(canvas_finished - present_finished) / 1.0e6;
+                    frame_ms[mode][sample] = (double)(canvas_finished - upload_started) / 1.0e6;
+                    samples[mode] += 1u;
+                }
+            }
+        }
+    }
+    printf("bench upload-queue: %u chunks, %.1f KiB whole (%.1f KiB a quarter) a frame, %u frames a mode\n",
+        UPLOAD_BENCH_CHUNKS, (double)total_bytes / 1024.0, (double)quarter_bytes / 1024.0, samples[0]);
+    double median_upload[UPLOAD_BENCH_MODES];
+    double median_present[UPLOAD_BENCH_MODES];
+    double median_scene_upload[UPLOAD_BENCH_MODES];
+    double median_canvas[UPLOAD_BENCH_MODES];
+    double median_frame[UPLOAD_BENCH_MODES];
+    for (uint32_t mode = 0u; mode < UPLOAD_BENCH_MODES; ++mode) {
+        const uint32_t n = samples[mode];
+        qsort(upload_ms[mode], n, sizeof(double), compare_doubles);
+        qsort(present_ms[mode], n, sizeof(double), compare_doubles);
+        qsort(scene_upload_ms[mode], n, sizeof(double), compare_doubles);
+        qsort(canvas_ms[mode], n, sizeof(double), compare_doubles);
+        qsort(frame_ms[mode], n, sizeof(double), compare_doubles);
+        median_upload[mode] = upload_ms[mode][n / 2u];
+        median_present[mode] = present_ms[mode][n / 2u];
+        median_scene_upload[mode] = scene_upload_ms[mode][n / 2u];
+        median_canvas[mode] = canvas_ms[mode][n / 2u];
+        median_frame[mode] = frame_ms[mode][n / 2u];
+        printf("bench %-17s uploads %.3f ms (p10 %.3f, p90 %.3f); present %.3f ms (its upload %.4f); canvas %.3f ms; "
+            "frame %.3f ms (p10 %.3f, p90 %.3f)\n",
+            modes[mode].name, median_upload[mode], upload_ms[mode][n / 10u], upload_ms[mode][n * 9u / 10u],
+            median_present[mode], median_scene_upload[mode], median_canvas[mode], median_frame[mode],
+            frame_ms[mode][n / 10u], frame_ms[mode][n * 9u / 10u]);
+    }
+    for (uint32_t mode = 1u; mode < UPLOAD_BENCH_MODES; ++mode) {
+        printf("bench %-17s per upload: %.2f us at the call, %.2f us in the present (%.2f us in its upload), %.2f us "
+            "in the canvas, over \"still\"; frame +%.3f ms over \"still\"\n",
+            modes[mode].name, 1000.0 * median_upload[mode] / UPLOAD_BENCH_CHUNKS,
+            1000.0 * (median_present[mode] - median_present[0]) / UPLOAD_BENCH_CHUNKS,
+            1000.0 * (median_scene_upload[mode] - median_scene_upload[0]) / UPLOAD_BENCH_CHUNKS,
+            1000.0 * (median_canvas[mode] - median_canvas[0]) / UPLOAD_BENCH_CHUNKS,
+            median_frame[mode] - median_frame[0]);
+    }
+    for (uint32_t chunk = 0u; chunk < UPLOAD_BENCH_CHUNKS; ++chunk) {
+        btbh_gpu_instance_buffer_destroy(chunks[chunk]);
+        free(data[chunk]);
+    }
+    btbh_gpu_custom_mesh_destroy(box);
+}
+
 /* ------------------------------------------------------------------------------------------------ main */
 
 static bool load_shader_paths(void) {
@@ -818,7 +1580,9 @@ int main(void) {
     }
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     const char *bench = SDL_getenv("BTBH_SMOKE_BENCH");
-    const bool benching = bench != NULL && strcmp(bench, "mesh-queue") == 0;
+    const bool bench_meshes = bench != NULL && strcmp(bench, "mesh-queue") == 0;
+    const bool bench_uploads = bench != NULL && strcmp(bench, "upload-queue") == 0;
+    const bool benching = bench_meshes || bench_uploads;
     const BTBHGPUDeviceDescriptor device_descriptor = {
         .backend = SMOKE_BACKEND,
         .required_features = BTBH_GPU_REQUIRED_FEATURES,
@@ -853,10 +1617,14 @@ int main(void) {
     assert(smoke.target != NULL);
     MeshData slab = shape(3);
     smoke.ground = create_mesh(smoke.window, &slab, false);
-    if (benching) {
+    if (bench_meshes) {
         run_bench(&smoke);
+    } else if (bench_uploads) {
+        run_upload_bench(&smoke);
     } else {
         check_queue(&smoke);
+        check_instance_uploads(&smoke);
+        check_range_updates(&smoke);
         check_closed_window(device);
     }
     btbh_gpu_custom_mesh_destroy(smoke.ground);
