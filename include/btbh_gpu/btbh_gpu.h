@@ -1751,13 +1751,23 @@ void btbh_gpu_device_destroy(BTBHGPUDevice *device);
    bigger than the budget, or one while every pooled buffer is still being read, makes its own too. The pool's memory
    stays allocated until the budget is lowered (idle buffers beyond it are released) or the device shuts down.
    Uploads and frames are the same to the byte with or without it. One device at a time: another device's call, a
-   NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT. */
+   NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT.
+   Since 0.13.0 a device made with BTBH_GPU_BACKEND_VULKAN starts with a budget of
+   BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET (32 MiB), when no other device has the pool; a Metal device starts with none.
+   The environment variable BTBH_GPU_UPLOAD_STAGING_BUDGET=<bytes>, read when a device is made, sets the budget it starts
+   with instead (0: none, 0.12.0's behaviour), and this call changes it at any time. Why (Be The Bullet Hell v1's exit
+   stall): SDL 3.4 frees a released upload buffer's memory only in a submit that presents, or in SDL_DestroyGPUDevice
+   (about 0.1 ms each on an RTX 3070 Ti), so every upload since the last presented frame (a level streamed in, then
+   quit; a minimized window) waited for the device's destroy. 1,500 such uploads made the exit 246 ms instead of
+   about 70; with the budget, 77 ms. */
 BTBHGPUResult btbh_gpu_device_set_upload_staging_budget(
     BTBHGPUDevice *device,
     uint32_t bytes
 );
 /* Defined when btbh_gpu_device_set_upload_staging_budget exists (since 0.11.0). */
 #define BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET 1
+/* The upload staging budget a Vulkan device starts with (since 0.13.0). */
+#define BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET (32u * 1024u * 1024u)
 double btbh_gpu_monotonic_elapsed_seconds(void);
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
