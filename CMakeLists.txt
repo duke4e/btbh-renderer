@@ -1308,8 +1308,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         # smokes also read the window's counts at their end and fail on a mismatch or on nothing checked
         # (Tests/btbh_gpu_smoke_runs_verify.h). The runs smoke's waterfront has runs of every kind of batch added since
         # 0.10.0 (lifted, light factor, UV rect, flags2, lit particles); the others add tables, dig masks, the
-        # cascades' sources with tops, queued mesh updates and the lazy creation log's scenes. (The height lift, lit
-        # particle and prewarm smokes draw no run.)
+        # cascades' sources with tops, queued mesh updates and the lazy creation log's scenes, and (0.14.0) the lit
+        # particle smoke runs of lit particles with RFC 0013 phase 2's particle shadow, interleaved with unflagged ones.
+        # (The height lift and prewarm smokes draw no run.)
         foreach(_verify_smoke
             btbh_gpu_scene_runs_smoke
             btbh_gpu_scene_flags_smoke
@@ -1319,6 +1320,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             btbh_gpu_mesh_queue_smoke
             btbh_gpu_scene_target_smoke
             btbh_gpu_lazy_creation_smoke
+            btbh_gpu_lit_particle_smoke
         )
             add_test(NAME ${_verify_smoke}_runs_verify COMMAND ${_verify_smoke})
             set_tests_properties(${_verify_smoke}_runs_verify PROPERTIES

@@ -42,6 +42,9 @@
  *     creation log names no shader, pipeline, sampler or texture; the window's prewarm, the same for its presents;
  *   - old shaders: without production_particle_transmittance.vert the map's frame fails naming it (particle_shadow 0
  *     draws); a lit particle or scene shader that doesn't read the map fails naming it.
+ * - Started with BTBH_GPU_SCENE_RUNS=verify (CTest's btbh_gpu_lit_particle_smoke_runs_verify, since 0.14.0), every
+ *   draw that continues a run is checked as well (btbh_gpu_smoke_runs_verify.h): the column split into batches of one
+ *   puff each, and interleaved with unflagged batches of the same material, makes runs on both sides of the flag.
  * - BTBH_LIT_PARTICLE_DUMP=<dir> writes the pictures.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
@@ -50,6 +53,7 @@
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_particle.h"
+#include "btbh_gpu_smoke_runs_verify.h"
 
 #include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_gpu.h>
@@ -2337,6 +2341,30 @@ static void build_column(ColumnScene *column, const SmokeWindow *smoke, uint8_t 
 /* (Away from an edge in the sun's map: a texel and a half, so that the bilinear fetch's four texels lie on one side of
    it.) */
 
+/* The column split (a batch a puff, all flagged) with three unflagged batches of the same material below it, out of the
+   puffs' light path, interleaved: flagged, flagged, unflagged, unflagged, flagged, unflagged. Runs form on both sides of
+   the flag (it is in the run key), and break between them. */
+static void build_interleaved_column(ColumnScene *column, const SmokeWindow *smoke) {
+    build_column(column, smoke, 1u, true, true, 0.0f);
+    Scene *scene = &column->scene;
+    assert(scene->batch_count == 3u);
+    const BTBHGPUSceneGeometryBatch flagged[3] = { scene->batches[0], scene->batches[1], scene->batches[2] };
+    BTBHGPUSceneGeometryBatch unflagged[3];
+    for (int k = 0; k < 3; ++k) {
+        unflagged[k] = flagged[0];
+        unflagged[k].flags = 0u;
+        unflagged[k].first_instance = add_instance(scene, 0.8f - 0.8f * (float)k, -1.6f, 0.0f, 0.5f, half_alpha);
+    }
+    const BTBHGPUSceneGeometryBatch order[6] = {
+        flagged[0], flagged[1], unflagged[0], unflagged[1], flagged[2], unflagged[2],
+    };
+    for (int index = 0; index < 6; ++index) {
+        scene->batches[index] = order[index];
+    }
+    scene->batch_count = 6u;
+    column->puffs = &scene->batches[0];
+}
+
 /* Checks every 3rd pixel the column covers, away from the quads' edges on screen and in the sun's map, against the
    CPU: the lit particle's colour with the sun's share times the map's transmittance (`shadowed`; else 1), the same for
    every puff over the pixel (they lie in one plane), blended n times at alpha 0.5 over black: times 1 - 0.5^n.
@@ -2675,6 +2703,23 @@ static void check_particle_shadow(SmokeWindow *smoke) {
     assert(differing_pixels(shadowed, split_noruns) == 0u);
     assert(differing_pixels(shadowed, noruns) == 0u);
     checks += 3;
+    /* Flagged and unflagged batches of one material interleaved: the same picture with runs on (or verify) and off. */
+    build_interleaved_column(&column, smoke);
+    uint8_t *interleaved = render_column(smoke, &column, "pshadow-column-interleaved");
+    (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
+    uint8_t *interleaved_noruns = render_column(smoke, &column, "pshadow-column-interleaved-noruns");
+    if (runs_before != NULL) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", runs_setting, true);
+    } else {
+        (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
+    }
+    printf("  flagged and unflagged batches interleaved, runs on against off: %u pixels differ\n",
+        differing_pixels(interleaved, interleaved_noruns));
+    assert(differing_pixels(interleaved, interleaved_noruns) == 0u);
+    (void)expect_column(interleaved, &column, true, 2048u, &darkest, "the column, interleaved with unflagged batches");
+    checks += 1;
+    free(interleaved);
+    free(interleaved_noruns);
 
     /* A quarter-size map: the same against the CPU away from the discs' edges. */
     build_column(&column, smoke, 1u | BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER, true, false, 0.0f);
@@ -3091,6 +3136,8 @@ static bool load_shader_paths(void) {
 
 int main(void) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
+    /* (Read before the smoke changes the variable.) */
+    const bool runs_verify = smoke_runs_verify_requested();
     if (!load_shader_paths()) {
         return SMOKE_SKIP;
     }
@@ -3145,6 +3192,7 @@ int main(void) {
         check_base_shaders(&smoke, &before, base_directory);
         close_smoke_window(&before);
     }
+    smoke_check_runs_verify(smoke.window, "btbh_gpu_lit_particle_smoke", runs_verify);
     close_smoke_window(&smoke);
     btbh_gpu_device_destroy(device);
     printf("btbh_gpu_lit_particle_smoke: %d checks passed\n", checks);

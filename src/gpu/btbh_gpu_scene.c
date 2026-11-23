@@ -5533,6 +5533,8 @@ static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_particle_fields[] = {
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, fog_edge),
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, cascade_origin),
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, cascade_field),
+    /* (RFC 0013 phase 2, 0.14.0.) */
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, shadow_controls),
 };
 
 static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_vertex_layout =
