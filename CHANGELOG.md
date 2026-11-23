@@ -37,6 +37,22 @@ Tested on Windows (Vulkan), merged onto 0.10.0's candidate (`a89a4494`), from a 
 macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
 its Height terrain with it yet.
 
+Also for Be The Bullet Hell v2's night perf round (`feature/0.11.0-prewarm-log`): a log of what a window's presents
+make lazily, so that what a prewarm missed has a name, and an upload staging budget. The first frame after a level's
+load spent its time in SDL's submit, freeing every upload buffer the load had made; with the budget there are none to
+free. Both are off by default, and frames are the same to the byte with them or without. Tested on that branch, from
+`fc2784ea`:
+- `check.ps1` passes 30/30: the 29 above and the new lazy creation smoke. All 73 shaders build, and the public
+  headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures (the window probes read
+  the canvas present from its new layout).
+- Identity against release/0.11.0's verification images (`btbh-rel-0110-outs*`): every picture of the eight image
+  smokes and the height lift smoke (246 PNGs) and the prewarm smoke's 32 frames, 278 images and 16,219,008 pixels a
+  mode; 0 differ, in each of the three modes above. Every smoke passes in each mode.
+- The lazy creation smoke: with the log on, and prewarmed under a staging budget, the frames are the frames with
+  nothing set; and 25 rounds of 64 textures uploaded before any is read back arrive whole through the pool (300 rounds
+  in a stress run).
+
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
   height samples (2..`BTBH_GPU_HEIGHTFIELD_MAX_SIZE`, 4096), sample (i, j) at the texel centre. Kept as RGBA16F, the
@@ -81,6 +97,32 @@ its Height terrain with it yet.
     is kept leaves the queue for the next; a closed window drops its queue.
   - At most `BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES` (256 MiB) queued at a time (replaced updates count until the next
     scene); past that the call fails and queues nothing. An unknown flag fails. `BTBH_GPU_HAS_QUEUED_MESH_UPDATES`.
+- **The lazy creation log** (v2's night perf round, request 4): `btbh_gpu_window_set_lazy_creation_log_enabled(window,
+  enabled)` and `btbh_gpu_window_lazy_creation_report(window, entries, capacity, &count)`, which copies out the oldest
+  entries since the last report (the window keeps `BTBH_GPU_LAZY_CREATION_WINDOW_CAPACITY`, 128; a gap in `sequence`
+  shows a drop). `BTBH_GPU_LOG_LAZY_CREATION=1` records every window and prints each entry with `SDL_Log`, one line
+  starting `BTBH_GPU_LAZY` (frame, call, kind, ms, prewarm, name). `BTBHGPULazyCreationEntry` (256 bytes):
+  `frame_index` (the window's frames submitted before), `sequence`, `microseconds`, `kind`, `call` (scene present,
+  render to a target, canvas present), `prewarm_covers`, `name[232]`. `BTBH_GPU_HAS_LAZY_CREATION_LOG`.
+  - What it records: shaders (with their file read), graphics pipelines by their key (the vertex and fragment shader
+    files, each colour target's format and blending, the depth-stencil format, depth test, stencil and cull mode),
+    compute pipelines, samplers, textures (size, format, use), buffers and transfer buffers made or grown, each with
+    its CPU time and where in the core; and the SDL calls that take 1 ms over their usual time: the scene's and the
+    canvas's command buffer and upload map, the swapchain image, the frame's submit and a render to a target's.
+  - `prewarm_covers` 1: made in the steps the present shares with `btbh_gpu_window_scene_prewarm` (or its
+    render-to-target form), so a prewarm with the frame's shaders, settings, batches, render size and drawable size
+    makes it; after a resize, only a prewarm after it. 0: nothing makes it ahead: the buffers that grow with a frame's
+    instances, bones, motions, canvas vertices and the cascades' emitters, everything the canvas makes, the slow calls.
+    SDL's own lazy work (descriptor pools, uniform buffers, its deferred frees) shows only as a slow call around it.
+  - Only the presenting thread is recorded; uploads made outside a present (loading) aren't.
+- **`btbh_gpu_device_set_upload_staging_budget(device, bytes)`** (request 5's fix): keeps up to `bytes` of upload
+  buffers for reuse. Without it (0, the default) every upload makes its own transfer buffer and releases it, and SDL
+  frees them all in the next submit that presents. With it, the uploads of textures (made, loaded, updated, arrays,
+  heightfields) and of the shared geometry buffers (models' primitives and `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`
+  meshes) take ranges of at most 16 pooled buffers (4 MiB, or a power of two that holds the upload), reused once the
+  GPU has finished every upload that read them (fences, never waited for). An upload bigger than the budget, or while
+  the pool is busy, makes its own as before; custom meshes of their own and instance buffers still do. Lowering the
+  budget lets idle buffers go; the device's shutdown releases the rest. `BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET`.
 
 ### Changed
 - `production_model.vert` carries the lift under `#if BTBH_HEIGHT_LIFT`; without it, it and every shader built from it
@@ -95,6 +137,16 @@ its Height terrain with it yet.
   shader test's lifted shaders; the frame bench's `lift`, `lift-keep` and `lift-flat` modes. `tools/check.ps1` and
   `tools/check.sh` skip the new smokes with the other GPU smokes (`check.sh` now skips the runs and RC tops smokes
   too).
+- Every SDL texture, sampler, buffer and transfer buffer the core makes goes through a wrapper (macros in
+  `btbh_gpu_internal.h`, the caller's `__func__` naming where), as shaders and pipelines already did; a present, a
+  render to a target and a canvas present run inside the log's scope. With the log off that is a flag test a call and
+  one atomic load a creation.
+- `btbh_gpu_window_scene_prewarm`'s header names the first frame's other costs: the frees after a load, and the log.
+- Tests: `btbh_gpu_lazy_creation_smoke` (new: what cold frames log and prewarmed ones don't, frames with the log and
+  the budget against frames without, the canvas, a render to a target, the report's refusals and pieces, every upload
+  path through the pool); `btbh_gpu_stage_bench` (new, a measurement: a stage switch at v2's Deck preset, each frame's
+  CPU split with the SDL calls from the log). `tools/check.ps1` and `tools/check.sh` skip the new smoke with the other
+  GPU smokes.
 
 ### Measured
 Windows, RTX 3070 Ti, Vulkan, without a debug device. The machine's shared perf lock was held for the runs marked
@@ -120,6 +172,26 @@ twice a quiet machine's.
   +0.035), about 0.001 ms per 100,000 lifted vertices, as the RFC estimated; with `KEEP_NORMALS` +0.041 ms (the fetch
   costs, not the tilt). On the CPU a lifted batch costs 3–7 ns more geometry encode in a run and 2 ns more prepare;
   with runs off (each batch binding its heightfield) 6–16 ns more encode.
+- **The first frame of a new stage** (v2's request 5, 40–88 ms outside the CPU split; the stage bench at v2's Deck
+  preset: a 1280x800 window, 2,000 kit draws, a stage load of about 140 uploads with textures up to 4096^2; six stage
+  switches a run, *locked*). The first frame after the load, median (range):
+  - nothing set: 28.4 ms (23.8–31.9). The scene present takes 2.1, all of it in its report's split; the canvas present
+    takes 26.0, of which its submit 25.3. With the whole kit in the shared buffers, as v2 makes it: 26.5 (20.5–29.1),
+    submit 24.2. The frames after it: 1–6 ms.
+  - Where the submit goes (SDL timed inside, in a scratch build): SDL 3.4's Vulkan backend gives every transfer buffer
+    a dedicated host-visible allocation, and frees the released ones only in a submit that presents. The first one
+    after the load freed 136–146 of them (215–407 MB): 18–27 ms. Its defragmentation of one allocation took
+    0.25–1.4 ms (moving up to 115 MB of the old stage's neighbours on the GPU), the queue submit 0.05–0.1 ms, the
+    present about 0.5 ms. Not pipelines, residency or descriptor pools: the scene present after a prewarm made nothing.
+  - with a staging budget of 128 MiB: 4.1 ms (2.9–8.6), submit 2.3; the next frames 1.4 and 1.2. The load made 2–12
+    buffers to free instead of about 140, and its meshes took 3.6 ms instead of 12.9.
+  - the host's way without a budget, waiting for the GPU (`SDL_WaitForGPUIdle`) and presenting one canvas frame after
+    the load: 2.9 ms (1.2–15.7); that extra frame takes the 20 ms instead.
+  - left with a budget: in a later frame, SDL frees the old stage's emptied 64–128 MB device memory blocks
+    (0.4–17 ms, one a frame) and defragments (0.25–1.4 ms); a window resized at the switch remakes its swapchain in the
+    first acquire (7.7 ms).
+- **The log off** (the frame bench's CPU mode, 2,001 batches, four alternating processes each, *locked*): the scene
+  present takes 0.640 ms against the base's 0.659 (the processes' medians 0.62–0.72 and 0.61–0.72): no difference.
 
 ### Upgrading
 - Nothing to set: hosts that don't lift or queue draw as before. Rust hosts with bindgen regenerate the bindings for
@@ -130,7 +202,18 @@ twice a quiet machine's.
   pieces `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`, and stand their instances at height 0. Keep each lift alive and unmoved
   while a present that uses it runs. Bounds used for culling must span the lift.
 - To queue (v2's conformed marks): `btbh_gpu_custom_mesh_update_ex(..., BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, ...)`.
-- Swift: nothing changes; a `heightLift` option can follow when Be The Bullet Hell (v1) asks.
+- Swift: nothing changes; a `heightLift` option can follow when Be The Bullet Hell (v1) asks. Neither the lazy creation
+  log nor the staging budget has a Swift API.
+- The lazy creation log and the staging budget are off by default: nothing changes. Rust hosts regenerate the bindings
+  for the new functions and types (no struct changed).
+- v2, after a stage's first frames hitch: run with `BTBH_GPU_LOG_LAZY_CREATION=1` (or turn the log on per window and
+  read the report). An entry with `prewarm=1` names a batch kind or setting the prewarm missed: prewarm with it. With
+  `prewarm=0`: a buffer that grew (more instances than before), the canvas's (its pipelines are made by its first
+  present and the first batch with a font atlas), or a slow SDL call. A slow `SDL_SubmitGPUCommandBuffer (frame)`
+  after a load is SDL freeing what the load released: call `btbh_gpu_device_set_upload_staging_budget(device,
+  128 << 20)` once after making the device (128 MiB lets a 4096^2 texture's 64 MiB share the pool), and destroy the old
+  stage's resources a few frames before the new stage's first frame (a loading screen's), so that SDL frees their
+  memory there.
 
 ## [Unreleased]
 
