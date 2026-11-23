@@ -8472,9 +8472,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_uniforms.projection_scale_y = projection_scale_y;
     post_uniforms.saturation = post->saturation;
     /* Phases: opaque, transparent, and on frames that draw one, refraction (a transparent pass over a copy of
-       the scene so far). */
-    const uint32_t geometry_phase_count =
-        BTBH_GPU_SCENE_TRANSPARENCY_COUNT + (refraction_active ? 1u : 0u);
+       the scene so far). The radiance cascades' debug views (since 0.10.0) take the opaque pass alone: the
+       transparent and refracting batches drew over the view (Be The Bullet Hell v2's additive night overlays read
+       as the cascades' light). */
+    const bool radiance_cascades_debug_output =
+        (radiance_cascades_active || radiance_cascades_fallback_debug) &&
+        post->radiance_cascades.debug_view != BTBH_GPU_SCENE_RC_DEBUG_NONE;
+    const uint32_t geometry_phase_count = radiance_cascades_debug_output
+        ? 1u
+        : BTBH_GPU_SCENE_TRANSPARENCY_COUNT + (refraction_active ? 1u : 0u);
     for (uint32_t transparency_phase = 0u;
          transparency_phase < geometry_phase_count;
          ++transparency_phase) {

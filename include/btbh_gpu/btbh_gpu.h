@@ -672,6 +672,11 @@ typedef enum BTBHGPUSceneRadianceCascadesBackend {
     BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC = 0
 } BTBHGPUSceneRadianceCascadesBackend;
 
+/* BTBHGPUSceneRadianceCascades.debug_view: the scene shows one of the cascades' buffers instead of the frame. A debug
+ * view shows the cascades alone: the frame's HBAO, SSAO, reflections, bloom, fog and vignette are off, and since 0.10.0
+ * the transparent and refracting batches aren't drawn over it either (before, they were, so that Be The Bullet Hell
+ * v2's additive night overlays read as the cascades' light in the views). The tone mapping and grading still apply.
+ * Frames without a debug view are unchanged. */
 typedef enum BTBHGPUSceneRadianceCascadesDebugView {
     BTBH_GPU_SCENE_RC_DEBUG_NONE = 0,
     BTBH_GPU_SCENE_RC_DEBUG_CASCADE_0 = 1,
