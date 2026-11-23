@@ -78,22 +78,42 @@ typedef struct BTBHGPUModelTextureShare BTBHGPUModelTextureShare;
 
 #define BTBH_GPU_FRAME_TELEMETRY_CAPACITY 256u
 
-/* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (RFC 0012's extra, since 0.11.0): one queued update, its vertices and indices at
-   these offsets of the queue's bytes. mesh NULL: replaced by a later update, or its mesh destroyed. */
-typedef struct BTBHGPUCustomMeshQueueEntry {
-    BTBHGPUCustomMesh *mesh;
-    uint32_t vertex_offset;
-    uint32_t vertex_byte_count;
-    uint32_t index_offset;
-    uint32_t index_byte_count;
-} BTBHGPUCustomMeshQueueEntry;
+/* The window's upload queue (since 0.11.0): BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (RFC 0012's extra, whole and partial
+   updates) and BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED. An entry is one range of bytes for one destination: a custom
+   mesh's vertices or indices, or an instance buffer (both of its buffers). */
+typedef enum BTBHGPUUploadPart {
+    BTBH_GPU_UPLOAD_MESH_VERTICES = 0,
+    BTBH_GPU_UPLOAD_MESH_INDICES = 1,
+    BTBH_GPU_UPLOAD_INSTANCES = 2
+} BTBHGPUUploadPart;
 
-/* A window's queued updates (btbh_gpu_custom_mesh.c): what the next scene copies at the start of its command buffer
-   (btbh_gpu_custom_mesh_queue_record), until a scene that copied them is kept (btbh_gpu_custom_mesh_queue_commit).
-   copied_serial counts the scenes that copied any; pending_serial is the one whose frame waits for the canvas
-   (window->pending_command), 0 when none does. */
-typedef struct BTBHGPUCustomMeshQueue {
-    BTBHGPUCustomMeshQueueEntry *entries;
+/* One queued range: byte_count bytes at data_offset of the queue's bytes, for byte_offset of the destination (from the
+   mesh's first vertex or first index in its buffers; from an instance buffer's start). Exactly one of mesh and
+   instance_buffer is set while the entry is in its target's chain (both NULL once a whole update or the target's destroy
+   dropped it); live is false once a later write replaced the range or it was dropped. next chains a target's entries,
+   newest first: 1 + the index of the one before, 0 at the end. Every entry that names a target is in its chain. cycle: a whole update of a mesh with buffers of its own (SDL's cycling); every other range is
+   written in place. */
+typedef struct BTBHGPUUploadQueueEntry {
+    BTBHGPUCustomMesh *mesh;
+    BTBHGPUInstanceBuffer *instance_buffer;
+    uint32_t next;
+    uint32_t data_offset;
+    uint32_t byte_offset;
+    uint32_t byte_count;
+    uint8_t part;
+    bool cycle;
+    bool live;
+} BTBHGPUUploadQueueEntry;
+
+/* A window's queued uploads (btbh_gpu_custom_mesh.c): what the next scene copies at the start of its command buffer
+   (btbh_gpu_upload_queue_record), until a scene that copied them is kept (btbh_gpu_upload_queue_commit). Ranges that
+   overlap carry the same bytes in the overlap (a later write patches the earlier ranges), so the order of their copies
+   doesn't matter. copied_serial counts the scenes that copied any; pending_serial is the one whose frame waits for the
+   canvas (window->pending_command), 0 when none does. pending_holds: that frame holds queued copies, or a write outside
+   the queue recorded after its draws, so it is submitted even when the canvas drops it
+   (btbh_gpu_upload_queue_finish_pending). */
+typedef struct BTBHGPUUploadQueue {
+    BTBHGPUUploadQueueEntry *entries;
     uint32_t entry_count;
     uint32_t entry_capacity;
     uint32_t live_count;
@@ -103,9 +123,10 @@ typedef struct BTBHGPUCustomMeshQueue {
     uint32_t live_bytes;
     uint64_t copied_serial;
     uint64_t pending_serial;
-    /* Set by btbh_gpu_custom_mesh_queue_record until the scene that recorded is kept or dropped. */
+    bool pending_holds;
+    /* Set by btbh_gpu_upload_queue_record until the scene that recorded is kept or dropped. */
     bool recorded;
-} BTBHGPUCustomMeshQueue;
+} BTBHGPUUploadQueue;
 
 typedef struct BTBHGPUFrameTelemetryPending {
     SDL_GPUFence *fence;
@@ -154,9 +175,9 @@ struct BTBHGPUWindow {
     BTBHGPUGeometryArena index_arena;
     BTBHGPUInstanceBuffer *instance_buffer_head;
     BTBHGPUCustomMesh *custom_mesh_head;
-    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): the updates queued for the next scene (btbh_gpu_custom_mesh.c),
-       their data in mesh_queue_bytes. */
-    BTBHGPUCustomMeshQueue mesh_queue;
+    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED and BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED (since 0.11.0): the uploads queued
+       for the next scene (btbh_gpu_custom_mesh.c). */
+    BTBHGPUUploadQueue upload_queue;
     /* The SDF terrains attached to this window (btbh_gpu_window_sdf_terrain_attach). */
     BTBHGPUSdfTerrain *sdf_terrain_head;
     BTBHGPUSceneRuntime *scene_runtime;
@@ -253,6 +274,11 @@ struct BTBHGPUInstanceBuffer {
     uint32_t stride;
     uint32_t byte_capacity;
     uint32_t uploaded_prefix_byte_count;
+    /* BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED (since 0.11.0): 1 + its newest entry in the owner's upload_queue while
+       uploads of it wait there (0: none), and the serial of the last scene that copied a queued upload of it (0:
+       none). */
+    uint32_t queue_head;
+    uint64_t queue_copied_serial;
 };
 
 struct BTBHGPUCustomMesh {
@@ -281,9 +307,10 @@ struct BTBHGPUCustomMesh {
     BTBHGPUGeometryBlock *index_block;
     int32_t vertex_base;
     uint32_t first_index;
-    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): 1 + its entry in the owner's mesh_queue while an update of it
-       waits there (0: none), and the serial of the last scene that copied a queued update of it (0: none). */
-    uint32_t queue_entry;
+    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): 1 + its newest entry in the owner's upload_queue while
+       updates of it wait there (0: none), and the serial of the last scene that copied a queued update of it (0:
+       none). */
+    uint32_t queue_head;
     uint64_t queue_copied_serial;
 };
 
@@ -295,26 +322,82 @@ bool btbh_gpu_custom_mesh_bounds(
     float minimum[3],
     float maximum[3]
 );
-/* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0), for the scene that copies the queue (btbh_gpu_scene.c):
-   - _size: the bytes the window's live queued updates take in a transfer buffer, each vertex or index range at a
-     multiple of 16 (0: nothing queued);
+/* The window's upload queue (since 0.11.0, btbh_gpu_custom_mesh.c). For the scene that copies it (btbh_gpu_scene.c):
+   - _size: the bytes the window's live queued ranges take in a transfer buffer, each at a multiple of 16 (0: nothing
+     queued);
    - _write: packs them so at `destination` (a mapped transfer buffer, _size bytes);
-   - _record: uploads them from `transfer` at `offset` (where _write's destination was) to their meshes' buffers in
-     `copy`, cycling a mesh's own buffers and writing a shared mesh's ranges in place; returns how many uploads;
+   - _record: uploads them from `transfer` at `offset` (where _write's destination was) to their buffers in `copy`,
+     cycling only a whole update of a mesh with buffers of its own; returns how many uploads;
    - _commit: the scene that recorded them is kept (its command buffer submitted, or waiting for the canvas when
      `pending`): the queue empties. Without a record it only notes that no queued copy waits in a pending frame. A
      scene that recorded and then failed calls nothing: the queue stays for the next one. */
-uint32_t btbh_gpu_custom_mesh_queue_size(const BTBHGPUWindow *window);
-void btbh_gpu_custom_mesh_queue_write(const BTBHGPUWindow *window, uint8_t *destination);
-uint32_t btbh_gpu_custom_mesh_queue_record(
+uint32_t btbh_gpu_upload_queue_size(const BTBHGPUWindow *window);
+void btbh_gpu_upload_queue_write(const BTBHGPUWindow *window, uint8_t *destination);
+uint32_t btbh_gpu_upload_queue_record(
     BTBHGPUWindow *window,
     SDL_GPUCopyPass *copy,
     SDL_GPUTransferBuffer *transfer,
     uint32_t offset
 );
-void btbh_gpu_custom_mesh_queue_commit(BTBHGPUWindow *window, bool pending);
-/* Drops the window's queued updates and frees the queue (the window closes). */
-void btbh_gpu_window_release_custom_mesh_queue(BTBHGPUWindow *window);
+void btbh_gpu_upload_queue_commit(BTBHGPUWindow *window, bool pending);
+/* For the uploads (exactly one of `mesh` and `instance_buffer` set; the window is its owner):
+   - _prepare: room for a range of `first_byte_count` bytes and one of `second_byte_count` (0: none); false, with
+     `message` written ("<what>: ..."), when the queue would pass BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES (*out_of_memory
+     false) or memory runs out (true). Nothing changes on false, and the _push calls it made room for can't fail;
+   - _push: queues `byte_count` bytes for `byte_offset` of the target's part: the earlier ranges of that part it
+     covers are dropped, those it overlaps take its bytes there, and one that holds it entirely takes them instead of
+     a new range;
+   - _overwrite: a write outside the queue (submitted, or recorded into the frame waiting for the canvas) made after
+     the queued ones: the same, without queueing anything;
+   - _drop: every range of the target goes, and its entries forget it (a whole update replaces them, or the target is
+     destroyed);
+   - _pending_command: the frame waiting for the canvas, when it copied a queued upload of a target that scene
+     `copied_serial` copied last; else NULL;
+   - _note_pending_write: a write outside the queue was recorded into the frame waiting for the canvas. */
+bool btbh_gpu_upload_queue_prepare(
+    BTBHGPUWindow *window,
+    uint32_t first_byte_count,
+    uint32_t second_byte_count,
+    const char *what,
+    char *message,
+    size_t message_size,
+    bool *out_of_memory
+);
+void btbh_gpu_upload_queue_push(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer,
+    BTBHGPUUploadPart part,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count,
+    bool cycle
+);
+void btbh_gpu_upload_queue_overwrite(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer,
+    BTBHGPUUploadPart part,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count
+);
+void btbh_gpu_upload_queue_drop(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer
+);
+SDL_GPUCommandBuffer *btbh_gpu_upload_queue_pending_command(
+    const BTBHGPUWindow *window,
+    uint64_t copied_serial
+);
+void btbh_gpu_upload_queue_note_pending_write(BTBHGPUWindow *window);
+/* The frame waiting for the canvas is finished, submitted or dropped (btbh_gpu_window_finish_pending_frame): true when
+   it holds queued copies or writes recorded after its draws, so that it must be submitted; either way the queue
+   forgets that frame. */
+bool btbh_gpu_upload_queue_finish_pending(BTBHGPUWindow *window);
+/* Drops the window's queued uploads and frees the queue (the window closes). */
+void btbh_gpu_window_release_upload_queue(BTBHGPUWindow *window);
 /* BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK (btbh_gpu.h says which batches it moves and by what key): the batches
    the opaque pass draws, as indices into `batches`, in the order it draws them. Writes them to `order` (room
    for batch_count) and returns how many; scratch has room for 2 * batch_count keys. `batches` must be valid

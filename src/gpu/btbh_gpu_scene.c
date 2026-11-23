@@ -8576,10 +8576,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): the window's queued mesh updates go in the same transfer,
-       after the instances, bones and motions (at a multiple of 16), and in the same copy pass. Without any, the
-       transfer is as before. */
-    const uint32_t mesh_queue_bytes = btbh_gpu_custom_mesh_queue_size(window);
+    /* The window's upload queue (since 0.11.0: BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED)
+       goes in the same transfer, after the instances, bones and motions (at a multiple of 16), and in the same copy
+       pass. Without any, the transfer is as before. */
+    const uint32_t mesh_queue_bytes = btbh_gpu_upload_queue_size(window);
     const uint32_t scene_upload_bytes = instance_bytes + bone_bytes + motion_bytes;
     const uint32_t mesh_queue_offset = mesh_queue_bytes > 0u
         ? (scene_upload_bytes + 15u) & ~15u
@@ -8679,7 +8679,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
         }
         if (mesh_queue_bytes > 0u) {
-            btbh_gpu_custom_mesh_queue_write(window, (uint8_t *)mapped + mesh_queue_offset);
+            btbh_gpu_upload_queue_write(window, (uint8_t *)mapped + mesh_queue_offset);
         }
         SDL_UnmapGPUTransferBuffer(device, transfer);
     }
@@ -8740,7 +8740,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
         if (mesh_queue_bytes > 0u) {
             /* Before anything draws: every pass of this scene sees the queued data. */
-            (void)btbh_gpu_custom_mesh_queue_record(window, copy, transfer, mesh_queue_offset);
+            (void)btbh_gpu_upload_queue_record(window, copy, transfer, mesh_queue_offset);
         }
         SDL_EndGPUCopyPass(copy);
     }
@@ -11096,9 +11096,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     }
     window->pending_command = command;
     window->pending_scene_ready = true;
-    /* The queued mesh updates this scene copied are done with (a scene for the window waits for the canvas; one for a
+    /* The queued uploads this scene copied are done with (a scene for the window waits for the canvas; one for a
        target is submitted by the caller). */
-    btbh_gpu_custom_mesh_queue_commit(window, output_width == 0u);
+    btbh_gpu_upload_queue_commit(window, output_width == 0u);
     free(bone_offsets);
 
     report->result = BTBH_GPU_OK;

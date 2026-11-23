@@ -169,6 +169,11 @@ _Static_assert(BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES == 268435456u, "the queue ho
 #if !defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT) || !defined(BTBH_GPU_HAS_QUEUED_MESH_UPDATES)
 #error "0.11.0's HAS_ macros are defined with their features"
 #endif
+_Static_assert(BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED == 1u, "the queued-upload flag is bit 0");
+_Static_assert(BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE == 2u, "the in-place upload flag is bit 1");
+#if !defined(BTBH_GPU_HAS_QUEUED_INSTANCE_UPLOADS) || !defined(BTBH_GPU_HAS_PARTIAL_MESH_UPDATES)
+#error "0.11.0's queued uploads and partial mesh updates define their HAS_ macros"
+#endif
 
 /* RFC 0013 phase 1 (0.11.0): the lit particle is variant 11 (the count 12), the UV rect batch bit 3; batch bit 4 and the
    lighting's byte 3,337 stay free for phase 2. No struct grows. */

@@ -152,6 +152,27 @@ BTBHGPUInstanceBuffer *btbh_gpu_window_instance_buffer_create(
     return resource;
 }
 
+/* The upload was made (submitted, recorded or queued): the uploaded prefix grows over it, the report is filled. */
+static BTBHGPUResult btbh_gpu_instance_buffer_uploaded(
+    BTBHGPUInstanceBuffer *buffer,
+    uint32_t byte_offset,
+    uint32_t byte_count,
+    BTBHGPUInstanceBufferReport *report
+) {
+    const uint32_t uploaded_end = byte_offset + byte_count;
+    if (
+        byte_offset <= buffer->uploaded_prefix_byte_count &&
+        uploaded_end > buffer->uploaded_prefix_byte_count
+    ) {
+        buffer->uploaded_prefix_byte_count = uploaded_end;
+    }
+    report->result = BTBH_GPU_OK;
+    report->capacity = buffer->capacity;
+    report->stride = buffer->stride;
+    report->byte_capacity = buffer->byte_capacity;
+    return report->result;
+}
+
 BTBHGPUResult btbh_gpu_instance_buffer_upload(
     BTBHGPUInstanceBuffer *buffer,
     uint32_t byte_offset,
@@ -159,10 +180,31 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     uint32_t byte_count,
     BTBHGPUInstanceBufferReport *report
 ) {
+    return btbh_gpu_instance_buffer_upload_ex(buffer, byte_offset, bytes, byte_count, 0u, report);
+}
+
+BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
+    BTBHGPUInstanceBuffer *buffer,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count,
+    uint32_t flags,
+    BTBHGPUInstanceBufferReport *report
+) {
     if (report == NULL) {
         return BTBH_GPU_INVALID_ARGUMENT;
     }
     memset(report, 0, sizeof(*report));
+    if ((flags & ~(uint32_t) (
+            BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED | BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE
+        )) != 0u) {
+        btbh_gpu_instance_buffer_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Unknown GPU instance buffer upload flags (BTBH_GPU_INSTANCE_BUFFER_UPLOAD_*)"
+        );
+        return report->result;
+    }
     if (
         buffer == NULL ||
         buffer->owner == NULL ||
@@ -183,6 +225,47 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
         );
         return report->result;
     }
+
+    BTBHGPUWindow *owner = buffer->owner;
+    if ((flags & BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED) != 0u) {
+        /* Copied into the window's upload queue now; the next scene copies it in place, in its own copy pass. */
+        char message[256];
+        bool out_of_memory = false;
+        if (!btbh_gpu_upload_queue_prepare(
+                owner,
+                byte_count,
+                0u,
+                "GPU instance buffer queued upload",
+                message,
+                sizeof(message),
+                &out_of_memory
+            )
+        ) {
+            btbh_gpu_instance_buffer_error(
+                report,
+                out_of_memory ? BTBH_GPU_PLATFORM_FAILURE : BTBH_GPU_INVALID_ARGUMENT,
+                message
+            );
+            return report->result;
+        }
+        btbh_gpu_upload_queue_push(
+            owner,
+            NULL,
+            buffer,
+            BTBH_GPU_UPLOAD_INSTANCES,
+            byte_offset,
+            bytes,
+            byte_count,
+            false
+        );
+        return btbh_gpu_instance_buffer_uploaded(buffer, byte_offset, byte_count, report);
+    }
+    /* Without flags: a submission of its own that cycles the buffers (as since 0.1.0: a frame still drawing them keeps
+       its data, and the rest of the buffer is undefined after it). BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE (since
+       0.11.0): in place, so the rest keeps its data; while a scene waits for the canvas, recorded into that frame after
+       its draws (it keeps the old data, and a queued upload it copied lands first). */
+    const bool cycle = (flags & BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE) == 0u;
+    SDL_GPUCommandBuffer *into = cycle ? NULL : owner->pending_command;
 
     SDL_GPUDevice *device = buffer->owner->device->gpu;
     SDL_GPUTransferBufferCreateInfo transfer_info = {0};
@@ -213,7 +296,7 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     memcpy(mapped, bytes, byte_count);
     SDL_UnmapGPUTransferBuffer(device, transfer);
 
-    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCommandBuffer *command = into != NULL ? into : SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass *copy = command != NULL
         ? SDL_BeginGPUCopyPass(command)
         : NULL;
@@ -223,7 +306,7 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
             BTBH_GPU_DEVICE_FAILURE,
             SDL_GetError()
         );
-        if (command != NULL) {
+        if (command != NULL && into == NULL) {
             (void) SDL_CancelGPUCommandBuffer(command);
         }
         SDL_ReleaseGPUTransferBuffer(device, transfer);
@@ -235,11 +318,12 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     destination.buffer = buffer->buffer;
     destination.offset = byte_offset;
     destination.size = byte_count;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    SDL_UploadToGPUBuffer(copy, &source, &destination, cycle);
     destination.buffer = buffer->vertex_buffer;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    SDL_UploadToGPUBuffer(copy, &source, &destination, cycle);
     SDL_EndGPUCopyPass(copy);
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+    /* (Recorded into a frame, the transfer buffer is released now and freed by SDL once that frame has run.) */
+    const bool submitted = into != NULL || SDL_SubmitGPUCommandBuffer(command);
     SDL_ReleaseGPUTransferBuffer(device, transfer);
     if (!submitted) {
         btbh_gpu_instance_buffer_error(
@@ -249,19 +333,13 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
         );
         return report->result;
     }
-
-    const uint32_t uploaded_end = byte_offset + byte_count;
-    if (
-        byte_offset <= buffer->uploaded_prefix_byte_count &&
-        uploaded_end > buffer->uploaded_prefix_byte_count
-    ) {
-        buffer->uploaded_prefix_byte_count = uploaded_end;
+    if (into != NULL) {
+        btbh_gpu_upload_queue_note_pending_write(owner);
     }
-    report->result = BTBH_GPU_OK;
-    report->capacity = buffer->capacity;
-    report->stride = buffer->stride;
-    report->byte_capacity = buffer->byte_capacity;
-    return report->result;
+    /* Queued uploads not yet copied are older: where they overlap this one they carry its bytes, and those it covers
+       are dropped. (Nothing to do for a host that never queues.) */
+    btbh_gpu_upload_queue_overwrite(owner, NULL, buffer, BTBH_GPU_UPLOAD_INSTANCES, byte_offset, bytes, byte_count);
+    return btbh_gpu_instance_buffer_uploaded(buffer, byte_offset, byte_count, report);
 }
 
 void btbh_gpu_instance_buffer_destroy(
@@ -278,6 +356,8 @@ void btbh_gpu_instance_buffer_destroy(
     ) {
         device = buffer->owner->device->gpu;
     }
+    /* Its queued uploads go with it (one a frame already recorded still runs: SDL frees the buffers after it). */
+    btbh_gpu_upload_queue_drop(buffer->owner, NULL, buffer);
     btbh_gpu_instance_buffer_release_handle(buffer, device);
     btbh_gpu_instance_buffer_unlink(buffer);
     free(buffer);

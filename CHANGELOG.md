@@ -12,6 +12,12 @@ smoothly instead of stepping cell by cell; and custom-mesh updates can be queued
 submitting a command buffer of its own (`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`). Both are opt-in: a batch without a lift
 and an update without the flag draw byte for byte as before, with the same shaders.
 
+From v2's night perf round on the Deck preset, two more: instance buffer uploads can go into the next scene's copy pass
+and keep the rest of the buffer (`btbh_gpu_instance_buffer_upload_ex` with `BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED`,
+or `_NO_CYCLE` submitted at once), so v2 can upload the part of a city or kit chunk that changed, all of them in one
+copy pass a frame; and a custom mesh can be updated in part (`btbh_gpu_custom_mesh_update_range`), queued or not.
+Opt-in too: a host that sets neither draws byte for byte as before.
+
 Tested on Windows (Vulkan), merged onto 0.10.0's candidate (`a89a4494`), from a cold build:
 - `check.ps1` with the GPU smokes passes 29/29: 0.10.0's 26, the height lift's native test, and the new height lift
   and mesh queue smokes. All 73 shaders build, and the public headers compile clean under `/W4 /WX`.
@@ -84,6 +90,13 @@ Tested on Windows (Vulkan), at the branch's tip (with the `KEEP_HBAO` change bel
 
 macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
 its blackouts with it yet.
+
+The queued uploads and partial updates, tested on Windows (Vulkan) on `release/0.11.0` (`fc2784ea`):
+- `check.ps1` with the GPU smokes passes 29/29; the mesh queue smoke now makes 73 byte-for-byte checks (17 before),
+  and each rule it checks was broken once on purpose and caught.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- Identity against `fc2784ea`'s own images, every image of the eight image smokes and the height lift smoke: 278
+  images, 16,219,008 pixels, 0 differ, in each of the three modes above. No shader changed.
 
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
@@ -178,8 +191,36 @@ its blackouts with it yet.
     (`seed_component` 1; v2's seed in custom w is free), a lit particle (its shader doesn't take it), a refracting
     batch (it draws no material).
   - Older scene shaders ignore it: the instance draws powered. `BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR`.
+- **`btbh_gpu_instance_buffer_upload_ex(buffer, byte_offset, bytes, byte_count, flags, report)`**: 0 is
+  `btbh_gpu_instance_buffer_upload` (unchanged: a submission of its own that cycles the buffer, so the rest of it is
+  undefined after a partial upload; it now forwards to `_ex`).
+  - **`BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED`**: the bytes are copied at the call into the window's upload queue (the
+    queued mesh updates' one) and the uploaded prefix grows at once; the next scene, present or render-to-target,
+    writes them in place in the transfer and copy pass it makes for its instances, before it draws. The rest of the
+    buffer keeps its data. Frames submitted before that scene, and a scene waiting for the canvas, draw the old data.
+  - **`BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE`**: submitted at once but in place, so the rest of the buffer keeps its
+    data; while a scene waits for the canvas it goes into that frame after its draws instead (that frame draws the old
+    data). With `QUEUED` it changes nothing.
+  - Rules: uploads of one buffer land in the order they were made, queued or not: a later upload's bytes win where it
+    overlaps a queued one not yet copied (several queued in one frame included), and a queued one it covers is dropped;
+    a `NO_CYCLE` upload after a queued one that the waiting frame copied lands after it; a plain upload cycles as always.
+    `btbh_gpu_instance_buffer_destroy` drops the buffer's queued uploads (one a waiting frame copied still runs). The
+    queue's cap counts mesh updates and instance uploads together. `BTBH_GPU_HAS_QUEUED_INSTANCE_UPLOADS`.
+- **`btbh_gpu_custom_mesh_update_range(mesh, first_vertex, vertices, vertex_byte_count, first_index, indices,
+  index_count, flags, report)`**: writes a range of a mesh's vertices and of its indices (either may be empty) in place,
+  for a mesh with buffers of its own or in the shared buffers; the rest of the mesh keeps its data. The counts don't
+  change and the range must lie within them; every index must be below the vertex count. The mesh's bounds grow to
+  cover the new vertices and never shrink until a whole update. `flags`: 0 (submitted at once without cycling; into the
+  waiting frame after its draws while one waits) or `BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED` (copied at the call, written
+  by the next scene). Where a range overlaps queued updates of the mesh not yet copied, its data wins; a whole update
+  replaces the queued ranges before it. `BTBH_GPU_HAS_PARTIAL_MESH_UPDATES`.
 
 ### Changed
+- The custom-mesh queue is the window's upload queue: an entry per range (a mesh's vertices or indices, an instance
+  buffer), and ranges that overlap carry the same bytes, so the order of their copies doesn't matter. A frame that
+  copied queued updates or uploads is submitted even when it is dropped (the canvas refuses its submission, or the next
+  scene is presented without one), so they land; before, such a frame was cancelled and its queued mesh updates lost.
+  A host that never queues drops frames as before.
 - `production_model.vert` carries the lift under `#if BTBH_HEIGHT_LIFT`; without it, it and every shader built from it
   compile to 0.10.0's SPIR-V, MSL and reflection byte for byte.
 - RFC 0013: `production_model.vert` and the four files built from it read the UV rect's switch (a named word,
@@ -204,7 +245,9 @@ its blackouts with it yet.
   batches against meshes lifted on the CPU through every pass, the table, a lifted unlit overlay under additive cascades
   with `KEEP_HBAO`, every refusal, prewarm, old shaders);
   `btbh_gpu_mesh_queue_smoke` (new: every queue rule against meshes made with the data, in render-to-target and
-  present, and `BTBH_SMOKE_BENCH=mesh-queue`); the order test's layouts, run key and lifted sort key; the phase 2
+  present, and `BTBH_SMOKE_BENCH=mesh-queue`; then the queued and in-place instance uploads and the partial mesh
+  updates, every rule above, and `BTBH_SMOKE_BENCH=upload-queue`); the order test's layouts, run key, lifted sort key,
+  and the new flags and HAS_ macros; the phase 2
   shader test's lifted shaders; the frame bench's `lift`, `lift-keep` and `lift-flat` modes. `tools/check.ps1` and
   `tools/check.sh` skip the new smokes with the other GPU smokes (`check.sh` now skips the runs and RC tops smokes
   too).
@@ -247,6 +290,19 @@ twice a quiet machine's.
   0.43–0.51 µs at the call and 4.3–5.3 µs in all (3.7–4.6 µs of it in the present's upload, where SDL makes two copies a
   mesh); in the shared buffers 3.4–3.6 µs. About 50 times cheaper: 200 moving marks cost about 1 ms a frame instead of
   48–55 ms.
+- **Queued instance buffer uploads** (the mesh queue smoke's `upload-queue` bench: 60 chunks, instance buffers of 4 to
+  64 KiB, 2,037 KiB in all, each drawn by a batch and all uploaded every frame; medians of 120 frames a mode, three
+  runs, *locked*, two other sessions' `v2-game` processes running): whole chunks with the plain upload cost
+  84–90 µs each at the call, and the frame 12.3–13.4 ms of CPU against 0.1 ms without uploads (the canvas after them
+  waits about 120 µs an upload behind the 60 submissions). Queued, the same whole chunks cost 0.7–1.0 µs each at the
+  call and 3.2–3.5 µs in the present's upload: the frame 0.35–0.39 ms. A quarter of each chunk queued (507 KiB a
+  frame): 0.2 µs at the call, 1.8–2.1 µs in the present, the frame 0.23–0.25 ms. A quarter with `NO_CYCLE` costs what
+  the plain upload does (82–92 µs at the call, 12.3–14.1 ms a frame): the submission is the cost, not the size. The
+  GPU side of the copies wasn't measured.
+- **Queued custom-mesh updates after the queue became the window's** (the `mesh-queue` bench, release/0.11.0's build
+  and this one alternating, two runs each, *locked*): the same within the noise, 0.27–0.28 µs at the call and
+  2.35–2.48 µs (before) against 2.36–2.41 µs (after) an update in all; in the shared buffers 1.72–1.81 against
+  1.73–1.74 µs.
 - **A frame without lifted batches** (the frame bench's CPU mode, 2,001 batches; `c5390f0b`'s core and shaders against
   this branch's, in alternating processes): the GPU does the same work (the same shaders, byte for byte, and the same
   pixels). On the CPU the quietest runs (14 pairs, not locked) put the geometry encode at +3–4 µs and the shadow encode
@@ -304,6 +360,11 @@ The light factor's runs, on the same machine and bench (the Deck preset, 2,001 k
   pieces `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`, and stand their instances at height 0. Keep each lift alive and unmoved
   while a present that uses it runs. Bounds used for culling must span the lift.
 - To queue (v2's conformed marks): `btbh_gpu_custom_mesh_update_ex(..., BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, ...)`.
+- To upload part of a chunk (v2's city and kit chunks): `btbh_gpu_instance_buffer_upload_ex(chunk, first * 96,
+  &records[first], count * 96, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, &report)` for each changed range, every frame,
+  instead of the whole chunk; a chunk that is a mesh: `btbh_gpu_custom_mesh_update_range(...,
+  BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, ...)`. Don't mix in plain (cycling) uploads of part of a buffer: they leave the
+  rest undefined, as always.
 - Swift: nothing changes; a `heightLift` option can follow when Be The Bullet Hell (v1) asks.
 - RFC 0013: nothing to set; a host that draws no lit particle and sets no UV rect draws as before. Rebuild the five
   static vertex shaders with the others. Rust hosts with bindgen get the new variant and flag; `..Default::default()`

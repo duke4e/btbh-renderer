@@ -2,7 +2,9 @@
 
 - **Status:** Accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator). Phase 1 and the
   extra (queued custom-mesh updates) implemented on `feature/0.11.0-height-lift`: see "Implementation notes (phase 1
-  and the extra)". Phase 2 only if asked. See "v2's answers"
+  and the extra)". Queued instance buffer uploads and partial mesh updates (v2's night perf round) on
+  `feature/0.11.0-queued-uploads`: see "Queued instance uploads and partial updates". Phase 2 only if asked. See
+  "v2's answers"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in and their batches keep today's vertex shaders. They rebuild the shaders with the C core, as every release
@@ -421,6 +423,105 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(BTBHGPUCustomMesh *mesh, const void
 
 A transient vertex stream (the other option v2 named) would need a new geometry kind and buffer per frame; the queue
 gives v2's marks the same saving with the meshes it already has.
+
+### Queued instance uploads and partial updates (0.11.0, v2's night perf round)
+
+v2's next two requests, from its night perf round on the Deck preset: **(2)** a partial upload that keeps the rest of
+the buffer (v2 re-uploads whole city and kit chunks only because `btbh_gpu_instance_buffer_upload` cycles the buffer,
+so everything outside the range is undefined after it), and **(3)** one copy pass a frame (each chunk upload is a
+submission of its own). Both opt-in; the plain calls are unchanged.
+
+```c
+enum {
+    BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED = 1u << 0,    /* into the next scene's copy pass, in place */
+    BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE = 1u << 1   /* submitted now, in place */
+};
+BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(BTBHGPUInstanceBuffer *buffer, uint32_t byte_offset,
+    const void *bytes, uint32_t byte_count, uint32_t flags, BTBHGPUInstanceBufferReport *report);
+#define BTBH_GPU_HAS_QUEUED_INSTANCE_UPLOADS 1
+
+BTBHGPUResult btbh_gpu_custom_mesh_update_range(BTBHGPUCustomMesh *mesh, uint32_t first_vertex,
+    const void *vertices, uint32_t vertex_byte_count, uint32_t first_index, const uint32_t *indices,
+    uint32_t index_count, uint32_t flags /* 0 or BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED */,
+    BTBHGPUCustomMeshReport *report);
+#define BTBH_GPU_HAS_PARTIAL_MESH_UPDATES 1
+```
+
+- **One queue a window.** The custom-mesh queue became the window's upload queue: an entry per range (a mesh's
+  vertices, its indices, or an instance buffer, whose two buffers both take the bytes), chained per target. A whole mesh
+  update is two entries (vertices, indices) and drops the mesh's earlier ones, as before; it is the only entry that
+  cycles (a mesh of its own). Every other entry, a queued instance upload and a partial update, is written in place.
+  The scene copies the live entries in its one transfer and copy pass, after its instances, bones and motions. The cap
+  (`BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES`) counts both kinds together.
+- **Later wins, independent of copy order.** A later write to a target, queued or not, patches the bytes of the earlier
+  queued ranges it overlaps and drops those it covers; one that an earlier range holds entirely goes into it instead of
+  a new entry. So ranges that overlap carry the same bytes in the overlap, and the order in which the GPU runs their
+  copies doesn't matter (SDL's Vulkan and D3D12 backends put barriers around every copy; its Metal backend adds none
+  within a copy pass, and nothing here depends on it).
+- **Partial mesh updates.** In place within the mesh's counts, which don't change; indices must be below the vertex
+  count. Mesh of its own or shared alike. **The bounds grow** to cover the new vertices (the union with the old ones) and
+  never shrink until a whole update measures afresh: the core keeps no CPU copy of the vertices, and asking the caller
+  for bounds would be one more thing to get wrong. Loose bounds only shift the opaque sort's key.
+
+#### Ordering against frames in flight (SDL's semantics)
+
+- **A buffer an in-flight frame reads, written without cycling:** safe on the queue's order alone. SDL has one queue a
+  device; `SDL_UploadToGPUBuffer` with `cycle = false` puts a barrier from the buffer's default use (vertex or storage
+  read) to copy-destination before the copy on Vulkan and D3D12, and those barriers order every command submitted
+  before them, earlier command buffers included; on Metal, SDL's buffers are hazard-tracked (the default), and Metal
+  orders the copy after the earlier command buffers' reads on its queue. The
+  earlier frames draw the old data, and the copy may wait for their reads. What SDL's documentation warns against
+  ("overwriting a section of data that has already been referenced") is the other case: a buffer referenced by a
+  command buffer that is recorded but not yet submitted, written by one submitted before it. Here that is the frame a
+  presented scene leaves waiting for the canvas (`window->pending_command`). So a write that isn't queued and doesn't
+  cycle (`NO_CYCLE`, a plain partial mesh update) goes, while such a frame waits, into that frame after its draws
+  instead of a submission of its own: the frame draws the old data, and a queued copy it holds lands first. The older
+  plain whole update of a shared mesh keeps its 0.10.0 behaviour (submitted on its own, so a waiting frame shows it),
+  except under the queued-update rule above.
+- **Two queued uploads overlapping in one frame:** the later wins, by the patch above, whatever the copy order.
+- **A plain upload after a queued one:** a queued range not yet copied takes the plain upload's bytes where they
+  overlap (and goes if covered), so the plain one wins. A queued range already copied into the waiting frame is
+  before it: `NO_CYCLE` goes into that frame after it; a cycling plain upload lands in a new buffer, which later frames
+  draw (only its own range defined, as always for a cycling upload).
+- **A render-to-target first:** it is a scene: it copies the whole queue at the start of its command buffer and submits
+  it. The buffer isn't cycled, so the next present draws the data too.
+- **Destroy with uploads pending:** `btbh_gpu_instance_buffer_destroy` drops the buffer's queued ranges and the entries
+  forget it; one already copied into a frame not yet submitted still runs (SDL frees the buffers after that frame). A
+  window closed with uploads queued drops them.
+- **A frame dropped after it copied** (the canvas refuses its submission, or the next scene is presented without one):
+  `btbh_gpu_window_finish_pending_frame` now submits instead of cancelling a frame that holds queued copies or a write
+  recorded after its draws, so they land; the queue was already emptied for it. This also fixes 0.11.0's queued mesh
+  updates, which such a frame lost. A host that never queues drops such frames as before.
+
+#### Measured
+
+Windows, RTX 3070 Ti, Vulkan, no debug device, the machine's perf lock held (06:49–06:50 on 2026-11-23; two other
+sessions' `v2-game` processes ran). `BTBH_SMOKE_BENCH=upload-queue`: 60 chunks (instance buffers of 4 to 64 KiB, 42 to
+682 instances, 2,037 KiB in all), each drawn by a batch, all uploaded every frame; five modes in interleaved rounds,
+medians of 120 frames a mode, three runs:
+
+| Mode | At the call, per upload | In the present, per upload | Frame CPU (uploads, present, canvas) |
+| --- | --- | --- | --- |
+| No uploads | | | 0.094–0.102 ms |
+| Whole chunks, plain (today) | 84–90 µs | 5.4–6.5 µs (+114–126 µs in the canvas) | 12.3–13.4 ms |
+| Whole chunks, queued | 0.74–0.95 µs | 3.2–3.5 µs | **0.35–0.39 ms** |
+| A quarter of each, queued (507 KiB) | 0.21–0.23 µs | 1.8–2.1 µs | **0.23–0.25 ms** |
+| A quarter of each, `NO_CYCLE` | 82–92 µs | 4.9–5.9 µs (+115–132 µs in the canvas) | 12.3–14.1 ms |
+
+The plain upload's cost is its transfer buffer, command buffer and submission; the canvas after 60 of them waits about
+120 µs more each. Queued, an upload is a copy into the window's queue at the call and, in the present, a share of the one
+map and SDL's two copies (the instance buffer's storage and vertex buffers). The GPU side wasn't measured: the copies
+are 2 MiB at most here, but a non-cycled copy waits for the earlier frame's reads of that buffer.
+
+The queued mesh updates after the queue was generalised (`BTBH_SMOKE_BENCH=mesh-queue`, release/0.11.0's build and
+this branch's alternating, two runs each, same lock): 0.27–0.28 µs at the call for both; 2.35–2.48 µs (before) and
+2.36–2.41 µs (after) an update in all; in the shared buffers 1.72–1.81 and 1.73–1.74 µs.
+
+#### Was `NO_CYCLE` worth offering?
+
+Yes: it is the partial upload that keeps the rest without waiting for a scene (a load, a render-to-target before the
+first present), and it is the plain path with `cycle = false` plus the waiting-frame rule, nothing new to keep in sync.
+It still costs a submission a call (unless a frame waits), so per-frame streaming should queue.
 
 ## Cost
 
