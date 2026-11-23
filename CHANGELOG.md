@@ -6,6 +6,128 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+0.14.0 (in progress): RFC 0013 phase 2, the particle transmittance map, asked for by Be The Bullet Hell v2 once its owner
+picked the lit smoke (`LIT_PARTICLE` at albedo gain 0.38) as its default. Batches with a new flag draw their coverage
+into a map in sun space. Lit particles read it, so a smoke column's lee side darkens; with `particle_shadow` 2 so do the
+surfaces the sun shadows, so the column's shadow falls on the street.
+
+Nothing changes until a host sets the lighting's new byte and flags a batch: with nothing set every frame draws byte for
+byte as 0.12.0's. Seven shader variants compile anew (four of the scene fragment shader's, the three lit particle ones)
+and two shaders are new (78).
+
+Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.14.0-particle-shadow`:
+- `check.ps1` with the GPU smokes passes 32/32 (no new test executable); all 78 shaders build (SPIR-V and MSL), and
+  the public headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- **Identity:** v0.12.0's references come from a build of its release checkout, out of tree. Every image both builds
+  write (the flags, font, height lift, lit particle, prewarm, RC tops, runs, scene target and world detail smokes): 376
+  images and 18,174,848 pixels a mode; 0 differ, in each of three modes: nothing set; `BTBH_SMOKE_SHARED_MESHES=1`;
+  `BTBH_GPU_SCENE_RUNS=0`. The SDF terrain and mesh queue smokes pass in each mode. The lit particle smoke's 26 new
+  images exist only in the new build.
+- **Shader artefacts:** against v0.12.0's build, 208 of 231 files are the same bytes. `production_model.frag`,
+  `production_model_2d_shadows.frag`, `production_model_rc.frag` and `production_model_rc_2d_shadows.frag` differ
+  (SPIR-V, MSL, reflection), and so do the three `production_particle_lit*.frag` (the unshadowed one's reflection is the
+  same), with the three FSR 3 MSL files that differ between any two builds. The unshadowed scene shaders, the fast unlit
+  shader and every other shader are unchanged.
+- **The header:** the batch is 288 bytes with `flags` at 253; batch bits 0-6 are taken (bit 7 free); the lighting is
+  3,340 bytes with `particle_shadow` at 3,337 (3,339 is still free).
+
+### Added
+- **`BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW`** (batch bit 4, kept for it since 0.11.0) and
+  **`BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW`**. A flagged batch draws into the particle transmittance map on frames where
+  `particle_shadow` is set and the sun's shadow is on; otherwise the flag does nothing.
+  - The map is drawn every such frame, after the shadow maps, with the sun map's matrix (the retained one when the sun's
+    map is kept over frames). A `FRONT` billboard faces the sun there (its quad along the matrix's first two rows), so a
+    puff shadows with its whole disc; a `Y_AXIS` one turns round y toward the sun; other batches are drawn as they
+    stand. The camera's fades don't apply.
+  - A fragment's alpha (the albedo's, the vertex's, the instance's and the material's, with the UV rect) becomes optical
+    depth `-ln(1 - min(alpha, 0.999))`, times a lit particle's density (`surface_parameters1[3]`, 0 meaning 1). A
+    fragment at alpha 1/255 or less, or below `alpha_cutoff`, adds nothing.
+  - Each texel keeps one slab: the summed optical depth, its depth-weighted sum (blended `ADD`) and the nearest depth
+    (`MIN`), in one RGBA16F texture. A receiver reads it with one bilinear fetch: all the light before the slab,
+    `exp(-sum)` past it, the share of the sum between its front and the receiver inside it (the coverage taken as even
+    from the front to twice the mean depth less the front).
+  - The `_with_visibility` calls' `directional_shadow_visibility` byte keeps a batch out of it (`NO_SUN_SHADOW` doesn't);
+    `scene_visibility` doesn't apply.
+  - Only on a static, unlifted, undug batch drawn in the transparent pass, of surface variant `NONE`, `SOFT_PARTICLE` or
+    `LIT_PARTICLE`: the present (and the prewarm) fails with `BTBH_GPU_INVALID_ARGUMENT` on any other, naming the
+    batch ("GPU scene batch N: flags PARTICLE_SHADOW: ...").
+- **`BTBHGPUSceneLighting.particle_shadow`** (byte 3,337 on 64-bit, the old `directional_shadow_reserved[0]`; the struct
+  keeps its 3,340 bytes) and its values **`BTBH_GPU_SCENE_PARTICLE_SHADOW_OFF`** (0), **`_PARTICLES`** (1: the lit
+  particles read the map), **`_GROUND`** (2: so do the opaque surfaces the sun shadows, lit and unlit modes 2 and 3),
+  **`_READERS`** (3, the mask of those) and **`_QUARTER`** (4, or'd in: the map at a quarter of the sun map's size each
+  way instead of half). Readers 3 or a bit above 2 fail the present.
+  - The map is 1024 x 1024 (8 MiB) at half under the default 2048 sun map, 512 x 512 (2 MiB) at a quarter; 512 and 256
+    under a 1024 one. It and its pipeline are made by the first frame or prewarm that draws them, made anew when the
+    sun map's or the setting's size changes; a host that never sets the byte holds neither.
+- New shaders: **`production_particle_transmittance.vert`** and **`.frag`** (the map's draw), beside the host's static
+  vertex shader, and `production_particle_shadow.hlsli` (the slab's read). A frame that draws the map without them fails
+  naming the file. 78 shaders.
+- Prewarm: the map's texture and pipeline join `btbh_gpu_window_scene_prewarm` and the render target's prewarm, through
+  the model pipelines' step. In the smoke, the renders after the prewarm make no pipeline, shader, sampler or texture.
+- Tests: the lit particle smoke's particle shadow checks (the lee side and the street against the CPU's slab, half and a
+  quarter, runs, the refusals, prewarm, old shaders: 174 checks, 126 before); the particle test's slab and refusals
+  (22,496 checks); the shader and order tests; the frame bench's `smoke-shadow`, `smoke-ground` and `+quarter` modes,
+  `BTBH_FRAME_BENCH_PRESET=high` (1920 x 1080) and `BTBH_FRAME_BENCH_SUN_MAP`.
+- Swift: nothing. The Swift layer sets no batch flags and doesn't expose `particle_shadow`.
+
+### Changed
+- **`production_model.frag.hlsl`'s shadowed variants** (`production_model.frag`, `_2d_shadows`, `_rc`, `_rc_2d_shadows`)
+  take the map in their last free slot: t15 in the full variant (its 16th sampler, SDL's last), t14 in `_2d_shadows`. A
+  fallback is bound there when the frame's surfaces don't read it. With `particle_shadow` 2 the map's transmittance
+  multiplies the sun's visibility in the lit path and the shadow's visibility of unlit modes 2 and 3, behind
+  `directional_shadow_controls.w` (0 before, 0 off). The core makes these pipelines with 16 and 15 samplers (15 and 14
+  before). **The full scene shader now binds all 16 of SDL's samplers:** a later texture in it needs one freed first
+  (the sun map's second, comparison binding through `GatherCmp`, or the world detail's three maps as one array) or a
+  shader of its own, as the lit particle took.
+- **`production_particle_lit.frag.hlsl`:** the map after the shadow maps (t9; t8 in `_2d_shadows`; 10 and 9 samplers),
+  the sun's share times its transmittance with `particle_shadow` 1 or 2. Its `ParticleFrame` block grows from 176 to 192
+  bytes (`particle_shadow_controls`).
+- **A lit particle's `surface_parameters1[3]`** is its density in the map; it is refused only below 0 (0.11.0 to 0.13.0
+  refused anything but 0).
+
+### Measured
+Under the machine's perf lock (18:39:07 to 18:40:45; the off cost 18:56:01 to 18:56:28), on an RTX 3070 Ti (Vulkan):
+the frame bench's burning fight (170 lit puffs in one batch, 5 columns of 12 and 110 low ones, every puff flagged), 60
+rounds, the paired median and its 90 % interval. The map pass is in `shadow_ms`, the lit particles' read in
+`transparent_ms`, the ground's in `main_ms`.
+
+| | Deck preset (960 x 600 to 1280 x 800, 1024 sun map) | 1920 x 1080 (2048 sun map) |
+| --- | --- | --- |
+| Map pass, half / a quarter | +0.009 / +0.003 ms | +0.013 / +0.007 ms |
+| Lit particles' read | +0.000 to +0.001 ms (not resolved) | +0.004 ms |
+| Ground's read, half / a quarter | +0.042 / +0.035 ms | +0.084 / +0.077 ms |
+| Frame, `particle_shadow` 1, half / a quarter | +0.006 / +0.003 ms | +0.017 / +0.006 ms |
+| Frame, `particle_shadow` 2, half / a quarter | +0.048 / +0.045 ms | +0.101 / +0.089 ms |
+
+- The map pass grows with the map's texels: on a 8192 sun map (the map 4096² or 2048²) +0.127 and +0.036 ms.
+- The ground's read is a fetch and the slab for every shaded opaque fragment (overdraw included), smoke over it or not,
+  so it follows the view's shaded fragments, not the smoke.
+- **Off:** nothing to pay. v0.12.0's shaders against this build's under this core (Deck preset, 60 rounds): mode none,
+  the opaque pass -0.001 ms [-0.005, +0.007] and the frame +0.001 ms [-0.002, +0.004]; with the lit smoke, the
+  transparent pass +0.0006 ms [+0.0004, +0.0013] (the lit particle shader's unread branch).
+- An earlier block (18:22 to 18:23) ran while other sessions' unlocked game runs kept the GPU at 100 %; it resolved
+  nothing and isn't used.
+
+### Upgrading
+- Nothing to set: a host that leaves `particle_shadow` 0 or flags no batch draws as before. Rebuild the scene shaders
+  (the seven variants changed, two are new): with 0.12.0's lit particle or scene shaders a frame that draws the map fails
+  naming the shader, and without the map's shaders it fails naming them.
+- Rust hosts with bindgen regenerate the bindings: `directional_shadow_reserved` (one byte) becomes `particle_shadow`;
+  `..Default::default()` leaves it 0. A host that left garbage in it now gets `BTBH_GPU_INVALID_ARGUMENT` for readers 3
+  or a bit above 2.
+- v2: flag the lit smoke's batch with `BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW` (the columns' puffs at least; the low smoke
+  may stay out of the map), set `particle_shadow` 2 on desktop and 1 on the Deck (or `1 | QUARTER`), and prewarm with
+  them. `surface_parameters1[3]` thins or thickens the smoke's shadow without changing its look.
+
+### Known
+- **One slab per texel** (decision 11): puffs stacked along a sun ray are one column. Two columns on one ray would share
+  a slab, the receivers between them taking part of the far one's shadow.
+- **The map is the sun's alone:** the fill, the spot, the omni light, the lamps and the radiance cascades' own passes
+  don't read it.
+- **The scene shader's sampler slots are full** in its full variant (above).
+- **macOS (Metal), the Vulkan validation layers and a real Steam Deck** aren't verified; nor are v2's own frames.
+
 ## [0.12.0] — 2026-11-23
 
 0.12.0: two additions to `BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`, both asked for by Be The Bullet Hell v2

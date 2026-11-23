@@ -608,8 +608,8 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      *   there (BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW, since 0.14.0; 0 taken as 1; reserved and refused unless 0 in
      *   0.11.0 to 0.13.0).
      * With BTBHGPUSceneLighting.particle_shadow 1 or 2 and a particle transmittance map drawn this frame (since
-     * 0.14.0), the sun's share is times the map's transmittance at its flat world position, read after the shadow
-     * maps (t9 in production_particle_lit.frag, t8 in _2d_shadows; the unshadowed variant never reads it).
+     * 0.14.0), the sun's share is multiplied by the map's transmittance at its flat world position, read after the
+     * shadow maps (t9 in production_particle_lit.frag, t8 in _2d_shadows; the unshadowed variant never reads it).
      * Needs transparency_enabled 1 with BTBH_GPU_SCENE_BLEND_ALPHA (straight alpha), unlit_enabled 0, a static
      * geometry (animation_library and animation_pose NULL), dug_by NULL, no world_detail with a texture, no
      * world_detail_table with map_layers, no height_lift with a heightfield, detail_parameters 0 and
@@ -1455,7 +1455,9 @@ typedef struct BTBHGPUSceneLighting {
      * map's size each way instead of half (BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER; nothing with bits 0-1 at 0). The
      * map is drawn only on frames whose sun shadow is on and that have a batch with
      * BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW: one RGBA16F texture, 8 MiB at half under the default 2048 sun map (2 at a
-     * quarter). Bits 0-1 at 3 or a bit above 2 fails the present with BTBH_GPU_INVALID_ARGUMENT. The readers need this
+     * quarter), made with its pipeline by the first frame that draws it (or by btbh_gpu_window_scene_prewarm and the
+     * render target's prewarm with the frame's settings), and made anew when its size changes. Bits 0-1 at 3, or a
+     * bit above 2, fail the present with BTBH_GPU_INVALID_ARGUMENT. The readers need this
      * release's shaders: with SPIR-V ones that don't read the map (production_particle_lit*.frag, and for 2 the scene
      * fragment shader the frame draws with), a present that draws it fails with the shader's path. */
     uint8_t particle_shadow;
