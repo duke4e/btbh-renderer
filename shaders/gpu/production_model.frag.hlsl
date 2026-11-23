@@ -1846,13 +1846,17 @@ FragmentOutput rc_material_output(
     return output;
 }
 
-/* unlit_enabled bit 7 (128: BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO, additive cascades and the HBAO): the
-   scene's own targets (`output`, fragment_output's, as without the cascades), so that the HBAO resolve darkens the
-   ambient light alone, with the reflectivity in the ambient target's alpha for the reflections. The emission target
+/* unlit_enabled bit 7 (128: BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO, additive cascades and the HBAO; since
+   0.12.0 its contact mode and the SSAO too): the scene's own targets (`output`, fragment_output's, as without the
+   cascades), so that the occlusion's resolve darkens what it darkens without them (the HBAO and the SSAO the ambient
+   light alone), with the reflectivity in the ambient target's alpha for the reflections. The emission target
    carries what the additive resolve reads instead (production_hrc_resolve.comp.hlsl's albedo_in_emission): the
    albedo the bounce light lands on, times 1 - metalness (an unlit receiver's albedo; 0 for a source, as
-   rc_material_output's albedo target holds, which the resolve's coarser samples blend into their neighbours'), and
-   rc_material_output's marks in its alpha. */
+   rc_material_output's marks in its alpha.
+   unlit_enabled bit 10 (1024: the flag with the HBAO's contact mode, ssao_contact 1, since 0.12.0): the ambient
+   target's rgb carries the emission instead (fragment_output's emission target, as without the cascades), which the
+   contact mode keeps (production_hbao_resolve.frag.hlsl, its emission slot bound to the ambient target); it reads no
+   ambient light. */
 FragmentOutput rc_scene_targets(
     FragmentOutput output,
     float4 albedo,
@@ -1863,6 +1867,10 @@ FragmentOutput rc_scene_targets(
 )
 {
     const bool receiver = unlit && (unlit_enabled & 4u) != 0u;
+    if ((unlit_enabled & 1024u) != 0u)
+    {
+        output.ambient.rgb = output.emission.rgb;
+    }
     output.ambient.a = unlit ? 0.0f : dot(f0, btbh_reflectivity_luma);
     output.emission = float4(
         unlit && !receiver ? float3(0.0f, 0.0f, 0.0f) : albedo.rgb * (unlit ? 1.0f : 1.0f - metalness),

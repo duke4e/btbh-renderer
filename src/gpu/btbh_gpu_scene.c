@@ -7531,11 +7531,16 @@ typedef struct BTBHGPUSceneFrameSetup {
     uint32_t shadow_enabled[3];
     bool omni_shadows_active;
     bool shadows_active;
-    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO where it applies: the opaque pass writes the scene's own
-       ambient targets under the cascades (unlit_enabled bit 7 for production_model_rc*.frag), the cascades' resolve
-       takes the albedo from the emission target, and the HBAO resolve and the SSR read them as without the
-       cascades. */
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO where it applies (the HBAO, since 0.12.0 its contact mode and the
+       SSAO too): the opaque pass writes the scene's own ambient targets under the cascades (unlit_enabled bit 7 for
+       production_model_rc*.frag), the cascades' resolve takes the albedo from the emission target, and the occlusion's
+       resolve and the SSR read them as without the cascades. */
     bool scene_ambient_targets;
+    /* Its contact mode (ssao_contact 1 with the HBAO, since 0.12.0): the opaque pass writes the emission to the
+       ambient target's rgb (unlit_enabled bit 10), and the HBAO's passes run before the cascades' (over the scene they
+       compose with their bounce light, which they then leave undarkened), their contact resolve keeping the emission
+       from the ambient target. */
+    bool scene_contact_targets;
     /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO's transparent part (with any ambient occlusion since 0.11.0; it
        needed the HBAO's in 0.10.0): under additive cascades, transparent unlit batches take the fast unlit shader, as
        without the cascades (btbh_gpu_scene_batch_fast_unlit). True wherever scene_ambient_targets is. */
@@ -7545,6 +7550,91 @@ typedef struct BTBHGPUSceneFrameSetup {
        target's (unlit_enabled bit 6), and the SSR reads them. */
     bool ssr_surface_reflectivity;
 } BTBHGPUSceneFrameSetup;
+
+/* The horizon-based occlusion's passes (BTBHGPUScenePost.ssao_enabled 2): the HBAO at half resolution, its denoise,
+   and its resolve laid over `target` (production_hbao_resolve.frag's blend). mode: what it darkens (1 the ambient
+   light, BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE with the radiance cascades, BTBH_GPU_SCENE_HBAO_CONTACT_MODE contact);
+   kept_emission: the texture whose rgb the contact mode keeps (the emission target, or the ambient target under
+   KEEP_HBAO's contact part, which carries the emission there). False, with SDL's error set, when a pass failed. */
+static bool btbh_gpu_scene_encode_hbao(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUScenePost *post,
+    const float inverse_view_projection[16],
+    float projection_scale_y,
+    uint32_t mode,
+    SDL_GPUTexture *kept_emission,
+    SDL_GPUTexture *target
+) {
+    BTBHGPUSceneHBAOUniforms hbao_uniforms;
+    SDL_zero(hbao_uniforms);
+    (void)memcpy(
+        hbao_uniforms.inverse_view_projection,
+        inverse_view_projection,
+        sizeof(hbao_uniforms.inverse_view_projection)
+    );
+    hbao_uniforms.controls[0] = post->ssao_radius;
+    hbao_uniforms.controls[1] = post->ssao_intensity;
+    hbao_uniforms.controls[2] = post->ssao_power;
+    hbao_uniforms.controls[3] = post->ssao_bias;
+    hbao_uniforms.options[0] = mode;
+    hbao_uniforms.options[1] = post->ssao_debug_view != 0u ? 1u : 0u;
+    hbao_uniforms.view[0] = projection_scale_y;
+    SDL_GPUTextureSamplerBinding hbao_samplers[2];
+    SDL_zeroa(hbao_samplers);
+    hbao_samplers[0].texture = runtime->depth_texture;
+    hbao_samplers[1].texture = runtime->normal_texture;
+    SDL_GPUTextureSamplerBinding denoise_sampler;
+    SDL_zero(denoise_sampler);
+    denoise_sampler.texture = runtime->hbao_texture;
+    SDL_GPUTextureSamplerBinding hbao_resolve_samplers[6];
+    SDL_zeroa(hbao_resolve_samplers);
+    hbao_resolve_samplers[0].texture = runtime->depth_texture;
+    hbao_resolve_samplers[1].texture = runtime->ambient_texture;
+    hbao_resolve_samplers[2].texture = runtime->normal_texture;
+    hbao_resolve_samplers[3].texture =
+        runtime->ambient_specular_texture;
+    hbao_resolve_samplers[4].texture =
+        runtime->hbao_denoised_texture;
+    hbao_resolve_samplers[5].texture = kept_emission;
+    hbao_samplers[0].sampler = runtime->scene_color_sampler;
+    hbao_samplers[1].sampler = runtime->scene_color_sampler;
+    denoise_sampler.sampler = runtime->scene_color_sampler;
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        hbao_resolve_samplers[index].sampler =
+            runtime->scene_color_sampler;
+    }
+    return btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH HBAO",
+            runtime->hbao_pipeline,
+            runtime->hbao_texture,
+            &hbao_uniforms,
+            (uint32_t)sizeof(hbao_uniforms),
+            hbao_samplers,
+            2u
+        ) &&
+        btbh_gpu_scene_render_fullscreen(
+            command,
+            "BTBH HBAO Denoise",
+            runtime->hbao_denoise_pipeline,
+            runtime->hbao_denoised_texture,
+            &hbao_uniforms,
+            (uint32_t)sizeof(hbao_uniforms),
+            &denoise_sampler,
+            1u
+        ) &&
+        btbh_gpu_scene_render_fullscreen_over(
+            command,
+            "BTBH HBAO Resolve",
+            runtime->hbao_resolve_pipeline,
+            target,
+            &hbao_uniforms,
+            (uint32_t)sizeof(hbao_uniforms),
+            hbao_resolve_samplers,
+            6u
+        );
+}
 
 /* The first part of a scene frame, shared by the present and btbh_gpu_window_scene_prewarm so that the two make
    the same things: the window's scene runtime and BRDF lookup, the radiance cascades' and FSR 3's pipelines and
@@ -7799,13 +7889,19 @@ static bool btbh_gpu_scene_prepare_frame(
     (void)memcpy(setup->shadow_enabled, shadow_enabled, sizeof(setup->shadow_enabled));
     setup->omni_shadows_active = omni_shadows_active;
     setup->shadows_active = shadows_active;
-    /* (ssao_contact's mode is the same with the cascades or without; it reads the emission target.) */
+    /* Since 0.12.0 with the HBAO in either mode and with the SSAO (0.9.0 to 0.11.0: the HBAO, ssao_contact 0). With no
+       ambient occlusion nothing darkens the scene, which the cascades then only add their bounce light to: the flag's
+       transparent part alone (cascades_fast_unlit). */
     setup->scene_ambient_targets =
-        hbao_active &&
+        (hbao_active || ambient_occlusion_active) &&
         radiance_cascades_active &&
         post->radiance_cascades.additive != 0u &&
-        post->ssao_contact == 0u &&
         (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
+    /* (ssao_contact's mode keeps the emission target's rgb, which the cascades' resolve reads the albedo from here.) */
+    setup->scene_contact_targets =
+        setup->scene_ambient_targets &&
+        hbao_active &&
+        post->ssao_contact != 0u;
     setup->cascades_fast_unlit =
         radiance_cascades_active &&
         post->radiance_cascades.additive != 0u &&
@@ -8308,6 +8404,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const bool omni_shadows_active = setup.omni_shadows_active;
     const bool shadows_active = setup.shadows_active;
     const bool scene_ambient_targets = setup.scene_ambient_targets;
+    const bool scene_contact_targets = setup.scene_contact_targets;
+    /* KEEP_HBAO's contact part lays the HBAO over the opaque scene before the cascades compose it with their bounce
+       light; its debug view (the occlusion alone, in grey) stays after them, as without the flag. */
+    const bool hbao_before_cascades = scene_contact_targets && post->ssao_debug_view == 0u;
     const bool cascades_fast_unlit = setup.cascades_fast_unlit;
     const bool ssr_surface_reflectivity = setup.ssr_surface_reflectivity;
     if (!runtime->temporal_debug_view_read) {
@@ -9092,8 +9192,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_uniforms.tilt_shift_enabled = post->tilt_shift_enabled != 0u
         ? (temporal_active ? 2u : 1u)
         : 0u;
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO with the SSAO (since 0.12.0): the ambient light, from the scene's
+       own targets, as without the cascades. */
     post_uniforms.ssao_enabled = ambient_occlusion_active
-        ? (radiance_cascades_active
+        ? (radiance_cascades_active && !scene_ambient_targets
             ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
             : 1u)
         : 0u;
@@ -9155,80 +9257,23 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             transparency_phase == BTBH_GPU_SCENE_TRANSPARENCY_COUNT;
         const bool phase_auxiliary_geometry_outputs =
             !transparent_phase && auxiliary_geometry_outputs;
-        if (transparency_phase == 1u && hbao_active) {
-            /* The horizon-based occlusion, laid over the opaque scene before the transparent pass. */
-            BTBHGPUSceneHBAOUniforms hbao_uniforms;
-            SDL_zero(hbao_uniforms);
-            (void)memcpy(
-                hbao_uniforms.inverse_view_projection,
-                inverse_view_projection,
-                sizeof(hbao_uniforms.inverse_view_projection)
-            );
-            hbao_uniforms.controls[0] = post->ssao_radius;
-            hbao_uniforms.controls[1] = post->ssao_intensity;
-            hbao_uniforms.controls[2] = post->ssao_power;
-            hbao_uniforms.controls[3] = post->ssao_bias;
-            /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO: the ambient light, from the scene's own targets. */
-            hbao_uniforms.options[0] = post->ssao_contact != 0u
-                ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
-                : (radiance_cascades_active && !scene_ambient_targets
-                    ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
-                    : 1u);
-            hbao_uniforms.options[1] = post->ssao_debug_view != 0u ? 1u : 0u;
-            hbao_uniforms.view[0] = projection_scale_y;
-            SDL_GPUTextureSamplerBinding hbao_samplers[2];
-            SDL_zeroa(hbao_samplers);
-            hbao_samplers[0].texture = runtime->depth_texture;
-            hbao_samplers[1].texture = runtime->normal_texture;
-            SDL_GPUTextureSamplerBinding denoise_sampler;
-            SDL_zero(denoise_sampler);
-            denoise_sampler.texture = runtime->hbao_texture;
-            SDL_GPUTextureSamplerBinding hbao_resolve_samplers[6];
-            SDL_zeroa(hbao_resolve_samplers);
-            hbao_resolve_samplers[0].texture = runtime->depth_texture;
-            hbao_resolve_samplers[1].texture = runtime->ambient_texture;
-            hbao_resolve_samplers[2].texture = runtime->normal_texture;
-            hbao_resolve_samplers[3].texture =
-                runtime->ambient_specular_texture;
-            hbao_resolve_samplers[4].texture =
-                runtime->hbao_denoised_texture;
-            hbao_resolve_samplers[5].texture = runtime->emission_texture;
-            hbao_samplers[0].sampler = runtime->scene_color_sampler;
-            hbao_samplers[1].sampler = runtime->scene_color_sampler;
-            denoise_sampler.sampler = runtime->scene_color_sampler;
-            for (uint32_t index = 0u; index < 6u; ++index) {
-                hbao_resolve_samplers[index].sampler =
-                    runtime->scene_color_sampler;
-            }
-            if (!btbh_gpu_scene_render_fullscreen(
+        if (transparency_phase == 1u && hbao_active && !hbao_before_cascades) {
+            /* The horizon-based occlusion, laid over the opaque scene before the transparent pass (under KEEP_HBAO
+               with its contact mode, before the cascades instead: below). Under KEEP_HBAO without contact AO: the
+               ambient light, from the scene's own targets. */
+            if (!btbh_gpu_scene_encode_hbao(
                     command,
-                    "BTBH HBAO",
-                    runtime->hbao_pipeline,
-                    runtime->hbao_texture,
-                    &hbao_uniforms,
-                    (uint32_t)sizeof(hbao_uniforms),
-                    hbao_samplers,
-                    2u
-                ) ||
-                !btbh_gpu_scene_render_fullscreen(
-                    command,
-                    "BTBH HBAO Denoise",
-                    runtime->hbao_denoise_pipeline,
-                    runtime->hbao_denoised_texture,
-                    &hbao_uniforms,
-                    (uint32_t)sizeof(hbao_uniforms),
-                    &denoise_sampler,
-                    1u
-                ) ||
-                !btbh_gpu_scene_render_fullscreen_over(
-                    command,
-                    "BTBH HBAO Resolve",
-                    runtime->hbao_resolve_pipeline,
-                    radiance_cascades_post_input,
-                    &hbao_uniforms,
-                    (uint32_t)sizeof(hbao_uniforms),
-                    hbao_resolve_samplers,
-                    6u
+                    runtime,
+                    post,
+                    inverse_view_projection,
+                    projection_scale_y,
+                    post->ssao_contact != 0u
+                        ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
+                        : (radiance_cascades_active && !scene_ambient_targets
+                            ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
+                            : 1u),
+                    scene_contact_targets ? runtime->ambient_texture : runtime->emission_texture,
+                    radiance_cascades_post_input
                 )) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
@@ -9996,7 +10041,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     (ssr_surface_reflectivity ? 64u : 0u) |
                     (scene_ambient_targets &&
                      !btbh_gpu_scene_batch_keeps_cascades_look(batch, cascades_fast_unlit)
-                        ? 128u
+                        ? (scene_contact_targets ? 128u | 1024u : 128u)
                         : 0u) |
                     ((batch->flags &
                       BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
@@ -10406,6 +10451,39 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             return report->result;
         }
 
+        if (!transparent_phase && hbao_before_cascades) {
+            /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO with the HBAO's contact mode (since 0.12.0): laid over
+               the opaque scene before the cascades add their bounce light to it, which it then leaves as it is; the
+               emission it keeps rides the ambient target (unlit_enabled bit 10). */
+            if (!btbh_gpu_scene_encode_hbao(
+                    command,
+                    runtime,
+                    post,
+                    inverse_view_projection,
+                    projection_scale_y,
+                    BTBH_GPU_SCENE_HBAO_CONTACT_MODE,
+                    runtime->ambient_texture,
+                    radiance_cascades_post_input
+                )) {
+                btbh_gpu_scene_cancel_submission(window, command);
+                free(bone_offsets);
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
+                );
+                return report->result;
+            }
+            if (!btbh_gpu_scene_cost_split(
+                    window,
+                    &command,
+                    BTBH_GPU_COST_GROUP_SSAO,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
+        }
         if (!transparent_phase &&
             (radiance_cascades_active ||
              radiance_cascades_fallback_debug)) {

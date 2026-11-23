@@ -1576,7 +1576,9 @@ typedef struct BTBHGPUScenePost {
     float ssr_thickness;
     /* Ambient occlusion (ssao_enabled 1): the radius occluders count within (render units), its strength,
      * and with the cascades the share of the indirect light it occludes and the share of that the direct light
-     * keeps (both 0...1). A zero radius leaves all four at their defaults (1, 0.4, 0.75, 0.2). */
+     * keeps (both 0...1; not under additive cascades with BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO, since
+     * 0.12.0, where it darkens the ambient light as without the cascades). A zero radius leaves all four at their
+     * defaults (1, 0.4, 0.75, 0.2). */
     float ao_radius;
     float ao_intensity;
     float ao_contact_strength;
@@ -1594,7 +1596,7 @@ typedef struct BTBHGPUScenePost {
     float ssao_bias;
     /* 1: it darkens all the light of the opaque surfaces but their emission, lit or unlit (contact shading);
      * 0: the ambient light of lit surfaces, or with the radiance cascades on, all their light but the emission,
-     * three quarters as much. */
+     * three quarters as much (but with BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO under additive ones). */
     uint8_t ssao_contact;
     /* 1: the scene shows the occlusion alone, in grey (for tuning). */
     uint8_t ssao_debug_view;
@@ -1611,17 +1613,23 @@ typedef struct BTBHGPUScenePost {
 /* BTBHGPUScenePost.flags (since 0.9.0). Each needs the scene shaders of the release that brought it
  * (production_model*.frag, production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones:
  * with 0.8.0's SSR_SURFACE_REFLECTIVITY changes nothing and KEEP_HBAO darkens by the albedo (don't set it with them);
- * with 0.9.0's SSR_FACING_HITS changes nothing. */
+ * with 0.9.0's SSR_FACING_HITS changes nothing; with 0.11.0's (production_model_rc*.frag) KEEP_HBAO with contact AO
+ * keeps the ambient light instead of the emission from its darkening (don't set it with them). */
 enum {
-    /* The horizon-based ambient occlusion (ssao_enabled 2, ssao_contact 0) under additive radiance cascades
-     * (BTBHGPUSceneRadianceCascades.additive) darkens what it darkens without the cascades: the ambient light of
-     * lit surfaces (diffuse, and specular as its occlusion goes). Without it, cascades of any kind make it darken
-     * three quarters of all their light but the emission, which suits cascades that replace the scene's ambient
-     * light and darkens additive ones, whose surfaces keep it (Be The Bullet Hell v2, who asked for it: with
-     * nothing glowing, its night stage lost 1.4 sRGB levels on average once the cascades were on).
+    /* The ambient occlusion under additive radiance cascades (BTBHGPUSceneRadianceCascades.additive) darkens what it
+     * darkens without the cascades: the horizon-based one (ssao_enabled 2, ssao_contact 0) and, since 0.12.0, the SSAO
+     * (ssao_enabled 1) the ambient light of lit surfaces (diffuse, and specular as its occlusion goes); since 0.12.0,
+     * contact AO (ssao_enabled 2, ssao_contact 1) all the opaque surfaces' light but their emission. Without it,
+     * cascades of any kind make the HBAO and the SSAO darken three quarters of all their light but the emission (the
+     * SSAO as ao_contact_strength and ao_direct_share say), which suits cascades that replace the scene's ambient light
+     * and darkens additive ones, whose surfaces keep it (Be The Bullet Hell v2, who asked for it: with nothing glowing,
+     * its night stage lost 1.4 sRGB levels on average once the cascades were on); and contact AO keeps the street
+     * lamps' light (the cascades' scene shader carries it in the emission target) and the colour of opaque unlit
+     * surfaces (v2's lit surfaces in a street lamp's pool came out up to 94 levels brighter than without the cascades).
      * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off). Under the omni
      *   shadow a pixel may differ by a level now and then: the cascades' variant of the scene shader rounds that light
-     *   apart from the plain one.
+     *   apart from the plain one. (With no ambient occlusion a frame with nothing glowing is that frame without the
+     *   flag too, but for the transparent pass: nothing darkens the scene.)
      * - The transparent pass draws as without the cascades too (since 0.10.0), whatever the ambient occlusion (since
      *   0.11.0: the HBAO, ssao_contact 1, the SSAO of ssao_enabled 1, or none; 0.10.0 needed the HBAO): a transparent
      *   unlit batch takes the fast unlit shader, which adds no point light (nor the dark scene's darkening and spot,
@@ -1629,19 +1637,25 @@ enum {
      *   with the cascades' scene shader, which does add them: v2's additive night overlays by its neon point lights
      *   (reach 2.6, energy 2.1) came out up to 200 sRGB levels brighter than without the cascades. This changes the
      *   frames drawn with the flag wherever a point light (or the dark scene, or unlit 2 or 3) meets a transparent
-     *   unlit batch.
-     * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't.
+     *   unlit batch. A batch with BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (since 0.12.0: v2's weapon beams and
+     *   glows) keeps the cascades' scene shader, and draws as without the flag.
+     * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't. With
+     *   contact AO (since 0.12.0) the HBAO is laid over the opaque scene before the cascades add it; without the flag,
+     *   as in 0.11.0 with it, contact AO comes after them and darkens it with the rest.
      * - How: the opaque pass writes the scene's own ambient light to the targets the cascades' resolve reads its
-     *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission
-     *   target, which the additive resolve doesn't otherwise read. The bounce light is the same but at the edges of
-     *   metal surfaces (a level or two), where the resolve's coarser samples blend albedo times (1 - metalness)
-     *   instead of each apart.
+     *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission target,
+     *   which the additive resolve doesn't otherwise read; with contact AO, which reads no ambient light, the emission
+     *   it keeps to the ambient target. The bounce light is the same but at the edges of metal surfaces (a level or
+     *   two), where the resolve's coarser samples blend albedo times (1 - metalness) instead of each apart.
      * - Screen-space reflections then weigh each surface by its reflectivity's luminance, as with
-     *   BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY (the cascades' targets kept its colour).
+     *   BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY (the cascades' targets kept its colour); with no ambient occlusion
+     *   they read the cascades' targets, as without the flag.
      * - Ignored, rendering as without it: without the cascades or with them not additive, and in the cascades' debug
-     *   views. Everything but the transparent pass (the ambient light, the bounce light's albedo, the reflections'
-     *   reflectivity) applies with ssao_enabled 2 and ssao_contact 0 only: with ssao_contact 1 (whose darkening is the
-     *   same either way), ssao_enabled 0 or 1, the flag changes the transparent pass alone. */
+     *   views (and the HBAO's debug view, ssao_debug_view, shows its occlusion as without it). With no ambient
+     *   occlusion (ssao_enabled 0) the flag changes the transparent pass alone. Everything but the transparent pass
+     *   (the ambient light, the bounce light's albedo, the reflections' reflectivity) applies with the HBAO in either
+     *   mode and with the SSAO since 0.12.0; 0.9.0 to 0.11.0 applied it with ssao_enabled 2 and ssao_contact 0 only. So
+     *   0.12.0 changes the frames drawn with the flag under additive cascades with contact AO or the SSAO. */
     BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO = 1u << 0,
     /* Screen-space reflections without the radiance cascades weigh each surface by its own reflectivity, as with
      * the cascades: its F0 (0.04 for a dielectric, 0.12 for glass, detail pattern 5, its albedo for a metal,
