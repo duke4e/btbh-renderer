@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.9.0` (tag `v0.9.0`; BTBH `a14a54bc`, 2026-11-23) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.10.0` (tag `v0.10.0`; BTBH `878e5ea5`, 2026-11-23) |
 
 ## Features used
 
@@ -64,13 +64,14 @@ outskirts ring. Since 0.9.0:
 - `SSR_SURFACE_REFLECTIVITY`, with `ssr_thickness` 0.1;
 - `btbh_gpu_window_scene_prewarm_render_to_target` for its V1 cards' pictures.
 
-Adopting with 0.10.0 (tested on the candidate):
-- the cheaper draws, with its kit libraries in the shared mesh buffers (RFC 0011 phase 1);
-- `SSR_FACING_HITS`, with `ssr_thickness` 0.6;
-- the kaiju's spot shadow with `SPOT_OCCLUDER_SUN_ONLY | SPOT_OCCLUDER_ORTHOGRAPHIC`, strength about 0.8, and the kaiju
-  out of the sun's map.
-
-RC source tops (RFC 0010) are kept for when its lamps return as explicit emitters.
+Since 0.10.0:
+- the cheaper draws, with `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS` on its library meshes (RFC 0011 phase 1): the kit with
+  landmarks and set pieces, the country looks, props, boats and roof gear;
+- `SSR_FACING_HITS`, with `ssr_thickness` 0.6 (replacing 0.9.0's 0.1);
+- the kaiju's spot shadow with `SPOT_OCCLUDER_SUN_ONLY | SPOT_OCCLUDER_ORTHOGRAPHIC`, its reach 2.5 times the map's
+  depth, strength 0.8 by day and dusk and 0.53 at night;
+- each emitter's `top_above` filled per class, with `source_tops` off until its lamps return as explicit emitters
+  (RFC 0010).
 
 Requested for 0.11.0:
 - a vertex lift from a heightfield and mesh updates queued into the frame (RFC 0012);
