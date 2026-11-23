@@ -199,6 +199,8 @@ typedef struct BTBHGPUPostUniforms {
     float ssr_controls[4];
     /* The AO's radius and strength, its contact strength and direct share (BTBHGPUScenePost). */
     float ao_controls[4];
+    /* The reflections' hits (since 0.10.0): x 1 for BTBH_GPU_SCENE_POST_SSR_FACING_HITS; yzw 0. */
+    float ssr_hit_options[4];
 } BTBHGPUPostUniforms;
 
 /* The horizon-based ambient occlusion's passes (BTBHGPUScenePost.ssao_enabled 2, production_hbao.hlsli). */
@@ -5906,7 +5908,8 @@ static bool btbh_gpu_scene_post_valid(
         post->opaque_sort < BTBH_GPU_SCENE_OPAQUE_SORT_COUNT &&
         (post->flags & ~(uint32_t)(
             BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO |
-            BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY
+            BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY |
+            BTBH_GPU_SCENE_POST_SSR_FACING_HITS
         )) == 0u &&
         (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
          (isfinite(post->temporal_camera_near) &&
@@ -8460,6 +8463,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         post_uniforms.ssr_controls[1] = post->ssr_max_roughness;
         post_uniforms.ssr_controls[2] = post->ssr_max_distance;
         post_uniforms.ssr_controls[3] = post->ssr_thickness;
+        post_uniforms.ssr_hit_options[0] =
+            (post->flags & BTBH_GPU_SCENE_POST_SSR_FACING_HITS) != 0u ? 1.0f : 0.0f;
     }
     post_uniforms.tonemap_mode = post->tonemap_mode;
     post_uniforms.exposure = post->exposure;

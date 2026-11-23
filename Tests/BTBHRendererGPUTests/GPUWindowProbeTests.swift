@@ -3593,6 +3593,12 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertEqual(reflecting(ScreenSpaceReflectionDescriptor(intensity: 0, maxRoughness: 0.3, maxDistance: 20,
                                                                   thickness: 1, surfaceReflectivity: true)).reflections,
                        .off)
+        // Only the hits a ray can make (0.10.0): off by default, kept when enabled.
+        XCTAssertFalse(reflections.facingHits)
+        XCTAssertFalse(ScreenSpaceReflectionDescriptor.off.facingHits)
+        XCTAssertTrue(reflecting(ScreenSpaceReflectionDescriptor(intensity: 4, maxRoughness: 3, maxDistance: 20,
+                                                                 thickness: -1, facingHits: true))
+            .reflections.facingHits)
     }
 
     func testModelPatchCanFadeAnImportedMaterial() throws {

@@ -1378,9 +1378,10 @@ typedef struct BTBHGPUScenePost {
     uint8_t flags;
 } BTBHGPUScenePost;
 
-/* BTBHGPUScenePost.flags (since 0.9.0). Each needs this release's scene shaders (production_model*.frag,
- * production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones: with them
- * SSR_SURFACE_REFLECTIVITY changes nothing, and KEEP_HBAO darkens by the albedo (don't set it with them). */
+/* BTBHGPUScenePost.flags (since 0.9.0). Each needs the scene shaders of the release that brought it
+ * (production_model*.frag, production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones:
+ * with 0.8.0's SSR_SURFACE_REFLECTIVITY changes nothing and KEEP_HBAO darkens by the albedo (don't set it with them);
+ * with 0.9.0's SSR_FACING_HITS changes nothing. */
 enum {
     /* The horizon-based ambient occlusion (ssao_enabled 2, ssao_contact 0) under additive radiance cascades
      * (BTBHGPUSceneRadianceCascades.additive) darkens what it darkens without the cascades: the ambient light of
@@ -1415,13 +1416,29 @@ enum {
      * - The reflectivity is the F0's luminance, one channel: a dielectric, glass or a grey metal reflects as with
      *   the cascades, to the byte; a coloured metal reflects as bright, untinted.
      * - With the cascades on it changes nothing (they carry the F0 already); nor without SSR. */
-    BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY = 1u << 1
+    BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY = 1u << 1,
+    /* Screen-space reflections take only hits a ray can make (since 0.10.0, asked for by Be The Bullet Hell v2: under
+     * a steep camera in the rain, every actor left a noisy column of itself smeared down the wet street below it).
+     * The depth buffer holds only the surfaces in front, so a ray that passes behind or beneath a thin object (a jet,
+     * a kaiju's arm or tail) within ssr_thickness of it was taken for a hit on its visible face.
+     * - A hit on a surface that faces along the ray (its normal less than 90 degrees from the ray's direction: the
+     *   top of anything seen from above, for a ray that climbs from the street) can't be one: the ray passed behind
+     *   or beneath that surface, and marches on to what lies past it.
+     * - The hits left fade as the surface turns edge on to the ray (its normal within about 9 degrees of square to
+     *   it) and as the ray passes farther behind the surface (from a quarter of ssr_thickness to all of it).
+     * - Walls and the faces of objects turned toward the camera keep their reflections: a ray reflected from level
+     *   ground keeps the camera's heading, so it meets them from the front.
+     * - With or without the radiance cascades, and with BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY or without; it
+     *   changes nothing without SSR. Needs this release's production_ssao_resolve.frag; older ones ignore it. */
+    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2
 };
 
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO exist (since 0.9.0). */
 #define BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO 1
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY exist (since 0.9.0). */
 #define BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY 1
+/* Defined when BTBH_GPU_SCENE_POST_SSR_FACING_HITS exists (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_SSR_FACING_HITS 1
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;

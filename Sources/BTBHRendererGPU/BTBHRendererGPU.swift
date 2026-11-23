@@ -2476,6 +2476,9 @@ public final class GPUWindowProbe {
             if post.reflections.surfaceReflectivity {
                 nativePost.flags |= UInt8(truncatingIfNeeded: BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY)
             }
+            if post.reflections.facingHits {
+                nativePost.flags |= UInt8(truncatingIfNeeded: BTBH_GPU_SCENE_POST_SSR_FACING_HITS)
+            }
         }
         nativePost.anti_aliasing =
             GPUAntiAliasingProjection.native(post.antiAliasing)
