@@ -1256,6 +1256,36 @@ if(BTBH_BUILD_GPU_SPIKE)
         endif()
         add_dependencies(btbh_gpu_frame_bench btbh_gpu_shaders)
 
+        # A measurement, not a test (0.11.0): the first frames of a new stage at v2's Deck preset, timed with the lazy
+        # creation log; see the file.
+        add_executable(btbh_gpu_stage_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_stage_bench.c"
+        )
+        target_include_directories(
+            btbh_gpu_stage_bench
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_stage_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_stage_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_stage_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_stage_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_stage_bench btbh_gpu_shaders)
+
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
         get_property(_btbh_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
