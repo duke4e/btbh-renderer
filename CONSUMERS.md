@@ -63,7 +63,8 @@ under additive ones and the reflections' surface reflectivity (`BTBHGPUScenePost
 `btbh_gpu_window_scene_prewarm_render_to_target`. Requested:
 - for 0.10.0: an emitter height in the cascades' field and cheaper draws for meshes sharing a material (RFCs 0010
   and 0011);
-- for 0.11.0: a vertex lift from a heightfield, with mesh updates queued into the frame (RFC 0012);
+- for 0.11.0: a vertex lift from a heightfield, with mesh updates queued into the frame (RFC 0012), and partial
+  instance buffer and mesh uploads that keep the rest, queued into the frame's one copy pass;
 - drafting: lit particles (RFC 0013);
 - later: BC texture formats (RFC 0008 phase 2) and descriptor pools made before the first frames.
 
