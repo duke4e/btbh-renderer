@@ -2397,7 +2397,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
    - The first frame or two after it still cost a few milliseconds more than the next ones: the GPU API's first
      use of the new pipelines' render passes, descriptor pools and uniform buffers, which only drawing makes.
    - After a level's load, the first frame that presents also frees every upload buffer the load made (in its submit,
-     outside the scene report's split): btbh_gpu_device_set_upload_staging_budget keeps them for reuse instead.
+     outside the scene report's split): btbh_gpu_device_set_upload_staging_budget keeps them for reuse instead (and a
+     Vulkan device has a budget from the start since 0.13.0).
+   - Since 0.13.0, on Vulkan, when the renderer submitted command buffers since the last frame that presented (a
+     level's uploads, renders into targets), it waits for the GPU once at its end, so that SDL takes back the
+     descriptor-set caches those command buffers held: SDL 3.4 hands each command buffer one and takes them back only
+     in a submit that presents or a wait, and without it the first frame after a load drew with an empty cache, making
+     15 descriptor pools in its draws (about 0.5 ms; 24 ms once when the driver stalled). The wait lasts as long as the
+     GPU still runs what was submitted; with nothing submitted since the last presented frame it doesn't happen.
    - The lazy creation log (btbh_gpu_window_set_lazy_creation_log_enabled, below) names what a frame made that a
      prewarm would have, and what nothing makes ahead.
    - Nothing is kept between runs: SDL 3.4 makes its Vulkan pipelines without a pipeline cache. The driver's own

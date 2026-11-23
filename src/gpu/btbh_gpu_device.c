@@ -1424,6 +1424,29 @@ void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *tran
     }
 }
 
+/* ---- Submissions since the last presented frame (since 0.13.0) ---- */
+
+static SDL_AtomicInt btbh_gpu_unpresented_submits;
+
+bool btbh_gpu_submit_counted(SDL_GPUCommandBuffer *command) {
+    (void)SDL_AddAtomicInt(&btbh_gpu_unpresented_submits, 1);
+    return (SDL_SubmitGPUCommandBuffer)(command);
+}
+
+SDL_GPUFence *btbh_gpu_submit_counted_and_acquire_fence(SDL_GPUCommandBuffer *command) {
+    (void)SDL_AddAtomicInt(&btbh_gpu_unpresented_submits, 1);
+    return (SDL_SubmitGPUCommandBufferAndAcquireFence)(command);
+}
+
+void btbh_gpu_note_command_buffers_settled(void) {
+    SDL_SetAtomicInt(&btbh_gpu_unpresented_submits, 0);
+}
+
+uint32_t btbh_gpu_unpresented_submit_count(void) {
+    const int count = SDL_GetAtomicInt(&btbh_gpu_unpresented_submits);
+    return count > 0 ? (uint32_t)count : 0u;
+}
+
 void btbh_gpu_creation_stats(BTBHGPUCreationStats *stats) {
     if (stats == NULL) {
         return;

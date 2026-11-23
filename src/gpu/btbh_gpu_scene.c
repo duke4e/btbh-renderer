@@ -12255,6 +12255,20 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
         }
         return report->result;
     }
+    /* Since 0.13.0, on Vulkan: when the core submitted command buffers since the device's last presented frame (a
+       level's uploads, renders into targets, the prewarm's own uploads), wait for the GPU once, here. SDL 3.4 gives every
+       command buffer a descriptor-set cache from a pool (last in, first out) and takes the caches back only in a submit
+       that presents, or in a wait. A load's uploads emptied the pool, so the first frame after it drew with a new, empty
+       cache and made a descriptor pool for each layout it bound, 15 for a scene: about 0.5 ms, and 24 ms once when the
+       driver stalled in one. The wait gives every cache back, those the frames filled on top. Without such submissions
+       nothing waits. */
+    if (btbh_gpu_unpresented_submit_count() > 0u) {
+        const char *driver = SDL_GetGPUDeviceDriver(window->device->gpu);
+        if (driver != NULL && strcmp(driver, "vulkan") == 0) {
+            (void)SDL_WaitForGPUIdle(window->device->gpu);
+            btbh_gpu_note_command_buffers_settled();
+        }
+    }
     report->result = BTBH_GPU_OK;
     report->drawable_width = drawable_width;
     report->drawable_height = drawable_height;

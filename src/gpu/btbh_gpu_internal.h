@@ -836,6 +836,17 @@ bool btbh_gpu_staging_submit_into(
 void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *transfer);
 /* Releases the pool (btbh_gpu_device_shutdown, before the device goes). */
 void btbh_gpu_staging_release_device(SDL_GPUDevice *device);
+/* The command buffers the core submitted since the last frame that presented (since 0.13.0, btbh_gpu_device.c): every
+   SDL_SubmitGPUCommandBuffer and SDL_SubmitGPUCommandBufferAndAcquireFence in the core counts (the macros below), and
+   btbh_gpu_note_command_buffers_settled (SDL took back what finished command buffers held: the canvas's submit of a
+   frame with a swapchain image, or a wait for idle) starts it again from 0.
+   btbh_gpu_window_scene_prewarm reads it. */
+bool btbh_gpu_submit_counted(SDL_GPUCommandBuffer *command);
+SDL_GPUFence *btbh_gpu_submit_counted_and_acquire_fence(SDL_GPUCommandBuffer *command);
+void btbh_gpu_note_command_buffers_settled(void);
+uint32_t btbh_gpu_unpresented_submit_count(void);
+#define SDL_SubmitGPUCommandBuffer(command) btbh_gpu_submit_counted(command)
+#define SDL_SubmitGPUCommandBufferAndAcquireFence(command) btbh_gpu_submit_counted_and_acquire_fence(command)
 #define SDL_CreateGPUTexture(device, info) btbh_gpu_create_texture_at((device), (info), __func__)
 #define SDL_CreateGPUSampler(device, info) btbh_gpu_create_sampler_at((device), (info), __func__)
 #define SDL_CreateGPUBuffer(device, info) btbh_gpu_create_buffer_at((device), (info), __func__)

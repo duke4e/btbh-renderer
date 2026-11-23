@@ -707,6 +707,11 @@ bool btbh_gpu_window_finish_pending_frame(
     btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_FRAME_SUBMIT, lazy_submit_started_ticks);
     if (must_submit && result) {
         window->submitted_frame_count += 1u;
+        if (acquired_swapchain) {
+            /* (A submit that presents: SDL takes back what finished command buffers held, btbh_gpu_scene.c's
+               prewarm.) */
+            btbh_gpu_note_command_buffers_settled();
+        }
     }
     btbh_gpu_window_scene_submission_finished(
         window,
