@@ -31,6 +31,18 @@
  *   glowing (which read the F0 from their targets), through the three shadow variants; a gold metal reflects
  *   untinted (differs, printed). With the cascades, or without the reflections, it changes nothing.
  * - Refusals: an unknown batch flag, unknown post flags (present and prewarm).
+ *
+ * Set (0.10.0, Be The Bullet Hell v2's findings against 0.9.0 and its kaiju's spot shadow):
+ * - The radiance cascades' debug views render the same with an additive overlay and a refracting box as without
+ *   (the transparent passes no longer draw over them); the frame itself differs.
+ * - KEEP_HBAO at night, strong point lights in the building's corners, the overlay and the refracting box: as no
+ *   cascades (the transparent unlit batches draw with the fast unlit shader under the flag too); without the flag the
+ *   overlay is brighter.
+ * - SSR_FACING_HITS on the steep street (a slab floating over wet ground, a tall box standing on it): the slab's
+ *   column goes, the box's reflection stays, with no, normal and additive cascades; without SSR nothing changes.
+ * - The spot occluder's flags (an orthographic spot map along the sun round a tall box) and
+ *   BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW; the new refusals.
+ * - BTBH_SMOKE_BENCH=facing: SSR_FACING_HITS's cost on the steep street.
  * - BTBH_SMOKE_BENCH=1 (or =ssr, =hbao): the flags' cost at 1920x1080, in interleaved turns (prints only):
  *   the reflections without the cascades unset (which return before they march), with the flag and off; the HBAO
  *   and the reflections under additive cascades with KEEP_HBAO and without, and without the cascades.
@@ -64,6 +76,12 @@
 #if defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE) && defined(BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO) && \
     defined(BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY)
 #define SMOKE_HAS_FLAGS 1
+#endif
+/* 0.10.0: its fixes and flags (the debug views, KEEP_HBAO under point lights, SSR_FACING_HITS, the spot occluder's
+   flags and RECEIVES_NO_SPOT_SHADOW). */
+#if defined(SMOKE_HAS_FLAGS) && defined(BTBH_GPU_SCENE_HAS_SSR_FACING_HITS) && \
+    defined(BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS) && defined(BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW)
+#define SMOKE_HAS_0100 1
 #endif
 
 #if defined(__APPLE__)
@@ -385,6 +403,11 @@ typedef struct Options {
     bool gold;            /* a gold metal box among the reflecting surfaces */
     bool unlit_box;       /* an unlit box (a source, unless flagged) */
     bool no_metal;        /* without the grey metal box */
+    bool neon;            /* strong point lights at the building's foot (Be The Bullet Hell v2's signs at night) */
+    bool overlay;         /* an additive transparent quad over the street (v2's night overlays) */
+    bool steep;           /* the steep street instead (build_steep_scene): thin things over wet ground */
+    bool kaiju;           /* dusk, and a tall box alone in an orthographic spot map along the sun (Scene.kaiju_box) */
+    BTBHGPUSceneRadianceCascadesDebugView debug_view;
 } Options;
 
 typedef struct Scene {
@@ -404,6 +427,7 @@ typedef struct Scene {
     uint32_t unlit_box;
     uint32_t metal_boxes[2];
     uint32_t metal_box_count;
+    uint32_t kaiju_box;
 } Scene;
 
 static const float grey[4] = { 0.55f, 0.55f, 0.52f, 1.0f };
@@ -425,13 +449,35 @@ static uint32_t scene_add(Scene *scene, Box box, BTBHGPUSceneGeometryBatch batch
     return index;
 }
 
+/* The steep street (Options.steep): wet, glossy ground under a camera that looks 67 degrees down, a wall at the
+   back, and three thin things over the ground: a tall box (a kaiju's body), a slab floating 1.6 units up (a jet) and
+   a pole. With SSR, the ground under each reflects it. */
+static void build_steep_scene(const SmokeWindow *smoke, Scene *scene) {
+    static const float wet[4] = { 0.22f, 0.23f, 0.25f, 1.0f };
+    static const float rust[4] = { 0.8f, 0.4f, 0.2f, 1.0f };
+    static const float pale[4] = { 0.9f, 0.85f, 0.7f, 1.0f };
+    static const float white[4] = { 0.85f, 0.85f, 0.9f, 1.0f };
+    BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube);
+    batch.roughness = 0.06f;
+    (void)scene_add(scene, make_box(0.0f, -0.25f, 0.0f, 16.0f, 0.5f, 16.0f, wet), batch);
+    batch = cube_batch(smoke->cube);
+    batch.roughness = 0.7f;
+    (void)scene_add(scene, make_box(0.0f, 1.5f, -4.6f, 9.0f, 3.0f, 1.0f, slate), batch);
+    batch = cube_batch(smoke->cube);
+    batch.roughness = 0.5f;
+    (void)scene_add(scene, make_box(-1.7f, 1.4f, -1.0f, 0.9f, 2.8f, 0.7f, rust), batch);
+    (void)scene_add(scene, make_box(1.3f, 1.6f, -0.3f, 1.4f, 0.18f, 0.7f, pale), batch);
+    (void)scene_add(scene, make_box(0.1f, 1.25f, 0.9f, 0.15f, 2.5f, 0.15f, white), batch);
+}
+
 static void build_scene(const SmokeWindow *smoke, const Options *options, Scene *scene) {
     memset(scene, 0, sizeof(*scene));
     scene->name = options->name;
     scene->glow_box = scene->source_box = scene->far_glow_box = scene->far_source_box = scene->unlit_box =
-        MAX_BOXES;
-    const float eye[3] = { 0.0f, 5.5f, 6.5f };
-    const float centre[3] = { 0.0f, 0.2f, -0.5f };
+        scene->kaiju_box = MAX_BOXES;
+    /* The steep street: the camera looks 67 degrees down. */
+    const float eye[3] = { 0.0f, options->steep ? 9.0f : 5.5f, options->steep ? 3.2f : 6.5f };
+    const float centre[3] = { 0.0f, options->steep ? 0.0f : 0.2f, options->steep ? -0.6f : -0.5f };
     scene->camera = look_at(eye, centre, 0.85f, 1.0f);
 
     BTBHGPUSceneLighting *lighting = &scene->lighting;
@@ -487,6 +533,19 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         lighting->spot_shadow_near = 0.1f;
     }
 
+    if (options->neon) {
+        /* Night, and v2's neon signs: point lights of reach 2.6 and energy 2.1, 0.15 over the ground at the
+           building's foot (in the corner it makes with the ground, and in the one between it and the metal box). */
+        lighting->ambient_energy = 0.12f;
+        lighting->directional_energy = 0.15f;
+        static const float neon[2][8] = {
+            { -2.2f, 0.15f, -0.75f, 2.6f, 1.0f, 0.35f, 0.85f, 2.1f },
+            { -1.3f, 0.15f, -1.1f, 2.6f, 0.3f, 0.9f, 1.0f, 2.1f },
+        };
+        lighting->point_light_count = 2u;
+        memcpy(lighting->point_lights, neon, sizeof(neon));
+    }
+
     BTBHGPUScenePost *post = &scene->post;
     /* Reinhard with a white point of 1: the target holds sRGB(linear colour), dithered. */
     post->tonemap_white = 1.0f;
@@ -519,6 +578,13 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         post->ssr_max_distance = 8.0f;
         post->ssr_thickness = 0.5f;
     }
+    if (options->reflections && options->steep) {
+        /* Be The Bullet Hell v2's reflections in the rain. */
+        post->ssr_intensity = 6.0f;
+        post->ssr_max_roughness = 0.35f;
+        post->ssr_max_distance = 12.0f;
+        post->ssr_thickness = 0.6f;
+    }
     if (options->cascades != CASCADES_OFF) {
         post->radiance_cascades.tier = BTBH_GPU_SCENE_RC_LOW;
         post->radiance_cascades.auto_frame_budget_milliseconds = 16.0f;
@@ -526,6 +592,11 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         post->radiance_cascades.hero_omni_emitter_index = -1;
         post->radiance_cascades.invalidate = 1u;
         post->radiance_cascades.additive = options->cascades == CASCADES_ADDITIVE ? 1u : 0u;
+        post->radiance_cascades.debug_view = options->debug_view;
+    }
+    if (options->steep) {
+        build_steep_scene(smoke, scene);
+        return;
     }
 
     /* The ground: a glossy dielectric. */
@@ -578,6 +649,91 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         batch = cube_batch(smoke->cube);
         batch.unlit_enabled = 1u;
         scene->source_box = scene_add(scene, make_box(0.3f, 0.25f, 2.0f, 0.5f, 0.5f, 0.5f, hot), batch);
+    }
+    if (options->overlay) {
+        /* An additive wash over the street, as v2's night overlays (street wash, lamp pools): a thin box drawn in the
+           transparent pass. */
+        batch = cube_batch(smoke->cube);
+        batch.unlit_enabled = 1u;
+        batch.transparency_enabled = 1u;
+        batch.blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+        batch.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        batch.albedo_alpha = 160u;
+        batch.spot_shadow_visible = 0u;
+        batch.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+#if defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE)
+        /* (No source of the cascades' light: it only draws over the frame.) */
+        batch.flags |= BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+#endif
+        (void)scene_add(scene, make_box(0.6f, 0.02f, 0.6f, 3.0f, 0.02f, 2.5f, hot), batch);
+        /* And a refracting box (the refraction pass). */
+        batch = cube_batch(smoke->cube);
+        batch.surface_variant = BTBH_GPU_SCENE_SURFACE_REFRACT;
+        batch.transparency_enabled = 1u;
+        batch.surface_parameters0[0] = 0.05f;
+        batch.spot_shadow_visible = 0u;
+        (void)scene_add(scene, make_box(1.2f, 0.5f, 1.4f, 0.8f, 0.8f, 0.8f, glass), batch);
+    }
+    if (options->kaiju) {
+        /* Dusk: a low warm sun, a cool fill and sky. Be The Bullet Hell v2's kaiju shadow: only the kaiju (a tall box)
+           in the spot map, an orthographic one fitted along the sun round it (near plane 1 unit from the eye, 8 units
+           sunward of the box's middle; far plane 30), its occluder darkening at full strength; no spot light. The
+           box casts into the sun's map too, unless a check flags it. */
+        lighting->ambient_red = 0.55f;
+        lighting->ambient_green = 0.65f;
+        lighting->ambient_blue = 1.0f;
+        lighting->ambient_energy = 0.35f;
+        lighting->directional_red = 1.0f;
+        lighting->directional_green = 0.62f;
+        lighting->directional_blue = 0.35f;
+        lighting->directional_energy = 1.3f;
+        lighting->secondary_directional_x = 0.4f;
+        lighting->secondary_directional_y = -1.0f;
+        lighting->secondary_directional_z = -0.3f;
+        lighting->secondary_directional_red = 0.5f;
+        lighting->secondary_directional_green = 0.6f;
+        lighting->secondary_directional_blue = 1.0f;
+        lighting->secondary_directional_energy = 0.4f;
+        for (uint32_t index = 0u; index < scene->count; ++index) {
+            scene->batches[index].spot_shadow_visible = 0u;
+        }
+        batch = cube_batch(smoke->cube);
+        batch.roughness = 0.6f;
+        static const float body[4] = { 0.45f, 0.5f, 0.42f, 1.0f };
+        const float centre_point[3] = { 1.0f, 1.1f, 1.3f };
+        scene->kaiju_box = scene_add(scene, make_box(centre_point[0], centre_point[1], centre_point[2], 0.8f, 2.2f,
+            0.8f, body), batch);
+        float to_sun[3] = { 4.0f, 10.0f, 3.0f };
+        normalize3(to_sun);
+        const float eye_point[3] = {
+            centre_point[0] + to_sun[0] * 8.0f, centre_point[1] + to_sun[1] * 8.0f, centre_point[2] + to_sun[2] * 8.0f,
+        };
+        float view[16];
+        float side[3];
+        float up[3];
+        look_at_matrix(eye_point, centre_point, view, side, up);
+        const float rcp = 1.0f / 2.0f;
+        const float range = 1.0f / (1.0f - 30.0f);
+        const float orthographic[16] = {
+            rcp, 0.0f, 0.0f, 0.0f,
+            0.0f, rcp, 0.0f, 0.0f,
+            0.0f, 0.0f, range, 0.0f,
+            0.0f, 0.0f, range * 1.0f, 1.0f,
+        };
+        multiply(orthographic, view, lighting->spot_shadow_view_projection);
+        lighting->spot_position_x = eye_point[0];
+        lighting->spot_position_y = eye_point[1];
+        lighting->spot_position_z = eye_point[2];
+        lighting->spot_direction_x = -to_sun[0];
+        lighting->spot_direction_y = -to_sun[1];
+        lighting->spot_direction_z = -to_sun[2];
+        lighting->spot_range = 8.0f;
+        lighting->spot_energy = 0.0f;
+        lighting->spot_shadow_enabled = 1u;
+        lighting->spot_shadow_is_omni = 0u;
+        lighting->spot_shadow_softness = 1.0f;
+        lighting->spot_occluder_shadow_strength = 1.0f;
+        lighting->spot_occluder_shadow_reach = 10000.0f;
     }
     if (options->far_glow) {
         /* Outside the view (the camera looks 37 degrees down; these lie 55 degrees off its axis), within three
@@ -670,6 +826,27 @@ static const Options gallery[] = {
       .unlit_box = true },
     { .name = "sources-additive", .shadows = SHADOWS_OMNI, .cascades = CASCADES_ADDITIVE, .glow = true,
       .far_glow = true, .unlit_box = true },
+    /* Since 0.10.0's fixes: what they touch, unset. */
+    { .name = "neon-hbao", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO, .gold = true, .unlit_box = true,
+      .neon = true, .overlay = true },
+    { .name = "neon-hbao-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO, .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    { .name = "neon-hbao-additive-omni", .shadows = SHADOWS_OMNI, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO, .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    { .name = "neon-hbao-rc", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON, .occlusion = OCCLUSION_HBAO,
+      .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    { .name = "overlay-rc", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON, .glow = true, .overlay = true },
+    { .name = "overlay-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE, .occlusion = OCCLUSION_HBAO,
+      .glow = true, .overlay = true },
+    { .name = "steep-ssr-rc", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON, .reflections = true, .steep = true },
+    { .name = "steep-ssr-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE, .reflections = true,
+      .steep = true },
+    { .name = "steep-ssr-hbao", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO, .reflections = true,
+      .steep = true },
+    { .name = "kaiju-spot", .shadows = SHADOWS_SUN, .kaiju = true },
+    { .name = "kaiju-spot-rc", .shadows = SHADOWS_SUN, .cascades = CASCADES_ON, .kaiju = true },
+    { .name = "kaiju-spot-hbao-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO, .kaiju = true },
 };
 #define GALLERY_COUNT (sizeof(gallery) / sizeof(gallery[0]))
 
@@ -769,6 +946,14 @@ static void expect_same(const char *what, const uint8_t *a, const uint8_t *b) {
     printf("%s: %u pixels differ\n", what, differing);
     if (differing != 0u) {
         fprintf(stderr, "%s: %u pixels differ (largest %d)\n", what, differing, largest);
+        for (uint32_t index = 0u, shown = 0u; index < TEXELS && shown < 8u; ++index) {
+            if (memcmp(&a[index * 4u], &b[index * 4u], 4u) != 0) {
+                fprintf(stderr, "  at %u,%u: %d %d %d against %d %d %d\n", index % TARGET_SIZE, index / TARGET_SIZE,
+                    a[index * 4u], a[index * 4u + 1u], a[index * 4u + 2u], b[index * 4u], b[index * 4u + 1u],
+                    b[index * 4u + 2u]);
+                shown += 1u;
+            }
+        }
     }
     assert(differing == 0u);
 }
@@ -1127,6 +1312,352 @@ static void check_ssr_reflectivity(SmokeWindow *smoke) {
     }
 }
 
+#if defined(SMOKE_HAS_0100)
+/* The radiance cascades' debug views (0.10.0): the transparent and refracting batches no longer draw over them. In
+   the frame itself they still show. */
+static void check_rc_debug_views(SmokeWindow *smoke) {
+    static const BTBHGPUSceneRadianceCascadesDebugView views[] = {
+        BTBH_GPU_SCENE_RC_DEBUG_CASCADE_0, BTBH_GPU_SCENE_RC_DEBUG_HIT_DISTANCE, BTBH_GPU_SCENE_RC_DEBUG_CONFIDENCE,
+        BTBH_GPU_SCENE_RC_DEBUG_FINAL_INDIRECT, BTBH_GPU_SCENE_RC_DEBUG_DIRECTIONAL_SOURCE,
+        BTBH_GPU_SCENE_RC_DEBUG_DIRECT_LIGHT,
+    };
+    const Cascades kinds[2] = { CASCADES_ON, CASCADES_ADDITIVE };
+    for (uint32_t kind = 0u; kind < 2u; ++kind) {
+        const char *label = kinds[kind] == CASCADES_ON ? "cascades" : "additive cascades";
+        Options options = { .name = "debug-view", .shadows = SHADOWS_SUN, .cascades = kinds[kind],
+            .occlusion = OCCLUSION_HBAO, .glow = true };
+        uint8_t *plain = render_with(smoke, options, kinds[kind], 0u, false);
+        options.overlay = true;
+        uint8_t *overlaid = render_with(smoke, options, kinds[kind], 0u, false);
+        char what[200];
+        (void)snprintf(what, sizeof(what), "debug views, %s: the frame with the overlays against without", label);
+        (void)expect_different(what, plain, overlaid);
+        free(plain);
+        free(overlaid);
+        for (uint32_t index = 0u; index < sizeof(views) / sizeof(views[0]); ++index) {
+            options.debug_view = views[index];
+            options.overlay = false;
+            plain = render_with(smoke, options, kinds[kind], 0u, false);
+            options.overlay = true;
+            overlaid = render_with(smoke, options, kinds[kind], 0u, false);
+            (void)snprintf(what, sizeof(what), "debug view %d, %s: with the overlays against without",
+                (int)views[index], label);
+            expect_same(what, plain, overlaid);
+            if (views[index] == BTBH_GPU_SCENE_RC_DEBUG_FINAL_INDIRECT && kinds[kind] == CASCADES_ADDITIVE) {
+                dump_image("debug-final-indirect-overlaid", overlaid);
+            }
+            free(plain);
+            free(overlaid);
+        }
+    }
+}
+
+/* KEEP_HBAO at night under strong point lights by the building, with an additive overlay and a refracting box in the
+   transparent pass (0.10.0; Be The Bullet Hell v2's neon signs over its night overlays). Under the cascades a
+   transparent unlit batch drew with their scene shader, which brightens unlit surfaces by the point lights; without
+   them, and now with the flag, the fast unlit shader draws it, which takes none. Without the flag the cascades keep
+   the scene shader (the overlay brighter, printed). Under the omni shadow, a pixel or two of the ground differs by a
+   level: the two scene shader variants (production_model.frag, production_model_rc.frag) round that light
+   differently, with or without the point lights (as in 0.9.0). */
+static void check_keep_hbao_point_lights(SmokeWindow *smoke) {
+    const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    static const char *const shadow_names[3] = { "no shadow", "the sun's shadow", "the omni shadow" };
+    for (uint32_t shadows = 0u; shadows < 3u; ++shadows) {
+        const Options options = { .name = "keep-hbao-neon", .shadows = (Shadows)shadows,
+            .occlusion = OCCLUSION_HBAO, .gold = true, .unlit_box = true, .neon = true, .overlay = true };
+        uint8_t *off = render_with(smoke, options, CASCADES_OFF, 0u, true);
+        uint8_t *additive = render_with(smoke, options, CASCADES_ADDITIVE, 0u, true);
+        uint8_t *kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, true);
+        char what[200];
+        (void)snprintf(what, sizeof(what),
+            "KEEP_HBAO, %s, nothing glowing, point lights by the overlays: additive cascades with it against none",
+            shadow_names[shadows]);
+        if (shadows == (uint32_t)SHADOWS_OMNI) {
+            int largest = 0;
+            const uint32_t differing = differing_pixels(off, kept, &largest);
+            printf("%s: %u pixels differ (largest %d levels)\n", what, differing, largest);
+            assert(differing <= 4u && largest <= 1);
+        } else {
+            expect_same(what, off, kept);
+        }
+        (void)snprintf(what, sizeof(what),
+            "KEEP_HBAO, %s, nothing glowing, point lights by the overlays: additive cascades without it against none",
+            shadow_names[shadows]);
+        (void)expect_different(what, off, additive);
+        if (shadows == 1u) {
+            dump_image("keep-hbao-neon-off", off);
+            dump_image("keep-hbao-neon-additive", additive);
+            dump_image("keep-hbao-neon-kept", kept);
+        }
+        free(off);
+        free(additive);
+        free(kept);
+    }
+}
+
+/* Pixels below a box on the screen (its rectangle's columns, from its bottom row to the image's) where a and b differ. */
+static uint32_t differing_below(const Scene *scene, uint32_t box_index, const uint8_t *a, const uint8_t *b) {
+    int rectangle[4];
+    box_rectangle(scene, box_index, rectangle);
+    uint32_t count = 0u;
+    for (int y = rectangle[3] + 1; y < (int)TARGET_SIZE; ++y) {
+        for (int x = rectangle[0] < 0 ? 0 : rectangle[0]; x <= rectangle[2] && x < (int)TARGET_SIZE; ++x) {
+            const uint32_t index = ((uint32_t)y * TARGET_SIZE + (uint32_t)x) * 4u;
+            count += memcmp(&a[index], &b[index], 4u) != 0 ? 1u : 0u;
+        }
+    }
+    return count;
+}
+
+/* SSR_FACING_HITS (0.10.0). The steep street: the floating slab's column (the ground under it reflected its top,
+   where the rays passed beneath it) goes; the tall box, which stands on the ground, keeps its reflection. Then the
+   street by day (printed). */
+static void check_ssr_facing_hits(SmokeWindow *smoke) {
+    const uint8_t reflectivity = BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY;
+    const uint8_t facing = BTBH_GPU_SCENE_POST_SSR_FACING_HITS;
+    struct { const char *what; const char *name; Cascades cascades; uint8_t flags; } cases[3] = {
+        { "no cascades, SSR_SURFACE_REFLECTIVITY", "steep-ssr", CASCADES_OFF, reflectivity },
+        { "additive cascades", "steep-ssr-additive", CASCADES_ADDITIVE, 0u },
+        { "cascades", "steep-ssr-rc", CASCADES_ON, 0u },
+    };
+    for (uint32_t index = 0u; index < 3u; ++index) {
+        Options options = { .name = cases[index].name, .shadows = SHADOWS_SUN, .steep = true };
+        uint8_t *none = render_with(smoke, options, cases[index].cascades, cases[index].flags, false);
+        uint8_t *none_set = render_with(smoke, options, cases[index].cascades,
+            (uint8_t)(cases[index].flags | facing), false);
+        options.reflections = true;
+        uint8_t *unset = render_with(smoke, options, cases[index].cascades, cases[index].flags, false);
+        uint8_t *set = render_with(smoke, options, cases[index].cascades, (uint8_t)(cases[index].flags | facing),
+            false);
+        char what[200];
+        (void)snprintf(what, sizeof(what), "SSR_FACING_HITS, %s, without the reflections: set against unset",
+            cases[index].what);
+        expect_same(what, none, none_set);
+        (void)snprintf(what, sizeof(what), "SSR_FACING_HITS, %s: the reflections unset against none",
+            cases[index].what);
+        (void)expect_different(what, none, unset);
+        (void)snprintf(what, sizeof(what), "SSR_FACING_HITS, %s: set against unset", cases[index].what);
+        (void)expect_different(what, unset, set);
+        print_darkening("  set against unset", unset, set);
+        static Scene scene;
+        build_scene(smoke, &options, &scene);
+        /* The steep street's boxes: 2 the tall box, 3 the floating slab. */
+        const uint32_t slab_unset = differing_below(&scene, 3u, none, unset);
+        const uint32_t slab_set = differing_below(&scene, 3u, none, set);
+        const uint32_t tall_unset = differing_below(&scene, 2u, none, unset);
+        const uint32_t tall_set = differing_below(&scene, 2u, none, set);
+        printf("  reflected below the floating slab: %u pixels unset, %u set; below the tall box: %u, %u\n", slab_unset,
+            slab_set, tall_unset, tall_set);
+        assert(slab_set * 3u < slab_unset);
+        assert(tall_set * 10u >= tall_unset * 9u);
+        char name[64];
+        (void)snprintf(name, sizeof(name), "%s-none", cases[index].name);
+        dump_image(name, none);
+        (void)snprintf(name, sizeof(name), "%s-unset", cases[index].name);
+        dump_image(name, unset);
+        (void)snprintf(name, sizeof(name), "%s-facing", cases[index].name);
+        dump_image(name, set);
+        free(none);
+        free(none_set);
+        free(unset);
+        free(set);
+    }
+    /* The street (the building, the glass pane, the metal boxes) by day, without the cascades: printed. */
+    {
+        const Options options = { .name = "ssr-facing-street", .shadows = SHADOWS_SUN, .reflections = true,
+            .gold = true };
+        uint8_t *none = render_with(smoke, options, CASCADES_OFF, 0u, false);
+        uint8_t *unset = render_with(smoke, options, CASCADES_OFF, reflectivity, false);
+        uint8_t *set = render_with(smoke, options, CASCADES_OFF, (uint8_t)(reflectivity | facing), false);
+        int largest = 0;
+        const uint32_t reflected = differing_pixels(none, unset, &largest);
+        const uint32_t changed = differing_pixels(unset, set, &largest);
+        printf("SSR_FACING_HITS, the street by day: %u pixels reflect; set against unset: %u differ (largest %d levels)\n",
+            reflected, changed, largest);
+        dump_image("ssr-facing-street-unset", unset);
+        dump_image("ssr-facing-street-set", set);
+        free(none);
+        free(unset);
+        free(set);
+    }
+}
+
+/* Pixels where b lies outside [min(lo, hi), max(lo, hi)] by more than `slack` levels in a channel, among those where
+   `mask_a` and `mask_b` differ. */
+static uint32_t outside_between(const uint8_t *mask_a, const uint8_t *mask_b, const uint8_t *lo, const uint8_t *hi,
+    const uint8_t *b, int slack, uint32_t *masked) {
+    uint32_t outside = 0u;
+    *masked = 0u;
+    for (uint32_t index = 0u; index < TEXELS; ++index) {
+        if (memcmp(&mask_a[index * 4u], &mask_b[index * 4u], 3u) == 0) {
+            continue;
+        }
+        *masked += 1u;
+        for (uint32_t channel = 0u; channel < 3u; ++channel) {
+            const int l = lo[index * 4u + channel];
+            const int h = hi[index * 4u + channel];
+            const int v = b[index * 4u + channel];
+            if (v < (l < h ? l : h) - slack || v > (l > h ? l : h) + slack) {
+                outside += 1u;
+                break;
+            }
+        }
+    }
+    return outside;
+}
+
+/* The spot occluder's flags and RECEIVES_NO_SPOT_SHADOW (0.10.0; Be The Bullet Hell v2's kaiju shadow). */
+static void check_spot_occluder(SmokeWindow *smoke) {
+    static Scene scene;
+    const Options options = { .name = "kaiju", .shadows = SHADOWS_SUN, .kaiju = true };
+    const uint8_t sun_only = BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY;
+    const uint8_t orthographic = BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC;
+    /* The box out of the sun's map: its map is its sun shadow. */
+    build_scene(smoke, &options, &scene);
+    scene.batches[scene.kaiju_box].flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+    uint8_t *classic = render(smoke, &scene);
+    scene.lighting.spot_occluder_flags = sun_only;
+    uint8_t *sun = render(smoke, &scene);
+    scene.lighting.spot_occluder_flags = 0u;
+    scene.lighting.spot_occluder_shadow_strength = 0.0f;
+    uint8_t *lit = render(smoke, &scene);
+    scene.lighting.spot_occluder_flags = sun_only;
+    uint8_t *lit_flagged = render(smoke, &scene);
+    scene.lighting.spot_occluder_flags = 0u;
+    scene.lighting.directional_energy = 0.0f;
+    uint8_t *sunless = render(smoke, &scene);
+    scene.lighting.spot_occluder_shadow_strength = 1.0f;
+    scene.lighting.spot_occluder_flags = sun_only;
+    uint8_t *sunless_sun_only = render(smoke, &scene);
+    scene.lighting.spot_occluder_flags = 0u;
+    uint8_t *sunless_classic = render(smoke, &scene);
+    (void)expect_different("spot occluder: its darkening (the classic one) against none", lit, classic);
+    expect_same("SPOT_OCCLUDER_SUN_ONLY with no darkening: set against unset", lit, lit_flagged);
+    expect_same("SPOT_OCCLUDER_SUN_ONLY without a sun: the darkening takes nothing", sunless, sunless_sun_only);
+    (void)expect_different("spot occluder without a sun: the classic darkening still takes the fill and the sky",
+        sunless, sunless_classic);
+    /* In the shadow, the sun-only darkening lies between the frame without the sun (the umbra) and the one without
+       the darkening; the classic one is darker. */
+    uint32_t masked = 0u;
+    const uint32_t outside = outside_between(lit, classic, sunless, lit, sun, 1, &masked);
+    print_darkening("SPOT_OCCLUDER_SUN_ONLY: the shadow, set against unset", classic, sun);
+    printf("SPOT_OCCLUDER_SUN_ONLY: %u pixels in the shadow, %u outside [no sun, no darkening] by more than a level\n",
+        masked, outside);
+    assert(masked > 200u && outside == 0u);
+    double classic_sum = 0.0;
+    double sun_sum = 0.0;
+    for (uint32_t index = 0u; index < TEXELS * 4u; ++index) {
+        classic_sum += classic[index];
+        sun_sum += sun[index];
+    }
+    assert(sun_sum > classic_sum);
+    dump_image("kaiju-classic", classic);
+    dump_image("kaiju-sun-only", sun);
+    dump_image("kaiju-no-darkening", lit);
+    dump_image("kaiju-sunless", sunless);
+    /* Under cascades that aren't additive their light is darkened as before (the sun-only darkening still lightens the
+       shadow: the scene's own fill and sky stay). */
+    {
+        Options rc = options;
+        rc.cascades = CASCADES_ON;
+        build_scene(smoke, &rc, &scene);
+        scene.batches[scene.kaiju_box].flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+        uint8_t *rc_classic = render(smoke, &scene);
+        scene.lighting.spot_occluder_flags = sun_only;
+        uint8_t *rc_sun = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_strength = 0.0f;
+        uint8_t *rc_lit = render(smoke, &scene);
+        (void)expect_different("SPOT_OCCLUDER_SUN_ONLY under the cascades: set against unset", rc_classic, rc_sun);
+        (void)expect_different("SPOT_OCCLUDER_SUN_ONLY under the cascades: set against no darkening", rc_lit, rc_sun);
+        print_darkening("  set against unset", rc_classic, rc_sun);
+        print_darkening("  no darkening against set", rc_sun, rc_lit);
+        free(rc_classic);
+        free(rc_sun);
+        free(rc_lit);
+    }
+    /* RECEIVES_NO_SPOT_SHADOW on the box: only its own pixels change (its own map no longer darkens it), lighter. */
+    {
+        build_scene(smoke, &options, &scene);
+        uint8_t *own = render(smoke, &scene);
+        scene.batches[scene.kaiju_box].flags = BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW;
+        uint8_t *spared = render(smoke, &scene);
+        int rectangle[4];
+        box_rectangle(&scene, scene.kaiju_box, rectangle);
+        uint32_t differing = 0u;
+        uint32_t outside_box = 0u;
+        uint32_t darker = 0u;
+        for (uint32_t y = 0u; y < TARGET_SIZE; ++y) {
+            for (uint32_t x = 0u; x < TARGET_SIZE; ++x) {
+                const uint32_t index = (y * TARGET_SIZE + x) * 4u;
+                if (memcmp(&own[index], &spared[index], 4u) == 0) {
+                    continue;
+                }
+                differing += 1u;
+                outside_box += (int)x < rectangle[0] || (int)x > rectangle[2] || (int)y < rectangle[1] ||
+                    (int)y > rectangle[3] ? 1u : 0u;
+                darker += spared[index] + spared[index + 1u] + spared[index + 2u] <
+                    own[index] + own[index + 1u] + own[index + 2u] ? 1u : 0u;
+            }
+        }
+        printf("RECEIVES_NO_SPOT_SHADOW on the box: %u pixels differ, %u outside its rectangle, %u darker\n",
+            differing, outside_box, darker);
+        assert(differing > 20u && outside_box == 0u && darker == 0u);
+        dump_image("kaiju-own-shadow", own);
+        dump_image("kaiju-receives-none", spared);
+        free(own);
+        free(spared);
+    }
+    /* SPOT_OCCLUDER_ORTHOGRAPHIC: the reach in world units from the map's near plane. The box's sunward face lies
+       about 6.3 units from it (its far side 7.8). */
+    {
+        build_scene(smoke, &options, &scene);
+        scene.lighting.spot_occluder_flags = orthographic;
+        uint8_t *far_reach = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_reach = 80.0f;
+        uint8_t *reach_30 = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_reach = 5.0f;
+        uint8_t *reach_5 = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_reach = 12.0f;
+        uint8_t *reach_12 = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_strength = 0.0f;
+        uint8_t *none = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_strength = 1.0f;
+        scene.lighting.spot_occluder_flags = 0u;
+        scene.lighting.spot_occluder_shadow_reach = 5.0f;
+        uint8_t *perspective_5 = render(smoke, &scene);
+        scene.lighting.spot_occluder_shadow_reach = 10000.0f;
+        uint8_t *perspective_far = render(smoke, &scene);
+        expect_same("SPOT_OCCLUDER_ORTHOGRAPHIC: reach 80 (2.5 times the map's 29 units of depth) against 10,000",
+            far_reach, reach_30);
+        expect_same("SPOT_OCCLUDER_ORTHOGRAPHIC: reach 5 (short of the box) against no darkening", none, reach_5);
+        (void)expect_different("SPOT_OCCLUDER_ORTHOGRAPHIC: reach 12 (easing over the box) against 80", reach_30,
+            reach_12);
+        (void)expect_different("SPOT_OCCLUDER_ORTHOGRAPHIC: reach 12 against no darkening", none, reach_12);
+        /* Unset, the matrix's depth is read as perspective (the box some 0.07 units from the light): reach 5 eases
+           nothing but the map's empty edges. */
+        assert(expect_different("unset, an orthographic matrix read as perspective: reach 5 against no darkening",
+            none, perspective_5) > 1000u);
+        int largest = 0;
+        printf("  reach 5 against 10,000: %u pixels differ\n", differing_pixels(perspective_5, perspective_far,
+            &largest));
+        free(far_reach);
+        free(reach_30);
+        free(reach_5);
+        free(reach_12);
+        free(none);
+        free(perspective_5);
+        free(perspective_far);
+    }
+    free(classic);
+    free(sun);
+    free(lit);
+    free(lit_flagged);
+    free(sunless);
+    free(sunless_sun_only);
+    free(sunless_classic);
+}
+#endif
+
 static void check_refusals(SmokeWindow *smoke) {
     static Scene scene;
     const Options options = { .name = "refusal", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO,
@@ -1135,8 +1666,19 @@ static void check_refusals(SmokeWindow *smoke) {
     build_scene(smoke, &options, &scene);
     scene.batches[1].flags = (uint8_t)(1u << 3);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+    scene.batches[1].flags = (uint8_t)(1u << 6);
+    assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+#if defined(SMOKE_HAS_0100)
     build_scene(smoke, &options, &scene);
-    scene.post.flags = (uint8_t)(1u << 2);
+    scene.lighting.spot_occluder_flags = (uint8_t)(1u << 2);
+    assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+    scene.lighting.spot_occluder_flags =
+        (uint8_t)(BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY | BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC);
+    scene.batches[1].flags = BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW;
+    free(render_scene(smoke, &scene, BTBH_GPU_OK, &report));
+#endif
+    build_scene(smoke, &options, &scene);
+    scene.post.flags = (uint8_t)(1u << 3);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
     scene.post.flags = 0x80u;
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
@@ -1153,7 +1695,7 @@ static void check_refusals(SmokeWindow *smoke) {
         BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY);
     uint8_t *image = render_scene(smoke, &scene, BTBH_GPU_OK, &report);
     free(image);
-    puts("refusals: an unknown batch flag, unknown post flags (present and prewarm)");
+    puts("refusals: unknown batch flags, unknown post flags (present and prewarm), unknown spot occluder flags");
 }
 
 /* ----------------------------------------------------------------------------------------------- the bench */
@@ -1295,6 +1837,28 @@ static void run_bench(SmokeWindow *smoke, SmokeWindow *baseline, const char (*ba
         }
         bench_configs("the HBAO under additive cascades", configs, 3u + extra, rounds);
     }
+#if defined(SMOKE_HAS_0100)
+    if (strcmp(mode, "1") == 0 || strcmp(mode, "facing") == 0) {
+        /* 0.10.0's SSR_FACING_HITS on the steep street (its reflections without the cascades, as v2's rain). */
+        BenchConfig configs[4];
+        memset(configs, 0, sizeof(configs));
+        const Options base = { .name = "bench-facing", .shadows = SHADOWS_SUN, .reflections = true, .steep = true };
+        configs[0] = (BenchConfig){ .name = "steep street, SSR with SSR_SURFACE_REFLECTIVITY", .options = base,
+            .post_flags = BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY };
+        configs[1] = (BenchConfig){ .name = "steep street, SSR with it and SSR_FACING_HITS", .options = base,
+            .post_flags = BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY | BTBH_GPU_SCENE_POST_SSR_FACING_HITS };
+        configs[2] = (BenchConfig){ .name = "steep street, no SSR", .options = base };
+        configs[2].options.reflections = false;
+        configs[3] = (BenchConfig){ .name = "steep street, SSR with it, baseline shaders", .options = base,
+            .post_flags = BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY };
+        for (uint32_t index = 0u; index < 4u; ++index) {
+            configs[index].smoke = index == 3u ? baseline : smoke;
+            configs[index].paths = index == 3u ? baseline_paths : (const char (*)[1024])shader_paths;
+            configs[index].target = index == 3u ? baseline_target : target;
+        }
+        bench_configs("the reflections' facing hits", configs, 3u + extra, rounds);
+    }
+#endif
     if (baseline_target != NULL) {
         btbh_gpu_texture_destroy(baseline_target);
     }
@@ -1399,6 +1963,12 @@ int main(void) {
         check_no_rc_source(&smoke);
         check_keep_hbao(&smoke);
         check_ssr_reflectivity(&smoke);
+#if defined(SMOKE_HAS_0100)
+        check_rc_debug_views(&smoke);
+        check_keep_hbao_point_lights(&smoke);
+        check_ssr_facing_hits(&smoke);
+        check_spot_occluder(&smoke);
+#endif
         check_refusals(&smoke);
 #endif
     }
