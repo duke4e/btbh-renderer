@@ -6,6 +6,202 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+0.13.0: the renderer's own backlog; nobody asked for these.
+- **`BTBH_GPU_SCENE_RUNS=verify`**, a permanent debug mode: every draw that continues a same-material run (RFC 0011)
+  checks that the run key covers what the passes read. CTest runs the smokes with runs in it.
+- **SDF terrain updates** (Be The Bullet Hell v1's budget spikes, RFC 0007): chunk meshes go through the window's
+  upload queue, and a budgeted update meshes one chunk at a time.
+- **The Vulkan exit stall** (v1): a Vulkan device starts with a 32 MiB upload staging budget.
+- **Descriptor pools after a load** (0.7.0's 25–28 ms frame): the prewarm lets SDL take its descriptor-set caches back.
+
+With nothing set every frame draws byte for byte as 0.12.0's, and no shader changed. Three things do change with
+nothing set, none of them in a frame: when an SDF terrain's meshes reach the GPU (in the next scene's copy pass, before
+it draws, instead of in the update), the memory a Vulkan device keeps for uploads (up to 32 MiB), and a prewarm after
+uploads, which now waits for the GPU once.
+
+Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
+- `check.ps1` from a cold build directory passes 40/40: 0.12.0's 32 and the eight `*_runs_verify` runs. All 76 shaders
+  build (SPIR-V and MSL), and the public headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures. One source probe now
+  counts the shadow pass's uniform pushes through `btbh_gpu_scene_run_push_vertex_uniforms` instead of
+  `SDL_PushGPUVertexUniformData`.
+- **Identity:** v0.12.0's references come from a build of the release checkout (`8a5c9e1d`), out of tree; the SDF
+  terrain smoke's frames (new in this release) from the new smoke compiled against v0.12.0's header and core. Every
+  image both builds write (the flags, font, scene target, height lift, prewarm, runs, RC tops, world detail, lit
+  particle and SDF terrain smokes): 383 images and 18,354,048 pixels a mode; 0 differ, in each of four modes:
+  - nothing set;
+  - `BTBH_SMOKE_SHARED_MESHES=1`;
+  - `BTBH_GPU_SCENE_RUNS=0`;
+  - `BTBH_GPU_SCENE_RUNS=verify`, against the references with nothing set.
+
+  Every smoke passes in each mode, the mesh queue smoke included. The runs smoke's four waterfront images exist only in
+  the new build. The craters bench's 16 frames, each rendered after the update that switched its crater (so the queued
+  meshes had to be there), are byte for byte v0.12.0's core's.
+- **Run verify over the smokes** (each window's totals, 0 mismatches in all): the runs smoke 3,646 run draws checked,
+  flags 72, world detail 771 (five windows), RC tops 422, SDF terrain 86, mesh queue 139, scene target 22, lazy
+  creation 650. The height lift, lit particle, prewarm, font and model texture share smokes draw no run. With
+  `roughness` dropped from the run key on purpose, the flags smoke logs `fragment uniform slot 0
+  (BTBHGPUSceneFragmentUniforms): material_factors (+8)` and fails.
+- **Shader artifacts:** no shader source changed; against v0.12.0's build 228 of 231 files are byte-identical, the
+  other three the FSR 3 MSL files that differ between any two builds.
+- **The header:** two macros (`BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET`, and the package-internal
+  `BTBH_GPU_SCENE_HAS_RUN_VERIFY`); no struct, enum or function signature changed.
+
+### Added
+- **`BTBH_GPU_SCENE_RUNS=verify`** (read once a present, like `=0`): runs stay on, and every draw that continues a run,
+  in the opaque, transparent, refraction, shadow (each map and face) and cascade-source passes, builds the uniforms,
+  samplers, storage buffers, pipeline and stencil reference it would push and bind without the run and compares them
+  with what the pass holds: each uniform block byte for byte at the size it would be pushed with. A checking draw
+  pushes and binds nothing, so the frame is the frame with runs on.
+  - A difference is logged with `SDL_Log` (the first 64 a window finds), as a line starting
+    `BTBH_GPU_SCENE_RUNS=verify: mismatch` that names the pass, the batch, the uniform slot and the first field the
+    difference touches, for example `fragment uniform slot 0 (BTBHGPUSceneFragmentUniforms): material_factors (+8)`.
+    A window destroyed after it checked logs its totals.
+  - Package-internal: the scene telemetry's `run_verify_draw_count` and `run_verify_mismatch_count` (a present's),
+    and `btbh_gpu_window_scene_read_run_verify` (a window's life, renders into a target included, whose telemetry
+    the window doesn't keep), with `BTBH_GPU_SCENE_HAS_RUN_VERIFY`.
+  - Off, a push or bind costs one test more (the wrappers are forced inline): nothing measurable (Measured).
+  - It started as the 0.10.1 investigation's temporary patch (the main pass only); the shadow and cascade-source passes
+    and 0.11.0's and 0.12.0's state (the lift's sampler and block, the lit particles' samplers and block, the light
+    factor and UV rect bits, flags2) are new.
+- **CTest's `*_runs_verify`:** the eight smokes whose scenes have runs (runs, flags, world detail, RC tops, SDF
+  terrain, mesh queue, scene target, lazy creation) run again with `BTBH_GPU_SCENE_RUNS=verify`; the core's mismatch
+  log fails them (`FAIL_REGULAR_EXPRESSION`), and the runs and flags smokes also read the window's counts at their end
+  and fail on a mismatch or on nothing checked (`Tests/btbh_gpu_smoke_runs_verify.h`). `check.ps1` and `check.sh` run
+  them with the other tests. (The height lift, lit particle and prewarm smokes draw no run.)
+- **The runs smoke's waterfront** (the 0.10.1 probe made coverage): v2's rainy quay (wet ground and paving, bollards,
+  `SURFACE_WATER` tiles, kit pieces before and after them, a model whole and slot by slot, a kaiju's orthographic spot
+  shadow with its occluder darkening, SSR with `SURFACE_REFLECTIVITY`, contact HBAO) with runs of each batch kind added
+  since 0.10.0: lifted pieces on a heightfield, `INSTANCE_LIGHT_FACTOR` boxes (each instance its own light),
+  `INSTANCE_UV_RECT` pieces (each its own atlas cell), lit particles, and beams with `FLAGS2_KEEP_CASCADES_LOOK` and
+  without under additive cascades with `KEEP_HBAO`. Two frames of two mixes, own and shared buffers, runs on and off:
+  the same bytes; presented, 74 geometry, 93 shadow and (with the cascades) 4 cascade-source draws continue a run.
+- **The SDF terrain smoke:** `BTBH_SDF_TERRAIN_DUMP=<dir>` writes the frames that don't depend on the update budget's
+  timing; `BTBH_SMOKE_BENCH=craters` times v1's craters (Measured), splitting each update with the package-internal
+  `btbh_gpu_sdf_terrain_update_times` (the bricks, the meshing, the switch, the GPU vertices, the meshes' uploads and
+  the mask's).
+- **The stage bench** times the exit step by step (`BTBH_STAGE_BENCH_EXIT_EXTRA`, `BTBH_STAGE_BENCH_EXIT`), and
+  `BTBH_STAGE_BENCH_STAGING_MB` sizes its staging mode's budget.
+- **`BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET`** (32 MiB) and the environment variable
+  **`BTBH_GPU_UPLOAD_STAGING_BUDGET=<bytes>`**, read when a device is made: the budget it starts with (0: none).
+
+### Changed
+- **SDF terrain: a chunk's mesh goes through the window's upload queue** (no API change). A switched chunk's custom
+  mesh was updated, or made, with two transfer buffers and a command buffer of its own (0.13–0.17 ms each on Vulkan),
+  after the update's budget had run out. Now the update copies its data into the queue (an update with
+  `BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`; a new chunk's mesh made with its buffers now and its data queued), and the
+  window's next scene, a present or a render into a target, copies it in its one copy pass before it draws. A host
+  updates the terrain before the scene that draws it, so that scene shows the new meshes with the new mask, as before
+  (the mask is still uploaded in the update). When the queue can't take a chunk (`BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES`),
+  it is uploaded at once as before. The dig mask's upload takes its transfer buffer from the staging pool when the
+  device has a budget.
+- **SDF terrain: a budgeted update without `run_jobs` meshes one chunk at a time**, checking the budget after each. A
+  batch of up to 8 chunks sized by the running average of a chunk's time overran the budget by several chunks where
+  they cost more than those before. With `run_jobs`, up to 8 still go out together. The chunks, their order and their
+  meshes are the same.
+- **A device made with `BTBH_GPU_BACKEND_VULKAN` starts with an upload staging budget of 32 MiB**
+  (`btbh_gpu_device_set_upload_staging_budget`, 0.11.0), when no other device has the pool; Metal starts with none.
+  Uploads take ranges of a few pooled transfer buffers (up to 32 MiB of host-visible memory, kept until the budget is
+  lowered or the device shuts down) instead of one buffer each. Why: SDL 3.4 on Vulkan gives every transfer buffer an
+  allocation of its own and frees a released one only in a submit that presents, or in `SDL_DestroyGPUDevice` (about
+  0.1 ms each here), so every upload since the last presented frame waited for the exit (v1's `VULKAN_DestroyDevice`
+  stall). `BTBH_GPU_UPLOAD_STAGING_BUDGET=0` or a budget of 0 restores 0.12.0's behaviour. Uploads and frames are the
+  same to the byte.
+- **The prewarm waits for the GPU once after uploads (Vulkan).** When the core submitted command buffers since the
+  device's last presented frame (a level's uploads, renders into targets), `btbh_gpu_window_scene_prewarm` (and its
+  `_render_to_target` form) ends with `SDL_WaitForGPUIdle`. SDL 3.4 hands every command buffer a descriptor-set cache
+  from a pool and takes them back only in a submit that presents, or in a wait: a load's uploads emptied the pool, and
+  the first frame after the load drew with an empty cache, making 15 descriptor pools in its draws (about 0.5 ms; in
+  one of the three loads of a run 24 ms, the driver stalling in one of them). The core counts its submissions for this (package-internal macros over
+  `SDL_SubmitGPUCommandBuffer` and `SDL_SubmitGPUCommandBufferAndAcquireFence`). With nothing submitted since the last
+  presented frame, nothing waits.
+
+### Measured
+Windows, RTX 3070 Ti, Vulkan, no debug device. Every number here was taken under the machine's perf lock, in three
+blocks (11:39:34–11:39:52, 11:55:15–11:55:49 and 12:11:00–12:11:17), with other sessions free to run around them.
+v0.12.0 is the release checkout built out of tree; a bench built against its header and core where the bench is new.
+- **`BTBH_GPU_SCENE_RUNS` unset costs nothing.** The frame bench's CPU mode, its ring with runs (`ring+sorted+arena`,
+  2,001 batches without the ring), three alternating processes a build: the frame without the ring encodes its geometry
+  in 0.219, 0.232 and 0.222 ms against v0.12.0's 0.218, 0.221 and 0.221 (process medians), and a ring batch costs the
+  same 0.09 µs. (The first build, whose wrappers weren't inlined, took 0.239–0.252 ms there.)
+- **SDF terrain updates** (the SDF terrain smoke's `BTBH_SMOKE_BENCH=craters`: v1's 0.5 m cells, 32-cell chunks and
+  smooth normals over 96 x 96 m, 12 craters of 13 m, some across chunk corners and some over earlier ones; a scene
+  rendered after every update; three alternating processes a build, then two):
+
+  | | v0.12.0 | 0.13.0 |
+  | --- | --- | --- |
+  | Updates for 12 craters, no budget | 40.5–42.2 ms (3.4–3.5 a crater) | 33.0–33.1 ms (2.75) |
+  | Of it, the chunk meshes' uploads (57: 32 made, 25 updated)¹ | 7.3–8.5 ms | 0.4 ms |
+  | Of it, the dig mask's 12 uploads¹ | 1.0–1.1 ms | 0.5–0.6 ms (from the pool) |
+  | Slowest call with a 2,000 µs budget | 3.5–4.2 ms | 2.33–2.36 ms |
+  | 90th percentile of those calls | 2.4–2.7 ms | 2.24–2.25 ms |
+  | The renders after the unbudgeted updates (24) | 2.7–3.4 ms | 2.9 ms |
+
+  ¹ v0.12.0's split comes from the branch before the fix: v0.12.0's upload path with 0.13.0's timers.
+
+  - Where an unbudgeted crater's update goes (0.13.0's timers, the branch before the fix): bricks 1.05 ms, meshing
+    1.6 ms, the switch 0.07, the GPU vertices 0.01, the meshes' uploads 0.6–0.7 and the mask 0.09. The renderer's
+    part was the uploads: a fifth of the update, all of it after the budget.
+  - The queue alone (no budget) gave 34.2–35.0 ms; the slowest budgeted call stayed at 4.06–4.13 ms until the meshing
+    went one chunk at a time. That call's split: 232 bricks in 1.71 ms, then 5 chunks meshed in one batch, 2.37 ms.
+  - v0.12.0 with a 16 MiB staging budget also got to 34.9–35.2 ms: its own-buffer meshes take pooled buffers since
+    0.11.0. The queue saves the per-chunk submission on top, and needs no budget.
+- **The exit** (the stage bench: v2's Deck-preset stage, 140 uploads a load, then its exit timed step by step):
+
+  | | v0.12.0 | 0.13.0 |
+  | --- | --- | --- |
+  | After a stage's frames, nothing pending | 51.1–53.7 ms | 50.2–53.7 ms |
+  | 500 textures, meshes and instance buffers made just before it (1,500 uploads, no frame after) | 245.9–246.2 ms | 82.1–82.9 ms |
+  | Of it, `btbh_gpu_device_shutdown` | 232.4 ms | 70.1–70.6 ms |
+  | Making those 1,500 uploads | 207–210 ms | 125–126 ms |
+
+  - With 2,000 extra (6,000 uploads), the branch before the default took 850 ms without a budget and 136 ms with
+    32 MiB.
+    The stall grows with the uploads made since the last presented frame: about 0.13 ms each.
+  - SDL instrumented (a scratch build, reverted): with the 1,500 uploads, `SDL_DestroyGPUDevice` found 2,029
+    allocations (1,418 MB) and spent 182 ms in `vkFreeMemory` (0.09 ms each), 2 ms in SDL's region bookkeeping and
+    36 ms in `vkDestroyDevice`; with a 128 MiB budget, 33 allocations, 16.5 ms and 31 ms.
+  - What doesn't help (without a budget): destroying nothing before the window (247 ms), `SDL_WaitForGPUIdle` first
+    (252 ms). A
+    canvas-only present after the destroys moves 172–183 ms into that present (the exit stays 241–252 ms).
+  - Budgets of 8, 32 and 128 MiB: 80.5, 77–79 and 68–70 ms.
+- **The first frame after a load** (the stage bench, 4 loads a process, two processes a build):
+
+  | | v0.12.0 | 0.13.0, no budget | 0.13.0 |
+  | --- | --- | --- | --- |
+  | Its scene present | 1.51–2.38 ms | 1.00–1.13 ms | 1.00–1.07 ms |
+  | Of it, the opaque pass's encode (where SDL made the descriptor pools) | 0.90–1.72 ms | 0.59–0.65 ms | 0.59–0.63 ms |
+  | Its canvas's submit (SDL freeing the load's upload buffers) | 14.0–15.9 ms | 13.5–14.9 ms | 2.0–6.0 ms |
+  | The frame | 15.8–17.8 ms | 14.5–16.1 ms | 3.1–7.1 ms |
+  | The prewarm | 0.08 ms | 0.33–0.48 ms | 0.28–0.45 ms |
+  | The load's 48 kit meshes | 5.6–7.9 ms | 5.6–7.5 ms | 1.2–1.8 ms |
+
+  - SDL instrumented: before the fix, the first frame after each load made 15 descriptor pools, 0.50–0.51 ms, and
+    once in three loads 24.4 ms (one `vkCreateDescriptorPool` took 23.9 ms): the 0.7.0 frame. With the fix, none in
+    6 loads. The first frames a device ever draws make theirs still (15 pools and 55–87 uniform buffers in each of
+    the first 3–4 frames, 0.5–0.6 ms).
+  - The lazy creation log can't show this: the pools are made inside SDL's draws, not in a call it times.
+
+### Upgrading
+- Nothing to do. A host that wants 0.12.0's uploads back sets `BTBH_GPU_UPLOAD_STAGING_BUDGET=0` or calls
+  `btbh_gpu_device_set_upload_staging_budget(device, 0)`; a host that set its own budget keeps it.
+- A host that calls the prewarm in the middle of play, right after uploads or renders into targets, now waits there for
+  the GPU to finish them.
+- No public struct changed (bindings stay as they are). The package-internal scene telemetry struct, which the Swift
+  layer reads, grew two fields at its end.
+
+### Known
+- `BTBH_GPU_SCENE_RUNS=verify` checks what goes through its helpers: the uniform blocks, samplers, storage buffers,
+  stencil reference and pipeline a batch pushes and binds for its run. The vertex and index buffers (bound per
+  geometry) and the cascade-source pass's pipeline (bound per geometry, before the run's check) aren't part of a run
+  and aren't checked.
+- The dig mask is still uploaded in the terrain's update (one submission, about 0.1 ms; half that from the staging
+  pool). A host that updates the terrain while a presented scene waits for its canvas still gets the new mask in that
+  frame with the old meshes, as in 0.12.0.
+- The first three or four frames a device ever draws still each make their descriptor pools (15, about 0.5 ms): SDL
+  makes a cache for each command buffer in flight.
+- Not run here: Metal (`check.sh` on the Mac), the Steam Deck, the Vulkan validation layers, and v1 or v2 themselves.
+
 ## [0.12.0] — 2026-11-23
 
 0.12.0: two additions to `BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`, both asked for by Be The Bullet Hell v2
