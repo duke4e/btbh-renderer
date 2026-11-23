@@ -2709,10 +2709,13 @@ static void check_refusals(SmokeWindow *smoke) {
         .reflections = true };
     BTBHGPUSceneReport report;
     build_scene(smoke, &options, &scene);
-    /* (Bit 3 is RFC 0013's UV rect since 0.11.0; bit 4 stays unknown until its phase 2. Bit 6 is the light factor
-       since 0.11.0; bit 7 stays unknown.) */
+    /* (Bit 3 is RFC 0013's UV rect since 0.11.0; bit 4 its phase 2's particle shadow since 0.14.0, which this opaque
+       batch can't take. Bit 6 is the light factor since 0.11.0; bit 7 stays unknown.) */
     scene.batches[1].flags = (uint8_t)(1u << 4);
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+#if defined(BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW)
+    assert(strstr(report.message, "flags PARTICLE_SHADOW") != NULL);
+#endif
 #if defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
     scene.batches[1].flags = (uint8_t)(1u << 7);
 #else

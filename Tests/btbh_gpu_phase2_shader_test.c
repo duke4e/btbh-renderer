@@ -38,6 +38,12 @@
 #if !defined(BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH) ||     !defined(BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH) ||     !defined(BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH)
 #error "the lit particle's reflection paths must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH
+#error "BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
@@ -298,9 +304,11 @@ int main(void)
             BTBH_PRODUCTION_ANIMATED_SHADOW_VERTEX_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD5\", \"type\": \"float4\", \"location\": 3"
         ) ||
+        /* RFC 0013 phase 2 (0.14.0): the shadowed variants' last sampler is the particle transmittance map (the full
+           variant's 16th, SDL's last). */
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 15"
+            "\"samplers\": 16"
         ) ||
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
@@ -308,7 +316,7 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 14"
+            "\"samplers\": 15"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
@@ -320,11 +328,11 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 15"
+            "\"samplers\": 16"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 14"
+            "\"samplers\": 15"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
@@ -537,14 +545,15 @@ int main(void)
         ) ||
         /* RFC 0013: the lit particle's three variants: the albedo, the normal, the scene's distance (sampled, so no
            storage texture), the emission and the cascades' atlas, then 4, 3 or no shadow maps; the material and the
-           frame's block; the static vertex shader's outputs it reads, and the colour and the reactive mask. */
+           frame's block; the static vertex shader's outputs it reads, and the colour and the reactive mask. Phase 2
+           (0.14.0): the shadowed variants' last is the particle transmittance map. */
         !require_text(
             BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 9, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
+            "\"samplers\": 10, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
         ) ||
         !require_text(
             BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"samplers\": 8, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
+            "\"samplers\": 9, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
         ) ||
         !require_text(
             BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
@@ -561,6 +570,33 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
             "\"name\": \"out.var.SV_Target1\", \"type\": \"float4\", \"location\": 1"
+        ) ||
+        /* RFC 0013 phase 2 (0.14.0): the particle transmittance map's shaders: the instances and the block in the
+           vertex stage, which reads the position, the colour and the texture coordinate (locations 0 to 2) and hands
+           on the colour and the texture coordinate; the albedo and the block in the fragment stage, one target. */
+        !require_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH,
+            "\"samplers\": 0, \"storage_textures\": 0, \"storage_buffers\": 1, \"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD2\", \"type\": \"float2\", \"location\": 2"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_VERTEX_REFLECTION_PATH,
+            "\"location\": 3"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD1\", \"type\": \"float2\", \"location\": 1"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_TRANSMITTANCE_FRAGMENT_REFLECTION_PATH,
+            "SV_Target1"
         )) {
         return 1;
     }

@@ -178,8 +178,9 @@ _Static_assert(BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE == 2u, "the in-place upl
 #error "0.11.0's queued uploads and partial mesh updates define their HAS_ macros"
 #endif
 
-/* RFC 0013 phase 1 (0.11.0): the lit particle is variant 11 (the count 12), the UV rect batch bit 3; batch bit 4 and the
-   lighting's byte 3,337 stay free for phase 2. No struct grows. */
+/* RFC 0013 phase 1 (0.11.0): the lit particle is variant 11 (the count 12), the UV rect batch bit 3. Phase 2 (0.14.0):
+   the particle shadow is batch bit 4 and the lighting's byte 3,337 (particle_shadow, which was
+   directional_shadow_reserved[0]). No struct grows. */
 _Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11 && BTBH_GPU_SCENE_SURFACE_COUNT == 12,
     "LIT_PARTICLE is variant 11");
 _Static_assert(BTBH_GPU_SCENE_SURFACE_REFRACT == 10, "the variants before it keep their numbers");
@@ -187,11 +188,19 @@ _Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT == 8, "INSTANCE_UV_RECT is 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 288u && offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u,
     "the batch keeps its size and its flags' byte");
-_Static_assert(offsetof(BTBHGPUSceneLighting, directional_shadow_reserved) == 3337u,
-    "phase 2's byte (3,337) stays reserved");
 #endif
+_Static_assert(offsetof(BTBHGPUSceneLighting, particle_shadow) == 3337u && sizeof(BTBHGPUSceneLighting) == 3340u,
+    "phase 2's byte is 3,337, and the lighting keeps its 3,340 bytes");
+_Static_assert(sizeof(((BTBHGPUSceneLighting *)0)->particle_shadow) == 1u, "particle_shadow is a byte");
+_Static_assert(BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW == 16, "PARTICLE_SHADOW is batch bit 4");
+_Static_assert(BTBH_GPU_SCENE_PARTICLE_SHADOW_OFF == 0 && BTBH_GPU_SCENE_PARTICLE_SHADOW_PARTICLES == 1 &&
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND == 2 && BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS == 3 &&
+    BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER == 4, "particle_shadow's values");
 #if !defined(BTBH_GPU_SCENE_HAS_LIT_PARTICLE) || !defined(BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT)
 #error "RFC 0013's HAS_ macros are defined with their features"
+#endif
+#if !defined(BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW)
+#error "RFC 0013 phase 2's HAS_ macro is defined with its features"
 #endif
 
 /* 0.11.0 (Be The Bullet Hell v2's blackouts): the instance's light factor is batch bit 6, after RECEIVES_NO_SPOT_SHADOW
@@ -199,13 +208,14 @@ _Static_assert(offsetof(BTBHGPUSceneLighting, directional_shadow_reserved) == 33
 _Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR == 64, "INSTANCE_LIGHT_FACTOR is batch bit 6");
 _Static_assert((BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR & (BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
     BTBH_GPU_SCENE_BATCH_KEEP_ORDER | BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE | BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT |
-    (1u << 4) | BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW)) == 0, "the light factor's bit is its own");
+    BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW | BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW)) == 0,
+    "the light factor's bit is its own");
 #if !defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
 #error "BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR is defined with the flag"
 #endif
 
 /* 0.12.0 (Be The Bullet Hell v2's beams and glows under KEEP_HBAO): the batch flags' second byte, a byte that was there
-   (batch bit 7 stays free, bit 4 is RFC 0013 phase 2's), and its first bit. */
+   (batch bit 7 stays free, bit 4 is RFC 0013 phase 2's since 0.14.0), and its first bit. */
 _Static_assert(sizeof(((BTBHGPUSceneGeometryBatch *)0)->flags2) == 1u, "flags2 is a byte");
 _Static_assert(BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK == 1, "KEEP_CASCADES_LOOK is flags2 bit 0");
 #if UINTPTR_MAX == UINT64_MAX

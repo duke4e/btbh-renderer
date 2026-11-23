@@ -25,6 +25,23 @@
  *   BTBH_LIT_PARTICLE_OLD_SHADER_DIR=<a release's shaders from before 0.11.0> also checks that their
  *   production_model.vert draws unflagged batches as this release's does, to the byte, and that their
  *   production_rc_material_source.vert fails a rect batch that is the cascades' source.
+ * - RFC 0013 phase 2 (0.14.0), the particle shadow (BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW, particle_shadow):
+ *   - off: without a flagged batch particle_shadow 1, 2, 5 and 6 change no pixel and make nothing (the lazy creation
+ *     log names nothing of the map's); with one, particle_shadow 0, or the sun's shadow off, changes no pixel;
+ *   - the lee side: a column of three lit puffs along a low sun (16 degrees), seen from the side, against the CPU's
+ *     slab (src/gpu/btbh_gpu_particle.h's copies of the map's optical depth and of the slab's transmittance) at every
+ *     third pixel away from the discs' edges: with the map at half and a quarter, the density 2, and the omni shadow
+ *     (the full variant); particle_shadow 2 as 1 there; three batches (a run) as one, runs on and off, to the byte;
+ *   - the street: the column's shadow on an unlit (mode 2) street against the CPU, lit (the sun's part times the
+ *     transmittance, from the street without the map) with 2, none with 1 (to the byte off the puffs), the omni
+ *     shadow's variant and the cascades' scene shader; half against a quarter on a 256 sun map (both against the CPU,
+ *     their penumbrae differ);
+ *   - the refusals (an opaque batch, DISSOLVE, skinned, lifted, dug; a negative density; particle_shadow 3, 7, 8,
+ *     0x81) and what draws (unlit soft particles, an additive Y_AXIS billboard);
+ *   - prewarm: six such scenes prewarmed into a target, then their renders make no pipeline or shader and the lazy
+ *     creation log names no shader, pipeline, sampler or texture; the window's prewarm, the same for its presents;
+ *   - old shaders: without production_particle_transmittance.vert the map's frame fails naming it (particle_shadow 0
+ *     draws); a lit particle or scene shader that doesn't read the map fails naming it.
  * - BTBH_LIT_PARTICLE_DUMP=<dir> writes the pictures.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
@@ -1788,7 +1805,8 @@ static void check_refusals(SmokeWindow *smoke) {
                 break;
             case 9: puff->detail_parameters[3] = 7.0f; what = "a lit particle with a procedural detail";
                 needle = "detail_parameters"; break;
-            default: puff->surface_parameters1[3] = 1.0f; what = "a lit particle, surface_parameters1[3] 1";
+            /* (surface_parameters1[3] is the particle shadow's density since 0.14.0: refused below 0, not above.) */
+            default: puff->surface_parameters1[3] = -1.0f; what = "a lit particle, surface_parameters1[3] -1";
                 needle = "surface_parameters1[3]"; break;
         }
         expect_refused(smoke, &scene, what, needle);
@@ -1830,11 +1848,11 @@ static void check_refusals(SmokeWindow *smoke) {
         expect_refused(smoke, &scene, what, needle);
         expect_refused(smoke, &scene, what, "GPU scene batch 0: flags INSTANCE_UV_RECT: ");
     }
-    /* Bit 4 (phase 2's) and variant 12 are unknown. */
+    /* Bit 7 and variant 12 are unknown (bit 4 is phase 2's particle shadow since 0.14.0). */
     scene_begin(&scene, "refusal", front_eye);
     BTBHGPUSceneGeometryBatch *puff = add_puff(&scene, smoke, 0.0f, 0.0f, 0.0f, 0.5f);
-    puff->flags = 1u << 4;
-    expect_refused(smoke, &scene, "batch flag bit 4", "Invalid GPU model instance scene submission");
+    puff->flags = 1u << 7;
+    expect_refused(smoke, &scene, "batch flag bit 7", "Invalid GPU model instance scene submission");
     puff->flags = 0u;
     puff->surface_variant = (BTBHGPUSceneSurfaceVariant)12;
     expect_refused(smoke, &scene, "surface variant 12", "Invalid GPU model instance scene submission");
@@ -2170,6 +2188,885 @@ static void check_base_shaders(SmokeWindow *now, SmokeWindow *before, const char
     checks += 1;
 }
 
+/* ---------------------------------------------------------------- RFC 0013 phase 2: the particle shadow */
+
+/* A point through a column-major matrix, divided by w. */
+static void project_point(const float m[16], const float p[3], float out[3]) {
+    float clip[4];
+    for (int r = 0; r < 4; ++r) {
+        clip[r] = m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r];
+    }
+    for (int a = 0; a < 3; ++a) {
+        out[a] = clip[a] / clip[3];
+    }
+}
+
+/* A puff in the particle transmittance map: a quad of half size `half` facing the sun (along the sun matrix's rows 0
+   and 1, normalized), centred on `centre`, adding `optical` (btbh_gpu_particle_optical_depth) where it covers. */
+typedef struct Caster {
+    float centre[3];
+    float half;
+    float optical;
+} Caster;
+
+/* The map's transmittance at a flat world point as the CPU sees it: the slab of the casters covering its place in
+   the sun's map (src/gpu/btbh_gpu_particle.h's copy of the shader's). *ambiguous is set where the point lies within
+   `margin` world units of a caster's edge (a filtered texel). */
+static float cpu_transmittance(const BTBHGPUSceneLighting *lighting, const Caster *casters, uint32_t count,
+    const float point[3], float margin, bool *ambiguous) {
+    const float *m = lighting->directional_shadow_view_projection;
+    float right[3] = { m[0], m[4], m[8] };
+    float up[3] = { m[1], m[5], m[9] };
+    normalize3(right);
+    normalize3(up);
+    float projected[3];
+    project_point(m, point, projected);
+    float optical = 0.0f;
+    float weighted = 0.0f;
+    float nearest = 1.0f;
+    *ambiguous = false;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const Caster *caster = &casters[index];
+        const float offset[3] = {
+            point[0] - caster->centre[0], point[1] - caster->centre[1], point[2] - caster->centre[2],
+        };
+        const float inside = caster->half - fmaxf(fabsf(dot3(offset, right)), fabsf(dot3(offset, up)));
+        if (fabsf(inside) < margin) {
+            *ambiguous = true;
+        }
+        if (inside > 0.0f) {
+            float centre[3];
+            project_point(m, caster->centre, centre);
+            optical += caster->optical;
+            weighted += caster->optical * centre[2];
+            nearest = fminf(nearest, centre[2]);
+        }
+    }
+    return btbh_gpu_particle_slab_transmittance(optical, weighted, nearest, projected[2]);
+}
+
+/* World units a texel of the map spans for a sun map of `sun_size` (BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER in
+   `particle_shadow` or not). */
+static float map_texel_world(const BTBHGPUSceneLighting *lighting, uint32_t sun_size) {
+    const float *m = lighting->directional_shadow_view_projection;
+    const float row = sqrtf(m[0] * m[0] + m[4] * m[4] + m[8] * m[8]);
+    return 2.0f / ((float)btbh_gpu_particle_shadow_size(sun_size, lighting->particle_shadow) * row);
+}
+
+/* How many of `count` camera-facing quads (half sizes `halves`, centres `centres`) cover a pixel, or -1 where it lies
+   within `margin` of one's edge; `point` the pixel's point on the last one covering it (the quads of the column all
+   lie in one plane, so it is every one's). */
+static int covering_puffs(const Scene *scene, const float (*centres)[3], const float *halves, uint32_t count, int px,
+    int py, float margin, float point[3]) {
+    float normal[3];
+    cross3(scene->camera.right, scene->camera.up, normal);
+    normalize3(normal);
+    int found = 0;
+    for (uint32_t index = 0u; index < count; ++index) {
+        float hit[3];
+        if (pixel_on_plane(&scene->camera, px, py, centres[index], normal, hit) > 1.0e30f) {
+            continue;
+        }
+        const float offset[3] = {
+            hit[0] - centres[index][0], hit[1] - centres[index][1], hit[2] - centres[index][2],
+        };
+        const float inside =
+            halves[index] - fmaxf(fabsf(dot3(offset, scene->camera.right)), fabsf(dot3(offset, scene->camera.up)));
+        if (fabsf(inside) < margin) {
+            return -1;
+        }
+        if (inside > 0.0f) {
+            found += 1;
+            memcpy(point, hit, sizeof(hit));
+        }
+    }
+    return found;
+}
+
+#define COLUMN_PUFFS 3
+
+typedef struct ColumnScene {
+    Scene scene;
+    float centres[COLUMN_PUFFS][3];
+    float halves[COLUMN_PUFFS];
+    Caster casters[COLUMN_PUFFS];
+    BTBHGPUSceneGeometryBatch *puffs;
+} ColumnScene;
+
+static const float half_alpha[4] = { 1.0f, 1.0f, 1.0f, 0.5f };
+
+/* The lee side: three lit puffs in a row along a low sun (16 degrees, from +x), seen from the front, as one batch of
+   three instances (`split`: three batches, a run); straight alpha 0.5 (optical depth ln 2 each), the wrap 0.5, no
+   transmission; PARTICLE_SHADOW with particle_shadow `setting` (`flagged` false: the batch without the flag). */
+static void build_column(ColumnScene *column, const SmokeWindow *smoke, uint8_t setting, bool flagged, bool split,
+    float density) {
+    Scene *scene = &column->scene;
+    scene_begin(scene, "pshadow-column", front_eye);
+    const float sun = 16.0f * pi / 180.0f;
+    const float toward[3] = { cosf(sun), sinf(sun), 0.0f };
+    set_sun(&scene->lighting, toward, 3.0f);
+    sun_shadow(&scene->lighting, toward, BTBH_GPU_SCENE_SHADOW_FILTER_TENT);
+    scene->lighting.particle_shadow = setting;
+    BTBHGPUSceneGeometryBatch batch = puff_batch(smoke);
+    batch.surface_parameters0[3] = 0.5f;
+    batch.surface_parameters1[3] = density;
+    batch.flags = flagged ? BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW : 0u;
+    for (int k = 0; k < COLUMN_PUFFS; ++k) {
+        const float x = 0.8f - 0.8f * (float)k;
+        column->centres[k][0] = x;
+        column->centres[k][1] = 0.0f;
+        column->centres[k][2] = 0.0f;
+        column->halves[k] = 0.7f;
+        memcpy(column->casters[k].centre, column->centres[k], sizeof(column->centres[k]));
+        column->casters[k].half = 0.7f;
+        column->casters[k].optical = btbh_gpu_particle_optical_depth(0.5f, density, 0.0f);
+        const uint32_t instance = add_instance(scene, x, 0.0f, 0.0f, 0.7f, half_alpha);
+        if (split || k == 0) {
+            batch.first_instance = instance;
+            batch.instance_count = 1u;
+            BTBHGPUSceneGeometryBatch *added = add_batch(scene, batch);
+            if (k == 0) {
+                column->puffs = added;
+            }
+        } else {
+            column->puffs->instance_count += 1u;
+        }
+    }
+}
+
+/* (Away from an edge in the sun's map: a texel and a half, so that the bilinear fetch's four texels lie on one side of
+   it.) */
+
+/* Checks every 3rd pixel the column covers, away from the quads' edges on screen and in the sun's map, against the
+   CPU: the lit particle's colour with the sun's share times the map's transmittance (`shadowed`; else 1), the same for
+   every puff over the pixel (they lie in one plane), blended n times at alpha 0.5 over black: times 1 - 0.5^n.
+   Returns how many it checked; *darkest the least transmittance among them. */
+static uint32_t expect_column(const uint8_t *pixels, const ColumnScene *column, bool shadowed, uint32_t sun_size,
+    float *darkest, const char *what) {
+    const Scene *scene = &column->scene;
+    const float margin = 1.5f * map_texel_world(&scene->lighting, sun_size) + 0.01f;
+    float normal[3];
+    cross3(scene->camera.right, scene->camera.up, normal);
+    normalize3(normal);
+    uint32_t checked = 0u;
+    int worst = 0;
+    *darkest = 1.0f;
+    for (int py = 1; py < (int)TARGET_SIZE; py += 3) {
+        for (int px = 1; px < (int)TARGET_SIZE; px += 3) {
+            float point[3];
+            const int layers =
+                covering_puffs(scene, column->centres, column->halves, COLUMN_PUFFS, px, py, 0.08f, point);
+            if (layers <= 0) {
+                continue;
+            }
+            bool ambiguous = false;
+            const float transmittance = shadowed
+                ? cpu_transmittance(&scene->lighting, column->casters, COLUMN_PUFFS, point, margin, &ambiguous)
+                : 1.0f;
+            if (ambiguous) {
+                continue;
+            }
+            float view[3] = {
+                scene->camera.position[0] - point[0], scene->camera.position[1] - point[1],
+                scene->camera.position[2] - point[2],
+            };
+            normalize3(view);
+            float colour[3];
+            expected_colour(scene, column->puffs, 1.0f, transmittance, point, normal, view, colour);
+            for (int c = 0; c < 3; ++c) {
+                const int expected = output_level((1.0f - powf(0.5f, (float)layers)) * colour[c], px, py);
+                const int delta = abs((int)pixels[(py * (int)TARGET_SIZE + px) * 4 + c] - expected);
+                worst = delta > worst ? delta : worst;
+            }
+            *darkest = fminf(*darkest, transmittance);
+            checked += 1u;
+        }
+    }
+    printf("  %-62s %4u pixels against the CPU, worst %d levels, least transmittance %.3f\n", what, checked, worst,
+        *darkest);
+    assert(checked > 100u);
+    assert(worst <= LEVEL_TOLERANCE);
+    checks += 1;
+    return checked;
+}
+
+/* The street: a ground quad (lit, or unlit mode 2) under a column of three lit puffs stacked over x = 1.5, the sun at
+   28 degrees from +x, seen from above and in front; its shadow falls on the street toward -x. */
+static void build_street(ColumnScene *column, const SmokeWindow *smoke, uint8_t setting, bool unlit, float sun_energy) {
+    Scene *scene = &column->scene;
+    const float eye[3] = { -0.5f, 5.5f, 6.5f };
+    scene_begin(scene, "pshadow-street", eye);
+    const float sun = 28.0f * pi / 180.0f;
+    const float toward[3] = { cosf(sun), sinf(sun), 0.0f };
+    set_sun(&scene->lighting, toward, sun_energy);
+    sun_shadow(&scene->lighting, toward, BTBH_GPU_SCENE_SHADOW_FILTER_TENT);
+    scene->lighting.particle_shadow = setting;
+    BTBHGPUSceneGeometryBatch ground = base_batch();
+    ground.custom_mesh = smoke->ground;
+    ground.albedo_red = 180u;
+    ground.albedo_green = 170u;
+    ground.albedo_blue = 160u;
+    ground.unlit_enabled = unlit ? 2u : 0u;
+    ground.first_instance = add_instance(scene, 0.0f, 0.0f, 0.0f, 5.0f, white);
+    add_batch(scene, ground);
+    BTBHGPUSceneGeometryBatch batch = puff_batch(smoke);
+    batch.surface_parameters0[3] = 0.5f;
+    batch.flags = BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW;
+    batch.first_instance = scene->instance_count;
+    batch.instance_count = COLUMN_PUFFS;
+    for (int k = 0; k < COLUMN_PUFFS; ++k) {
+        const float y = 0.9f + 0.8f * (float)k;
+        column->centres[k][0] = 1.5f;
+        column->centres[k][1] = y;
+        column->centres[k][2] = 0.0f;
+        column->halves[k] = 0.6f;
+        memcpy(column->casters[k].centre, column->centres[k], sizeof(column->centres[k]));
+        column->casters[k].half = 0.6f;
+        column->casters[k].optical = btbh_gpu_particle_optical_depth(0.5f, 0.0f, 0.0f);
+        (void)add_instance(scene, 1.5f, y, 0.0f, 0.6f, half_alpha);
+    }
+    column->puffs = add_batch(scene, batch);
+}
+
+/* The street's pixels away from the puffs on screen and from their discs' edges in the sun's map: their flat world
+   points and the CPU's transmittance there. */
+typedef struct StreetPixel {
+    int px;
+    int py;
+    float transmittance;
+} StreetPixel;
+
+static uint32_t street_pixels(const ColumnScene *column, uint32_t sun_size, StreetPixel *out, uint32_t capacity) {
+    const Scene *scene = &column->scene;
+    const float margin = 1.5f * map_texel_world(&scene->lighting, sun_size) + 0.01f;
+    const float origin[3] = { 0.0f, 0.0f, 0.0f };
+    const float up[3] = { 0.0f, 1.0f, 0.0f };
+    uint32_t count = 0u;
+    for (int py = 0; py < (int)TARGET_SIZE && count < capacity; py += 2) {
+        for (int px = 0; px < (int)TARGET_SIZE && count < capacity; px += 2) {
+            float point[3];
+            if (pixel_on_plane(&scene->camera, px, py, origin, up, point) > 1.0e30f ||
+                fabsf(point[0]) > 4.6f || fabsf(point[2]) > 4.6f) {
+                continue;
+            }
+            float on_puff[3];
+            if (covering_puffs(scene, column->centres, column->halves, COLUMN_PUFFS, px, py, 0.15f, on_puff) != 0) {
+                continue;
+            }
+            bool ambiguous = false;
+            const float transmittance =
+                cpu_transmittance(&scene->lighting, column->casters, COLUMN_PUFFS, point, margin, &ambiguous);
+            if (ambiguous) {
+                continue;
+            }
+            out[count].px = px;
+            out[count].py = py;
+            out[count].transmittance = transmittance;
+            count += 1u;
+        }
+    }
+    return count;
+}
+
+#define STREET_CAPACITY 4096u
+
+/* The unlit street (mode 2) against the CPU: its albedo times lerp(0.45, 1, transmittance), at least `least_shadowed`
+   of its pixels in the column's shadow. Returns how many are. */
+static uint32_t expect_unlit_street(const uint8_t *pixels, const ColumnScene *column, uint32_t sun_size, bool shadowed,
+    uint32_t least_shadowed, const char *what) {
+    static StreetPixel street[STREET_CAPACITY];
+    const uint32_t count = street_pixels(column, sun_size, street, STREET_CAPACITY);
+    const BTBHGPUSceneGeometryBatch *ground = &column->scene.batches[0];
+    const float albedo[3] = {
+        (float)ground->albedo_red / 255.0f, (float)ground->albedo_green / 255.0f, (float)ground->albedo_blue / 255.0f,
+    };
+    uint32_t in_shadow = 0u;
+    int worst = 0;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const float transmittance = shadowed ? street[index].transmittance : 1.0f;
+        in_shadow += street[index].transmittance < 0.999f ? 1u : 0u;
+        for (int c = 0; c < 3; ++c) {
+            /* (production_model.frag.hlsl's BTBH_UNLIT_SHADOW_LIGHT, 0.45.) */
+            const float linear = albedo[c] * (0.45f + 0.55f * transmittance);
+            const int expected = output_level(linear, street[index].px, street[index].py);
+            const int delta =
+                abs((int)pixels[(street[index].py * (int)TARGET_SIZE + street[index].px) * 4 + c] - expected);
+            worst = delta > worst ? delta : worst;
+        }
+    }
+    printf("  %-62s %4u pixels (%u in the column's shadow), worst %d levels\n", what, count, in_shadow, worst);
+    assert(count > 500u && in_shadow >= least_shadowed);
+    assert(worst <= LEVEL_TOLERANCE);
+    checks += 1;
+    return in_shadow;
+}
+
+/* The lit street with particle_shadow 2: the sun's light is linear in its visibility, so each pixel is its ambient
+   part (the street without the sun) plus the sun's part (with it, no map) times the transmittance. */
+static void expect_lit_street(const uint8_t *pixels, const uint8_t *ambient, const uint8_t *sunlit,
+    const ColumnScene *column, uint32_t sun_size, const char *what) {
+    static StreetPixel street[STREET_CAPACITY];
+    const uint32_t count = street_pixels(column, sun_size, street, STREET_CAPACITY);
+    uint32_t in_shadow = 0u;
+    int worst = 0;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const int px = street[index].px;
+        const int py = street[index].py;
+        in_shadow += street[index].transmittance < 0.999f ? 1u : 0u;
+        for (int c = 0; c < 3; ++c) {
+            const size_t at = (size_t)(py * (int)TARGET_SIZE + px) * 4u + (size_t)c;
+            const float a = level_linear(ambient[at], px, py);
+            const float s = level_linear(sunlit[at], px, py) - a;
+            const int expected = output_level(a + s * street[index].transmittance, px, py);
+            const int delta = abs((int)pixels[at] - expected);
+            worst = delta > worst ? delta : worst;
+        }
+    }
+    printf("  %-62s %4u pixels (%u in the column's shadow), worst %d levels\n", what, count, in_shadow, worst);
+    assert(count > 500u && in_shadow > 40u);
+    assert(worst <= LEVEL_TOLERANCE + 1);
+    checks += 1;
+}
+
+/* Pixels that differ outside the puffs (with a margin) on screen. */
+static uint32_t differing_off_puffs(const uint8_t *a, const uint8_t *b, const ColumnScene *column) {
+    uint32_t count = 0u;
+    for (int py = 0; py < (int)TARGET_SIZE; ++py) {
+        for (int px = 0; px < (int)TARGET_SIZE; ++px) {
+            float point[3];
+            if (covering_puffs(&column->scene, column->centres, column->halves, COLUMN_PUFFS, px, py, 0.15f, point) !=
+                0) {
+                continue;
+            }
+            const size_t at = (size_t)(py * (int)TARGET_SIZE + px) * 4u;
+            count += memcmp(&a[at], &b[at], 3u) != 0 ? 1u : 0u;
+        }
+    }
+    return count;
+}
+
+static uint8_t *render_column(SmokeWindow *smoke, ColumnScene *column, const char *name) {
+    column->scene.name = name;
+    return render(smoke, &column->scene);
+}
+
+/* How many entries of a window's lazy creation log, since its last report, name something the particle shadow makes
+   (its texture, its pipeline's shaders and key), or (any_creation) record any shader, pipeline, sampler or texture;
+   `print` prints them. */
+static uint32_t lazy_entries(BTBHGPUWindow *window, bool any_creation, bool print) {
+    static BTBHGPULazyCreationEntry entries[BTBH_GPU_LAZY_CREATION_WINDOW_CAPACITY];
+    uint32_t found = 0u;
+    uint32_t count = 0u;
+    do {
+        assert(btbh_gpu_window_lazy_creation_report(window, entries, BTBH_GPU_LAZY_CREATION_WINDOW_CAPACITY, &count) ==
+            BTBH_GPU_OK);
+        for (uint32_t index = 0u; index < count; ++index) {
+            const BTBHGPULazyCreationEntry *entry = &entries[index];
+            const bool made = entry->kind == BTBH_GPU_LAZY_CREATION_SHADER ||
+                entry->kind == BTBH_GPU_LAZY_CREATION_GRAPHICS_PIPELINE ||
+                entry->kind == BTBH_GPU_LAZY_CREATION_SAMPLER || entry->kind == BTBH_GPU_LAZY_CREATION_TEXTURE;
+            const bool named = strstr(entry->name, "transmittance") != NULL || strstr(entry->name, "particle_shadow");
+            if ((any_creation && made) || (!any_creation && named)) {
+                if (print) {
+                    printf("    lazy: kind %u: %s\n", (unsigned)entry->kind, entry->name);
+                }
+                found += 1u;
+            }
+        }
+    } while (count == BTBH_GPU_LAZY_CREATION_WINDOW_CAPACITY);
+    return found;
+}
+
+/* Off: without a flagged batch, particle_shadow changes nothing and makes nothing; with one, particle_shadow 0
+   changes nothing. A fresh window, so the lazy creation log would name the map's texture and pipeline. */
+static void check_particle_shadow_off(SmokeWindow *fresh) {
+    static ColumnScene column;
+    puts("the particle shadow, off:");
+    btbh_gpu_window_set_lazy_creation_log_enabled(fresh->window, 1u);
+    (void)lazy_entries(fresh->window, false, false);
+    build_column(&column, fresh, 0u, false, false, 0.0f);
+    uint8_t *plain = render_column(fresh, &column, "pshadow-off-plain");
+    static const uint8_t settings[4] = { 1u, 2u, 5u, 6u };
+    for (int index = 0; index < 4; ++index) {
+        build_column(&column, fresh, settings[index], false, false, 0.0f);
+        uint8_t *unflagged = render_column(fresh, &column, "pshadow-off-unflagged");
+        printf("  particle_shadow %u, no batch with the flag: %u pixels differ\n", (unsigned)settings[index],
+            differing_pixels(plain, unflagged));
+        assert(differing_pixels(plain, unflagged) == 0u);
+        free(unflagged);
+        checks += 1;
+    }
+    build_column(&column, fresh, 0u, true, false, 0.0f);
+    uint8_t *flagged = render_column(fresh, &column, "pshadow-off-flagged");
+    printf("  the flag, particle_shadow 0: %u pixels differ\n", differing_pixels(plain, flagged));
+    assert(differing_pixels(plain, flagged) == 0u);
+    checks += 1;
+    /* The sun's shadow off: the flag and particle_shadow 1 draw no map. */
+    build_column(&column, fresh, 1u, true, false, 0.0f);
+    column.scene.lighting.directional_shadow_enabled = 0u;
+    uint8_t *no_sun_map = render_column(fresh, &column, "pshadow-off-nosunmap");
+    build_column(&column, fresh, 0u, false, false, 0.0f);
+    column.scene.lighting.directional_shadow_enabled = 0u;
+    uint8_t *no_sun_map_plain = render_column(fresh, &column, "pshadow-off-nosunmap-plain");
+    printf("  the flag, particle_shadow 1, the sun's shadow off: %u pixels differ\n",
+        differing_pixels(no_sun_map, no_sun_map_plain));
+    assert(differing_pixels(no_sun_map, no_sun_map_plain) == 0u);
+    checks += 1;
+    const uint32_t named = lazy_entries(fresh->window, false, true);
+    printf("  the lazy creation log names %u things of the particle shadow's\n", named);
+    assert(named == 0u);
+    checks += 1;
+    btbh_gpu_window_set_lazy_creation_log_enabled(fresh->window, 0u);
+    free(plain);
+    free(flagged);
+    free(no_sun_map);
+    free(no_sun_map_plain);
+}
+
+/* The lee side, the density, runs, half and a quarter, and the street. */
+static void check_particle_shadow(SmokeWindow *smoke) {
+    static ColumnScene column;
+    puts("the particle shadow:");
+    float darkest = 1.0f;
+
+    /* The column with no map: every puff in the full sun (wrap 0.5 at n.l 0). */
+    build_column(&column, smoke, 0u, true, false, 0.0f);
+    uint8_t *unshadowed = render_column(smoke, &column, "pshadow-column-off");
+    (void)expect_column(unshadowed, &column, false, 2048u, &darkest, "the column, particle_shadow 0");
+
+    /* particle_shadow 1: the sunny puff keeps the sun, the middle one about exp(-ln 2 * 1.5), the lee one
+       exp(-3 ln 2). */
+    build_column(&column, smoke, 1u, true, false, 0.0f);
+    uint8_t *shadowed = render_column(smoke, &column, "pshadow-column");
+    (void)expect_column(shadowed, &column, true, 2048u, &darkest, "the column, particle_shadow 1 (half)");
+    assert(darkest < 0.2f);
+    assert(differing_pixels(unshadowed, shadowed) > 1000u);
+    checks += 1;
+
+    /* particle_shadow 2 lights the puffs as 1 (no opaque surface here). */
+    build_column(&column, smoke, 2u, true, false, 0.0f);
+    uint8_t *ground_too = render_column(smoke, &column, "pshadow-column-2");
+    printf("  particle_shadow 2 against 1, puffs alone: %u pixels differ\n", differing_pixels(shadowed, ground_too));
+    assert(differing_pixels(shadowed, ground_too) == 0u);
+    checks += 1;
+
+    /* Runs: three batches of one puff each (a run in every pass) as one batch of three, runs on and off. */
+    build_column(&column, smoke, 1u, true, true, 0.0f);
+    uint8_t *split = render_column(smoke, &column, "pshadow-column-split");
+    /* (The smoke may run with BTBH_GPU_SCENE_RUNS set already: put it back as it was.) */
+    char runs_setting[16] = "";
+    const char *runs_before = SDL_getenv("BTBH_GPU_SCENE_RUNS");
+    if (runs_before != NULL) {
+        (void)snprintf(runs_setting, sizeof(runs_setting), "%s", runs_before);
+    }
+    (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
+    uint8_t *split_noruns = render_column(smoke, &column, "pshadow-column-split-noruns");
+    build_column(&column, smoke, 1u, true, false, 0.0f);
+    uint8_t *noruns = render_column(smoke, &column, "pshadow-column-noruns");
+    if (runs_before != NULL) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", runs_setting, true);
+    } else {
+        (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
+    }
+    printf("  three batches against one, runs on: %u pixels differ; runs off: %u; one batch, runs off against on: "
+        "%u\n", differing_pixels(shadowed, split), differing_pixels(shadowed, split_noruns),
+        differing_pixels(shadowed, noruns));
+    assert(differing_pixels(shadowed, split) == 0u);
+    assert(differing_pixels(shadowed, split_noruns) == 0u);
+    assert(differing_pixels(shadowed, noruns) == 0u);
+    checks += 3;
+
+    /* A quarter-size map: the same against the CPU away from the discs' edges. */
+    build_column(&column, smoke, 1u | BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER, true, false, 0.0f);
+    uint8_t *quarter = render_column(smoke, &column, "pshadow-column-quarter");
+    (void)expect_column(quarter, &column, true, 2048u, &darkest, "the column, particle_shadow 5 (a quarter)");
+
+    /* The density: surface_parameters1[3] 2 doubles each puff's optical depth. */
+    build_column(&column, smoke, 1u, true, false, 2.0f);
+    uint8_t *dense = render_column(smoke, &column, "pshadow-column-density2");
+    (void)expect_column(dense, &column, true, 2048u, &darkest, "the column, density 2");
+    assert(darkest < 0.02f);
+    checks += 1;
+
+    /* The omni shadow on: the full variant (its map at t9). */
+    build_column(&column, smoke, 1u, true, false, 0.0f);
+    {
+        const float light[3] = { 0.0f, 3.0f, 4.0f };
+        omni_shadow(&column.scene.lighting, light);
+    }
+    uint8_t *omni = render_column(smoke, &column, "pshadow-column-omni");
+    (void)expect_column(omni, &column, true, 2048u, &darkest, "the column, with the omni shadow (the full variant)");
+
+    /* The street. Unlit mode 2 against the CPU; with particle_shadow 1 the street is as with 0. */
+    build_street(&column, smoke, 0u, true, 2.0f);
+    uint8_t *street_off = render_column(smoke, &column, "pshadow-street-unlit-off");
+    (void)expect_unlit_street(street_off, &column, 2048u, false, 40u, "the unlit street, particle_shadow 0");
+    build_street(&column, smoke, 1u, true, 2.0f);
+    uint8_t *street_one = render_column(smoke, &column, "pshadow-street-unlit-1");
+    printf("  the street, particle_shadow 1 against 0: %u pixels differ off the puffs\n",
+        differing_off_puffs(street_off, street_one, &column));
+    assert(differing_off_puffs(street_off, street_one, &column) == 0u);
+    checks += 1;
+    build_street(&column, smoke, 2u, true, 2.0f);
+    uint8_t *street_two = render_column(smoke, &column, "pshadow-street-unlit-2");
+    (void)expect_unlit_street(street_two, &column, 2048u, true, 40u, "the unlit street, particle_shadow 2 (half)");
+    /* The omni shadow on: the full variant's last slot (t15). */
+    {
+        const float light[3] = { -4.0f, 3.0f, 2.0f };
+        omni_shadow(&column.scene.lighting, light);
+        column.scene.lighting.spot_energy = 0.0f;
+    }
+    uint8_t *street_omni = render_column(smoke, &column, "pshadow-street-unlit-2-omni");
+    (void)expect_unlit_street(street_omni, &column, 2048u, true, 40u,
+        "the unlit street, particle_shadow 2, omni (t15)");
+
+    /* The lit street: the ambient part and the sun's part from the street without the map. */
+    build_street(&column, smoke, 0u, false, 0.0f);
+    uint8_t *lit_ambient = render_column(smoke, &column, "pshadow-street-lit-ambient");
+    build_street(&column, smoke, 0u, false, 2.0f);
+    uint8_t *lit_off = render_column(smoke, &column, "pshadow-street-lit-off");
+    build_street(&column, smoke, 2u, false, 2.0f);
+    uint8_t *lit_two = render_column(smoke, &column, "pshadow-street-lit-2");
+    expect_lit_street(lit_two, lit_ambient, lit_off, &column, 2048u, "the lit street, particle_shadow 2 (half)");
+    build_street(&column, smoke, 1u, false, 2.0f);
+    uint8_t *lit_one = render_column(smoke, &column, "pshadow-street-lit-1");
+    printf("  the lit street, particle_shadow 1 against 0: %u pixels differ off the puffs\n",
+        differing_off_puffs(lit_off, lit_one, &column));
+    assert(differing_off_puffs(lit_off, lit_one, &column) == 0u);
+    checks += 1;
+    /* The cascades' scene shader (production_model_rc_2d_shadows.frag) reads it too. */
+    build_street(&column, smoke, 2u, false, 2.0f);
+    cascades_on(&column.scene.post, true);
+    uint8_t *lit_rc = render_column(smoke, &column, "pshadow-street-lit-2-rc");
+    build_street(&column, smoke, 0u, false, 2.0f);
+    cascades_on(&column.scene.post, true);
+    uint8_t *lit_rc_off = render_column(smoke, &column, "pshadow-street-lit-0-rc");
+    printf("  the lit street under the cascades, particle_shadow 2 against 0: %u pixels differ off the puffs\n",
+        differing_off_puffs(lit_rc_off, lit_rc, &column));
+    assert(differing_off_puffs(lit_rc_off, lit_rc, &column) > 40u);
+    checks += 1;
+
+    /* Half against a quarter on a 256 sun map (the map 128 or 64 texels a side, wider than a pixel): both against the
+       CPU away from the edges, and their penumbrae differ. */
+    assert(btbh_gpu_window_scene_set_directional_shadow_size(smoke->window, 256u, 256u) == 1u);
+    build_street(&column, smoke, 2u, true, 2.0f);
+    uint8_t *small_half = render_column(smoke, &column, "pshadow-street-256-half");
+    (void)expect_unlit_street(small_half, &column, 256u, true, 20u, "the unlit street, a 256 sun map, half (128)");
+    build_street(&column, smoke, 2u | BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER, true, 2.0f);
+    uint8_t *small_quarter = render_column(smoke, &column, "pshadow-street-256-quarter");
+    (void)expect_unlit_street(small_quarter, &column, 256u, true, 10u,
+        "the unlit street, a 256 sun map, a quarter (64)");
+    printf("  half against a quarter on a 256 sun map: %u pixels differ (the penumbrae)\n",
+        differing_pixels(small_half, small_quarter));
+    assert(differing_pixels(small_half, small_quarter) > 0u);
+    checks += 1;
+    assert(btbh_gpu_window_scene_set_directional_shadow_size(smoke->window, 2048u, 2048u) == 1u);
+
+    free(unshadowed);
+    free(shadowed);
+    free(ground_too);
+    free(split);
+    free(split_noruns);
+    free(noruns);
+    free(quarter);
+    free(dense);
+    free(omni);
+    free(street_off);
+    free(street_one);
+    free(street_two);
+    free(street_omni);
+    free(lit_ambient);
+    free(lit_off);
+    free(lit_two);
+    free(lit_one);
+    free(lit_rc);
+    free(lit_rc_off);
+    free(small_half);
+    free(small_quarter);
+}
+
+/* The refusals: the flag on a batch the map can't draw, a negative density, and particle_shadow's unknown values. */
+static void check_particle_shadow_refusals(SmokeWindow *smoke) {
+    static ColumnScene column;
+    static const int stand_in = 0;
+    puts("the particle shadow's refusals:");
+    for (int field = 0; field < 6; ++field) {
+        build_column(&column, smoke, 1u, true, false, 0.0f);
+        BTBHGPUSceneGeometryBatch *puff = column.puffs;
+        const char *what = NULL;
+        const char *needle = NULL;
+        switch (field) {
+            case 0:
+                puff->surface_variant = BTBH_GPU_SCENE_SURFACE_NONE;
+                puff->transparency_enabled = 0u;
+                what = "the particle shadow, opaque";
+                needle = "transparency_enabled";
+                break;
+            case 1:
+                puff->surface_variant = BTBH_GPU_SCENE_SURFACE_DISSOLVE;
+                what = "the particle shadow with DISSOLVE";
+                needle = "surface variant";
+                break;
+            case 2:
+                puff->kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+                puff->model = smoke->skinned;
+                puff->custom_mesh = NULL;
+                puff->animation_library = smoke->animation;
+                puff->animation_time = 0.25f;
+                puff->surface_variant = BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE;
+                what = "the particle shadow, skinned";
+                needle = "static";
+                break;
+            case 3:
+                puff->surface_variant = BTBH_GPU_SCENE_SURFACE_NONE;
+                puff->billboard_mode = BTBH_GPU_SCENE_BILLBOARD_DISABLED;
+                puff->height_lift = &smoke->overlay_lift;
+                what = "the particle shadow, lifted";
+                needle = "lifted";
+                break;
+            case 4:
+                puff->surface_variant = BTBH_GPU_SCENE_SURFACE_NONE;
+                puff->dug_by = (const BTBHGPUSdfTerrain *)(const void *)&stand_in;
+                what = "the particle shadow, dug";
+                needle = "dug";
+                break;
+            default:
+                puff->surface_parameters1[3] = -1.0f;
+                what = "a lit particle, density -1";
+                needle = "surface_parameters1[3]";
+                break;
+        }
+        expect_refused(smoke, &column.scene, what, needle);
+        expect_refused(smoke, &column.scene, what, field == 5
+            ? "GPU scene batch 0: surface_variant LIT_PARTICLE: "
+            : "GPU scene batch 0: flags PARTICLE_SHADOW: ");
+    }
+    static const uint8_t unknown[4] = { 3u, 7u, 8u, 0x81u };
+    for (int index = 0; index < 4; ++index) {
+        build_column(&column, smoke, unknown[index], true, false, 0.0f);
+        char what[64];
+        (void)snprintf(what, sizeof(what), "particle_shadow %u", (unsigned)unknown[index]);
+        expect_refused(smoke, &column.scene, what, "Invalid GPU model instance scene submission");
+    }
+    /* The unlit, soft and additive see-through batches draw (NONE and SOFT_PARTICLE), and a Y_AXIS billboard. */
+    build_column(&column, smoke, 2u, true, false, 0.0f);
+    column.puffs->surface_variant = BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE;
+    column.puffs->unlit_enabled = 1u;
+    column.puffs->surface_parameters0[3] = 0.0f;
+    BTBHGPUSceneReport report;
+    assert(render_with(smoke, &shaders, &column.scene, &report) == BTBH_GPU_OK);
+    column.puffs->surface_variant = BTBH_GPU_SCENE_SURFACE_NONE;
+    column.puffs->transparency_enabled = 0u;
+    column.puffs->blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+    column.puffs->billboard_mode = BTBH_GPU_SCENE_BILLBOARD_Y_AXIS;
+    assert(render_with(smoke, &shaders, &column.scene, &report) == BTBH_GPU_OK);
+    checks += 2;
+}
+
+/* The scenes prewarm covers for the particle shadow: the column (2D shadows, and with the omni shadow), the lit and the
+   unlit street at half, the unlit one at a quarter, and the street under the cascades. */
+#define PSHADOW_PREWARM_SCENES 6u
+
+static void build_pshadow_prewarm_scene(SmokeWindow *smoke, uint32_t index, ColumnScene *column) {
+    switch (index) {
+        case 0: build_column(column, smoke, 1u, true, false, 0.0f); break;
+        case 1: {
+            build_column(column, smoke, 1u, true, false, 0.0f);
+            const float light[3] = { 0.0f, 3.0f, 4.0f };
+            omni_shadow(&column->scene.lighting, light);
+            break;
+        }
+        case 2: build_street(column, smoke, 2u, false, 2.0f); break;
+        case 3: build_street(column, smoke, 2u, true, 2.0f); break;
+        case 4: build_street(column, smoke, 6u, true, 2.0f); break;
+        default:
+            build_street(column, smoke, 2u, false, 2.0f);
+            cascades_on(&column->scene.post, true);
+            break;
+    }
+}
+
+/* The map is made for one size at a time (half or a quarter of the sun map's): the scenes at half are prewarmed and
+   rendered, then the one at a quarter (`group` 0 and 1). */
+static bool pshadow_prewarm_group(uint32_t index, uint32_t group) {
+    return (index == 4u) == (group == 1u);
+}
+
+static void check_particle_shadow_prewarm(SmokeWindow *fresh) {
+    static ColumnScene columns[PSHADOW_PREWARM_SCENES];
+    puts("the particle shadow's prewarm:");
+    btbh_gpu_window_set_lazy_creation_log_enabled(fresh->window, 1u);
+    for (uint32_t group = 0u; group < 2u; ++group) {
+    const BTBHGPUCreationStats before_prewarm = creation_stats();
+    for (uint32_t index = 0u; index < PSHADOW_PREWARM_SCENES; ++index) {
+        if (!pshadow_prewarm_group(index, group)) {
+            continue;
+        }
+        build_pshadow_prewarm_scene(fresh, index, &columns[index]);
+        const Scene *scene = &columns[index].scene;
+        BTBHGPUSceneReport report;
+        memset(&report, 0, sizeof(report));
+        const BTBHGPUResult result = btbh_gpu_window_scene_prewarm_render_to_target(fresh->window, fresh->target,
+            shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
+            shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
+            shaders.paths[8], shaders.paths[9], shaders.paths[10],
+            SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE, &scene->lighting, &scene->post,
+            scene->batches, scene->batch_count, &report);
+        if (result != BTBH_GPU_OK) {
+            fprintf(stderr, "particle shadow prewarm %u: %s\n", index, report.message);
+        }
+        assert(result == BTBH_GPU_OK);
+    }
+    (void)lazy_entries(fresh->window, true, false);
+    const BTBHGPUCreationStats after_prewarm = creation_stats();
+    uint32_t lazy = 0u;
+    for (uint32_t index = 0u; index < PSHADOW_PREWARM_SCENES; ++index) {
+        if (!pshadow_prewarm_group(index, group)) {
+            continue;
+        }
+        BTBHGPUSceneReport report;
+        assert(render_with(fresh, &shaders, &columns[index].scene, &report) == BTBH_GPU_OK);
+        lazy += lazy_entries(fresh->window, true, true);
+    }
+    const BTBHGPUCreationStats after_renders = creation_stats();
+    printf("  %s: %llu pipelines and %llu shaders made by prewarming into a target; the renders then made %llu "
+        "pipelines and %llu shaders, and the lazy creation log names %u shaders, pipelines, samplers or textures\n",
+        group == 0u ? "five scenes, the map at half" : "a scene, the map at a quarter",
+        (unsigned long long)(after_prewarm.graphics_pipelines - before_prewarm.graphics_pipelines),
+        (unsigned long long)(after_prewarm.shaders - before_prewarm.shaders),
+        (unsigned long long)(after_renders.graphics_pipelines - after_prewarm.graphics_pipelines),
+        (unsigned long long)(after_renders.shaders - after_prewarm.shaders), lazy);
+    assert(group == 1u || after_prewarm.graphics_pipelines > before_prewarm.graphics_pipelines);
+    assert(after_renders.graphics_pipelines == after_prewarm.graphics_pipelines);
+    assert(after_renders.shaders == after_prewarm.shaders);
+    assert(lazy == 0u);
+    checks += 2;
+    }
+
+    /* The window's own prewarm and presents: the lit street, particle_shadow 2. A first frame with the puffs drawn
+       plain makes the canvas's pipelines and the frame's other ones. */
+    ColumnScene *street = &columns[2];
+    for (int frame = -1; frame < 3; ++frame) {
+        static ColumnScene plain;
+        const ColumnScene *drawn = street;
+        if (frame < 0) {
+            plain = *street;
+            plain.scene.batches[1].flags = 0u;
+            plain.scene.lighting.particle_shadow = 0u;
+            drawn = &plain;
+        } else if (frame == 0) {
+            BTBHGPUSceneReport report;
+            memset(&report, 0, sizeof(report));
+            assert(btbh_gpu_window_scene_prewarm(fresh->window,
+                shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
+                shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
+                shaders.paths[8], shaders.paths[9], shaders.paths[10],
+                SMOKE_SHADER_FORMAT, 160u, 90u, &street->scene.lighting, &street->scene.post, street->scene.batches,
+                street->scene.batch_count, &report) == BTBH_GPU_OK);
+            (void)lazy_entries(fresh->window, true, false);
+        }
+        const BTBHGPUCreationStats before = creation_stats();
+        BTBHGPUSceneReport report;
+        memset(&report, 0, sizeof(report));
+        const Scene *scene = &drawn->scene;
+        const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(fresh->window,
+            shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
+            shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
+            shaders.paths[8], shaders.paths[9], shaders.paths[10],
+            SMOKE_SHADER_FORMAT, 160u, 90u,
+            scene->camera.view_projection, scene->camera.right, scene->camera.up, scene->camera.position,
+            &scene->lighting, &scene->post, &scene->instances[0][0], scene->instance_count, scene->instance_count,
+            scene->batches, scene->batch_count, 0u, 0u, 0u, 255u, &report);
+        if (result != BTBH_GPU_OK) {
+            fprintf(stderr, "particle shadow window present: %s\n", report.message);
+        }
+        assert(result == BTBH_GPU_OK);
+        BTBHGPUCanvasPass pass;
+        memset(&pass, 0, sizeof(pass));
+        BTBHGPUCanvasReport canvas_report;
+        memset(&canvas_report, 0, sizeof(canvas_report));
+        assert(btbh_gpu_window_canvas_present(fresh->window, canvas_shader_paths[0], canvas_shader_paths[1],
+            canvas_shader_paths[2], SMOKE_SHADER_FORMAT, NULL, 0u, NULL, 0u, &pass, 1u, &canvas_report) ==
+            BTBH_GPU_OK);
+        const BTBHGPUCreationStats after = creation_stats();
+        if (frame >= 0) {
+            const uint32_t window_lazy = lazy_entries(fresh->window, true, true);
+            assert(after.graphics_pipelines == before.graphics_pipelines && after.shaders == before.shaders);
+            assert(window_lazy == 0u);
+            checks += 1;
+        } else {
+            (void)lazy_entries(fresh->window, true, false);
+        }
+    }
+    puts("  the window's prewarm: its presents then made no pipeline, shader, sampler or texture");
+    btbh_gpu_window_set_lazy_creation_log_enabled(fresh->window, 0u);
+}
+
+/* A copy of this build's shaders in BTBH_GPU_SMOKE_SHADER_DIR/../<name>. */
+static void copy_shaders_to(const char *name, ShaderSet *set, char directory[1100]) {
+    ShaderCopy copy;
+    memset(&copy, 0, sizeof(copy));
+    (void)snprintf(copy.from, sizeof(copy.from), "%s", BTBH_GPU_SMOKE_SHADER_DIR);
+    (void)snprintf(copy.to, sizeof(copy.to), "%s/../%s", BTBH_GPU_SMOKE_SHADER_DIR, name);
+    (void)SDL_CreateDirectory(copy.to);
+    assert(SDL_EnumerateDirectory(copy.from, copy_shader_file, &copy));
+    assert(copy.copied > 11u);
+    shader_set_in(set, copy.to);
+    (void)snprintf(directory, 1100, "%s", copy.to);
+}
+
+/* Old shaders: without production_particle_transmittance.*, a frame that draws the map fails naming the file (every
+   other frame draws); a lit particle shader or a scene shader that doesn't read the map fails naming it (with
+   particle_shadow 1 the scene shader isn't read for it). */
+static void check_particle_shadow_old_shaders(SmokeWindow *fresh) {
+#if defined(__APPLE__)
+    (void)fresh;
+    return;
+#endif
+    puts("the particle shadow, old shaders:");
+    static ColumnScene column;
+    BTBHGPUSceneReport report;
+    ShaderSet old;
+    char directory[1100];
+    char from[1200];
+    char path[1200];
+    /* (A directory each: the core reads a shader's names once per path.) */
+    copy_shaders_to("pshadow_old_map", &old, directory);
+    (void)snprintf(path, sizeof(path), "%s/production_particle_transmittance.vert.spv", directory);
+    assert(SDL_RemovePath(path));
+    build_column(&column, fresh, 1u, true, false, 0.0f);
+    assert(render_with(fresh, &old, &column.scene, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    printf("  no production_particle_transmittance.vert: \"%s\"\n", report.message);
+    assert(strstr(report.message, "pshadow_old_map/production_particle_transmittance.vert") != NULL &&
+        strstr(report.message, "missing") != NULL);
+    column.scene.lighting.particle_shadow = 0u;
+    assert(render_with(fresh, &old, &column.scene, &report) == BTBH_GPU_OK);
+    checks += 2;
+    /* A lit particle shader without the map (the unshadowed one under the _2d_shadows name). */
+    copy_shaders_to("pshadow_old_lit", &old, directory);
+    (void)snprintf(from, sizeof(from), "%s/production_particle_lit_unshadowed.frag.spv", directory);
+    (void)snprintf(path, sizeof(path), "%s/production_particle_lit_2d_shadows.frag.spv", directory);
+    assert(SDL_CopyFile(from, path));
+    build_column(&column, fresh, 1u, true, false, 0.0f);
+    assert(render_with(fresh, &old, &column.scene, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    printf("  a production_particle_lit_2d_shadows.frag that doesn't read the map: \"%s\"\n", report.message);
+    assert(strstr(report.message, "pshadow_old_lit/production_particle_lit_2d_shadows") != NULL &&
+        strstr(report.message, "doesn't read its map") != NULL);
+    checks += 1;
+    /* A scene shader without the map (the unshadowed one under the _2d_shadows name), particle_shadow 2. */
+    copy_shaders_to("pshadow_old_scene", &old, directory);
+    (void)snprintf(from, sizeof(from), "%s/production_model_unshadowed.frag.spv", directory);
+    (void)snprintf(path, sizeof(path), "%s/production_model_2d_shadows.frag.spv", directory);
+    assert(SDL_CopyFile(from, path));
+    build_street(&column, fresh, 2u, false, 2.0f);
+    assert(render_with(fresh, &old, &column.scene, &report) == BTBH_GPU_INVALID_ARGUMENT);
+    printf("  particle_shadow 2, a production_model_2d_shadows.frag that doesn't read the map: \"%s\"\n",
+        report.message);
+    assert(strstr(report.message, "pshadow_old_scene/production_model_2d_shadows") != NULL &&
+        strstr(report.message, "doesn't read its map") != NULL);
+    checks += 1;
+}
+
 /* ------------------------------------------------------------------------------------------------ main */
 
 static bool load_shader_paths(void) {
@@ -2218,12 +3115,30 @@ int main(void) {
     check_fades(&smoke);
     check_uv_rect(&smoke);
     check_refusals(&smoke);
+    /* RFC 0013 phase 2 (0.14.0): the particle shadow. */
+    {
+        SmokeWindow off = open_smoke_window(device);
+        check_particle_shadow_off(&off);
+        close_smoke_window(&off);
+    }
+    check_particle_shadow(&smoke);
+    check_particle_shadow_refusals(&smoke);
     SmokeWindow fresh = open_smoke_window(device);
     check_prewarm(&fresh);
     close_smoke_window(&fresh);
+    {
+        SmokeWindow warm = open_smoke_window(device);
+        check_particle_shadow_prewarm(&warm);
+        close_smoke_window(&warm);
+    }
     SmokeWindow old = open_smoke_window(device);
     check_old_shaders(&old);
     close_smoke_window(&old);
+    {
+        SmokeWindow old_map = open_smoke_window(device);
+        check_particle_shadow_old_shaders(&old_map);
+        close_smoke_window(&old_map);
+    }
     const char *base_directory = SDL_getenv("BTBH_LIT_PARTICLE_OLD_SHADER_DIR");
     if (base_directory != NULL && base_directory[0] != '\0') {
         SmokeWindow before = open_smoke_window(device);
