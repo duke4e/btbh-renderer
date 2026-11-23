@@ -1617,5 +1617,6 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
         window->owns_video_subsystem = false;
     }
+    btbh_gpu_lazy_creation_release(window);
     free(window);
 }

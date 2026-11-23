@@ -1192,6 +1192,7 @@ static SDL_GPUShader *btbh_gpu_scene_load_shader(
     uint32_t uniform_buffer_count,
     BTBHGPUSceneReport *report
 ) {
+    const uint64_t load_started_ticks = btbh_gpu_lazy_creation_clock();
     size_t byte_count = 0u;
     void *bytes = SDL_LoadFile(path, &byte_count);
     if (bytes == NULL || byte_count == 0u) {
@@ -1213,7 +1214,7 @@ static SDL_GPUShader *btbh_gpu_scene_load_shader(
     info.num_storage_buffers = storage_buffer_count;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader_from(device, &info, path, load_started_ticks, NULL);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_scene_error(
@@ -8240,7 +8241,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     window->radiance_cascades_telemetry_enabled =
         post->radiance_cascades.tier == BTBH_GPU_SCENE_RC_AUTO;
     BTBHGPUSceneFrameSetup setup;
-    if (!btbh_gpu_scene_prepare_frame(
+    /* (The lazy creation log: what the present makes in the steps it shares with the prewarm, a prewarm makes.) */
+    btbh_gpu_lazy_creation_prewarm_step(true);
+    const bool frame_prepared = btbh_gpu_scene_prepare_frame(
             window,
             fast_shadow_vertex_shader_path,
             fast_shadow_fragment_shader_path,
@@ -8261,7 +8264,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             batch_count,
             &setup,
             report
-        )) {
+        );
+    btbh_gpu_lazy_creation_prewarm_step(false);
+    if (!frame_prepared) {
         return report->result;
     }
     BTBHGPUSceneTelemetryReport *telemetry =
@@ -8516,7 +8521,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->opaque_order_keys
         )
         : 0u;
-    if (!btbh_gpu_scene_ensure_model_pipelines(
+    btbh_gpu_lazy_creation_prewarm_step(true);
+    const bool pipelines_ready = btbh_gpu_scene_ensure_model_pipelines(
             window,
             vertex_shader_path,
             animated_vertex_shader_path,
@@ -8530,7 +8536,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             prepared_geometry_count,
             opaque_sorted ? runtime->opaque_geometry_base : NULL,
             report
-        )) {
+        );
+    btbh_gpu_lazy_creation_prewarm_step(false);
+    if (!pipelines_ready) {
         free(bone_matrices);
         free(bone_offsets);
         return report->result;
@@ -8650,7 +8658,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         1000000.0;
     const uint64_t upload_started_ticks = SDL_GetTicksNS();
     if (transfer_bytes > 0u) {
+        const uint64_t map_started_ticks = btbh_gpu_lazy_creation_clock();
         void *mapped = SDL_MapGPUTransferBuffer(device, transfer, true);
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_SCENE_UPLOAD_MAP, map_started_ticks);
         if (mapped == NULL) {
             free(bone_matrices);
             free(bone_offsets);
@@ -8686,7 +8696,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     free(bone_matrices);
     bone_matrices = NULL;
 
+    const uint64_t command_started_ticks = btbh_gpu_lazy_creation_clock();
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_SCENE_COMMAND_BUFFER, command_started_ticks);
     if (command == NULL) {
         free(bone_offsets);
         btbh_gpu_scene_error(
@@ -8921,6 +8933,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     bool scene_distance_ready = false;
     report->cpu_swapchain_acquire_milliseconds = 0.0;
     const uint64_t target_ensure_started_ticks = SDL_GetTicksNS();
+    btbh_gpu_lazy_creation_prewarm_step(true);
     const bool targets_ready = btbh_gpu_scene_ensure_frame_targets(
         window,
         &setup,
@@ -8937,6 +8950,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         &scene_distance_ready,
         report
     );
+    btbh_gpu_lazy_creation_prewarm_step(false);
     report->cpu_target_ensure_milliseconds =
         (double)(SDL_GetTicksNS() - target_ensure_started_ticks) /
         1000000.0;
@@ -11161,7 +11175,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 ) {
-    return btbh_gpu_window_scene_present_instances_internal(
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
         window,
         vertex_shader_path,
         animated_vertex_shader_path,
@@ -11198,6 +11214,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
         0u,
         report
     );
+    btbh_gpu_lazy_creation_end(&lazy_scope);
+    return result;
 }
 
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
@@ -11233,7 +11251,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 ) {
-    return btbh_gpu_window_scene_present_instances_internal(
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
         window,
         vertex_shader_path,
         animated_vertex_shader_path,
@@ -11270,6 +11290,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         0u,
         report
     );
+    btbh_gpu_lazy_creation_end(&lazy_scope);
+    return result;
 }
 
 /* Makes what the next scene presents would make the first time they draw these batches with these settings,
@@ -11759,6 +11781,8 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
     }
     const BTBHGPUScenePost target_post =
         btbh_gpu_scene_render_target_post(post, render_width, render_height, target);
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET, &lazy_scope);
     BTBHGPUSceneAsideSwap swap;
     btbh_gpu_scene_enter_aside(window, &swap);
     /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
@@ -11824,7 +11848,9 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
             : SDL_GPU_FILTER_LINEAR;
         SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
         SDL_BlitGPUTexture(command, &blit);
+        const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
         const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
         btbh_gpu_window_scene_submission_finished(window, submitted);
         if (!submitted) {
             btbh_gpu_scene_error(
@@ -11835,6 +11861,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         }
     }
     btbh_gpu_scene_leave_aside(window, &swap);
+    btbh_gpu_lazy_creation_end(&lazy_scope);
     return report->result;
 }
 
@@ -12089,6 +12116,9 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         SDL_EndGPUCopyPass(copy);
     }
     const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+    if (submitted) {
+        window->submitted_frame_count += 1u;
+    }
     btbh_gpu_window_scene_submission_finished(window, submitted);
     if (copy == NULL || !submitted) {
         report->result = BTBH_GPU_DEVICE_FAILURE;

@@ -1152,6 +1152,39 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_prewarm_smoke COMMAND btbh_gpu_scene_prewarm_smoke)
         set_tests_properties(btbh_gpu_scene_prewarm_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # The lazy creation log and the upload staging budget (0.11.0): what cold frames make is logged, prewarmed
+        # frames log nothing a prewarm covers, frames are the same with the log and the budget or without, and every
+        # upload path delivers its pixels through the staging pool (hidden windows).
+        add_executable(btbh_gpu_lazy_creation_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_lazy_creation_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_lazy_creation_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_lazy_creation_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_lazy_creation_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_lazy_creation_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_lazy_creation_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_lazy_creation_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_lazy_creation_smoke COMMAND btbh_gpu_lazy_creation_smoke)
+        set_tests_properties(btbh_gpu_lazy_creation_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # RFC 0011 phase 1 (0.10.0): custom meshes in the shared geometry buffers and same-material runs draw byte
         # for byte as before, through every pass that encodes batches; the shared meshes' refusals and lifetime
         # (hidden windows).
@@ -1278,6 +1311,36 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         add_dependencies(btbh_gpu_frame_bench btbh_gpu_shaders)
+
+        # A measurement, not a test (0.11.0): the first frames of a new stage at v2's Deck preset, timed with the lazy
+        # creation log; see the file.
+        add_executable(btbh_gpu_stage_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_stage_bench.c"
+        )
+        target_include_directories(
+            btbh_gpu_stage_bench
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_stage_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_stage_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_stage_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_stage_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_stage_bench btbh_gpu_shaders)
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.

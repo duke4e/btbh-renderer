@@ -80,6 +80,7 @@ static SDL_GPUShader *btbh_gpu_canvas_load_shader(
     uint32_t uniform_buffer_count,
     BTBHGPUCanvasReport *report
 ) {
+    const uint64_t load_started_ticks = btbh_gpu_lazy_creation_clock();
     size_t byte_count = 0u;
     void *bytes = SDL_LoadFile(path, &byte_count);
     if (bytes == NULL || byte_count == 0u) {
@@ -100,7 +101,7 @@ static SDL_GPUShader *btbh_gpu_canvas_load_shader(
     info.stage = stage;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader_from(device, &info, path, load_started_ticks, NULL);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_canvas_error(
@@ -626,6 +627,7 @@ bool btbh_gpu_window_finish_pending_frame(
                window->frame_telemetry_pending_count > 0u) {
         btbh_gpu_window_release_frame_telemetry(window);
     }
+    const uint64_t lazy_submit_started_ticks = must_submit ? btbh_gpu_lazy_creation_clock() : 0u;
     bool result;
     if (must_submit && btbh_gpu_cost_log_enabled()) {
         btbh_gpu_cost_wait_warm();
@@ -684,6 +686,10 @@ bool btbh_gpu_window_finish_pending_frame(
         result = must_submit
             ? SDL_SubmitGPUCommandBuffer(command)
             : SDL_CancelGPUCommandBuffer(command);
+    }
+    btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_FRAME_SUBMIT, lazy_submit_started_ticks);
+    if (must_submit && result) {
+        window->submitted_frame_count += 1u;
     }
     btbh_gpu_window_scene_submission_finished(
         window,
@@ -1213,7 +1219,58 @@ BTBHGPUResult btbh_gpu_write_png_rgba8(
         : BTBH_GPU_PLATFORM_FAILURE;
 }
 
+static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    BTBHGPUCanvasReport *report
+);
+
+/* The canvas present inside the lazy creation log's scope. Its body, btbh_gpu_window_canvas_present_internal, follows
+   at once (the Swift source probes read the present from here to btbh_gpu_window_release_canvas). */
 BTBHGPUResult btbh_gpu_window_canvas_present(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    const char *textured_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    BTBHGPUCanvasReport *report
+) {
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
+    const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
+        window,
+        vertex_shader_path,
+        fragment_shader_path,
+        textured_fragment_shader_path,
+        shader_format,
+        vertices,
+        vertex_count,
+        batches,
+        batch_count,
+        passes,
+        pass_count,
+        report
+    );
+    btbh_gpu_lazy_creation_end(&lazy_scope);
+    return result;
+}
+
+static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
@@ -1309,16 +1366,22 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     SDL_GPUDevice *device = window->device->gpu;
     const bool had_scene = window->pending_scene_ready;
     if (window->pending_command == NULL) {
+        const uint64_t command_started_ticks = btbh_gpu_lazy_creation_clock();
         window->pending_command = SDL_AcquireGPUCommandBuffer(device);
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_CANVAS_COMMAND_BUFFER, command_started_ticks);
     }
-    if (window->pending_command == NULL ||
-        !SDL_WaitAndAcquireGPUSwapchainTexture(
+    const uint64_t acquire_started_ticks = btbh_gpu_lazy_creation_clock();
+    const bool swapchain_acquired =
+        window->pending_command != NULL &&
+        SDL_WaitAndAcquireGPUSwapchainTexture(
             window->pending_command,
             window->window,
             &window->pending_swapchain,
             &window->pending_drawable_width,
             &window->pending_drawable_height
-        )) {
+        );
+    btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_SWAPCHAIN_ACQUIRE, acquire_started_ticks);
+    if (!swapchain_acquired) {
         if (window->pending_command != NULL) {
             (void)btbh_gpu_window_finish_pending_frame(
                 window,
@@ -1404,11 +1467,13 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     SDL_GPUBuffer *vertex_buffer = runtime->vertex_buffer;
     SDL_GPUTransferBuffer *transfer = runtime->upload_transfer;
     if (byte_count != 0u) {
+        const uint64_t map_started_ticks = btbh_gpu_lazy_creation_clock();
         void *mapped = SDL_MapGPUTransferBuffer(
             device,
             transfer,
             true
         );
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_CANVAS_UPLOAD_MAP, map_started_ticks);
         if (mapped == NULL) {
             (void)btbh_gpu_window_finish_pending_frame(window, false);
             btbh_gpu_canvas_error(
