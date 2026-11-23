@@ -601,6 +601,18 @@ static void btbh_gpu_window_poll_radiance_cascades_telemetry(
     window->frame_telemetry_pending_count = retained_count;
 }
 
+/* Hands a frame telemetry fence back to SDL once the GPU has signalled it, waiting for it first when it hasn't (since
+   0.11.0). SDL gives a released fence to the next submission at once (vkResetFences on Vulkan), so a fence released
+   while its frame still runs can read signalled before that next submission has run. A presented frame's fence is
+   also held by its swapchain until SDL has waited for it, but one that presented nothing (a hidden or minimized
+   window) is held only here. */
+static void btbh_gpu_window_release_telemetry_fence(SDL_GPUDevice *device, SDL_GPUFence *fence) {
+    if (!SDL_QueryGPUFence(device, fence)) {
+        (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
+    }
+    SDL_ReleaseGPUFence(device, fence);
+}
+
 bool btbh_gpu_window_finish_pending_frame(
     BTBHGPUWindow *window,
     bool submit
@@ -658,29 +670,34 @@ bool btbh_gpu_window_finish_pending_frame(
         const uint64_t submit_finished_ticks = SDL_GetTicksNS();
         result = fence != NULL;
         if (fence != NULL) {
-            const uint32_t index =
-                window->frame_telemetry_pending_count;
-            if (index < BTBH_GPU_FRAME_TELEMETRY_CAPACITY) {
-                BTBHGPUFrameTelemetryPending *pending =
-                    &window->frame_telemetry_pending[index];
-                window->next_frame_telemetry_serial += 1u;
-                pending->fence = fence;
-                pending->frame_serial =
-                    window->next_frame_telemetry_serial;
-                pending->submit_started_ticks =
-                    submit_started_ticks;
-                pending->cpu_submit_milliseconds =
-                    (double)(
-                        submit_finished_ticks -
-                        submit_started_ticks
-                    ) / 1000000.0;
-                window->frame_telemetry_pending_count += 1u;
-            } else {
-                SDL_ReleaseGPUFence(
-                    window->device->gpu,
-                    fence
+            if (window->frame_telemetry_pending_count == BTBH_GPU_FRAME_TELEMETRY_CAPACITY) {
+                /* Full (no poll for that many frames): the oldest sample makes room, its fence long signalled. The
+                   new one's fence stays held until it signals (since 0.11.0; before, it was released at once and
+                   the newest sample dropped). */
+                btbh_gpu_window_release_telemetry_fence(window->device->gpu, window->frame_telemetry_pending[0].fence);
+                window->frame_telemetry_pending_count -= 1u;
+                SDL_memmove(
+                    window->frame_telemetry_pending,
+                    window->frame_telemetry_pending + 1,
+                    window->frame_telemetry_pending_count * sizeof(window->frame_telemetry_pending[0])
                 );
             }
+            const uint32_t index =
+                window->frame_telemetry_pending_count;
+            BTBHGPUFrameTelemetryPending *pending =
+                &window->frame_telemetry_pending[index];
+            window->next_frame_telemetry_serial += 1u;
+            pending->fence = fence;
+            pending->frame_serial =
+                window->next_frame_telemetry_serial;
+            pending->submit_started_ticks =
+                submit_started_ticks;
+            pending->cpu_submit_milliseconds =
+                (double)(
+                    submit_finished_ticks -
+                    submit_started_ticks
+                ) / 1000000.0;
+            window->frame_telemetry_pending_count += 1u;
         }
     } else {
         result = must_submit
@@ -827,12 +844,20 @@ uint32_t btbh_gpu_window_finish_frame_telemetry(
         fences[index] =
             window->frame_telemetry_pending[index].fence;
     }
-    (void)SDL_WaitForGPUFences(
-        window->device->gpu,
-        true,
-        fences,
-        window->frame_telemetry_pending_count
-    );
+    /* 32 at a time (since 0.11.0): asked to wait for all 256 at once, SDL 3.4 on Vulkan (an RTX 3070 Ti, driver
+       621.14) returned at once with the newest still running. */
+    for (
+        uint32_t start = 0u;
+        start < window->frame_telemetry_pending_count;
+        start += 32u
+    ) {
+        (void)SDL_WaitForGPUFences(
+            window->device->gpu,
+            true,
+            &fences[start],
+            SDL_min(32u, window->frame_telemetry_pending_count - start)
+        );
+    }
     return btbh_gpu_window_poll_frame_telemetry(
         window,
         samples,
@@ -852,12 +877,13 @@ void btbh_gpu_window_release_frame_telemetry(
             ? window->device->gpu
             : NULL;
     if (device != NULL) {
+        /* (A frame still running is waited for: its fence must not go back to SDL before it signals.) */
         for (
             uint32_t index = 0u;
             index < window->frame_telemetry_pending_count;
             ++index
         ) {
-            SDL_ReleaseGPUFence(
+            btbh_gpu_window_release_telemetry_fence(
                 device,
                 window->frame_telemetry_pending[index].fence
             );
