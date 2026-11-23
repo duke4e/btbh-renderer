@@ -4965,7 +4965,8 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
                 BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE |
                 BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT |
-                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW
+                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW |
+                BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
             )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
@@ -5047,9 +5048,9 @@ static void btbh_gpu_scene_refuse_batch(
 
 /* RFC 0008: each batch's world detail, and RFC 0009: its world-detail table, and no array texture in a 2D slot.
    RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
-   UV rect may be. Batches often share a detail, a table or a lift, so a run of batches pointing at the same one
-   checks it once. directional_shadow_visibility: the _with_visibility calls' array, or NULL. False with the report
-   naming the batch and the fault. */
+   UV rect may be; and (0.11.0) one with the light factor. Batches often share a detail, a table or a lift, so a run of
+   batches pointing at the same one checks it once. directional_shadow_visibility: the _with_visibility calls' array, or
+   NULL. False with the report naming the batch and the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -5090,6 +5091,13 @@ static bool btbh_gpu_scene_validate_world_details(
             const char *problem = btbh_gpu_particle_uv_rect_problem(batch);
             if (problem != NULL) {
                 btbh_gpu_scene_refuse_batch(report, index, "flags INSTANCE_UV_RECT", problem);
+                return false;
+            }
+        }
+        if (btbh_gpu_scene_light_factor(batch)) {
+            const char *problem = btbh_gpu_scene_light_factor_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "flags INSTANCE_LIGHT_FACTOR", problem);
                 return false;
             }
         }
@@ -7356,9 +7364,12 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     (float)batch->emission_blue / 255.0f;
                 fragment_uniforms.emission_color_energy[3] =
                     batch->emission_energy;
+                /* Bit 9 (512): BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0), the instance's custom x
+                   scales its emission here too (production_light_factor.hlsli). */
                 fragment_uniforms.unlit_enabled =
                     (uint32_t)batch->unlit_enabled |
-                    (batch->rc_receiver != 0u ? 4u : 0u);
+                    (batch->rc_receiver != 0u ? 4u : 0u) |
+                    (btbh_gpu_scene_light_factor(batch) ? 512u : 0u);
                 fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =
                     batch->surface_variant ==
@@ -9946,7 +9957,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     ((batch->flags &
                       BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
                         ? 256u
-                        : 0u);
+                        : 0u) |
+                    /* BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0): the instance's custom x scales its
+                       light (production_light_factor.hlsli; the fast unlit shader reads it too). */
+                    (btbh_gpu_scene_light_factor(batch) ? 512u : 0u);
                 fragment_uniforms.alpha_cutoff =
                     batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =

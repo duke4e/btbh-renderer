@@ -8,12 +8,14 @@ SamplerState dig_mask_sampler : register(s2, space2);
 
 #include "production_temporal.hlsli"
 #include "production_dig_mask.hlsli"
+#include "production_light_factor.hlsli"
 
 cbuffer MaterialPBR : register(b0, space3)
 {
     float4 unused_material_prefix[11];
     float4 emission_color_energy;
-    uint unused_unlit_enabled;
+    // Read for BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR's bit only (production_light_factor.hlsli).
+    uint unlit_enabled;
     float alpha_cutoff;
     uint unused_surface_variant;
     float unused_surface_time;
@@ -33,6 +35,8 @@ struct FragmentInput
     [[vk::location(0)]] float4 color : TEXCOORD0;
     [[vk::location(1)]] float2 texture_coordinate : TEXCOORD1;
     [[vk::location(2)]] float3 world_position : TEXCOORD2;
+    // BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0): custom x, the instance's light.
+    [[vk::location(5)]] float4 instance_custom : TEXCOORD5;
     [[vk::location(9)]] float4 motion_clip_xy : TEXCOORD9;
     [[vk::location(10)]] float2 motion_clip_w : TEXCOORD10;
 };
@@ -71,7 +75,8 @@ FragmentOutput main(FragmentInput input)
     const float3 emission = emission_texture.Sample(
         emission_sampler,
         input.texture_coordinate
-    ).rgb * emission_color_energy.rgb * emission_color_energy.w;
+    ).rgb * emission_color_energy.rgb *
+        (emission_color_energy.w * btbh_instance_light_factor(unlit_enabled, input.instance_custom));
     FragmentOutput output;
     output.color = float4(albedo.rgb + emission, albedo.a);
     output.ambient = 0.0f;

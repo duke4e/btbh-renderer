@@ -4,7 +4,8 @@
 /* RFC 0013 phase 1 (0.11.0): what a batch with BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE or
  * BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT may be, the lit particles' frame block, and C copies of
  * production_particle_lit.frag.hlsl's wrap, phase and fog for the native tests and the smoke's references (as
- * btbh_gpu_world_detail.h is for RFC 0008). Header-only: btbh_gpu_scene.c and the tests include it. */
+ * btbh_gpu_world_detail.h is for RFC 0008). Also (0.11.0) what a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
+ * may be, which reads a custom float as the rect does. Header-only: btbh_gpu_scene.c and the tests include it. */
 
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_world_detail.h"
@@ -75,6 +76,35 @@ static inline const char *btbh_gpu_particle_uv_rect_problem(const BTBHGPUSceneGe
     }
     if (batch->world_detail_table != NULL && batch->world_detail_table->seed_component != 0u) {
         return "world_detail_table's seed_component reads a custom float, which the UV rect takes (it must be 0)";
+    }
+    return NULL;
+}
+
+static inline bool btbh_gpu_scene_light_factor(const BTBHGPUSceneGeometryBatch *batch) {
+    return ((uint32_t)batch->flags & BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR) != 0u;
+}
+
+/* Why a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR can't draw, or NULL. Skinned batches may: their vertex
+   shader passes the custom floats on as the static one does. */
+static inline const char *btbh_gpu_scene_light_factor_problem(const BTBHGPUSceneGeometryBatch *batch) {
+    if (btbh_gpu_particle_uv_rect(batch)) {
+        return "the light factor is custom x, which the UV rect (INSTANCE_UV_RECT) takes: set one or the other";
+    }
+    if (btbh_gpu_particle_lit(batch)) {
+        return "a lit particle takes no light factor (its shader doesn't read it)";
+    }
+    if (batch->surface_variant == BTBH_GPU_SCENE_SURFACE_REFRACT) {
+        return "a refracting batch draws no material, so it has no light to scale";
+    }
+    if (batch->surface_variant == BTBH_GPU_SCENE_SURFACE_DISSOLVE ||
+        batch->surface_variant == BTBH_GPU_SCENE_SURFACE_GLITTER) {
+        return "the surface variant reads custom x (DISSOLVE, GLITTER), which the light factor takes";
+    }
+    if (batch->world_detail != NULL && batch->world_detail->seed_component == 1u) {
+        return "world_detail's seed_component 1 reads custom x, which the light factor takes (y, z, w are free)";
+    }
+    if (batch->world_detail_table != NULL && batch->world_detail_table->seed_component == 1u) {
+        return "world_detail_table's seed_component 1 reads custom x, which the light factor takes (y, z, w are free)";
     }
     return NULL;
 }

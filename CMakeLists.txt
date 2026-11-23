@@ -369,6 +369,17 @@ if(BTBH_BUILD_GPU_SPIKE)
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_temporal.hlsli"
             )
         endif()
+        # The instance's light factor (BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR, since 0.11.0).
+        if(
+            _shader_name MATCHES "^production_model.*\\.frag$" OR
+            _shader_name STREQUAL "production_rc_material_source.frag"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_light_factor.hlsli"
+            )
+        endif()
         if(_shader_name MATCHES "^production_fsr3_")
             file(
                 GLOB_RECURSE

@@ -1165,22 +1165,44 @@ enum {
      * batch: opaque or transparent, lit, unlit (the fast unlit shader too), soft and lit particles, lifted, and the
      * radiance cascades' source pass. Shadows sample no texture and don't change. Static batches only, and not
      * with the surface variants that read the custom floats (DISSOLVE, SHATTER, GLITTER) nor a world detail or table
-     * seeded by one (seed_component not 0): the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
-     * needs this release's static vertex shaders: with SPIR-V ones that don't read it, the present fails with the
-     * shader's path. (Bit 4 is kept for RFC 0013's phase 2.) */
+     * seeded by one (seed_component not 0), nor with BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR: the present fails
+     * with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It needs this release's static vertex shaders: with SPIR-V
+     * ones that don't read it, the present fails with the shader's path. (Bit 4 is kept for RFC 0013's phase 2.) */
     BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT = 1u << 3,
     /* The batch receives no spot (or omni) shadow (since 0.10.0, asked
      * for by Be The Bullet Hell v2: its kaiju, the only thing in its spot map, was darkened by its own map): the
      * spot light lights it unshadowed, and spot_occluder_shadow_strength takes none of its light. What it casts is
      * left to spot_shadow_visible, as before; the directional shadows are as before. Needs this release's scene
      * shaders (production_model*.frag); older ones ignore it. */
-    BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW = 1u << 5
+    BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW = 1u << 5,
+    /* The instance's custom x is its light (since 0.11.0, asked for by Be The Bullet Hell v2 for its district
+     * blackouts): clamped to 0..1 (1 powered, 0 dark; a NaN is 0), it multiplies on that instance alone
+     * - the material's emission (emission_texture times the emission colour times emission_energy),
+     * - the glass detail's share of panes lit at night (pattern 5's detail_parameters[1]),
+     * - the lamp lens detail's glow (pattern 6),
+     * in every pass that draws them (the fast unlit shader too) and in the radiance cascades' source field. Nothing
+     * else changes: the albedo (an unlit batch's colour, and its share of the cascades' sources), the glass's panes,
+     * tint and reflection, the shading, the surface variants' own glows. At 1 the instance draws byte for byte as
+     * without the flag; at 0 as the same batch with emission_energy 0, and detail_parameters[1] 0 on glass or
+     * detail_parameters[3] 0 on a lamp lens. Between them the emission and the lens's glow scale with it and the
+     * glass keeps that share of its lit panes, each at its full light: as it falls they go out one by one. Read per
+     * pixel, taken to the nearest 1/4096 (a value interpolated across a triangle may come a rounding off), so 0, 1 and
+     * every k/4096 are exact; give all of an instance's vertices the same value (it is per instance anyway). Skinned
+     * batches take it too. Not with INSTANCE_UV_RECT, DISSOLVE or GLITTER (they read custom x), a world detail or
+     * table seeded by custom x (seed_component 1; 2 to 4 are free), a lit particle (its shader doesn't take it) nor a
+     * refracting batch (it draws no material): the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
+     * reaches the shaders as a bit of a uniform word and adds no pipeline. Needs this release's scene shaders
+     * (production_model*.frag, production_model_unlit.frag and production_rc_material_source.frag); older ones ignore
+     * it, and the instance draws powered. */
+    BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR = 1u << 6
 };
 
 /* Defined when BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW exists (since 0.10.0). */
 #define BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW 1
 /* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT exists (RFC 0013, since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT 1
+/* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR exists (since 0.11.0). */
+#define BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR 1
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
  * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
