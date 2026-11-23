@@ -4,6 +4,115 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] (0.11.0)
+
+RFC 0012's phase 1 and an extra, both asked for by Be The Bullet Hell v2. A static batch can be lifted by a heightfield
+in the vertex stage (`BTBHGPUSceneGeometryBatch.height_lift`), so ground pieces and their overlays follow a slope
+smoothly instead of stepping cell by cell; and custom-mesh updates can be queued into the next scene instead of each
+submitting a command buffer of its own (`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`). Both are opt-in: a batch without a lift
+and an update without the flag draw byte for byte as before, with the same shaders.
+
+Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (28/28 with the new height lift and mesh queue smokes, 73
+shaders), the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.10.0's candidate
+(`c5390f0b`), each smoke's images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ,
+with nothing set and with the smokes' meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`); every shader that
+existed compiles to the same SPIR-V, MSL and reflection (three FSR 3 MSL files aside, which differ between any two
+builds of the same source). macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The
+Bullet Hell v2 hasn't drawn its Height terrain with it yet.
+
+### Added
+- **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
+  height samples (2..`BTBH_GPU_HEIGHTFIELD_MAX_SIZE`, 4096), sample (i, j) at the texel centre. Kept as RGBA16F, the
+  height and its slope along u and v, filtered bilinearly and clamped at the edges; the heights also stay on the CPU.
+  Heights are halves (within 8..16 units they step by 1/128): a height that isn't finite or lies past ±32768 is refused,
+  naming the sample. Only a lift takes one: every other texture slot refuses it with `BTBH_GPU_INVALID_ARGUMENT` (a
+  batch's four, a world detail's three, a table's `map_layers`, the post LUT, the canvas's texture and target, the
+  render target, the capture destination), and so does `btbh_gpu_texture_update_rgba8`. `btbh_gpu_texture_destroy`
+  frees it.
+- **`BTBHGPUSceneHeightLift`** (40 bytes: `heightfield`, `world_to_uv[4]`, `height_scale` (0 means 1), `height_offset`,
+  `flags`, `reserved`) and **`BTBHGPUSceneGeometryBatch.height_lift`**, appended at 280 (the batch is 288 bytes). After
+  the instance's matrix and the wind every vertex rises by `height_scale * h + height_offset`, h read at its flat world
+  xz through `world_to_uv`; its normal and tangent tilt with the slope, unless
+  **`BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS`** (overlays that keep their shading). In every pass that draws a static
+  batch: opaque, transparent, unlit (the fast unlit pipeline too), additive, soft particles, refraction, with or
+  without a world-detail table. FSR 3's previous position is lifted at its own xz (a static instance on a fixed field
+  moves 0); the opaque front-to-back sort lifts a lifted batch's centres from the CPU heights; the radiance cascades'
+  material sources take it unlifted (they project straight down). Several batches may share a lift; a lift with
+  `heightfield` NULL draws as none.
+  - Refused, naming the batch (`BTBH_GPU_INVALID_ARGUMENT`): a mapping that isn't finite or has a zero scale, a scale
+    or offset that isn't finite, an unknown flag, `reserved` not 0, a heightfield that isn't one or is another
+    window's; with a heightfield set, a batch that is animated, a billboard, dug (`dug_by`), or that would cast a
+    shadow. **A lifted batch casts no shadow in 0.11.0**: it must be transparent, or set
+    `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW` (or have its `directional_shadow_visibility` byte 0) and leave
+    `spot_shadow_visible` 0. It still takes shadows. Lifted casters are RFC 0012's phase 2, if a game asks.
+  - Two new shader files, after their bases in the CMake list: **`production_model_lift.vert`** and
+    **`production_model_detail_table_lift.vert`** (a lift with a world-detail table), with the include
+    `production_height_lift.hlsli`. The core loads them beside the host's `production_model.vert`, for lifted batches
+    only; without them (or with a file of that name that doesn't read a heightfield) a lifted batch fails the present,
+    naming the file. Hosts that name their shaders add them only if they lift.
+  - `BTBH_GPU_SCENE_HAS_HEIGHT_LIFT`.
+- **`btbh_gpu_custom_mesh_update_ex(mesh, vertices, vertex_byte_count, indices, index_count, flags, report)`** and
+  **`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`**: 0 is the plain update (unchanged; it now forwards to `_ex`). With the flag
+  the data is copied at the call into the window's staging area, the mesh's counts and bounds change at once, and the
+  next `btbh_gpu_window_scene_present_instances(_with_visibility)` or `btbh_gpu_window_scene_render_to_target` of the
+  window copies every queued update in its own upload (the transfer and copy pass it already makes for the instances),
+  before it draws: the data shows in the next scene that draws and every one after it.
+  - Rules: a later update of a mesh replaces its queued one; a plain update made after a queued one always lands after
+    it (for a mesh in the shared buffers whose queued update a frame waiting for the canvas copied, the plain update
+    is recorded into that frame after its draws); `btbh_gpu_custom_mesh_destroy` drops the mesh's queued update; a
+    mesh in the shared buffers must fit its ranges, a mesh of its own grows at the call; a scene that fails before it
+    is kept leaves the queue for the next; a closed window drops its queue.
+  - At most `BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES` (256 MiB) queued at a time (replaced updates count until the next
+    scene); past that the call fails and queues nothing. An unknown flag fails. `BTBH_GPU_HAS_QUEUED_MESH_UPDATES`.
+
+### Changed
+- `production_model.vert` carries the lift under `#if BTBH_HEIGHT_LIFT`; without it, it and every shader built from it
+  compile to 0.10.0's SPIR-V, MSL and reflection byte for byte.
+- `height_lift` is part of the same-material run key (RFC 0011): a run never spans two lifts.
+- Tests: `btbh_gpu_height_lift_test` (new, the C copy: halves, slopes, the bilinear read, a plane's lift and normal,
+  orthogonality through the tilt, a v2-style lattice, the refusals' reasons); `btbh_gpu_height_lift_smoke` (new: lifted
+  batches against meshes lifted on the CPU through every pass, the table, every refusal, prewarm, old shaders);
+  `btbh_gpu_mesh_queue_smoke` (new: every queue rule against meshes made with the data, in render-to-target and
+  present, and `BTBH_SMOKE_BENCH=mesh-queue`); the order test's layouts, run key and lifted sort key; the phase 2
+  shader test's lifted shaders; the frame bench's `lift`, `lift-keep` and `lift-flat` modes. `tools/check.ps1` and
+  `tools/check.sh` skip the new smokes with the other GPU smokes (`check.sh` now skips the runs smoke too).
+
+### Measured
+Windows, RTX 3070 Ti, Vulkan, without a debug device. The machine's shared perf lock was held for the runs marked
+*locked*; other sessions' `v2-game` processes (one to five) ran through all of them anyway, so the CPU times are up to
+twice a quiet machine's.
+
+- **Queued custom-mesh updates** (the mesh queue smoke's bench: 200 updates of a 64-vertex mesh a frame, against the
+  same frames without updates; three runs, *locked*): a plain update costs 234–271 µs at the call (v2 measured about
+  170; 156–182 µs here on a quieter run) and 238–275 µs with what it adds to the present. A queued one costs
+  0.43–0.51 µs at the call and 4.3–5.3 µs in all (3.7–4.6 µs of it in the present's upload, where SDL makes two copies a
+  mesh); in the shared buffers 3.4–3.6 µs. About 50 times cheaper: 200 moving marks cost about 1 ms a frame instead of
+  48–55 ms.
+- **A frame without lifted batches** (the frame bench's CPU mode, 2,001 batches; `c5390f0b`'s core and shaders against
+  this branch's, in alternating processes): the GPU does the same work (the same shaders, byte for byte, and the same
+  pixels). On the CPU the quietest runs (14 pairs, not locked) put the geometry encode at +3–4 µs and the shadow encode
+  at +2 µs a frame, about 2 ns a batch (the run key's one more field, the batch's 8 more bytes). The prepare cost +7 µs
+  in a first version, which looked at the lift before the pipeline slot, and +0.7 to +4 µs after the fix (*locked*, 8
+  and 16 pairs). Beside other sessions' processes the pairs scatter by up to ±0.2 ms a frame (*locked* medians: +13 µs
+  geometry, +26 µs shadow encode over 16 pairs), so nothing under about 0.03 ms is resolved there.
+- **Lifted batches** (the frame bench's `lift`, `lift-keep` and `lift-flat` modes: the 2,001 draws, 4.4 million vertices,
+  lifted by a 193 × 145 heightfield, against the same draws unlifted; the pieces cast no shadow in all three; *locked*,
+  three runs, 60 paired rounds): the opaque pass +0.043 ms on the GPU (90 % interval +0.033 to +0.051; the whole frame
+  +0.035), about 0.001 ms per 100,000 lifted vertices, as the RFC estimated; with `KEEP_NORMALS` +0.041 ms (the fetch
+  costs, not the tilt). On the CPU a lifted batch costs 3–7 ns more geometry encode in a run and 2 ns more prepare;
+  with runs off (each batch binding its heightfield) 6–16 ns more encode.
+
+### Upgrading
+- Nothing to set: hosts that don't lift or queue draw as before. Rust hosts with bindgen regenerate the bindings for
+  the bigger batch (288 bytes) and the new functions; `..Default::default()` leaves `height_lift` null.
+- To lift (v2): build the two lifted vertex shaders with the others; make one heightfield a stage (its samples on the
+  lattice's points, `world_to_uv` mapping them to texel centres, as the header shows); point the ground pieces' and the
+  overlays' batches at a lift (the overlays at their height over the ground with `KEEP_NORMALS`), give the ground
+  pieces `BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW`, and stand their instances at height 0. Keep each lift alive and unmoved
+  while a present that uses it runs. Bounds used for culling must span the lift.
+- To queue (v2's conformed marks): `btbh_gpu_custom_mesh_update_ex(..., BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, ...)`.
+- Swift: nothing changes; a `heightLift` option can follow when Be The Bullet Hell (v1) asks.
+
 ## [Unreleased] (0.10.0)
 
 RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch that differs from the one drawn before

@@ -2264,9 +2264,10 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_load_ex(
  * units, or normalise them and use height_scale. Only BTBHGPUSceneHeightLift.heightfield takes one: every other
  * texture slot refuses it with BTBH_GPU_INVALID_ARGUMENT (as an array texture), and so does
  * btbh_gpu_texture_update_rgba8. btbh_gpu_texture_destroy frees it. width and height: 2..BTBH_GPU_HEIGHTFIELD_MAX_SIZE.
- * A NULL or out-of-range argument or a height that isn't finite (the message names the sample): NULL with
- * BTBH_GPU_INVALID_ARGUMENT; a device that can't sample RGBA16F: BTBH_GPU_MISSING_CAPABILITY. report must not be
- * NULL; its width and height are the field's, its mip_count 1. */
+ * A NULL or out-of-range argument, or a height that isn't finite or lies past +-32768 (halves hold the heights and
+ * their differences; the message names the sample): NULL with BTBH_GPU_INVALID_ARGUMENT; a device that can't sample
+ * RGBA16F: BTBH_GPU_MISSING_CAPABILITY. report must not be NULL; its width and height are the field's, its mip_count
+ * 1. */
 BTBHGPUTexture *btbh_gpu_window_heightfield_create(
     BTBHGPUWindow *window,
     const float *heights,

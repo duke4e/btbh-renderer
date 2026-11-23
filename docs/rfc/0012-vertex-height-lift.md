@@ -1,7 +1,8 @@
 # RFC 0012: A vertex-stage height lift from a heightfield
 
-- **Status:** Accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator). Phase 2 only if
-  asked. See "v2's answers"
+- **Status:** Accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator). Phase 1 and the
+  extra (queued custom-mesh updates) implemented on `feature/0.11.0-height-lift`: see "Implementation notes (phase 1
+  and the extra)". Phase 2 only if asked. See "v2's answers"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in and their batches keep today's vertex shaders. They rebuild the shaders with the C core, as every release
@@ -500,6 +501,113 @@ triangles a cell follows the slope cell by cell; a finer bend needs more vertice
 | **The SDF terrain's heightfield base** (RFC 0007) | It meshes its own ground; kit pieces (streets, kerbs, markings) placed on it would still need lifting |
 | **Lifting skinned batches and billboards now** | Units and props stand on the ground rigidly (the host lifts their instance); bending a skinned body by the slope would look wrong. Phase 2 if a game asks |
 | **A lifted shadow vertex shader now** | v2's lifted batches cast none; see "The shadow decision" |
+
+## Implementation notes (phase 1 and the extra, 2026-11-23)
+
+Branch `feature/0.11.0-height-lift` on `c5390f0b` (0.9.0, RFC 0011 phase 1, the RFC 0010–0012 drafts). As drafted, with
+these differences and decisions:
+
+- **Offsets (checked):** `world_detail_table` at 272 and a 280-byte batch on this branch (RFC 0011 phase 1 changed no
+  struct), so `height_lift` sits at 280 and the batch is 288 bytes. `BTBHGPUSceneHeightLift` 40 bytes as drafted.
+- **No lifted shadow shader** (see "The shadow decision"): two new vertex shader files, not three. The rule reads the
+  batch's fields (`transparency_enabled`, `NO_SUN_SHADOW`, the visibility byte, `spot_shadow_visible`), exactly as the
+  shadow passes choose their casters, so no lifted batch reaches a shadow pass.
+- **The slope per sample** (the draft stored it per uv unit): the block's `zw` scale it to world units, and
+  `KEEP_NORMALS` is a zero factor, so the tilt adds exactly nothing (no branch). The draft's `z flags` field is gone.
+- **Heights past ±32768 are refused** at creation (halves hold the heights and their differences); not finite too. The
+  message names the sample.
+- **"Static" means no animation fields:** a batch with `animation_library` or `animation_pose` set and a heightfield is
+  refused, whether or not its model is skinned (the draft said "skinned").
+- **A lift without a heightfield** has only its `flags` and `reserved` checked (as a table without `map_layers`).
+- **The lifted pipeline sets** are allocated by the first lifted batch (442 KiB of pointers otherwise held by every
+  host); prewarm allocates and fills them as a present would. An unlifted batch's pipeline lookup is as before (the
+  slot first, the lift's work only when a lifted batch finds no sets), and a batch without a lift leaves the lift's
+  checks after one pointer test: a first version that looked at the lift before the slot cost a frame of 2,001
+  batches about 7 µs of prepare (measured, then fixed).
+- **The name check** reads the lifted file when its pipeline is made: missing ("is missing") or, in SPIR-V, without
+  `height_lift_field` ("doesn't read a heightfield"), the present fails with the path.
+- **The opaque sort** lifts each instance's bounds centre (the draft said "one key per batch from its centre": the key
+  was already a mean over the instances, so each is lifted where it stands).
+- **Not done:** a C model of the GPU's 8-bit filter weights (the CPU-lifted references differ from the GPU's by those
+  weights: a few edge pixels, and specular sparkles under a world-detail normal map); FSR 3's motion of a lifted batch
+  isn't tested on the GPU; Metal not run.
+- **The extra** as in its section: the copies ride in the scene's own upload (one map, one copy pass, no extra
+  submission). The ordering rule for shared meshes was found while designing it (without it, a plain update between a
+  present and its canvas would be overwritten by the frame's queued copy; the smoke fails that way with the rule taken
+  out).
+- **MSL nondeterminism (unrelated):** three FSR 3 compute shaders' MSL (`production_fsr3_luma_pyramid`,
+  `_prepare_inputs`, `_shading_change_pyramid`) differ between any two builds of the same source in the buffer index
+  SPIRV-Cross gives an atomic image's fallback buffer; their SPIR-V is identical. Every other artefact is byte for byte.
+
+### Tests (exact)
+
+- `tools/check.ps1`: 28/28 (26 + `btbh_gpu_height_lift_smoke` and `btbh_gpu_mesh_queue_smoke`), 73 shaders with SPIR-V
+  and MSL, public headers C11/C++17 /W4 /WX clean (on the tip, and before the last two scene commits).
+- Swift (`BTBH_ENABLE_GPU_TESTS=1`, shaders from the build): build clean; 301 tests, 2 skipped, 0 failures.
+- Native: `btbh_gpu_height_lift_test` 66,135 checks; `btbh_gpu_scene_order_test` (288 bytes, the lift's offsets, 60
+  run-key fields over 288 bytes: 243 bytes break a run, 45 keep it; a lifted batch's sort key); `btbh_gpu_phase2_shaders`
+  (the lifted shaders: 1 sampler, 2 storage buffers, 2 uniform buffers; their bases' inputs and outputs).
+- GPU, `btbh_gpu_height_lift_smoke`: 12 scenes, lifted against CPU-lifted: at most 256 of 36,864 pixels differ by more
+  than 8 (the world-detail table's specular sparkles; 1–4 pixels in the lit, shadowed, sorted, cascaded, transparent
+  and overlay scenes, 90 in the refraction), each scene ~20,000 pixels from its unlifted picture; a lift without a
+  heightfield 0 pixels from none; 34 refusals; prewarm made 40 pipelines and 55 shaders, the renders after it none; the
+  old-shader checks.
+- GPU, `btbh_gpu_mesh_queue_smoke`: 17 byte-for-byte comparisons against meshes made with the data (render-to-target
+  and present), the ordering rule for a shared and an own mesh, the refusals, a closed window.
+- **Identity against `c5390f0b`** (its build wrote, this one compared): flags, prewarm (16 frames + target frames),
+  world detail, runs, scene target, font and SDF terrain: **153 images, 10,577,792 pixels, 0 differ**, with nothing set
+  and again with `BTBH_SMOKE_SHARED_MESHES=1` (152 + the SDF terrain's), and again on the tip (153). Every shader that
+  existed: same SPIR-V, MSL and reflection (the three FSR 3 MSL files aside, above).
+
+### Measured
+
+Windows, RTX 3070 Ti (driver 621.14), Vulkan, without a debug device. Runs marked *locked* held the machine's shared perf
+lock (`perf-lock`, blocks at 03:20–03:24 and 03:51–03:54 on 2026-11-23); one to five other sessions' `v2-game`
+processes ran through every run anyway, so the CPU times are up to twice a quiet machine's (the frame bench's geometry
+encode 0.6 ms against 0.33 ms in the quietest pairs). Logs: `%LOCALAPPDATA%\btbh-wt-0110-bench-locked`, `-locked2` (and
+the unlocked `-bench`).
+
+**Queued custom-mesh updates.** `BTBH_SMOKE_BENCH=mesh-queue`: 200 meshes of 64 vertices (186 indices), each a batch,
+all updated every frame and presented, in rounds interleaving five modes (still, plain, queued, still in the shared
+buffers, queued in the shared buffers); per update, medians of 120 frames a mode, three runs:
+
+| Per update | At the call | In the present (its upload) | In all |
+| --- | --- | --- | --- |
+| Plain (*locked*) | 234–271 µs | 3.7–4.3 µs (0.0) | 238–275 µs |
+| Plain (not locked, quieter) | 156–245 µs | 3.2–3.8 µs | 159–249 µs |
+| Queued, buffers of its own (*locked*) | 0.43–0.51 µs | 3.9–4.8 µs (3.7–4.6) | **4.3–5.3 µs** |
+| Queued, shared buffers (*locked*) | 0.45–0.47 µs | 3.0–3.2 µs (2.9–3.1) | **3.4–3.6 µs** |
+
+The plain update's cost is the transfer buffers, the command buffer and its submission (v2 measured about 170 µs). The
+queued one's is mostly SDL's two uploads a mesh in the present (a barrier pair each; cycling for a mesh of its own).
+200 marks: 48–55 ms a frame plainly, about 1 ms queued.
+
+**A frame without lifted batches** (the frame bench's CPU mode, mode none, 2,001 batches: `c5390f0b`'s core, shaders
+and bench against this branch's, alternating processes, 12 rounds each, the scene report's CPU fields, frames over 1.5×
+their configuration's 25th percentile dropped):
+
+| Set | Pairs | Geometry encode | Prepare | Shadow encode |
+| --- | --- | --- | --- | --- |
+| Quietest (not locked, 1 `v2-game`) | 6 | +3.7 µs (p25 +2.4) | +7.0 µs | +1.7 µs |
+| Not locked, after the validation change | 6 | +3.0 µs (p25 +0.6) | +7.6 µs | noisy |
+| *Locked* block 1, after the pipeline-lookup fix | 8 | +15 µs | +0.7 µs | +16 µs |
+| *Locked* block 2, paired medians | 16 | +13 µs (quartiles +6..+65) | +4.2 µs (+1.7..+8.2) | +26 µs (+11..+39) |
+
+The GPU does the same work: the shaders are the same bytes and the pictures the same pixels. The prepare's +7 µs came
+from a first version of the pipeline lookup that looked at the lift before the slot; fixed (`c9d280f2`). The rest
+scatters with the other processes (the 16 locked pairs' geometry differences run from −0.23 to +0.17 ms): about 2 ns a
+batch in the quietest pairs (the run key's one more field, the batch's 8 more bytes), and nothing under about 0.03 ms a
+frame resolved beside other sessions' processes.
+
+**Lifted batches** (the frame bench's `lift`, `lift-keep`, `lift-flat` modes in one process, five windows with the
+`+noruns` variants, orders rotated between runs; `lift-flat` is the same draws without the lift, all casting no shadow):
+
+- GPU (*locked*, three runs, 60 rounds, every round kept): the opaque pass +0.043 ms (90 % interval +0.033 to +0.051;
+  the whole frame +0.035) for 2,001 lifted draws, 6,112 instances, 2.2 million triangles, 4.4 million vertices: about
+  0.001 ms per 100,000 lifted vertices, the RFC's estimate. `KEEP_NORMALS` +0.041 ms: the fetch costs, the tilt doesn't.
+  (Not locked, beside four `v2-game` processes: +0.006 ms, interval −0.046 to +0.066: unresolved.)
+- CPU (*locked*, three runs): geometry encode +14 µs a frame in runs (7 ns a lifted batch; 3 ns in a quieter unlocked
+  run), +12 µs with runs off (6 ns; 16 ns unlocked), prepare +4 µs (2 ns). `KEEP_NORMALS` the same.
 
 ## Phases
 

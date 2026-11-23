@@ -229,7 +229,8 @@ static void check_plane(void) {
     CHECK(kept_tangent[0] == 0.9f && kept_tangent[1] == -0.3f && kept_tangent[2] == 0.2f);
     CHECK(near_value(position[1], 3.0f, 1.0e-5f));
     free(texels);
-    printf("plane: the lift and its normal exactly, a vertical face's normal unchanged, scale and offset, KEEP_NORMALS\n");
+    printf("plane: the lift and its normal exactly, a vertical face's normal unchanged, scale and offset, "
+        "KEEP_NORMALS\n");
 }
 
 static void check_orthogonal(void) {
