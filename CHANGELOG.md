@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-23
+
 0.11.0: everything in it was asked for by Be The Bullet Hell v2, and all of it is opt-in. With nothing set, every frame
 draws byte for byte as 0.10.0's, and every shader that 0.10.0 had and 0.11.0 doesn't change compiles to the same files.
 - **RFC 0012's phase 1:** a static batch lifted by a heightfield in the vertex stage
@@ -85,8 +87,44 @@ from a cold build:
 
   The mesh queue smoke also passes with an 8 MiB staging budget forced on (a scratch run).
 
-macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
-with 0.11.0 yet.
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified.
+
+Be The Bullet Hell v2 tested the candidate (4dec4eea) on an RTX 3070 Ti, every number under the machine's perf lock.
+It ran on its main at e397c643, on 0.10.0 with its draw-order fix.
+- **Nothing set:** 0 pixels differ from 0.10.0 in its six views (day, night, rain, the Deck preset, the map edge, the
+  cascades at night), checked twice.
+- **The height lift** on its street-level kit, the night's street wash and its ground marks (`KEEP_NORMALS` on the
+  last two):
+  - The CPU path's per-cell terraces are gone, with no seams and no z-fighting.
+  - GPU main pass: +0.055 ms on the Deck preset, +0.14 ms on High.
+  - CPU frame: mean 2.22 → 1.78 ms, p99 4.83 → 2.44 ms. Laying and uploading its marks: 0.70 → 0.06 ms.
+- **Queued uploads:**
+  - The city part's p99: 0.24 → 0.03 ms. The frame's p99: 2.30 → 1.89 ms. Instances sent: 2.00M → 1.40M.
+  - A blackout wave's worst frame: 1.3 ms, against single 7–53 ms stalls with plain uploads.
+  - 0 pixels differ.
+- **Lit smoke**, one `LIT_PARTICLE` batch with a UV rect, six full-view cards. GPU cost against its fake (whose tent
+  filter takes 16 gathers):
+
+  | Preset | Fake | Lit |
+  | --- | --- | --- |
+  | Deck | +0.17 ms | +0.09 ms |
+  | High | +0.37 ms | +0.31 ms |
+
+  Its look is still being tuned.
+- **The light factor:**
+  - At 1 it draws as unflagged.
+  - Half its city dark takes 2239 draws, against 2322 with its dark batches and 2237 with no blackout. Its dark keys
+    can go.
+- **`KEEP_HBAO` with contact AO:** the neon's overlays now match the cascades off. The pixels that differ fell from
+  19 % (up to 203 levels) to 5.6 % (up to 94).
+- **The lazy creation log and the staging budget:**
+  - The log named its 566 ms miss: a skinned pipeline its own prewarm left out.
+  - With a 128 MiB budget, stage 1's first present went from 925–1054 ms to 1.7 ms.
+  - Stage 2's start frame went from 170–179 ms to 104–108 ms, and its present from 42 ms to 3 ms.
+
+0.10.0's Known item on v2's frames is settled:
+- Its 1-level differences are the recompiled shaders: 0.10.0's core with 0.9.0's shaders matches 0.9.0.
+- Its rain glint came from v2's draw order, which changed from process to process. Runs on and off match.
 
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
@@ -466,6 +504,21 @@ The light factor's runs, on the same machine and bench (the Deck preset, 2,001 k
   128 << 20)` once after making the device (128 MiB lets a 4096^2 texture's 64 MiB share the pool), and destroy the old
   stage's resources a few frames before the new stage's first frame (a loading screen's), so that SDL frees their
   memory there.
+
+### Known
+- **The lift's pipelines are made on first use** unless the prewarm sees them. Give `btbh_gpu_window_scene_prewarm` a
+  lifted batch (a template with a heightfield) of each kind drawn lifted.
+- **Be The Bullet Hell v2's geometry encoding grew by 0.08 ms with the lift.** A lifted batch is drawn with its own
+  pipeline, and its `height_lift` is part of the run key. Batches lifted with the same lift and material therefore
+  keep their runs, but lifted and unlifted batches interleaved switch pipelines. Sort the lifted batches together.
+- **`KEEP_HBAO` draws every transparent unlit batch as without the cascades**, the kaiju's beam and glows included:
+  they lose the cascades' point-light boost. Under contact AO, opaque lit surfaces in a street lamp's pool still differ
+  from the cascades off by up to 94 levels, with the flag or without: its HBAO part, the ambient light, applies to HBAO
+  only.
+- **The light factor at 0 leaves a glass pane drawn in its albedo**, the wall's, so drop dark cells' panes as before.
+- **Random ~40 ms submits and 5–12 ms swapchain acquires** in a run's first frames: v2 sees them on 0.10.0 too. They
+  are SDL's or the driver's.
+- **macOS (Metal) and a real Steam Deck** aren't verified.
 
 ## [0.10.0] — 2026-11-23
 

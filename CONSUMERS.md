@@ -73,12 +73,13 @@ Since 0.10.0:
 - each emitter's `top_above` filled per class, with `source_tops` off until its lamps return as explicit emitters
   (RFC 0010).
 
-Requested for 0.11.0:
-- a vertex lift from a heightfield and mesh updates queued into the frame (RFC 0012);
-- lit particles (RFC 0013 phase 1);
-- queued partial instance-buffer uploads;
-- a log of what the prewarm missed;
-- a per-instance light factor for blackouts.
+Adopting with 0.11.0 (tested on the candidate):
+- the height lift on its street-level kit, street wash and ground marks (RFC 0012);
+- queued mesh updates and partial instance uploads;
+- the light factor for its blackouts;
+- `KEEP_HBAO` with contact AO;
+- the upload staging budget;
+- lit smoke (RFC 0013 phase 1), once its look is tuned.
 
 Later: the particles' transmittance map (RFC 0013 phase 2), BC texture formats (RFC 0008 phase 2), and descriptor
 pools made before the first frames.

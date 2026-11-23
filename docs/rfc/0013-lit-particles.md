@@ -1,7 +1,7 @@
 # RFC 0013: Lit particles
 
-- **Status:** Phase 1 accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator); phase 2 after
-  v2's phase 1 captures. See "Decisions"
+- **Status:** Phase 1 accepted on 2026-11-23 (the owner left the decision to the coordinator) and released in v0.11.0;
+  phase 2 after v2's phase 1 captures. See "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-23, after it shipped fake-lit smoke)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in. They rebuild the scene shaders with the C core, as every release. `SOFT_PARTICLE`, which CHIMERA and v2 draw,

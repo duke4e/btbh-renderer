@@ -1,10 +1,11 @@
 # RFC 0012: A vertex-stage height lift from a heightfield
 
-- **Status:** Accepted on 2026-11-23 for 0.11.0 (the owner left the decision to the coordinator). Phase 1 and the
-  extra (queued custom-mesh updates) implemented on `feature/0.11.0-height-lift`: see "Implementation notes (phase 1
-  and the extra)". Queued instance buffer uploads and partial mesh updates (v2's night perf round) on
-  `feature/0.11.0-queued-uploads`: see "Queued instance uploads and partial updates". Phase 2 only if asked. See
-  "v2's answers"
+- **Status:** Accepted on 2026-11-23 (the owner left the decision to the coordinator). Released in v0.11.0:
+  - phase 1 and the extra (queued custom-mesh updates): see "Implementation notes (phase 1 and the extra)";
+  - queued instance buffer uploads and partial mesh updates (v2's night perf round): see "Queued instance uploads and
+    partial updates".
+
+  Phase 2 only if asked. See "v2's answers"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
   opt-in and their batches keep today's vertex shaders. They rebuild the shaders with the C core, as every release
