@@ -1927,6 +1927,57 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload(
     uint32_t byte_count,
     BTBHGPUInstanceBufferReport *report
 );
+/* btbh_gpu_instance_buffer_upload_ex's flags (since 0.11.0). Without any, the upload is btbh_gpu_instance_buffer_upload:
+ * a command buffer acquired and submitted per call (about 0.17 ms whatever its size) that cycles the buffer, so a frame
+ * still drawing it keeps its data, but everything outside the uploaded range is undefined after it; a host that
+ * changes part of a buffer has to upload all of it. */
+enum {
+    /* The upload is queued into the window's next scene and written in place. The bytes are copied at the call into
+     * the window's upload queue (the one BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED uses), and the uploaded prefix (the
+     * instances a batch may draw) grows at once. The next btbh_gpu_window_scene_present_instances(_with_visibility)
+     * or btbh_gpu_window_scene_render_to_target of the buffer's window copies every queued upload into the GPU at the
+     * start of its own command buffer, in one transfer and one copy pass with the scene's instances and the queued
+     * mesh updates, before it draws anything: so the new data shows in the next scene that draws, whichever of the two
+     * comes first, and in every one after it. The buffer isn't cycled: everything outside the range keeps its data.
+     * Frames submitted before that scene, and a scene presented but not yet submitted by the canvas, draw the old data
+     * (on the GPU's one queue the copy runs after them). Rules:
+     * - Uploads of one buffer land in the order they were made, queued or not: where a later upload overlaps a queued
+     *   one that no scene has copied yet, the later one's bytes land (a queued one it covers entirely is dropped),
+     *   several queued uploads of one frame included. A BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE upload made after a
+     *   queued one that a scene presented but not yet submitted by the canvas has copied goes into that frame after
+     *   its draws, so it lands after it. A plain upload (no flags) cycles the buffer as always: after it only its own
+     *   range is defined, a queued range that frame copied included.
+     * - btbh_gpu_instance_buffer_destroy drops the buffer's queued uploads; one already copied into a frame that isn't
+     *   submitted yet still runs (SDL frees the buffers after it).
+     * - A scene that fails before it is submitted leaves the queue as it was, for the next one. A frame that copied
+     *   queued uploads is submitted even when it is dropped (the canvas refuses its submission, or the next scene is
+     *   presented without one), so that they land. A window closed with uploads queued drops them.
+     * - The window's queue holds at most BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES at a time, queued mesh updates and
+     *   instance uploads together (replaced ranges count until the next scene): past that the call fails with
+     *   BTBH_GPU_INVALID_ARGUMENT and queues nothing.
+     * A window that queues nothing draws as before. */
+    BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED = 1u << 0,
+    /* The upload is submitted at once, as without flags, but written in place: everything outside the range keeps its
+     * data. Frames submitted before it draw the old data (the GPU runs the copy after them, waiting if they still read
+     * the buffer). While a scene presented but not yet submitted by the canvas waits, the upload goes into that frame's
+     * command buffer after its draws instead of a submission of its own: that frame draws the old data, every one after
+     * it the new. Overlapping queued uploads not yet copied take its bytes, as above. With
+     * BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED it changes nothing (a queued upload never cycles). */
+    BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE = 1u << 1
+};
+/* btbh_gpu_instance_buffer_upload with BTBH_GPU_INSTANCE_BUFFER_UPLOAD_* flags; 0 is btbh_gpu_instance_buffer_upload.
+ * An unknown bit fails with BTBH_GPU_INVALID_ARGUMENT. The range and the report are btbh_gpu_instance_buffer_upload's. */
+BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
+    BTBHGPUInstanceBuffer *buffer,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count,
+    uint32_t flags,
+    BTBHGPUInstanceBufferReport *report
+);
+/* Defined when btbh_gpu_instance_buffer_upload_ex, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED and
+ * BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE exist (since 0.11.0). */
+#define BTBH_GPU_HAS_QUEUED_INSTANCE_UPLOADS 1
 void btbh_gpu_instance_buffer_destroy(BTBHGPUInstanceBuffer *buffer);
 uint8_t btbh_gpu_pack_transform_stream_instances(
     float *destination,
@@ -2009,20 +2060,23 @@ enum {
      * start of its own command buffer, in one transfer and one copy pass with the scene's instances, before it draws
      * anything: so the new data shows in the next scene that draws, whichever of the two comes first, and in every
      * one after it. Rules:
-     * - A later update of the same mesh, queued or not, replaces a queued one that no scene has copied yet. A plain
-     *   update made after a queued one always lands after it: on a mesh in the shared buffers whose queued update a
-     *   scene presented but not yet submitted by the canvas has copied, the plain update is recorded into that
-     *   frame's command buffer after its draws, which keep the queued data.
+     * - A later update of the same mesh, queued or not, replaces the queued ones that no scene has copied yet (a
+     *   partial one, btbh_gpu_custom_mesh_update_range, only where it overlaps them). A plain update made after a
+     *   queued one always lands after it: on a mesh in the shared buffers whose queued update a scene presented but
+     *   not yet submitted by the canvas has copied, the plain update is recorded into that frame's command buffer
+     *   after its draws, which keep the queued data.
      * - btbh_gpu_custom_mesh_destroy drops the mesh's queued update; one already copied into a frame that isn't
      *   submitted yet still runs (SDL frees the buffers after it).
      * - A mesh in the shared buffers (BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS): as without the flag, the update must fit
      *   the mesh's ranges and is written in place; a mesh with buffers of its own grows them at the call when the
      *   update needs more, and its frames in flight keep their data (SDL's cycling).
-     * - A scene that fails before it is submitted leaves the queue as it was, for the next one. A window closed with
-     *   updates queued drops them.
-     * - The queue holds at most BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES of vertex and index data at a time (replaced
-     *   updates count until the next scene): past that the call fails with BTBH_GPU_INVALID_ARGUMENT and queues
-     *   nothing. One update's limits are btbh_gpu_custom_mesh_update's.
+     * - A scene that fails before it is submitted leaves the queue as it was, for the next one. A frame that copied
+     *   queued updates is submitted even when it is dropped (the canvas refuses its submission, or the next scene is
+     *   presented without one), so that they land. A window closed with updates queued drops them.
+     * - The queue holds at most BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES of data at a time, vertices and indices and
+     *   queued instance buffer uploads (BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED) together (replaced updates count until
+     *   the next scene): past that the call fails with BTBH_GPU_INVALID_ARGUMENT and queues nothing. One update's
+     *   limits are btbh_gpu_custom_mesh_update's.
      * A window that queues nothing draws as before. */
     BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED = 1u << 0
 };
@@ -2040,6 +2094,38 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
 );
 /* Defined when btbh_gpu_custom_mesh_update_ex and BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED exist (since 0.11.0). */
 #define BTBH_GPU_HAS_QUEUED_MESH_UPDATES 1
+/* A partial update (since 0.11.0): vertex_byte_count / 96 vertices written from vertex first_vertex, and index_count
+ * indices from index first_index, in place (either part may be empty, not both; an empty part's pointer may be NULL).
+ * The rest of the mesh keeps its data and its counts don't change: the range must lie within them (first_vertex plus
+ * the vertices at most the vertex count, first_index + index_count at most the index count), and every index must be
+ * below the vertex count. For meshes with buffers of their own and in the shared buffers alike. The mesh's bounds (the
+ * opaque sort's, BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK) grow to cover the new vertices and never shrink: the old
+ * vertices aren't kept to measure again (a whole update measures afresh); a position that isn't finite makes them
+ * unknown, as on create. flags: 0 or BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED.
+ * - 0: submitted at once without cycling (a mesh with buffers of its own too). Frames submitted before it draw the
+ *   old data (the GPU runs the copy after them). While a scene presented but not yet submitted by the canvas waits, it
+ *   goes into that frame's command buffer after its draws instead: that frame draws the old data, every one after it
+ *   the new; a queued update that frame copied lands first.
+ * - BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED: copied at the call and written by the window's next scene, as a queued whole
+ *   update, never cycling. Updates of one mesh land in the order they were made: where a partial update overlaps
+ *   queued ones not yet copied (whole or partial, queued or not), its data lands; a whole update replaces every
+ *   queued partial one before it.
+ * The report holds the mesh's counts. Refused with BTBH_GPU_INVALID_ARGUMENT, the mesh as it was: an unknown flag, no
+ * data, a vertex byte count not a multiple of 96, a range past the counts, an index past the vertices, a full queue
+ * (BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES). */
+BTBHGPUResult btbh_gpu_custom_mesh_update_range(
+    BTBHGPUCustomMesh *mesh,
+    uint32_t first_vertex,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t first_index,
+    const uint32_t *indices,
+    uint32_t index_count,
+    uint32_t flags,
+    BTBHGPUCustomMeshReport *report
+);
+/* Defined when btbh_gpu_custom_mesh_update_range exists (since 0.11.0). */
+#define BTBH_GPU_HAS_PARTIAL_MESH_UPDATES 1
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
 /* Same-material runs (since 0.10.0, RFC 0011). In every pass that draws batches (opaque, transparent, refraction, the
  * shadow maps, the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but

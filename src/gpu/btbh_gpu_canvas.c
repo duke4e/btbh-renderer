@@ -610,7 +610,10 @@ bool btbh_gpu_window_finish_pending_frame(
     SDL_GPUCommandBuffer *command = window->pending_command;
     const bool acquired_swapchain =
         window->pending_swapchain != NULL;
-    const bool must_submit = submit || acquired_swapchain;
+    /* A frame that holds queued uploads (or a write recorded after its draws) is submitted even when it is dropped,
+       so that they land (since 0.11.0; a host that never queues drops such frames as before). */
+    const bool holds_uploads = btbh_gpu_upload_queue_finish_pending(window);
+    const bool must_submit = submit || acquired_swapchain || holds_uploads;
     window->pending_command = NULL;
     window->pending_swapchain = NULL;
     window->pending_scene_ready = false;

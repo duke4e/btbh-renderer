@@ -28,11 +28,12 @@ static void btbh_gpu_custom_mesh_error(
     );
 }
 
-/* Uploads the vertices and the indices in one submission, at the given byte offsets of their buffers. `cycle`: a
-   buffer of the mesh's own that a frame still uses gets new memory (SDL's cycling), so that frame keeps the old data;
-   a shared mesh's buffers are the arena's and must not cycle (the rest of the block would be lost). `into`: NULL to
+/* Uploads the vertices and the indices in one submission, at the given byte offsets of their buffers (either may be
+   empty: a partial update, since 0.11.0). `cycle`: a buffer of the mesh's own that a frame still uses gets new memory
+   (SDL's cycling), so that frame keeps the old data; a shared mesh's buffers are the arena's and must not cycle (the
+   rest of the block would be lost), nor must a partial update's (the rest of the mesh would be). `into`: NULL to
    acquire and submit a command buffer of its own (as since 0.1.0); otherwise the copy pass is recorded into that one
-   (a frame waiting for the canvas, BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's ordering rule) and nothing is submitted. */
+   (a frame waiting for the canvas, the upload queue's ordering rules) and nothing is submitted. */
 static bool btbh_gpu_custom_mesh_upload_buffers(
     SDL_GPUDevice *device,
     SDL_GPUBuffer *vertex_buffer,
@@ -47,38 +48,42 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
     SDL_GPUCommandBuffer *into,
     BTBHGPUCustomMeshReport *report
 ) {
-    SDL_GPUTransferBufferCreateInfo vertex_transfer_info = {0};
-    vertex_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    vertex_transfer_info.size = vertex_byte_count;
-    SDL_GPUTransferBuffer *vertex_transfer = SDL_CreateGPUTransferBuffer(
-        device,
-        &vertex_transfer_info
-    );
-    if (vertex_transfer == NULL) {
-        btbh_gpu_custom_mesh_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
+    SDL_GPUTransferBuffer *vertex_transfer = NULL;
+    void *mapped = NULL;
+    if (vertex_byte_count > 0u) {
+        SDL_GPUTransferBufferCreateInfo vertex_transfer_info = {0};
+        vertex_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        vertex_transfer_info.size = vertex_byte_count;
+        vertex_transfer = SDL_CreateGPUTransferBuffer(
+            device,
+            &vertex_transfer_info
         );
-        return false;
-    }
+        if (vertex_transfer == NULL) {
+            btbh_gpu_custom_mesh_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            return false;
+        }
 
-    void *mapped = SDL_MapGPUTransferBuffer(
-        device,
-        vertex_transfer,
-        false
-    );
-    if (mapped == NULL) {
-        btbh_gpu_custom_mesh_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
+        mapped = SDL_MapGPUTransferBuffer(
+            device,
+            vertex_transfer,
+            false
         );
-        SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
-        return false;
+        if (mapped == NULL) {
+            btbh_gpu_custom_mesh_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            return false;
+        }
+        memcpy(mapped, vertices, vertex_byte_count);
+        SDL_UnmapGPUTransferBuffer(device, vertex_transfer);
     }
-    memcpy(mapped, vertices, vertex_byte_count);
-    SDL_UnmapGPUTransferBuffer(device, vertex_transfer);
 
     SDL_GPUTransferBuffer *index_transfer = NULL;
     if (index_byte_count > 0u) {
@@ -95,7 +100,9 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
                 BTBH_GPU_DEVICE_FAILURE,
                 SDL_GetError()
             );
-            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            if (vertex_transfer != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            }
             return false;
         }
         mapped = SDL_MapGPUTransferBuffer(
@@ -110,7 +117,9 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
                 SDL_GetError()
             );
             SDL_ReleaseGPUTransferBuffer(device, index_transfer);
-            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            if (vertex_transfer != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            }
             return false;
         }
         memcpy(mapped, indices, index_byte_count);
@@ -133,22 +142,26 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
         if (index_transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(device, index_transfer);
         }
-        SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+        if (vertex_transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+        }
         return false;
     }
 
-    SDL_GPUTransferBufferLocation vertex_source = {0};
-    vertex_source.transfer_buffer = vertex_transfer;
-    SDL_GPUBufferRegion vertex_destination = {0};
-    vertex_destination.buffer = vertex_buffer;
-    vertex_destination.offset = vertex_offset;
-    vertex_destination.size = vertex_byte_count;
-    SDL_UploadToGPUBuffer(
-        copy,
-        &vertex_source,
-        &vertex_destination,
-        cycle
-    );
+    if (vertex_byte_count > 0u) {
+        SDL_GPUTransferBufferLocation vertex_source = {0};
+        vertex_source.transfer_buffer = vertex_transfer;
+        SDL_GPUBufferRegion vertex_destination = {0};
+        vertex_destination.buffer = vertex_buffer;
+        vertex_destination.offset = vertex_offset;
+        vertex_destination.size = vertex_byte_count;
+        SDL_UploadToGPUBuffer(
+            copy,
+            &vertex_source,
+            &vertex_destination,
+            cycle
+        );
+    }
     if (index_byte_count > 0u) {
         SDL_GPUTransferBufferLocation index_source = {0};
         index_source.transfer_buffer = index_transfer;
@@ -169,7 +182,9 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
     if (index_transfer != NULL) {
         SDL_ReleaseGPUTransferBuffer(device, index_transfer);
     }
-    SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+    if (vertex_transfer != NULL) {
+        SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+    }
     if (!submitted) {
         btbh_gpu_custom_mesh_error(
             report,
@@ -574,38 +589,44 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_ex(
     return mesh;
 }
 
-/* ---- BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): updates queued into the window's next scene ---- */
+/* ---- The window's upload queue (since 0.11.0): BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's updates, whole and partial, and
+   BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED's uploads, copied by the window's next scene ---- */
 
 /* Each queued range starts at a multiple of this in the queue's bytes and in the scene's transfer buffer (Metal's
    blit encoder wants offsets in multiples of 4; 16 keeps every float vector aligned). */
-#define BTBH_GPU_CUSTOM_MESH_QUEUE_ALIGNMENT 16u
+#define BTBH_GPU_UPLOAD_QUEUE_ALIGNMENT 16u
 
-static uint32_t btbh_gpu_custom_mesh_queue_align(uint32_t value) {
-    return (value + (BTBH_GPU_CUSTOM_MESH_QUEUE_ALIGNMENT - 1u)) & ~(BTBH_GPU_CUSTOM_MESH_QUEUE_ALIGNMENT - 1u);
+static uint32_t btbh_gpu_upload_queue_align(uint32_t value) {
+    return (value + (BTBH_GPU_UPLOAD_QUEUE_ALIGNMENT - 1u)) & ~(BTBH_GPU_UPLOAD_QUEUE_ALIGNMENT - 1u);
 }
 
-/* Takes the mesh's waiting update out of the queue (a later update replaces it, or the mesh goes): its entry and
-   bytes stay as a hole until the next scene empties the queue. */
-static void btbh_gpu_custom_mesh_queue_drop(BTBHGPUCustomMesh *mesh) {
-    if (mesh->queue_entry == 0u || mesh->owner == NULL) {
-        mesh->queue_entry = 0u;
+static uint32_t *btbh_gpu_upload_queue_head(BTBHGPUCustomMesh *mesh, BTBHGPUInstanceBuffer *instance_buffer) {
+    return mesh != NULL ? &mesh->queue_head : &instance_buffer->queue_head;
+}
+
+/* The range is no longer copied (a later write replaced it, or its target went); its bytes stay as a hole until the
+   next scene empties the queue. */
+static void btbh_gpu_upload_queue_kill(BTBHGPUUploadQueue *queue, BTBHGPUUploadQueueEntry *entry) {
+    if (!entry->live) {
         return;
     }
-    BTBHGPUCustomMeshQueue *queue = &mesh->owner->mesh_queue;
-    BTBHGPUCustomMeshQueueEntry *entry = &queue->entries[mesh->queue_entry - 1u];
+    entry->live = false;
     queue->live_count -= 1u;
-    queue->live_bytes -= btbh_gpu_custom_mesh_queue_align(entry->vertex_byte_count) +
-        btbh_gpu_custom_mesh_queue_align(entry->index_byte_count);
-    entry->mesh = NULL;
-    mesh->queue_entry = 0u;
+    queue->live_bytes -= btbh_gpu_upload_queue_align(entry->byte_count);
 }
 
-static void btbh_gpu_custom_mesh_queue_clear(BTBHGPUCustomMeshQueue *queue) {
+static void btbh_gpu_upload_queue_clear(BTBHGPUUploadQueue *queue) {
     for (uint32_t index = 0u; index < queue->entry_count; ++index) {
-        if (queue->entries[index].mesh != NULL) {
-            queue->entries[index].mesh->queue_entry = 0u;
-            queue->entries[index].mesh = NULL;
+        BTBHGPUUploadQueueEntry *entry = &queue->entries[index];
+        if (entry->mesh != NULL) {
+            entry->mesh->queue_head = 0u;
         }
+        if (entry->instance_buffer != NULL) {
+            entry->instance_buffer->queue_head = 0u;
+        }
+        entry->mesh = NULL;
+        entry->instance_buffer = NULL;
+        entry->live = false;
     }
     queue->entry_count = 0u;
     queue->live_count = 0u;
@@ -614,20 +635,88 @@ static void btbh_gpu_custom_mesh_queue_clear(BTBHGPUCustomMeshQueue *queue) {
     queue->recorded = false;
 }
 
-/* Room for one more entry and `byte_count` more bytes; false when memory runs out (nothing changed). */
-static bool btbh_gpu_custom_mesh_queue_reserve(BTBHGPUCustomMeshQueue *queue, uint32_t byte_count) {
-    if (queue->entry_count == queue->entry_capacity) {
-        const uint32_t capacity = queue->entry_capacity == 0u ? 64u : queue->entry_capacity * 2u;
-        BTBHGPUCustomMeshQueueEntry *entries =
-            (BTBHGPUCustomMeshQueueEntry *) realloc(queue->entries, sizeof(*entries) * capacity);
-        if (entries == NULL) {
-            return false;
+/* A write of `byte_count` bytes at `byte_offset` of the target's `part`, later than its queued ranges: those it covers
+   are dropped, those it overlaps take its bytes there. True when one of them holds the write entirely (it then
+   carries all of it). */
+static bool btbh_gpu_upload_queue_patch(
+    BTBHGPUUploadQueue *queue,
+    uint32_t head,
+    BTBHGPUUploadPart part,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count
+) {
+    const uint64_t start = byte_offset;
+    const uint64_t end = start + byte_count;
+    bool held = false;
+    for (uint32_t link = head; link != 0u; link = queue->entries[link - 1u].next) {
+        BTBHGPUUploadQueueEntry *entry = &queue->entries[link - 1u];
+        if (!entry->live || entry->part != (uint8_t) part) {
+            continue;
         }
-        queue->entries = entries;
-        queue->entry_capacity = capacity;
+        const uint64_t entry_start = entry->byte_offset;
+        const uint64_t entry_end = entry_start + entry->byte_count;
+        if (entry_end <= start || end <= entry_start) {
+            continue;
+        }
+        if (start <= entry_start && entry_end <= end) {
+            btbh_gpu_upload_queue_kill(queue, entry);
+            continue;
+        }
+        const uint64_t from = start > entry_start ? start : entry_start;
+        const uint64_t to = end < entry_end ? end : entry_end;
+        memcpy(
+            queue->bytes + entry->data_offset + (size_t) (from - entry_start),
+            (const uint8_t *) bytes + (size_t) (from - start),
+            (size_t) (to - from)
+        );
+        held = held || (entry_start <= start && end <= entry_end);
+    }
+    return held;
+}
+
+bool btbh_gpu_upload_queue_prepare(
+    BTBHGPUWindow *window,
+    uint32_t first_byte_count,
+    uint32_t second_byte_count,
+    const char *what,
+    char *message,
+    size_t message_size,
+    bool *out_of_memory
+) {
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
+    const uint64_t byte_count = (uint64_t) btbh_gpu_upload_queue_align(first_byte_count) +
+        (uint64_t) btbh_gpu_upload_queue_align(second_byte_count);
+    *out_of_memory = false;
+    if ((uint64_t) queue->byte_count + byte_count > BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES) {
+        (void) snprintf(
+            message,
+            message_size,
+            "%s: the window's queue holds %u bytes and this one adds %llu, past "
+            "BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES (%u); present a scene, or go without the flag",
+            what,
+            queue->byte_count,
+            (unsigned long long) byte_count,
+            (uint32_t) BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES
+        );
+        return false;
+    }
+    if (queue->entry_count + 2u > queue->entry_capacity) {
+        uint32_t capacity = queue->entry_capacity == 0u ? 64u : queue->entry_capacity * 2u;
+        while (capacity < queue->entry_count + 2u) {
+            capacity *= 2u;
+        }
+        BTBHGPUUploadQueueEntry *entries =
+            (BTBHGPUUploadQueueEntry *) realloc(queue->entries, sizeof(*entries) * capacity);
+        if (entries == NULL) {
+            *out_of_memory = true;
+        } else {
+            queue->entries = entries;
+            queue->entry_capacity = capacity;
+        }
     }
     const uint64_t needed = (uint64_t) queue->byte_count + byte_count;
-    if (needed > queue->byte_capacity) {
+    if (!*out_of_memory && needed > queue->byte_capacity) {
         uint64_t capacity = queue->byte_capacity == 0u ? 64u * 1024u : queue->byte_capacity;
         while (capacity < needed) {
             capacity *= 2u;
@@ -635,103 +724,210 @@ static bool btbh_gpu_custom_mesh_queue_reserve(BTBHGPUCustomMeshQueue *queue, ui
         if (capacity > BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES) {
             capacity = BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES;
         }
-        uint8_t *bytes = (uint8_t *) realloc(queue->bytes, (size_t) capacity);
-        if (bytes == NULL) {
-            return false;
+        uint8_t *grown = (uint8_t *) realloc(queue->bytes, (size_t) capacity);
+        if (grown == NULL) {
+            *out_of_memory = true;
+        } else {
+            queue->bytes = grown;
+            queue->byte_capacity = (uint32_t) capacity;
         }
-        queue->bytes = bytes;
-        queue->byte_capacity = (uint32_t) capacity;
+    }
+    if (*out_of_memory) {
+        (void) snprintf(message, message_size, "%s: could not allocate room in the window's upload queue", what);
+        return false;
     }
     return true;
 }
 
-uint32_t btbh_gpu_custom_mesh_queue_size(const BTBHGPUWindow *window) {
-    return window != NULL ? window->mesh_queue.live_bytes : 0u;
+void btbh_gpu_upload_queue_push(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer,
+    BTBHGPUUploadPart part,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count,
+    bool cycle
+) {
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
+    uint32_t *head = btbh_gpu_upload_queue_head(mesh, instance_buffer);
+    if (btbh_gpu_upload_queue_patch(queue, *head, part, byte_offset, bytes, byte_count)) {
+        return;
+    }
+    BTBHGPUUploadQueueEntry *entry = &queue->entries[queue->entry_count];
+    entry->mesh = mesh;
+    entry->instance_buffer = instance_buffer;
+    entry->next = *head;
+    entry->data_offset = queue->byte_count;
+    entry->byte_offset = byte_offset;
+    entry->byte_count = byte_count;
+    entry->part = (uint8_t) part;
+    entry->cycle = cycle;
+    entry->live = true;
+    memcpy(queue->bytes + entry->data_offset, bytes, byte_count);
+    queue->byte_count += btbh_gpu_upload_queue_align(byte_count);
+    queue->entry_count += 1u;
+    queue->live_count += 1u;
+    queue->live_bytes += btbh_gpu_upload_queue_align(byte_count);
+    *head = queue->entry_count;
 }
 
-void btbh_gpu_custom_mesh_queue_write(const BTBHGPUWindow *window, uint8_t *destination) {
-    const BTBHGPUCustomMeshQueue *queue = &window->mesh_queue;
+void btbh_gpu_upload_queue_overwrite(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer,
+    BTBHGPUUploadPart part,
+    uint32_t byte_offset,
+    const void *bytes,
+    uint32_t byte_count
+) {
+    const uint32_t head = *btbh_gpu_upload_queue_head(mesh, instance_buffer);
+    if (window == NULL || head == 0u) {
+        return;
+    }
+    (void) btbh_gpu_upload_queue_patch(&window->upload_queue, head, part, byte_offset, bytes, byte_count);
+}
+
+void btbh_gpu_upload_queue_drop(
+    BTBHGPUWindow *window,
+    BTBHGPUCustomMesh *mesh,
+    BTBHGPUInstanceBuffer *instance_buffer
+) {
+    uint32_t *head = btbh_gpu_upload_queue_head(mesh, instance_buffer);
+    if (window == NULL) {
+        *head = 0u;
+        return;
+    }
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
+    for (uint32_t link = *head; link != 0u; link = queue->entries[link - 1u].next) {
+        BTBHGPUUploadQueueEntry *entry = &queue->entries[link - 1u];
+        /* Forgotten too: the chain starts afresh, and nothing may reach the target through an entry it no longer
+           links (it may be destroyed before the queue empties). */
+        btbh_gpu_upload_queue_kill(queue, entry);
+        entry->mesh = NULL;
+        entry->instance_buffer = NULL;
+    }
+    *head = 0u;
+}
+
+SDL_GPUCommandBuffer *btbh_gpu_upload_queue_pending_command(
+    const BTBHGPUWindow *window,
+    uint64_t copied_serial
+) {
+    return window->pending_command != NULL &&
+            copied_serial != 0u &&
+            copied_serial == window->upload_queue.pending_serial
+        ? window->pending_command
+        : NULL;
+}
+
+void btbh_gpu_upload_queue_note_pending_write(BTBHGPUWindow *window) {
+    window->upload_queue.pending_holds = true;
+}
+
+bool btbh_gpu_upload_queue_finish_pending(BTBHGPUWindow *window) {
+    const bool holds = window->upload_queue.pending_holds;
+    window->upload_queue.pending_holds = false;
+    return holds;
+}
+
+uint32_t btbh_gpu_upload_queue_size(const BTBHGPUWindow *window) {
+    return window != NULL ? window->upload_queue.live_bytes : 0u;
+}
+
+void btbh_gpu_upload_queue_write(const BTBHGPUWindow *window, uint8_t *destination) {
+    const BTBHGPUUploadQueue *queue = &window->upload_queue;
     uint32_t offset = 0u;
     for (uint32_t index = 0u; index < queue->entry_count; ++index) {
-        const BTBHGPUCustomMeshQueueEntry *entry = &queue->entries[index];
-        if (entry->mesh == NULL) {
+        const BTBHGPUUploadQueueEntry *entry = &queue->entries[index];
+        if (!entry->live) {
             continue;
         }
-        memcpy(destination + offset, queue->bytes + entry->vertex_offset, entry->vertex_byte_count);
-        offset += btbh_gpu_custom_mesh_queue_align(entry->vertex_byte_count);
-        if (entry->index_byte_count > 0u) {
-            memcpy(destination + offset, queue->bytes + entry->index_offset, entry->index_byte_count);
-            offset += btbh_gpu_custom_mesh_queue_align(entry->index_byte_count);
-        }
+        memcpy(destination + offset, queue->bytes + entry->data_offset, entry->byte_count);
+        offset += btbh_gpu_upload_queue_align(entry->byte_count);
     }
 }
 
-uint32_t btbh_gpu_custom_mesh_queue_record(
+uint32_t btbh_gpu_upload_queue_record(
     BTBHGPUWindow *window,
     SDL_GPUCopyPass *copy,
     SDL_GPUTransferBuffer *transfer,
     uint32_t offset
 ) {
-    BTBHGPUCustomMeshQueue *queue = &window->mesh_queue;
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
     uint32_t uploads = 0u;
     for (uint32_t index = 0u; index < queue->entry_count; ++index) {
-        const BTBHGPUCustomMeshQueueEntry *entry = &queue->entries[index];
-        const BTBHGPUCustomMesh *mesh = entry->mesh;
-        if (mesh == NULL) {
+        const BTBHGPUUploadQueueEntry *entry = &queue->entries[index];
+        if (!entry->live) {
             continue;
         }
-        /* Where the data goes is read now: a mesh with buffers of its own may have grown them at the call. A mesh of
-           its own cycles (a frame still drawing it keeps the old data); a shared one is written in place. */
-        const bool cycle = !btbh_gpu_custom_mesh_shared(mesh);
         SDL_GPUTransferBufferLocation source = {0};
         source.transfer_buffer = transfer;
         source.offset = offset;
         SDL_GPUBufferRegion destination = {0};
-        destination.buffer = mesh->vertex_buffer;
-        destination.offset = (uint32_t) mesh->vertex_base * BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE;
-        destination.size = entry->vertex_byte_count;
-        SDL_UploadToGPUBuffer(copy, &source, &destination, cycle);
-        uploads += 1u;
-        offset += btbh_gpu_custom_mesh_queue_align(entry->vertex_byte_count);
-        if (entry->index_byte_count > 0u) {
-            source.offset = offset;
-            destination.buffer = mesh->index_buffer;
-            destination.offset = mesh->first_index * (uint32_t) sizeof(uint32_t);
-            destination.size = entry->index_byte_count;
-            SDL_UploadToGPUBuffer(copy, &source, &destination, cycle);
+        destination.size = entry->byte_count;
+        if (entry->part == (uint8_t) BTBH_GPU_UPLOAD_INSTANCES) {
+            /* In place: the rest of the buffer keeps its data; earlier frames read it before this copy runs. */
+            destination.buffer = entry->instance_buffer->buffer;
+            destination.offset = entry->byte_offset;
+            SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+            destination.buffer = entry->instance_buffer->vertex_buffer;
+            SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+            uploads += 2u;
+        } else {
+            /* Where the data goes is read now: a mesh with buffers of its own may have grown them at the call. Its whole
+               update cycles (a frame still drawing it keeps the old data); a shared mesh and a partial update are
+               written in place. */
+            const BTBHGPUCustomMesh *mesh = entry->mesh;
+            if (entry->part == (uint8_t) BTBH_GPU_UPLOAD_MESH_VERTICES) {
+                destination.buffer = mesh->vertex_buffer;
+                destination.offset = (uint32_t) mesh->vertex_base * BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE +
+                    entry->byte_offset;
+            } else {
+                destination.buffer = mesh->index_buffer;
+                destination.offset = mesh->first_index * (uint32_t) sizeof(uint32_t) + entry->byte_offset;
+            }
+            SDL_UploadToGPUBuffer(copy, &source, &destination, entry->cycle);
             uploads += 1u;
-            offset += btbh_gpu_custom_mesh_queue_align(entry->index_byte_count);
         }
+        offset += btbh_gpu_upload_queue_align(entry->byte_count);
     }
     queue->recorded = queue->live_count > 0u;
     return uploads;
 }
 
-void btbh_gpu_custom_mesh_queue_commit(BTBHGPUWindow *window, bool pending) {
+void btbh_gpu_upload_queue_commit(BTBHGPUWindow *window, bool pending) {
     if (window == NULL) {
         return;
     }
-    BTBHGPUCustomMeshQueue *queue = &window->mesh_queue;
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
     if (!queue->recorded) {
         queue->pending_serial = 0u;
         return;
     }
     queue->copied_serial += 1u;
     for (uint32_t index = 0u; index < queue->entry_count; ++index) {
-        if (queue->entries[index].mesh != NULL) {
-            queue->entries[index].mesh->queue_copied_serial = queue->copied_serial;
+        const BTBHGPUUploadQueueEntry *entry = &queue->entries[index];
+        if (!entry->live) {
+            continue;
+        }
+        if (entry->mesh != NULL) {
+            entry->mesh->queue_copied_serial = queue->copied_serial;
+        } else {
+            entry->instance_buffer->queue_copied_serial = queue->copied_serial;
         }
     }
     queue->pending_serial = pending ? queue->copied_serial : 0u;
-    btbh_gpu_custom_mesh_queue_clear(queue);
+    queue->pending_holds = queue->pending_holds || pending;
+    btbh_gpu_upload_queue_clear(queue);
 }
 
-void btbh_gpu_window_release_custom_mesh_queue(BTBHGPUWindow *window) {
+void btbh_gpu_window_release_upload_queue(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;
     }
-    BTBHGPUCustomMeshQueue *queue = &window->mesh_queue;
-    btbh_gpu_custom_mesh_queue_clear(queue);
+    BTBHGPUUploadQueue *queue = &window->upload_queue;
+    btbh_gpu_upload_queue_clear(queue);
     free(queue->entries);
     free(queue->bytes);
     memset(queue, 0, sizeof(*queue));
@@ -749,23 +945,25 @@ static BTBHGPUResult btbh_gpu_custom_mesh_queue_update(
     BTBHGPUCustomMeshReport *report
 ) {
     BTBHGPUWindow *window = mesh->owner;
-    BTBHGPUCustomMeshQueue *queue = &window->mesh_queue;
     SDL_GPUDevice *device = window->device->gpu;
     const uint32_t index_byte_count = index_count * (uint32_t) sizeof(uint32_t);
-    const uint64_t queued_bytes = (uint64_t) btbh_gpu_custom_mesh_queue_align(vertex_byte_count) +
-        (uint64_t) btbh_gpu_custom_mesh_queue_align(index_byte_count);
-    if ((uint64_t) queue->byte_count + queued_bytes > BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES) {
-        char message[256];
-        (void) snprintf(
+    char message[256];
+    bool out_of_memory = false;
+    if (!btbh_gpu_upload_queue_prepare(
+            window,
+            vertex_byte_count,
+            index_byte_count,
+            "GPU custom mesh queued update",
             message,
             sizeof(message),
-            "GPU custom mesh queued update: the window's queue holds %u bytes and this one adds %llu, past "
-            "BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES (%u); present a scene, or update without the flag",
-            queue->byte_count,
-            (unsigned long long) queued_bytes,
-            (uint32_t) BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES
+            &out_of_memory
+        )
+    ) {
+        btbh_gpu_custom_mesh_error(
+            report,
+            out_of_memory ? BTBH_GPU_PLATFORM_FAILURE : BTBH_GPU_INVALID_ARGUMENT,
+            message
         );
-        btbh_gpu_custom_mesh_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
         return report->result;
     }
     SDL_GPUBuffer *vertex_buffer = mesh->vertex_buffer;
@@ -776,7 +974,6 @@ static BTBHGPUResult btbh_gpu_custom_mesh_queue_update(
     bool grow_indices = false;
     if (btbh_gpu_custom_mesh_shared(mesh)) {
         if (vertex_byte_count > mesh->vertex_buffer_capacity || index_byte_count > mesh->index_buffer_capacity) {
-            char message[256];
             (void) snprintf(
                 message,
                 sizeof(message),
@@ -830,38 +1027,32 @@ static BTBHGPUResult btbh_gpu_custom_mesh_queue_update(
             }
         }
     }
-    if (!btbh_gpu_custom_mesh_queue_reserve(queue, (uint32_t) queued_bytes)) {
-        if (grow_indices) {
-            SDL_ReleaseGPUBuffer(device, index_buffer);
-        }
-        if (grow_vertices) {
-            SDL_ReleaseGPUBuffer(device, vertex_buffer);
-        }
-        btbh_gpu_custom_mesh_error(
-            report,
-            BTBH_GPU_PLATFORM_FAILURE,
-            "Could not allocate room in the window's queue of GPU custom mesh updates"
-        );
-        return report->result;
-    }
-    /* A waiting update of this mesh is replaced: only the last one is copied. */
-    btbh_gpu_custom_mesh_queue_drop(mesh);
-    BTBHGPUCustomMeshQueueEntry *entry = &queue->entries[queue->entry_count];
-    entry->mesh = mesh;
-    entry->vertex_offset = queue->byte_count;
-    entry->vertex_byte_count = vertex_byte_count;
-    memcpy(queue->bytes + entry->vertex_offset, vertices, vertex_byte_count);
-    queue->byte_count += btbh_gpu_custom_mesh_queue_align(vertex_byte_count);
-    entry->index_offset = queue->byte_count;
-    entry->index_byte_count = index_byte_count;
+    /* Every waiting update of this mesh is replaced, whole or partial: only this one is copied. A mesh of its own
+       cycles (a frame still drawing it keeps the old data); a shared one is written in place. */
+    btbh_gpu_upload_queue_drop(window, mesh, NULL);
+    const bool cycle = !btbh_gpu_custom_mesh_shared(mesh);
+    btbh_gpu_upload_queue_push(
+        window,
+        mesh,
+        NULL,
+        BTBH_GPU_UPLOAD_MESH_VERTICES,
+        0u,
+        vertices,
+        vertex_byte_count,
+        cycle
+    );
     if (index_byte_count > 0u) {
-        memcpy(queue->bytes + entry->index_offset, indices, index_byte_count);
-        queue->byte_count += btbh_gpu_custom_mesh_queue_align(index_byte_count);
+        btbh_gpu_upload_queue_push(
+            window,
+            mesh,
+            NULL,
+            BTBH_GPU_UPLOAD_MESH_INDICES,
+            0u,
+            indices,
+            index_byte_count,
+            cycle
+        );
     }
-    queue->entry_count += 1u;
-    queue->live_count += 1u;
-    queue->live_bytes += (uint32_t) queued_bytes;
-    mesh->queue_entry = queue->entry_count;
     if (grow_vertices) {
         SDL_ReleaseGPUBuffer(device, mesh->vertex_buffer);
         mesh->vertex_buffer = vertex_buffer;
@@ -984,12 +1175,7 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
            canvas copied would land after a submission of this one (in place, no cycling), so this one goes into that
            frame's command buffer, after its draws. A host that never queues never gets here. */
         BTBHGPUWindow *owner = mesh->owner;
-        SDL_GPUCommandBuffer *into =
-            owner->pending_command != NULL &&
-            mesh->queue_copied_serial != 0u &&
-            mesh->queue_copied_serial == owner->mesh_queue.pending_serial
-                ? owner->pending_command
-                : NULL;
+        SDL_GPUCommandBuffer *into = btbh_gpu_upload_queue_pending_command(owner, mesh->queue_copied_serial);
         if (!btbh_gpu_custom_mesh_upload_buffers(
                 device,
                 mesh->vertex_buffer,
@@ -1007,8 +1193,11 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
         ) {
             return report->result;
         }
-        /* A queued update not yet copied is older: this one replaces it. */
-        btbh_gpu_custom_mesh_queue_drop(mesh);
+        if (into != NULL) {
+            btbh_gpu_upload_queue_note_pending_write(owner);
+        }
+        /* Queued updates not yet copied are older: this one replaces them. */
+        btbh_gpu_upload_queue_drop(owner, mesh, NULL);
         mesh->vertex_count = vertex_count;
         mesh->index_count = index_count;
         mesh->vertex_byte_count = vertex_byte_count;
@@ -1085,9 +1274,9 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
         }
         return report->result;
     }
-    /* A queued update not yet copied is older: this one replaces it (a copied one cycled the buffers or was recorded
+    /* Queued updates not yet copied are older: this one replaces them (a copied one cycled the buffers or was recorded
        before this submission's frame, so it lands first either way). */
-    btbh_gpu_custom_mesh_queue_drop(mesh);
+    btbh_gpu_upload_queue_drop(mesh->owner, mesh, NULL);
     if (grow_vertices) {
         SDL_ReleaseGPUBuffer(device, mesh->vertex_buffer);
         mesh->vertex_buffer = vertex_buffer;
@@ -1112,6 +1301,195 @@ BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
     return report->result;
 }
 
+BTBHGPUResult btbh_gpu_custom_mesh_update_range(
+    BTBHGPUCustomMesh *mesh,
+    uint32_t first_vertex,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t first_index,
+    const uint32_t *indices,
+    uint32_t index_count,
+    uint32_t flags,
+    BTBHGPUCustomMeshReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    memset(report, 0, sizeof(*report));
+    if ((flags & ~(uint32_t) BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED) != 0u) {
+        btbh_gpu_custom_mesh_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Unknown GPU custom mesh update flags (BTBH_GPU_CUSTOM_MESH_UPDATE_*)"
+        );
+        return report->result;
+    }
+    if (
+        mesh == NULL ||
+        mesh->owner == NULL ||
+        mesh->owner->device == NULL ||
+        mesh->owner->device->gpu == NULL ||
+        mesh->owner->device->shutdown ||
+        mesh->vertex_buffer == NULL ||
+        vertex_byte_count % BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE != 0u ||
+        (vertex_byte_count > 0u && vertices == NULL) ||
+        (index_count > 0u && indices == NULL) ||
+        (vertex_byte_count == 0u && index_count == 0u)
+    ) {
+        btbh_gpu_custom_mesh_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU custom mesh range update"
+        );
+        return report->result;
+    }
+    const uint32_t vertex_count = vertex_byte_count / BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE;
+    if ((uint64_t) first_vertex + vertex_count > mesh->vertex_count ||
+        (uint64_t) first_index + index_count > mesh->index_count) {
+        char message[256];
+        (void) snprintf(
+            message,
+            sizeof(message),
+            "GPU custom mesh range update: %u vertices from %u and %u indices from %u must lie within the mesh's %u "
+            "vertices and %u indices",
+            vertex_count,
+            first_vertex,
+            index_count,
+            first_index,
+            mesh->vertex_count,
+            mesh->index_count
+        );
+        btbh_gpu_custom_mesh_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return report->result;
+    }
+    for (uint32_t index = 0u; index < index_count; index += 1u) {
+        if (indices[index] >= mesh->vertex_count) {
+            btbh_gpu_custom_mesh_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "GPU custom mesh index is outside the vertex buffer"
+            );
+            return report->result;
+        }
+    }
+
+    BTBHGPUWindow *window = mesh->owner;
+    const uint32_t vertex_offset = first_vertex * BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE;
+    const uint32_t index_offset = first_index * (uint32_t) sizeof(uint32_t);
+    const uint32_t index_byte_count = index_count * (uint32_t) sizeof(uint32_t);
+    if ((flags & BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED) != 0u) {
+        char message[256];
+        bool out_of_memory = false;
+        if (!btbh_gpu_upload_queue_prepare(
+                window,
+                vertex_byte_count,
+                index_byte_count,
+                "GPU custom mesh queued range update",
+                message,
+                sizeof(message),
+                &out_of_memory
+            )
+        ) {
+            btbh_gpu_custom_mesh_error(
+                report,
+                out_of_memory ? BTBH_GPU_PLATFORM_FAILURE : BTBH_GPU_INVALID_ARGUMENT,
+                message
+            );
+            return report->result;
+        }
+        if (vertex_byte_count > 0u) {
+            btbh_gpu_upload_queue_push(
+                window,
+                mesh,
+                NULL,
+                BTBH_GPU_UPLOAD_MESH_VERTICES,
+                vertex_offset,
+                vertices,
+                vertex_byte_count,
+                false
+            );
+        }
+        if (index_byte_count > 0u) {
+            btbh_gpu_upload_queue_push(
+                window,
+                mesh,
+                NULL,
+                BTBH_GPU_UPLOAD_MESH_INDICES,
+                index_offset,
+                indices,
+                index_byte_count,
+                false
+            );
+        }
+    } else {
+        /* In place, without cycling (the rest of the mesh keeps its data), the mesh's own buffers as the shared
+           ones. While a scene waits for the canvas, into that frame after its draws: it keeps the old data, and a
+           queued update it copied lands first. */
+        SDL_GPUCommandBuffer *into = window->pending_command;
+        if (!btbh_gpu_custom_mesh_upload_buffers(
+                window->device->gpu,
+                mesh->vertex_buffer,
+                (uint32_t) mesh->vertex_base * BTBH_GPU_CUSTOM_MESH_VERTEX_STRIDE + vertex_offset,
+                vertices,
+                vertex_byte_count,
+                mesh->index_buffer,
+                mesh->first_index * (uint32_t) sizeof(uint32_t) + index_offset,
+                indices,
+                index_byte_count,
+                false,
+                into,
+                report
+            )
+        ) {
+            return report->result;
+        }
+        if (into != NULL) {
+            btbh_gpu_upload_queue_note_pending_write(window);
+        }
+        /* Queued updates not yet copied are older: where they overlap this one, they carry its data. */
+        if (vertex_byte_count > 0u) {
+            btbh_gpu_upload_queue_overwrite(
+                window,
+                mesh,
+                NULL,
+                BTBH_GPU_UPLOAD_MESH_VERTICES,
+                vertex_offset,
+                vertices,
+                vertex_byte_count
+            );
+        }
+        if (index_byte_count > 0u) {
+            btbh_gpu_upload_queue_overwrite(
+                window,
+                mesh,
+                NULL,
+                BTBH_GPU_UPLOAD_MESH_INDICES,
+                index_offset,
+                indices,
+                index_byte_count
+            );
+        }
+    }
+    /* The bounds grow to cover the new vertices (the old ones' too: they aren't kept on the CPU to measure again). */
+    if (vertex_count > 0u && mesh->bounds_valid) {
+        float minimum[3];
+        float maximum[3];
+        if (btbh_gpu_custom_mesh_bounds(vertices, vertex_count, minimum, maximum)) {
+            for (uint32_t axis = 0u; axis < 3u; axis += 1u) {
+                mesh->minimum[axis] = minimum[axis] < mesh->minimum[axis] ? minimum[axis] : mesh->minimum[axis];
+                mesh->maximum[axis] = maximum[axis] > mesh->maximum[axis] ? maximum[axis] : mesh->maximum[axis];
+            }
+        } else {
+            mesh->bounds_valid = false;
+        }
+    }
+    report->result = BTBH_GPU_OK;
+    report->vertex_count = mesh->vertex_count;
+    report->index_count = mesh->index_count;
+    report->vertex_byte_count = mesh->vertex_byte_count;
+    return report->result;
+}
+
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh) {
     if (mesh == NULL) {
         return;
@@ -1124,8 +1502,8 @@ void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh) {
     ) {
         device = mesh->owner->device->gpu;
     }
-    /* Its queued update goes with it (one a frame already recorded still runs: SDL frees the buffers after it). */
-    btbh_gpu_custom_mesh_queue_drop(mesh);
+    /* Its queued updates go with it (one a frame already recorded still runs: SDL frees the buffers after it). */
+    btbh_gpu_upload_queue_drop(mesh->owner, mesh, NULL);
     btbh_gpu_custom_mesh_release_handles(mesh, device);
     btbh_gpu_custom_mesh_unlink(mesh);
     free(mesh);
@@ -1135,7 +1513,8 @@ void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window) {
     if (window == NULL) {
         return;
     }
-    btbh_gpu_window_release_custom_mesh_queue(window);
+    /* The upload queue goes first: it forgets the meshes and instance buffers it names. */
+    btbh_gpu_window_release_upload_queue(window);
     SDL_GPUDevice *device =
         window->device != NULL && !window->device->shutdown
             ? window->device->gpu
