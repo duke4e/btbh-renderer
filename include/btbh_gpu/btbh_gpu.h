@@ -672,6 +672,11 @@ typedef enum BTBHGPUSceneRadianceCascadesBackend {
     BTBH_GPU_SCENE_RC_BACKEND_HOLOGRAPHIC = 0
 } BTBHGPUSceneRadianceCascadesBackend;
 
+/* BTBHGPUSceneRadianceCascades.debug_view: the scene shows one of the cascades' buffers instead of the frame. A debug
+ * view shows the cascades alone: the frame's HBAO, SSAO, reflections, bloom, fog and vignette are off, and since 0.10.0
+ * the transparent and refracting batches aren't drawn over it either (before, they were, so that Be The Bullet Hell
+ * v2's additive night overlays read as the cascades' light in the views). The tone mapping and grading still apply.
+ * Frames without a debug view are unchanged. */
 typedef enum BTBHGPUSceneRadianceCascadesDebugView {
     BTBH_GPU_SCENE_RC_DEBUG_NONE = 0,
     BTBH_GPU_SCENE_RC_DEBUG_CASCADE_0 = 1,
@@ -1074,8 +1079,17 @@ enum {
      * (BTBHGPUSceneRadianceCascades.occlusion_cascades), which no batch draws into, so the flag leaves it alone:
      * the batch blocks the cascades' light where that occlusion says so, with or without it. Without the
      * cascades, or on a batch that doesn't glow, it changes nothing. */
-    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2
+    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2,
+    /* (Bits 3 and 4 are taken by RFC 0013's draft.) The batch receives no spot (or omni) shadow (since 0.10.0, asked
+     * for by Be The Bullet Hell v2: its kaiju, the only thing in its spot map, was darkened by its own map): the
+     * spot light lights it unshadowed, and spot_occluder_shadow_strength takes none of its light. What it casts is
+     * left to spot_shadow_visible, as before; the directional shadows are as before. Needs this release's scene
+     * shaders (production_model*.frag); older ones ignore it. */
+    BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW = 1u << 5
 };
+
+/* Defined when BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW exists (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW 1
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
  * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
@@ -1164,7 +1178,10 @@ typedef struct BTBHGPUSceneLighting {
     float spot_inner_cutoff;
     float spot_outer_cutoff;
     /* The share of the sun, fill and sky light the spot's shadow also takes where its occluder lies
-       within spot_occluder_shadow_reach of the light (0 = the classic spot shadow). */
+       within spot_occluder_shadow_reach of the light (0 = the classic spot shadow). The reach is read through a
+       perspective spot matrix (a near plane of 0.05, spot_range far), as the distance from the light: the darkening
+       eases out from 0.4 to 1 times it. spot_occluder_flags (since 0.10.0) can take only the sun's light instead,
+       and read the reach through an orthographic matrix. */
     float spot_occluder_shadow_strength;
     float spot_occluder_shadow_reach;
     float irradiance_sh[27];
@@ -1249,8 +1266,37 @@ typedef struct BTBHGPUSceneLighting {
     /* How the primary directional (sun) shadow is filtered: BTBHGPUSceneShadowFilter (0: the tent
      * as before). */
     uint8_t directional_shadow_filter;
-    uint8_t directional_shadow_reserved[3];
+    uint8_t directional_shadow_reserved[1];
+    /* BTBH_GPU_SCENE_SPOT_OCCLUDER_* bits (since 0.10.0, byte 3,338, which was directional_shadow_reserved[1], so
+     * the struct keeps its 3,340 bytes): how spot_occluder_shadow_strength darkens. 0 as before; a bit the renderer
+     * doesn't know fails the present with BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t spot_occluder_flags;
+    uint8_t spot_occluder_reserved[1];
 } BTBHGPUSceneLighting;
+
+/* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0, asked for by Be The Bullet Hell v2, which draws only its
+ * kaiju into the spot map, fitted along the sun round its body with an orthographic matrix, for a crisp kaiju
+ * shadow). They need this release's scene shaders (production_model*.frag); older ones ignore them. */
+enum {
+    /* The occluder's darkening takes only the primary directional light (the sun, with its own shadow), not the
+     * sun, fill (the secondary directional light) and sky (the ambient light) together: the spot map then acts as
+     * a sharper sun shadow of what it holds, and that can leave the sun's map (taking the fill and sky too, a shadow
+     * at dusk came out brown). The spot light's own shadow is as before. Radiance cascades that aren't additive
+     * light the surface with their own field, which carries the sun and the sky together, so their light is still
+     * darkened as before (else the field would fill the shadow in); additive ones add bounce light that the
+     * occluder takes either way. */
+    BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY = 1u << 0,
+    /* The spot matrix (spot_shadow_view_projection) is orthographic: a directional light's map. Its depth is read
+     * as linear from its near plane, so spot_occluder_shadow_reach is the occluder's distance from that plane, in
+     * world units along the light (the darkening eases out from 0.4 to 1 times it; a reach of at least 2.5 times the
+     * map's depth range, far less near, never eases). The spot shadow's slope bias takes the light's direction
+     * (spot_direction) instead of the direction to spot_position. Without it such a matrix's depth is read as perspective, and only a very large
+     * reach kept the easing off. Ignored for an omni shadow. */
+    BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC = 1u << 1
+};
+
+/* Defined when BTBHGPUSceneLighting.spot_occluder_flags and its two bits exist (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS 1
 
 /* The order the opaque pass draws its batches in (BTBHGPUScenePost.opaque_sort, since 0.5.0). */
 typedef enum BTBHGPUSceneOpaqueSort {
@@ -1415,9 +1461,10 @@ typedef struct BTBHGPUScenePost {
     uint8_t flags;
 } BTBHGPUScenePost;
 
-/* BTBHGPUScenePost.flags (since 0.9.0). Each needs this release's scene shaders (production_model*.frag,
- * production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones: with them
- * SSR_SURFACE_REFLECTIVITY changes nothing, and KEEP_HBAO darkens by the albedo (don't set it with them). */
+/* BTBHGPUScenePost.flags (since 0.9.0). Each needs the scene shaders of the release that brought it
+ * (production_model*.frag, production_ssao_resolve.frag, production_hrc_resolve.comp), and nothing detects older ones:
+ * with 0.8.0's SSR_SURFACE_REFLECTIVITY changes nothing and KEEP_HBAO darkens by the albedo (don't set it with them);
+ * with 0.9.0's SSR_FACING_HITS changes nothing. */
 enum {
     /* The horizon-based ambient occlusion (ssao_enabled 2, ssao_contact 0) under additive radiance cascades
      * (BTBHGPUSceneRadianceCascades.additive) darkens what it darkens without the cascades: the ambient light of
@@ -1425,7 +1472,15 @@ enum {
      * three quarters of all their light but the emission, which suits cascades that replace the scene's ambient
      * light and darkens additive ones, whose surfaces keep it (Be The Bullet Hell v2, who asked for it: with
      * nothing glowing, its night stage lost 1.4 sRGB levels on average once the cascades were on).
-     * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off).
+     * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off). Under the omni
+     *   shadow a pixel may differ by a level now and then: the cascades' variant of the scene shader rounds that light
+     *   apart from the plain one.
+     * - The transparent pass draws as without the cascades too (since 0.10.0): a transparent unlit batch takes the
+     *   fast unlit shader, which adds no point light (nor the dark scene's darkening and spot, nor unlit 2 and 3's sun
+     *   shadow). Under the cascades without the flag, and in 0.9.0 with it, such a batch draws with the cascades'
+     *   scene shader, which does add them: v2's additive night overlays by its neon point lights (reach 2.6, energy
+     *   2.1) came out up to 200 sRGB levels brighter than without the cascades. This changes the frames drawn with
+     *   the flag wherever a point light (or the dark scene, or unlit 2 or 3) meets a transparent unlit batch.
      * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't.
      * - How: the opaque pass writes the scene's own ambient light to the targets the cascades' resolve reads its
      *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission
@@ -1444,13 +1499,29 @@ enum {
      * - The reflectivity is the F0's luminance, one channel: a dielectric, glass or a grey metal reflects as with
      *   the cascades, to the byte; a coloured metal reflects as bright, untinted.
      * - With the cascades on it changes nothing (they carry the F0 already); nor without SSR. */
-    BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY = 1u << 1
+    BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY = 1u << 1,
+    /* Screen-space reflections take only hits a ray can make (since 0.10.0, asked for by Be The Bullet Hell v2: under
+     * a steep camera in the rain, every actor left a noisy column of itself smeared down the wet street below it).
+     * The depth buffer holds only the surfaces in front, so a ray that passes behind or beneath a thin object (a jet,
+     * a kaiju's arm or tail) within ssr_thickness of it was taken for a hit on its visible face.
+     * - A hit on a surface that faces along the ray (its normal less than 90 degrees from the ray's direction: the
+     *   top of anything seen from above, for a ray that climbs from the street) can't be one: the ray passed behind
+     *   or beneath that surface, and marches on to what lies past it.
+     * - The hits left fade as the surface turns edge on to the ray (its normal within about 9 degrees of square to
+     *   it) and as the ray passes farther behind the surface (from a quarter of ssr_thickness to all of it).
+     * - Walls and the faces of objects turned toward the camera keep their reflections: a ray reflected from level
+     *   ground keeps the camera's heading, so it meets them from the front.
+     * - With or without the radiance cascades, and with BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY or without; it
+     *   changes nothing without SSR. Needs this release's production_ssao_resolve.frag; older ones ignore it. */
+    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2
 };
 
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO exist (since 0.9.0). */
 #define BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO 1
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY exist (since 0.9.0). */
 #define BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY 1
+/* Defined when BTBH_GPU_SCENE_POST_SSR_FACING_HITS exists (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_SSR_FACING_HITS 1
 
 typedef struct BTBHGPUSceneReport {
     BTBHGPUResult result;

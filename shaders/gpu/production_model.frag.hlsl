@@ -184,6 +184,8 @@ cbuffer MaterialPBR : register(b0, space3)
     float4x4 secondary_directional_shadow_view_projection;
     float4x4 spot_shadow_view_projection;
     float4 directional_shadow_controls;
+    // x on, y softness; z the spot occluder's flags (BTBHGPUSceneLighting.spot_occluder_flags, since 0.10.0: 1 the
+    // sun only, 2 an orthographic spot matrix; spot_occluder_mode); w 0
     float4 secondary_directional_shadow_controls;
     float4 spot_shadow_controls;
     float4 omni_shadow_position_range;
@@ -1440,12 +1442,20 @@ float omni_visibility(
 }
 #endif
 
+// BTBHGPUSceneLighting.spot_occluder_flags (secondary_directional_shadow_controls.z): bit 0 the sun only, bit 1 an
+// orthographic spot matrix.
+uint spot_occluder_mode()
+{
+    return (uint)(secondary_directional_shadow_controls.z + 0.5f);
+}
+
 float spot_visibility(
     float3 world_position,
     float3 normal
 )
 {
-    if (spot_shadow_controls.x < 0.5f)
+    // unlit_enabled bit 8 (256: BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW, since 0.10.0): none received.
+    if (spot_shadow_controls.x < 0.5f || (unlit_enabled & 256u) != 0u)
     {
         return 1.0f;
     }
@@ -1476,10 +1486,13 @@ float spot_visibility(
         projected.x * 0.5f + 0.5f,
         -projected.y * 0.5f + 0.5f
     );
-    const float3 light = stable_normalize(
-        spot_position_range.xyz - world_position,
-        float3(0.0f, 1.0f, 0.0f)
-    );
+    // (An orthographic map's light comes along spot_direction: BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC.)
+    const float3 light = (spot_occluder_mode() & 2u) != 0u
+        ? -stable_normalize(spot_direction_energy.xyz, float3(0.0f, -1.0f, 0.0f))
+        : stable_normalize(
+            spot_position_range.xyz - world_position,
+            float3(0.0f, 1.0f, 0.0f)
+        );
     const float normal_dot_light = saturate(dot(normal, light));
     const float bias =
         0.0001f + 0.0005f * (1.0f - normal_dot_light);
@@ -1540,9 +1553,16 @@ float spot_occluder_share(
     const float nearest = min(min(depths.x, depths.y), min(depths.z, depths.w));
     const float near_plane = 0.05f;
     const float far_plane = max(spot_position_range.w, near_plane * 2.0f);
-    const float occluder_distance =
+    float occluder_distance =
         near_plane * far_plane /
         max(far_plane - nearest * (far_plane - near_plane), 0.0001f);
+    if ((spot_occluder_mode() & 2u) != 0u)
+    {
+        /* BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC: the depth runs linearly from 0 at the map's near plane, by the
+           length of the matrix's depth row a world unit; the occluder's distance from that plane. */
+        occluder_distance =
+            nearest / max(length(spot_shadow_view_projection[2].xyz), 0.000001f);
+    }
     /* Eased in over most of the reach: across the last quarter alone, a building the carrier walked up
        to darkened its whole shadow in a few steps (the shadow "jumped", play-test 2026-10-14). */
     const float close =
@@ -2689,7 +2709,20 @@ FragmentOutput shade_fragment(FragmentInput input)
     );
     /* The sun, fill and sky dim where the spot's own occluder shadows them (see
        spot_occluder_share); the spot then adds its own light, shadowed as before. */
-    lighting *= 1.0f - spot_occluder;
+#if BTBH_DIRECTIONAL_SHADOWS
+    // BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY: the sun's light alone.
+    const bool spot_occluder_sun_only = (spot_occluder_mode() & 1u) != 0u;
+#else
+    const bool spot_occluder_sun_only = false;
+#endif
+    if (spot_occluder_sun_only)
+    {
+        lighting -= sun_lighting * spot_occluder;
+    }
+    else
+    {
+        lighting *= 1.0f - spot_occluder;
+    }
     const float3 spot_lighting = evaluate_spot_light(
         input.world_position,
         albedo_sample.rgb,

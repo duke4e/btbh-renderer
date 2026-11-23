@@ -339,20 +339,28 @@ public struct CloudShadowDescriptor: Hashable, Sendable {
 /// each surface reflects by its own reflectivity (its F0's luminance: 0.04 for a dielectric, 0.12 for glass, a
 /// metal's albedo), as it does with them. Without it, reflections without the cascades see no surface's
 /// reflectivity and reflect nothing. It needs the 0.9.0 scene shaders.
+///
+/// `facingHits` (since 0.10.0, `BTBH_GPU_SCENE_POST_SSR_FACING_HITS`): a ray takes only hits it can make. A surface
+/// that faces along the ray (the top of anything seen from above, for a ray that climbs from the ground) only hides
+/// where the ray passed behind or beneath it, so the ray marches on; the hits left fade as the surface turns edge on
+/// and as the ray passes farther behind it. Thin things over wet ground under a steep camera then no longer leave a
+/// column of themselves down the ground below them. It needs the 0.10.0 scene shaders.
 public struct ScreenSpaceReflectionDescriptor: Hashable, Sendable {
     public var intensity: Float
     public var maxRoughness: Float
     public var maxDistance: Float
     public var thickness: Float
     public var surfaceReflectivity: Bool
+    public var facingHits: Bool
 
     public init(intensity: Float, maxRoughness: Float, maxDistance: Float, thickness: Float,
-                surfaceReflectivity: Bool = false) {
+                surfaceReflectivity: Bool = false, facingHits: Bool = false) {
         self.intensity = intensity
         self.maxRoughness = maxRoughness
         self.maxDistance = maxDistance
         self.thickness = thickness
         self.surfaceReflectivity = surfaceReflectivity
+        self.facingHits = facingHits
     }
 
     public static let off = Self(intensity: 0, maxRoughness: 0, maxDistance: 0, thickness: 0)
@@ -367,7 +375,8 @@ public struct ScreenSpaceReflectionDescriptor: Hashable, Sendable {
     var sanitized: Self {
         guard isEnabled else { return .off }
         return Self(intensity: intensity, maxRoughness: min(maxRoughness, 1), maxDistance: maxDistance,
-                    thickness: max(thickness, 0), surfaceReflectivity: surfaceReflectivity)
+                    thickness: max(thickness, 0), surfaceReflectivity: surfaceReflectivity,
+                    facingHits: facingHits)
     }
 }
 

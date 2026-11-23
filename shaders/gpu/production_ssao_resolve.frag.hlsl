@@ -46,6 +46,9 @@ cbuffer PostUniforms : register(b0, space3)
     // Ambient occlusion: xy the SSAO's radius and strength (production_ssao.frag.hlsl); with the cascades z the
     // share of the indirect light it occludes, w the share of that direct light keeps
     float4 ao_controls;
+    // The reflections' hits (since 0.10.0): x 1 for BTBH_GPU_SCENE_POST_SSR_FACING_HITS (screen_space_reflection);
+    // yzw 0
+    float4 ssr_hit_options;
 };
 
 struct FragmentInput
@@ -279,7 +282,9 @@ float2 clip_to_uv(float4 clip)
 // half; rougher surfaces blur and fade it, as do hits near the screen's edges and the march's end. A ray nearly
 // straight back toward the camera finds nothing on screen and reflects nothing. The ray leaves along the surface's flat
 // normal (`flat_normal`, flat_surface_normal) bent a quarter of the way toward its shading normal, so ripples and
-// grain still waver in it.
+// grain still waver in it. With ssr_hit_options.x (BTBH_GPU_SCENE_POST_SSR_FACING_HITS) a hit must face the ray: one on
+// a surface that faces along it marches on, and the hit kept fades as its surface turns edge on and as the ray passes
+// farther behind it (hit_confidence).
 float3 screen_space_reflection(
     float2 uv,
     float depth,
@@ -318,6 +323,7 @@ float3 screen_space_reflection(
     float t = step_length * (0.5f + dither);
     bool hit = false;
     float2 hit_uv = float2(0.0f, 0.0f);
+    float hit_confidence = 1.0f;
     [loop]
     for (uint march = 0u; march < 24u && t < ssr_controls.z; ++march)
     {
@@ -361,6 +367,28 @@ float3 screen_space_reflection(
             if (crossing_depth < 0.99999f &&
                 crossing_clip.w - view_depth_at(crossing_uv, crossing_depth) < ssr_controls.w)
             {
+                if (ssr_hit_options.x > 0.5f)
+                {
+                    // BTBH_GPU_SCENE_POST_SSR_FACING_HITS: a surface the ray can hit faces it. One that faces along
+                    // the ray (the top of a kaiju or a jet seen from above, for a ray that climbs from the street)
+                    // only hides where the ray passed behind or beneath it: the ray marches on. Surfaces seen edge
+                    // on, and hits the ray reached farther behind the surface, fade (hit_confidence).
+                    const float3 encoded = normal_texture.SampleLevel(normal_sampler, crossing_uv, 0.0f).xyz *
+                        2.0f - 1.0f;
+                    const float facing = dot(encoded, encoded) > 0.00001f ? -dot(normalize(encoded), ray) : 1.0f;
+                    if (facing <= 0.0f)
+                    {
+                        previous_t = t;
+                        step_length *= 1.18f;
+                        t += step_length;
+                        continue;
+                    }
+                    hit_confidence = smoothstep(0.0f, 0.15f, facing) * (1.0f - smoothstep(
+                        ssr_controls.w * 0.25f,
+                        ssr_controls.w,
+                        crossing_clip.w - view_depth_at(crossing_uv, crossing_depth)
+                    ));
+                }
                 hit_uv = crossing_uv;
                 t = high;
                 hit = true;
@@ -403,6 +431,10 @@ float3 screen_space_reflection(
         f0 = ambient_texture.SampleLevel(ambient_sampler, uv, 0.0f).aaa;
     }
     const float3 fresnel = f0 + (1.0f - f0) * pow(1.0f - saturate(dot(reflecting_normal, view)), 5.0f);
+    if (ssr_hit_options.x > 0.5f)
+    {
+        return reflected * min(fresnel * intensity, 0.5f) * (fade * hit_confidence);
+    }
     return reflected * min(fresnel * intensity, 0.5f) * fade;
 }
 

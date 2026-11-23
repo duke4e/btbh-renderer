@@ -201,6 +201,8 @@ typedef struct BTBHGPUPostUniforms {
     float ssr_controls[4];
     /* The AO's radius and strength, its contact strength and direct share (BTBHGPUScenePost). */
     float ao_controls[4];
+    /* The reflections' hits (since 0.10.0): x 1 for BTBH_GPU_SCENE_POST_SSR_FACING_HITS; yzw 0. */
+    float ssr_hit_options[4];
 } BTBHGPUPostUniforms;
 
 /* The horizon-based ambient occlusion's passes (BTBHGPUScenePost.ssao_enabled 2, production_hbao.hlsli). */
@@ -2941,11 +2943,27 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
     return true;
 }
 
+/* Whether a batch draws with the fast unlit shader (production_model_unlit.frag, btbh_gpu_scene_uses_fast_unlit_pipeline:
+   a transparent unlit batch): without the radiance cascades, and under them with
+   BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO (scene_ambient_targets, since 0.10.0). The fast shader takes no
+   point light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent
+   pass draws as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came
+   out up to 200 levels brighter). Cascades without the flag keep the scene shader, as before. */
+static bool btbh_gpu_scene_batch_fast_unlit(
+    const BTBHGPUSceneGeometryBatch *batch,
+    bool radiance_cascades_active,
+    bool scene_ambient_targets
+) {
+    return (!radiance_cascades_active || scene_ambient_targets) &&
+        btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+}
+
 static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     BTBHGPUSceneRuntime *runtime,
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
+    bool scene_ambient_targets,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -2958,9 +2976,11 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         (uint32_t)batch->transparency_enabled;
     const uint32_t cull = (uint32_t)batch->cull_mode;
     const uint32_t stencil = (uint32_t)stencil_variant;
-    const uint32_t fast_unlit =
-        !radiance_cascades_active &&
-        btbh_gpu_scene_uses_fast_unlit_pipeline(batch) ? 1u : 0u;
+    const uint32_t fast_unlit = btbh_gpu_scene_batch_fast_unlit(
+        batch,
+        radiance_cascades_active,
+        scene_ambient_targets
+    ) ? 1u : 0u;
     const uint32_t color_target_variant =
         (temporal ? 4u : 0u) +
         (radiance_cascades_active ? 2u : 0u) +
@@ -3105,6 +3125,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
+    bool scene_ambient_targets,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -3125,6 +3146,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         auxiliary_geometry_outputs,
         temporal,
         radiance_cascades_active,
+        scene_ambient_targets,
         shadows_active,
         omni_shadows_active,
         animated,
@@ -3134,9 +3156,11 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     if (*slot != NULL) {
         return true;
     }
-    const bool fast_unlit =
-        !radiance_cascades_active &&
-        btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+    const bool fast_unlit = btbh_gpu_scene_batch_fast_unlit(
+        batch,
+        radiance_cascades_active,
+        scene_ambient_targets
+    );
     char variant_fragment_shader_path[
         BTBH_GPU_SCENE_PATH_CAPACITY
     ];
@@ -4705,7 +4729,8 @@ static bool btbh_gpu_scene_validate_batches(
             (batch->flags & ~(uint32_t)(
                 BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
-                BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE
+                BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE |
+                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW
             )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
@@ -5709,6 +5734,10 @@ bool btbh_gpu_scene_lighting_valid(
         lighting->directional_shadow_enabled > 1u ||
         lighting->directional_shadow_filter >=
             BTBH_GPU_SCENE_SHADOW_FILTER_COUNT ||
+        (lighting->spot_occluder_flags & ~(uint32_t)(
+            BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY |
+            BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC
+        )) != 0u ||
         !isfinite(lighting->point_light_ceiling) ||
         lighting->point_light_ceiling < 0.0f ||
         !isfinite(lighting->directional_shadow_softness) ||
@@ -5886,7 +5915,8 @@ static bool btbh_gpu_scene_post_valid(
         post->opaque_sort < BTBH_GPU_SCENE_OPAQUE_SORT_COUNT &&
         (post->flags & ~(uint32_t)(
             BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO |
-            BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY
+            BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY |
+            BTBH_GPU_SCENE_POST_SSR_FACING_HITS
         )) == 0u &&
         (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
          (isfinite(post->temporal_camera_near) &&
@@ -7295,6 +7325,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     setup->auxiliary_geometry_outputs,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
+                    setup->scene_ambient_targets,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -7319,6 +7350,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     false,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
+                    setup->scene_ambient_targets,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -8489,6 +8521,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         post_uniforms.ssr_controls[1] = post->ssr_max_roughness;
         post_uniforms.ssr_controls[2] = post->ssr_max_distance;
         post_uniforms.ssr_controls[3] = post->ssr_thickness;
+        post_uniforms.ssr_hit_options[0] =
+            (post->flags & BTBH_GPU_SCENE_POST_SSR_FACING_HITS) != 0u ? 1.0f : 0.0f;
     }
     post_uniforms.tonemap_mode = post->tonemap_mode;
     post_uniforms.exposure = post->exposure;
@@ -8501,9 +8535,15 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     post_uniforms.projection_scale_y = projection_scale_y;
     post_uniforms.saturation = post->saturation;
     /* Phases: opaque, transparent, and on frames that draw one, refraction (a transparent pass over a copy of
-       the scene so far). */
-    const uint32_t geometry_phase_count =
-        BTBH_GPU_SCENE_TRANSPARENCY_COUNT + (refraction_active ? 1u : 0u);
+       the scene so far). The radiance cascades' debug views (since 0.10.0) take the opaque pass alone: the
+       transparent and refracting batches drew over the view (Be The Bullet Hell v2's additive night overlays read
+       as the cascades' light). */
+    const bool radiance_cascades_debug_output =
+        (radiance_cascades_active || radiance_cascades_fallback_debug) &&
+        post->radiance_cascades.debug_view != BTBH_GPU_SCENE_RC_DEBUG_NONE;
+    const uint32_t geometry_phase_count = radiance_cascades_debug_output
+        ? 1u
+        : BTBH_GPU_SCENE_TRANSPARENCY_COUNT + (refraction_active ? 1u : 0u);
     for (uint32_t transparency_phase = 0u;
          transparency_phase < geometry_phase_count;
          ++transparency_phase) {
@@ -9154,6 +9194,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         fragment_uniforms
             .secondary_directional_shadow_controls[1] =
             lighting->secondary_directional_shadow_softness;
+        /* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0), as a whole number. */
+        fragment_uniforms
+            .secondary_directional_shadow_controls[2] =
+            (float)lighting->spot_occluder_flags;
         fragment_uniforms.spot_shadow_controls[0] =
             (float)shadow_enabled[2];
         fragment_uniforms.spot_shadow_controls[1] =
@@ -9322,7 +9366,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         ? 32u | ((uint32_t)batch->ssao_mode << 3u)
                         : 0u) |
                     (ssr_surface_reflectivity ? 64u : 0u) |
-                    (scene_ambient_targets ? 128u : 0u);
+                    (scene_ambient_targets ? 128u : 0u) |
+                    ((batch->flags &
+                      BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
+                        ? 256u
+                        : 0u);
                 fragment_uniforms.alpha_cutoff =
                     batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =
@@ -9400,6 +9448,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         phase_auxiliary_geometry_outputs,
                         temporal_active,
                         radiance_cascades_active,
+                        scene_ambient_targets,
                         shadows_active,
                         omni_shadows_active,
                         animated,
@@ -9514,9 +9563,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
                    (RFC 0008) and the world-detail table's array (RFC 0009; these four not in the fast unlit shader),
                    with their placement in the fragment uniform slot 1, and a table's entries in slot 2. */
-                const bool batch_fast_unlit =
-                    !radiance_cascades_active &&
-                    btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
+                const bool batch_fast_unlit = btbh_gpu_scene_batch_fast_unlit(
+                    batch,
+                    radiance_cascades_active,
+                    scene_ambient_targets
+                );
                 const uint32_t material_sampler_count =
                     batch_fast_unlit
                         ? 2u

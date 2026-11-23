@@ -130,6 +130,21 @@ _Static_assert(BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS == 1u, "the shared-buffers fl
 #error "BTBH_GPU_HAS_SHARED_MESH_BUFFERS is defined with btbh_gpu_window_custom_mesh_create_ex"
 #endif
 
+/* 0.10.0 (Be The Bullet Hell v2's findings and its kaiju shadow): a post flag, a batch flag and the spot occluder's
+   flags, in bits and bytes that were there. Batch bits 3 and 4 stay free for RFC 0013's draft. */
+_Static_assert(BTBH_GPU_SCENE_POST_SSR_FACING_HITS == 4, "SSR_FACING_HITS is post bit 2");
+_Static_assert(BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW == 32, "RECEIVES_NO_SPOT_SHADOW is batch bit 5");
+_Static_assert(BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY == 1 && BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC == 2,
+    "the spot occluder's flags' bits");
+_Static_assert(sizeof(BTBHGPUSceneLighting) == 3340u, "BTBHGPUSceneLighting keeps its size");
+_Static_assert(offsetof(BTBHGPUSceneLighting, directional_shadow_filter) == 3336u, "the shadow filter keeps its place");
+_Static_assert(offsetof(BTBHGPUSceneLighting, spot_occluder_flags) == 3338u,
+    "spot_occluder_flags is the old directional_shadow_reserved[1]");
+#if !defined(BTBH_GPU_SCENE_HAS_SSR_FACING_HITS) || !defined(BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW) || \
+    !defined(BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS)
+#error "0.10.0's HAS_ macros are defined with their features"
+#endif
+
 #define MAX_INSTANCES 32u
 
 static float instances[MAX_INSTANCES][24];
