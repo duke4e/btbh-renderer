@@ -75,6 +75,7 @@ typedef struct BTBHGPUModelPrimitive {
 typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
 typedef struct BTBHGPUCanvasRuntime BTBHGPUCanvasRuntime;
 typedef struct BTBHGPUModelTextureShare BTBHGPUModelTextureShare;
+typedef struct BTBHGPULazyCreationLog BTBHGPULazyCreationLog;
 
 #define BTBH_GPU_FRAME_TELEMETRY_CAPACITY 256u
 
@@ -185,6 +186,10 @@ struct BTBHGPUWindow {
         BTBH_GPU_FRAME_TELEMETRY_CAPACITY
     ];
     uint32_t frame_telemetry_pending_count;
+    /* The lazy creation log (since 0.11.0, btbh_gpu_device.c): made when it is first turned on. */
+    BTBHGPULazyCreationLog *lazy_creation;
+    /* The frames submitted so far (btbh_gpu_window_finish_pending_frame): the log's frame_index. */
+    uint64_t submitted_frame_count;
 };
 
 struct BTBHGPUTexture {
@@ -601,25 +606,107 @@ static inline bool btbh_gpu_texture_is_heightfield(const BTBHGPUTexture *texture
 
 /* Every shader and pipeline the renderer makes goes through these three (since 0.7.0): they count what was made
    and the time it took, process-wide, so a test can tell whether a present made any (the prewarm smoke) and a
-   measurement can tell how much of a frame went into making them. */
+   measurement can tell how much of a frame went into making them. Call them through the macros below.
+   `path` is the shader file (NULL when unknown) and `load_started_ticks` when reading it began (0: not timed), for
+   the lazy creation log; `function` is the caller's (__func__). */
 typedef struct BTBHGPUCreationStats {
     uint64_t shaders;
     uint64_t graphics_pipelines;
     uint64_t compute_pipelines;
     uint64_t nanoseconds;
 } BTBHGPUCreationStats;
-SDL_GPUShader *btbh_gpu_create_shader(
+SDL_GPUShader *btbh_gpu_create_shader_from(
     SDL_GPUDevice *device,
-    const SDL_GPUShaderCreateInfo *info
+    const SDL_GPUShaderCreateInfo *info,
+    const char *path,
+    uint64_t load_started_ticks,
+    const char *function
 );
-SDL_GPUGraphicsPipeline *btbh_gpu_create_graphics_pipeline(
+SDL_GPUGraphicsPipeline *btbh_gpu_create_graphics_pipeline_at(
     SDL_GPUDevice *device,
-    const SDL_GPUGraphicsPipelineCreateInfo *info
+    const SDL_GPUGraphicsPipelineCreateInfo *info,
+    const char *function
 );
-SDL_GPUComputePipeline *btbh_gpu_create_compute_pipeline(
+SDL_GPUComputePipeline *btbh_gpu_create_compute_pipeline_from(
     SDL_GPUDevice *device,
-    const SDL_GPUComputePipelineCreateInfo *info
+    const SDL_GPUComputePipelineCreateInfo *info,
+    const char *path,
+    uint64_t load_started_ticks,
+    const char *function
 );
 void btbh_gpu_creation_stats(BTBHGPUCreationStats *stats);
+#define btbh_gpu_create_shader(device, info) \
+    btbh_gpu_create_shader_from((device), (info), NULL, 0u, __func__)
+#define btbh_gpu_create_graphics_pipeline(device, info) \
+    btbh_gpu_create_graphics_pipeline_at((device), (info), __func__)
+#define btbh_gpu_create_compute_pipeline(device, info) \
+    btbh_gpu_create_compute_pipeline_from((device), (info), NULL, 0u, __func__)
+
+/* The lazy creation log (since 0.11.0, btbh_gpu_window_lazy_creation_report; btbh_gpu_device.c). A present, a render
+   to a target and a canvas present run inside a scope (btbh_gpu_lazy_creation_begin / _end). While the window's log
+   is on (or BTBH_GPU_LOG_LAZY_CREATION=1), what the scope's thread makes in it is recorded: the shaders and pipelines
+   through the functions above, and SDL's textures, samplers, buffers and transfer buffers through the macros below,
+   which every file that includes this header calls in place of SDL's (the caller's __func__ names where). Off, a
+   scope costs a flag test and the wrappers one atomic load more than SDL's own call. */
+typedef struct BTBHGPULazyCreationScope {
+    BTBHGPUWindow *window;   /* the window this scope records, NULL when it records nothing */
+    BTBHGPUWindow *previous_window;
+    SDL_ThreadID previous_thread;
+    uint8_t previous_call;
+    bool previous_in_prewarm_step;
+} BTBHGPULazyCreationScope;
+/* The timed SDL calls (BTBH_GPU_LAZY_CREATION_SLOW_CALL): recorded when one takes 1 ms or more over its usual time. */
+typedef enum BTBHGPULazyTimedCall {
+    BTBH_GPU_LAZY_CALL_SCENE_COMMAND_BUFFER = 0,
+    BTBH_GPU_LAZY_CALL_SCENE_UPLOAD_MAP,
+    BTBH_GPU_LAZY_CALL_TARGET_SUBMIT,
+    BTBH_GPU_LAZY_CALL_CANVAS_COMMAND_BUFFER,
+    BTBH_GPU_LAZY_CALL_SWAPCHAIN_ACQUIRE,
+    BTBH_GPU_LAZY_CALL_CANVAS_UPLOAD_MAP,
+    BTBH_GPU_LAZY_CALL_FRAME_SUBMIT,
+    BTBH_GPU_LAZY_CALL_COUNT
+} BTBHGPULazyTimedCall;
+void btbh_gpu_lazy_creation_begin(
+    BTBHGPUWindow *window,
+    uint8_t call,
+    BTBHGPULazyCreationScope *scope
+);
+void btbh_gpu_lazy_creation_end(const BTBHGPULazyCreationScope *scope);
+/* Brackets a step the present shares with the prewarm (btbh_gpu_scene_prepare_frame, _ensure_model_pipelines,
+   _ensure_frame_targets): what is made inside is marked prewarm_covers. */
+void btbh_gpu_lazy_creation_prewarm_step(bool entering);
+/* SDL_GetTicksNS() while this thread's scope records, else 0: the start of a timed call. */
+uint64_t btbh_gpu_lazy_creation_clock(void);
+/* Ends a timed call started with btbh_gpu_lazy_creation_clock (nothing when started_ticks is 0). */
+void btbh_gpu_lazy_creation_call_timed(BTBHGPULazyTimedCall call, uint64_t started_ticks);
+/* Frees the window's log (btbh_gpu_window_destroy). */
+void btbh_gpu_lazy_creation_release(BTBHGPUWindow *window);
+/* For measurements (the stage bench): a timed call is recorded when it takes `nanoseconds` over its usual time
+   (default 1 ms); 0 records every timed call. */
+void btbh_gpu_lazy_creation_set_call_threshold(uint64_t nanoseconds);
+SDL_GPUTexture *btbh_gpu_create_texture_at(
+    SDL_GPUDevice *device,
+    const SDL_GPUTextureCreateInfo *info,
+    const char *function
+);
+SDL_GPUSampler *btbh_gpu_create_sampler_at(
+    SDL_GPUDevice *device,
+    const SDL_GPUSamplerCreateInfo *info,
+    const char *function
+);
+SDL_GPUBuffer *btbh_gpu_create_buffer_at(
+    SDL_GPUDevice *device,
+    const SDL_GPUBufferCreateInfo *info,
+    const char *function
+);
+SDL_GPUTransferBuffer *btbh_gpu_create_transfer_buffer_at(
+    SDL_GPUDevice *device,
+    const SDL_GPUTransferBufferCreateInfo *info,
+    const char *function
+);
+#define SDL_CreateGPUTexture(device, info) btbh_gpu_create_texture_at((device), (info), __func__)
+#define SDL_CreateGPUSampler(device, info) btbh_gpu_create_sampler_at((device), (info), __func__)
+#define SDL_CreateGPUBuffer(device, info) btbh_gpu_create_buffer_at((device), (info), __func__)
+#define SDL_CreateGPUTransferBuffer(device, info) btbh_gpu_create_transfer_buffer_at((device), (info), __func__)
 
 #endif

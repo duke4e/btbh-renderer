@@ -2152,6 +2152,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
      targets and pipelines.
    - The first frame or two after it still cost a few milliseconds more than the next ones: the GPU API's first
      use of the new pipelines' render passes, descriptor pools and uniform buffers, which only drawing makes.
+   - The lazy creation log (btbh_gpu_window_set_lazy_creation_log_enabled, below) names what a frame made that a
+     prewarm would have, and what nothing makes ahead.
    - Nothing is kept between runs: SDL 3.4 makes its Vulkan pipelines without a pipeline cache. The driver's own
      shader cache is what makes a later run's creations faster.
    Call it between frames. While a scene waits for its canvas it returns BTBH_GPU_INVALID_ARGUMENT and leaves the
@@ -2289,6 +2291,87 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
 );
 /* Defined when btbh_gpu_window_scene_prewarm_render_to_target exists (since 0.9.0). */
 #define BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM 1
+
+/* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
+   a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls
+   in them that took 1 ms or more over their usual time. It names what a prewarm missed. Off by default: turn it on
+   per window with btbh_gpu_window_set_lazy_creation_log_enabled, or for every window with the environment variable
+   BTBH_GPU_LOG_LAZY_CREATION=1, which also prints each entry with SDL_Log as one line starting "BTBH_GPU_LAZY".
+   Off, nothing is timed or kept, and on or off the frames are the same to the byte.
+   - Recorded: shaders (the file read and the module), graphics and compute pipelines, samplers, textures (the scene's
+     targets, the shadow maps, lookup tables, FSR 3's and the radiance cascades' resources), buffers and transfer
+     buffers made or grown, each with its CPU time; and the slow calls: the scene's and the canvas's command buffer
+     and upload buffer, the swapchain image, the frame's submit and a render to a target's submit.
+   - prewarm_covers 1: btbh_gpu_window_scene_prewarm (for a render to a target, its _render_to_target form) called
+     with the frame's shader paths, settings, batches and render size, at the window's drawable size, makes it. Its
+     shaders, pipelines, samplers and textures in a scene present or a render to a target. A texture made again
+     after a window resize or at another render size counts too: only a prewarm after the change would have made it.
+   - prewarm_covers 0: no prewarm makes it. The buffers that grow with a frame's instances, bones, motions, canvas
+     vertices and the cascades' emitters and occlusion; everything the canvas makes (its pipelines are made by the
+     first canvas present, those for font atlases by the first batch that draws one); the slow calls. SDL's own
+     lazy work (its descriptor pools and uniform buffers, its deferred releases and memory clean-up on a presenting
+     submit) shows only as a slow call around it.
+   - Only the thread that presents is recorded; work on other threads (loading) isn't. */
+typedef enum BTBHGPULazyCreationKind {
+    BTBH_GPU_LAZY_CREATION_SHADER = 1,
+    BTBH_GPU_LAZY_CREATION_GRAPHICS_PIPELINE = 2,
+    BTBH_GPU_LAZY_CREATION_COMPUTE_PIPELINE = 3,
+    BTBH_GPU_LAZY_CREATION_SAMPLER = 4,
+    BTBH_GPU_LAZY_CREATION_TEXTURE = 5,
+    BTBH_GPU_LAZY_CREATION_BUFFER = 6,
+    BTBH_GPU_LAZY_CREATION_TRANSFER_BUFFER = 7,
+    BTBH_GPU_LAZY_CREATION_SLOW_CALL = 8
+} BTBHGPULazyCreationKind;
+
+/* The call an entry happened in. */
+typedef enum BTBHGPULazyCreationCall {
+    BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT = 1,
+    BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET = 2,
+    BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT = 3
+} BTBHGPULazyCreationCall;
+
+#define BTBH_GPU_LAZY_CREATION_NAME_CAPACITY 232u
+/* How many entries a window keeps between two reports: when more are recorded, the oldest are dropped (a gap in
+   sequence shows where). */
+#define BTBH_GPU_LAZY_CREATION_WINDOW_CAPACITY 128u
+
+typedef struct BTBHGPULazyCreationEntry {
+    /* The frames the window had submitted before this one (its canvas presents): a scene present, a render to a
+       target and the canvas present of one frame share it. */
+    uint64_t frame_index;
+    /* The entry's number among the window's, from 0 when its log was first turned on. */
+    uint64_t sequence;
+    /* The creation's CPU time (a shader's includes reading its file), or the slow call's. */
+    uint32_t microseconds;
+    uint8_t kind;           /* BTBHGPULazyCreationKind */
+    uint8_t call;           /* BTBHGPULazyCreationCall */
+    uint8_t prewarm_covers; /* 1 when a prewarm makes it (see above) */
+    uint8_t reserved;
+    /* What was made, NUL-terminated: a pipeline by its key (its vertex and fragment shader files, colour targets'
+       formats and blending, depth-stencil format, depth test, stencil, cull mode), a shader by its file, a texture
+       by its size, format and use, a buffer by its size and use, a slow call by its SDL function and its usual
+       time; then where in the renderer. Cut at the capacity. */
+    char name[BTBH_GPU_LAZY_CREATION_NAME_CAPACITY];
+} BTBHGPULazyCreationEntry;
+
+/* Turns the window's lazy creation log on (enabled 1) or off (0); turned off, it keeps what it recorded until the
+   next report. BTBH_GPU_LOG_LAZY_CREATION=1 records every window whatever this says. A NULL window does nothing. */
+void btbh_gpu_window_set_lazy_creation_log_enabled(
+    BTBHGPUWindow *window,
+    uint8_t enabled
+);
+/* Copies the oldest entries the window recorded since the last report, at most `capacity`, into `entries`, and
+   forgets them; *count is how many it copied (0 when there are none, or the log was never on). Call it again while
+   *count equals capacity to take the rest. NULL window or count, or NULL entries with a capacity, return
+   BTBH_GPU_INVALID_ARGUMENT. */
+BTBHGPUResult btbh_gpu_window_lazy_creation_report(
+    BTBHGPUWindow *window,
+    BTBHGPULazyCreationEntry *entries,
+    uint32_t capacity,
+    uint32_t *count
+);
+/* Defined when the lazy creation log exists (since 0.11.0). */
+#define BTBH_GPU_HAS_LAZY_CREATION_LOG 1
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report

@@ -124,6 +124,7 @@ static SDL_GPUComputePipeline *btbh_gpu_fsr3_create_pipeline(
         btbh_gpu_fsr3_message(message, message_capacity, "FSR3 shader path is too long", filename);
         return NULL;
     }
+    const uint64_t load_started_ticks = btbh_gpu_lazy_creation_clock();
     size_t size = 0u;
     void *bytes = SDL_LoadFile(path, &size);
     if (bytes == NULL || size == 0u) {
@@ -145,7 +146,8 @@ static SDL_GPUComputePipeline *btbh_gpu_fsr3_create_pipeline(
     info.threadcount_x = spec->threads_x;
     info.threadcount_y = spec->threads_y;
     info.threadcount_z = 1u;
-    SDL_GPUComputePipeline *pipeline = btbh_gpu_create_compute_pipeline(device, &info);
+    SDL_GPUComputePipeline *pipeline =
+        btbh_gpu_create_compute_pipeline_from(device, &info, path, load_started_ticks, NULL);
     SDL_free(bytes);
     if (pipeline == NULL) {
         btbh_gpu_fsr3_message(message, message_capacity, spec->name, SDL_GetError());

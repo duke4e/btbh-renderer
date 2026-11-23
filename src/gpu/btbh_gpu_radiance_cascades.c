@@ -760,6 +760,7 @@ btbh_gpu_radiance_cascades_create_compute_pipeline(
     if (shader_loaded != NULL) {
         *shader_loaded = false;
     }
+    const uint64_t load_started_ticks = btbh_gpu_lazy_creation_clock();
     size_t size = 0u;
     void *bytes = btbh_gpu_radiance_cascades_load_shader(
         path,
@@ -788,7 +789,7 @@ btbh_gpu_radiance_cascades_create_compute_pipeline(
     info.threadcount_y = 8u;
     info.threadcount_z = 1u;
     SDL_GPUComputePipeline *pipeline =
-        btbh_gpu_create_compute_pipeline(device, &info);
+        btbh_gpu_create_compute_pipeline_from(device, &info, path, load_started_ticks, NULL);
     SDL_free(bytes);
     if (pipeline == NULL) {
         btbh_gpu_radiance_cascades_message(
@@ -811,6 +812,7 @@ static SDL_GPUShader *btbh_gpu_radiance_cascades_create_shader(
     char *message,
     size_t message_capacity
 ) {
+    const uint64_t load_started_ticks = btbh_gpu_lazy_creation_clock();
     size_t size = 0u;
     void *bytes = btbh_gpu_radiance_cascades_load_shader(
         path,
@@ -833,7 +835,7 @@ static SDL_GPUShader *btbh_gpu_radiance_cascades_create_shader(
     info.num_storage_buffers = storage_buffer_count;
     info.num_samplers = sampler_count;
     info.num_uniform_buffers = uniform_buffer_count;
-    SDL_GPUShader *shader = btbh_gpu_create_shader(device, &info);
+    SDL_GPUShader *shader = btbh_gpu_create_shader_from(device, &info, path, load_started_ticks, NULL);
     SDL_free(bytes);
     if (shader == NULL) {
         btbh_gpu_radiance_cascades_message(
