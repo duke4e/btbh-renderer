@@ -5350,6 +5350,18 @@ static BTBHGPUSceneRunsMode btbh_gpu_scene_runs_mode(void) {
 #define BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS 16u
 #define BTBH_GPU_SCENE_RUN_VERIFY_STORAGE_BUFFERS 4u
 #define BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT 64u
+/* The helpers that wrap the SDL calls are always inlined, so that with the mode off a push or bind costs one test of
+   `verify` more; the checks themselves stay out of line. */
+#if defined(_MSC_VER)
+#define BTBH_GPU_SCENE_RUN_INLINE static __forceinline
+#define BTBH_GPU_SCENE_RUN_NOINLINE static __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BTBH_GPU_SCENE_RUN_INLINE static inline __attribute__((always_inline))
+#define BTBH_GPU_SCENE_RUN_NOINLINE static __attribute__((noinline))
+#else
+#define BTBH_GPU_SCENE_RUN_INLINE static inline
+#define BTBH_GPU_SCENE_RUN_NOINLINE static
+#endif
 
 /* A uniform block's fields by offset, so that a difference names the first field it touches. */
 typedef struct BTBHGPUSceneRunVerifyField {
@@ -5574,7 +5586,11 @@ static void btbh_gpu_scene_run_verify_begin_pass(BTBHGPUSceneRunVerify *verify, 
 }
 
 /* A geometry's batch state: recorded (it starts a run or has none) or checked (it continues one). */
-static void btbh_gpu_scene_run_verify_draw(BTBHGPUSceneRunVerify *verify, uint32_t batch_index, bool checking) {
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_verify_draw(
+    BTBHGPUSceneRunVerify *verify,
+    uint32_t batch_index,
+    bool checking
+) {
     if (verify == NULL) {
         return;
     }
@@ -5586,7 +5602,11 @@ static void btbh_gpu_scene_run_verify_draw(BTBHGPUSceneRunVerify *verify, uint32
     }
 }
 
-static void btbh_gpu_scene_run_verify_mismatch(BTBHGPUSceneRunVerify *verify, const char *what, const char *detail) {
+BTBH_GPU_SCENE_RUN_NOINLINE void btbh_gpu_scene_run_verify_mismatch(
+    BTBHGPUSceneRunVerify *verify,
+    const char *what,
+    const char *detail
+) {
     verify->telemetry->run_verify_mismatch_count += 1u;
     BTBHGPUSceneRunVerifyReport *totals = &verify->window->scene_run_verify;
     totals->mismatch_count += 1u;
@@ -5609,7 +5629,7 @@ static void btbh_gpu_scene_run_verify_mismatch(BTBHGPUSceneRunVerify *verify, co
 }
 
 /* Records a block about to be pushed (true: push it), or compares it with the block the slot holds (false). */
-static bool btbh_gpu_scene_run_verify_block(
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_block(
     BTBHGPUSceneRunVerify *verify,
     BTBHGPUSceneRunVerifyBlock *held,
     const char *stage,
@@ -5668,7 +5688,7 @@ static bool btbh_gpu_scene_run_verify_block(
     return false;
 }
 
-static void btbh_gpu_scene_run_push_vertex_uniforms(
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_push_vertex_uniforms(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPUCommandBuffer *command,
     uint32_t slot,
@@ -5683,7 +5703,7 @@ static void btbh_gpu_scene_run_push_vertex_uniforms(
     SDL_PushGPUVertexUniformData(command, slot, data, size);
 }
 
-static void btbh_gpu_scene_run_push_fragment_uniforms(
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_push_fragment_uniforms(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPUCommandBuffer *command,
     uint32_t slot,
@@ -5699,7 +5719,7 @@ static void btbh_gpu_scene_run_push_fragment_uniforms(
 }
 
 /* Records bindings from slot 0 about to be made (true: make them), or compares them with those held (false). */
-static bool btbh_gpu_scene_run_verify_bindings(
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_bindings(
     BTBHGPUSceneRunVerify *verify,
     void *held,
     uint32_t *held_count,
@@ -5736,7 +5756,7 @@ static bool btbh_gpu_scene_run_verify_bindings(
     return false;
 }
 
-static void btbh_gpu_scene_run_bind_fragment_samplers(
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_fragment_samplers(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
     const SDL_GPUTextureSamplerBinding *bindings,
@@ -5758,7 +5778,7 @@ static void btbh_gpu_scene_run_bind_fragment_samplers(
     SDL_BindGPUFragmentSamplers(pass, 0u, bindings, count);
 }
 
-static void btbh_gpu_scene_run_bind_vertex_samplers(
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_vertex_samplers(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
     const SDL_GPUTextureSamplerBinding *bindings,
@@ -5780,7 +5800,7 @@ static void btbh_gpu_scene_run_bind_vertex_samplers(
     SDL_BindGPUVertexSamplers(pass, 0u, bindings, count);
 }
 
-static void btbh_gpu_scene_run_bind_vertex_storage_buffers(
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_vertex_storage_buffers(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
     SDL_GPUBuffer *const *buffers,
@@ -5802,22 +5822,28 @@ static void btbh_gpu_scene_run_bind_vertex_storage_buffers(
     SDL_BindGPUVertexStorageBuffers(pass, 0u, buffers, count);
 }
 
-static void btbh_gpu_scene_run_set_stencil_reference(
+/* Records the stencil reference about to be set (true: set it), or compares it with the one held (false). */
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_stencil(BTBHGPUSceneRunVerify *verify, uint8_t reference) {
+    if (!verify->checking) {
+        verify->stencil_reference = reference;
+        verify->stencil_reference_set = true;
+        return true;
+    }
+    if (!verify->stencil_reference_set || verify->stencil_reference != reference) {
+        char detail[64];
+        (void)snprintf(detail, sizeof(detail), "%u against the %u held", reference, verify->stencil_reference);
+        btbh_gpu_scene_run_verify_mismatch(verify, "stencil reference", detail);
+    }
+    return false;
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_set_stencil_reference(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
     uint8_t reference
 ) {
-    if (verify != NULL) {
-        if (verify->checking) {
-            if (!verify->stencil_reference_set || verify->stencil_reference != reference) {
-                char detail[64];
-                (void)snprintf(detail, sizeof(detail), "%u against the %u held", reference, verify->stencil_reference);
-                btbh_gpu_scene_run_verify_mismatch(verify, "stencil reference", detail);
-            }
-            return;
-        }
-        verify->stencil_reference = reference;
-        verify->stencil_reference_set = true;
+    if (verify != NULL && !btbh_gpu_scene_run_verify_stencil(verify, reference)) {
+        return;
     }
     SDL_SetGPUStencilReference(pass, reference);
 }
