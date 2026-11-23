@@ -1383,7 +1383,15 @@ enum {
      * three quarters of all their light but the emission, which suits cascades that replace the scene's ambient
      * light and darkens additive ones, whose surfaces keep it (Be The Bullet Hell v2, who asked for it: with
      * nothing glowing, its night stage lost 1.4 sRGB levels on average once the cascades were on).
-     * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off).
+     * - With nothing glowing, a frame is then the frame without the cascades, to the byte (SSR off). Under the omni
+     *   shadow a pixel may differ by a level now and then: the cascades' variant of the scene shader rounds that light
+     *   apart from the plain one.
+     * - The transparent pass draws as without the cascades too (since 0.10.0): a transparent unlit batch takes the
+     *   fast unlit shader, which adds no point light (nor the dark scene's darkening and spot, nor unlit 2 and 3's sun
+     *   shadow). Under the cascades without the flag, and in 0.9.0 with it, such a batch draws with the cascades'
+     *   scene shader, which does add them: v2's additive night overlays by its neon point lights (reach 2.6, energy
+     *   2.1) came out up to 200 sRGB levels brighter than without the cascades. This changes the frames drawn with
+     *   the flag wherever a point light (or the dark scene, or unlit 2 or 3) meets a transparent unlit batch.
      * - The bounce light the cascades add isn't darkened (it isn't the ambient light), as their emitters' isn't.
      * - How: the opaque pass writes the scene's own ambient light to the targets the cascades' resolve reads its
      *   materials from (as without the cascades), and the albedo the bounce light lands on to the emission
