@@ -165,9 +165,9 @@ bootstrap interval of the difference:
   - Within each chunk, submit the batches with a table first and those without after them (overlays after their
     ground), each group by material, mesh after mesh. The ring's chunks can share one instance buffer, with offsets.
 - Swift: nothing changes; a `sharedBuffers:` option can follow when Be The Bullet Hell (v1) asks.
-- RFC 0010 (v2): rebuild the shaders with the C core, regenerate the bindings (`BTBHGPUSceneRadianceEmitter.reserved`
-  becomes `top_above`, `BTBHGPUSceneRadianceCascades.reserved` (one byte) becomes `source_tops`: `Emitter::raw` names `reserved: 0`
-  and stops compiling until it names `top_above`), then:
+- RFC 0010 (v2): rebuild the shaders with the C core and regenerate the bindings:
+  `BTBHGPUSceneRadianceEmitter.reserved` becomes `top_above` and `BTBHGPUSceneRadianceCascades.reserved` (one byte)
+  `source_tops`, so `Emitter::raw`, which names `reserved: 0`, stops compiling until it names `top_above`. Then:
   - `radiance_cascades.source_tops = 1` in `Radiance::apply`; set `invalidate` for the frame it changes if the cut
     should be clean;
   - each emitter's `top_above`, as v2 answered: shots, beams, arcs, drones and XP 0 (`position_y` their own height);
