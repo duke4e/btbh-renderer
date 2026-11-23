@@ -1090,6 +1090,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_runs_smoke COMMAND btbh_gpu_scene_runs_smoke)
         set_tests_properties(btbh_gpu_scene_runs_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # RFC 0010 (0.10.0): radiance-cascade sources with a top (source_tops, top_above): a street of a two-storey
+        # and a one-storey house round a lamp head and emitters, at Low and High; byte for byte as before with the
+        # switch off (hidden windows).
+        add_executable(btbh_gpu_rc_tops_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_rc_tops_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_rc_tops_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_rc_tops_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_rc_tops_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_rc_tops_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_rc_tops_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_rc_tops_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_rc_tops_smoke COMMAND btbh_gpu_rc_tops_smoke)
+        set_tests_properties(btbh_gpu_rc_tops_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # A measurement, not a test: a frame like Be The Bullet Hell v2's city (RFC 0009's follow-up); see the file
         # and tools/frame_bench_summary.py.
         add_executable(btbh_gpu_frame_bench
