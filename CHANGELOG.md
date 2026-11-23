@@ -6,6 +6,147 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+0.12.0: two additions to `BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`, both asked for by Be The Bullet Hell v2
+(0.11.0's two Known items about the flag):
+- **A per-batch opt-out from its transparent routing**, in a new second byte of batch flags
+  (`BTBHGPUSceneGeometryBatch.flags2`, `BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK`): v2's weapon beams and glows
+  keep the cascades' point-light boost while its light overlays draw as without the cascades.
+- **Its ambient part with contact AO and the SSAO:** with the flag, contact AO (`ssao_contact` 1) and the SSAO
+  (`ssao_enabled` 1) under additive cascades darken what they darken without the cascades. With nothing glowing, a frame
+  is the frame without the cascades. **This changes frames drawn with the flag** under additive cascades with contact
+  AO (v2's setting since 0.11.0) or the SSAO.
+
+Without the flag, and with it and the HBAO's `ssao_contact` 0 (0.9.0's path), every frame draws byte for byte as
+0.11.0's. One shader changed: `production_model.frag.hlsl`, whose three radiance-cascades variants
+(`production_model_rc*.frag`) compile anew; the plain variants and every other shader compile to 0.11.0's files.
+
+Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.12.0-keep-hbao`:
+- `check.ps1` with the GPU smokes passes 32/32 (no new test executable); all 76 shaders build (SPIR-V and MSL), and
+  the public headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- **Identity:** v0.11.0's references come from a build of the release checkout (`84cfff53`), out of tree. Every image
+  both builds write (the flags, font, scene target, height lift, prewarm, runs, RC tops, world detail and lit particle
+  smokes): 358 images and 17,714,048 pixels a mode; 0 differ, in each of three modes:
+  - nothing set;
+  - `BTBH_SMOKE_SHARED_MESHES=1`;
+  - `BTBH_GPU_SCENE_RUNS=0`.
+
+  The SDF terrain and mesh queue smokes pass in each mode. The flags smoke's 18 new images exist only in the new build.
+  Its gallery's seven new unset frames were checked against the new smoke built against 0.11.0's header and core: 35
+  gallery images, 0 differ, in each mode. Run on 0.11.0's core, the new smoke fails where it should: contact AO with
+  `KEEP_HBAO` by day differs from the cascades off (233 pixels, up to 26 levels).
+- **Shader artifacts:** against v0.11.0's build only `production_model_rc.frag`, `production_model_rc_2d_shadows.frag`
+  and `production_model_rc_unshadowed.frag` differ (SPIR-V and MSL; their reflection is the same), with the three FSR 3
+  MSL files that differ between any two builds.
+- **The header:** the batch is 288 bytes, with `flags` at 253, `flags2` at 254 and `ssao_reserved[1]` at 255; batch bits
+  0–3, 5 and 6 are taken (bit 4 RFC 0013 phase 2's, bit 7 free); flags2 bit 0 is taken; the 34 `HAS_` macros are each
+  defined once.
+
+### Added
+- **`BTBHGPUSceneGeometryBatch.flags2`**, the batch flags' second byte: byte 254 on 64-bit, right after `flags`, the
+  old `ssao_reserved[0]`. The batch keeps its 288 bytes; `ssao_reserved` keeps one byte (255). The byte was in the run
+  key already and stays there. Its bits are its own (they don't go in `flags`). An unknown bit fails the present and
+  the prewarm with `BTBH_GPU_INVALID_ARGUMENT`. Batch bit 7 stays free, and bit 4 stays RFC 0013 phase 2's.
+- **`BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK`** (flags2 bit 0) and
+  **`BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK`**. Under additive cascades with `KEEP_HBAO`, a transparent unlit batch
+  with the bit draws as under the cascades without `KEEP_HBAO`: with the cascades' scene shader
+  (`production_model_rc*.frag`), which adds the point lights, the dark scene's darkening, spot and glow, and unlit 2
+  and 3's sun shadow, instead of the fast unlit shader. Its fragment block is the one it has there, too (the flag's
+  scene-target bits cleared), so it draws byte for byte as without `KEEP_HBAO`.
+  - Only a batch the fast unlit shader would draw is affected (unlit, in the transparent pass, no surface variant, no
+    world detail texture, no table with `map_layers`), and only under additive cascades with `KEEP_HBAO`, outside the
+    cascades' debug views. Elsewhere it changes nothing.
+  - The batch takes the pipeline it takes under the cascades without `KEEP_HBAO`, and the prewarm makes it for a
+    batch with the bit. No new shader.
+- The flags smoke (`check_keep_cascades_look`): a beam (a long thin additive unlit box) by the neon, nothing glowing,
+  additive cascades, no AO, no shadow and the sun's. With `KEEP_HBAO` the frame is the frame without the cascades; with
+  the bit on the beam too it is the frame under the cascades without `KEEP_HBAO`, byte for byte, and the two differ
+  (146 pixels, up to 12 levels). With contact AO and street lamps, and with the HBAO, the bit changes the beam's pixels
+  alone (148 and 147). The bit changes nothing without the cascades, under cascades that aren't additive, under
+  additive ones without `KEEP_HBAO`, in a debug view, on an opaque unlit box, on every batch of a street without a beam,
+  or on the beam drawn lit. Prewarming the three flagged scenes in a fresh window made 34 pipelines; their renders then
+  made 0.
+- The refusals: flags2 bits 1 to 7, each with bit 0, at the present and at the prewarm; bit 0 alone is taken. The order
+  test: flags2's offset and bit, the macro, and flags2 in the run key (61 fields over 288 bytes).
+- Swift: nothing. The Swift layer sets no batch flags and doesn't expose `KEEP_HBAO`.
+
+### Changed
+- **`BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`'s ambient part applies with contact AO and the SSAO** (asked for
+  by Be The Bullet Hell v2). Under contact AO, v2's opaque lit surfaces in a street lamp's pool (a car's roof, a
+  facade) came out up to 94 levels brighter than without the cascades, with the flag or without. The cause: the
+  cascades' scene shader carries the street lamps' light in the emission target, and contact AO keeps the emission
+  target's light undarkened. It does the same for an opaque unlit surface's colour (0.11.0's smoke: 237 pixels, up to
+  26 levels). 0.9.0 to 0.11.0 applied the ambient part with the HBAO's `ssao_contact` 0 only.
+  - **The SSAO** (`ssao_enabled` 1): the opaque pass writes the scene's own ambient targets (as with the HBAO), and the
+    SSAO's resolve darkens the ambient light from them, as without the cascades (its mode 1; `ao_contact_strength` and
+    `ao_direct_share` no longer apply there).
+  - **Contact AO** (`ssao_enabled` 2, `ssao_contact` 1): the opaque pass writes the scene's own targets too, with the
+    emission in the ambient target's rgb (the cascades' scene shader, `unlit_enabled` bit 10), which contact AO reads
+    instead of the emission target. Contact AO reads no ambient light, and the emission target carries the albedo for
+    the cascades' resolve. The HBAO's passes run after the opaque pass and before the cascades, over the scene the
+    cascades then compose with their bounce light. So contact AO darkens the scene's own light as it does without the
+    cascades, and the bounce light isn't darkened: without the flag, as with it in 0.11.0, contact AO comes after the
+    cascades and darkens it with the rest. The HBAO's debug view (`ssao_debug_view`) stays after the cascades and shows
+    the occlusion as before.
+  - Screen-space reflections weigh each surface by its reflectivity's luminance there, as with the HBAO under the flag.
+  - **No AO:** nothing darkens the scene, so a frame with nothing glowing already equals the frame without the cascades,
+    with the flag or without. The flag changes the transparent pass alone there, as before.
+  - Under the omni shadow a pixel may differ by a level now and then (the cascades' variant of the scene shader rounds
+    that light apart from the plain one, as 0.10.0 noted): in the smoke, at most 1 pixel by 1 level a frame.
+  - **This changes frames drawn with the flag under additive cascades with contact AO or the SSAO.** With nothing
+    glowing they now match the cascades off. With something glowing, the bounce light near occluded corners is no
+    longer darkened by contact AO.
+  - The flags smoke (`check_keep_hbao_contact`): nothing glowing, additive cascades, the day street and a night street
+    with two street lamps (over the metal box and before the building's front) and the neon, through no shadow, the
+    sun's and the omni shadow. With the flag, contact AO and the SSAO render the frame without the cascades: 0 pixels
+    differ (under the omni shadow at night 1 pixel by 1 level). Without it they differ (contact AO by day 233 pixels, up
+    to 26 levels, the unlit box; at night 1,654 to 1,801, the lamps' pools up to 6 levels; the SSAO 1,544 to 2,331
+    pixels, up to 6). No AO renders the frame without the cascades with the flag and without (under the omni shadow 1
+    pixel by 1 level). On a street only the bounce light lights, contact AO and the SSAO with the flag render as no AO,
+    byte for byte; without it they darken that light (950 and 663 pixels). Contact AO's debug view is the same with the
+    flag, without it and without the cascades. With the reflections, contact AO and the SSAO under the flag render as no
+    cascades with `SSR_SURFACE_REFLECTIVITY` (0 pixels). 0.11.0's checks: the SSAO case and the opaque unlit box by the
+    neon now render the frame without the cascades too, and contact AO and the SSAO left the flag's "ignored" cases (no
+    AO joined them).
+  - The gallery's new unset frames (`lamps-contact`, `lamps-contact-additive`, `lamps-contact-additive-omni`,
+    `lamps-ssao-additive`, `dark-bounce-contact-additive`, `beam-additive`, `beam-contact-additive`) match 0.11.0's
+    core's to the byte.
+- `btbh_gpu_scene.c`: the HBAO's three passes moved into `btbh_gpu_scene_encode_hbao`, which the old place calls as
+  before.
+- The Swift suite's source check of the SSAO's mode reads the new condition.
+
+### Measured
+Under the machine's perf lock (10:16:45 to 10:17:04), the flags smoke's bench at 1920x1080 on an RTX 3070 Ti
+(Vulkan): the night street with its lamps and neon, additive cascades, contact AO (`BTBH_SMOKE_BENCH=contact`), and
+the HBAO with SSR (`=hbao`). A frame takes about 1 ms there, so these are small numbers.
+- **Off:** nothing to pay.
+  - v0.11.0's core and shaders against this build's, three alternating processes of 20 turns, unset: median
+    0.967 ms against 0.966 ms a frame (fastest 0.956 against 0.951).
+  - The shaders alone (this core, 0.11.0's shaders in a second window, 30 turns): +0.003 ms median with contact AO
+    unset, +0.004 ms with the HBAO and SSR unset. Within the turns' spread.
+- **`KEEP_HBAO` with contact AO** against unset, this build: -0.011 ms median (0.955 against 0.966), the same in each
+  of the three runs, and -0.010 ms against 0.11.0's `KEEP_HBAO` with contact AO (its transparent part alone). The
+  extra work is a branch in the cascades' scene shader; the HBAO's passes only move.
+- `KEEP_CASCADES_LOOK` costs a batch the scene shader instead of the fast unlit one; not measured.
+
+### Upgrading
+- Nothing to set: a host without `KEEP_HBAO`, or with it and the HBAO's `ssao_contact` 0, draws as before. Rebuild the
+  scene shaders: with 0.11.0's `production_model_rc*.frag`, `KEEP_HBAO` with contact AO would keep the ambient light
+  from contact AO instead of the emission. Rust hosts with bindgen regenerate the bindings: `ssao_reserved` (two bytes)
+  becomes `flags2` and a one-byte `ssao_reserved`; `..Default::default()` leaves `flags2` 0. A host that left garbage
+  in `ssao_reserved[0]` now gets `BTBH_GPU_INVALID_ARGUMENT`.
+- v2: nothing to change for the lamp pools: `KEEP_HBAO` with contact AO now matches the cascades off with nothing
+  glowing. Give the weapon beams' and glow sources' batches `flags2 = BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK`,
+  and keep the light overlays without it. Prewarm with the flagged batches.
+
+### Known
+- **0.11.0's two Known items about `KEEP_HBAO` are settled**: the beams and glows keep the cascades' look with
+  `KEEP_CASCADES_LOOK`, and lit surfaces in a street lamp's pool match the cascades off under contact AO with the flag.
+- **The smoke's lamp pools differ less than v2's**: without the flag they come out up to 6 levels brighter there
+  (v2: 94), as its contact AO is milder. The cause is the same, and the flag's frame matches the cascades off to the
+  byte; v2's own frames haven't been drawn with 0.12.0.
+- **macOS (Metal) and a real Steam Deck** aren't verified.
+
 ## [0.11.0] — 2026-11-23
 
 0.11.0: everything in it was asked for by Be The Bullet Hell v2, and all of it is opt-in. With nothing set, every frame
