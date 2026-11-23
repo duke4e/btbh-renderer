@@ -268,13 +268,9 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
     SDL_GPUCommandBuffer *into = cycle ? NULL : owner->pending_command;
 
     SDL_GPUDevice *device = buffer->owner->device->gpu;
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
-        device,
-        &transfer_info
-    );
+    /* (From the upload staging pool with a budget, unless recorded into the waiting frame.) */
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire_into(device, into, byte_count, &staging_offset);
     if (transfer == NULL) {
         btbh_gpu_instance_buffer_error(
             report,
@@ -290,10 +286,10 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
             BTBH_GPU_DEVICE_FAILURE,
             SDL_GetError()
         );
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return report->result;
     }
-    memcpy(mapped, bytes, byte_count);
+    memcpy((uint8_t *)mapped + staging_offset, bytes, byte_count);
     SDL_UnmapGPUTransferBuffer(device, transfer);
 
     SDL_GPUCommandBuffer *command = into != NULL ? into : SDL_AcquireGPUCommandBuffer(device);
@@ -309,11 +305,12 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
         if (command != NULL && into == NULL) {
             (void) SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return report->result;
     }
     SDL_GPUTransferBufferLocation source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     SDL_GPUBufferRegion destination = {0};
     destination.buffer = buffer->buffer;
     destination.offset = byte_offset;
@@ -323,8 +320,7 @@ BTBHGPUResult btbh_gpu_instance_buffer_upload_ex(
     SDL_UploadToGPUBuffer(copy, &source, &destination, cycle);
     SDL_EndGPUCopyPass(copy);
     /* (Recorded into a frame, the transfer buffer is released now and freed by SDL once that frame has run.) */
-    const bool submitted = into != NULL || SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    const bool submitted = btbh_gpu_staging_submit_into(device, command, into, &transfer, 1u);
     if (!submitted) {
         btbh_gpu_instance_buffer_error(
             report,

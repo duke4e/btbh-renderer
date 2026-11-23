@@ -1266,30 +1266,82 @@ SDL_GPUTransferBuffer *btbh_gpu_staging_acquire(SDL_GPUDevice *device, uint32_t 
     return transfer;
 }
 
-bool btbh_gpu_staging_submit(
+SDL_GPUTransferBuffer *btbh_gpu_staging_acquire_into(
+    SDL_GPUDevice *device,
+    SDL_GPUCommandBuffer *into,
+    uint32_t size,
+    uint32_t *offset
+) {
+    if (into == NULL) {
+        return btbh_gpu_staging_acquire(device, size, offset);
+    }
+    /* Recorded into a command buffer someone else submits (a frame waiting for the canvas): the pool would never see
+       that submission's fence, so the upload has a buffer of its own, released once recorded (SDL frees it once the
+       frame has run). */
+    *offset = 0u;
+    return btbh_gpu_staging_create(device, size);
+}
+
+bool btbh_gpu_staging_submit_into(
     SDL_GPUDevice *device,
     SDL_GPUCommandBuffer *command,
-    SDL_GPUTransferBuffer *transfer
+    SDL_GPUCommandBuffer *into,
+    SDL_GPUTransferBuffer *const *transfers,
+    uint32_t transfer_count
 ) {
+    if (into != NULL) {
+        for (uint32_t index = 0u; index < transfer_count; ++index) {
+            if (transfers[index] != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, transfers[index]);
+            }
+        }
+        return true;
+    }
+    /* Which of the transfer buffers (at most 4) are pooled ranges: a chunk once for each range it lent. */
+    uint32_t chunks[4];
+    uint32_t pooled = 0u;
+    transfer_count = SDL_min(transfer_count, (uint32_t)SDL_arraysize(chunks));
     SDL_LockSpinlock(&btbh_gpu_staging_lock);
-    const uint32_t index = btbh_gpu_staging_lending_chunk(device, transfer);
+    for (uint32_t index = 0u; index < transfer_count; ++index) {
+        chunks[index] = btbh_gpu_staging_lending_chunk(device, transfers[index]);
+        pooled += chunks[index] != BTBH_GPU_STAGING_CHUNKS ? 1u : 0u;
+    }
     SDL_UnlockSpinlock(&btbh_gpu_staging_lock);
-    if (index == BTBH_GPU_STAGING_CHUNKS) {
+    if (pooled == 0u) {
         const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        for (uint32_t index = 0u; index < transfer_count; ++index) {
+            if (transfers[index] != NULL) {
+                SDL_ReleaseGPUTransferBuffer(device, transfers[index]);
+            }
+        }
         return submitted;
     }
     SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    for (uint32_t index = 0u; index < transfer_count; ++index) {
+        if (transfers[index] != NULL && chunks[index] == BTBH_GPU_STAGING_CHUNKS) {
+            SDL_ReleaseGPUTransferBuffer(device, transfers[index]);
+        }
+    }
     SDL_LockSpinlock(&btbh_gpu_staging_lock);
-    BTBHGPUStagingChunk *chunk = &btbh_gpu_staging_chunks[index];
-    chunk->lent -= 1u;
+    for (uint32_t index = 0u; index < transfer_count; ++index) {
+        if (chunks[index] != BTBH_GPU_STAGING_CHUNKS) {
+            btbh_gpu_staging_chunks[chunks[index]].lent -= 1u;
+        }
+    }
     if (fence == NULL) {
-        /* (A failed submit: the chunk isn't trusted again.) */
-        if (chunk->lent == 0u) {
-            btbh_gpu_staging_drop(index);
-        } else {
-            chunk->cursor = chunk->size;
-            chunk->last_serial = UINT64_MAX;
+        /* (A failed submit: its chunks aren't trusted again.) */
+        for (uint32_t index = 0u; index < transfer_count; ++index) {
+            const uint32_t chunk_index = chunks[index];
+            if (chunk_index == BTBH_GPU_STAGING_CHUNKS || btbh_gpu_staging_chunks[chunk_index].transfer == NULL) {
+                continue;
+            }
+            BTBHGPUStagingChunk *chunk = &btbh_gpu_staging_chunks[chunk_index];
+            if (chunk->lent == 0u) {
+                btbh_gpu_staging_drop(chunk_index);
+            } else {
+                chunk->cursor = chunk->size;
+                chunk->last_serial = UINT64_MAX;
+            }
         }
         SDL_UnlockSpinlock(&btbh_gpu_staging_lock);
         return false;
@@ -1312,12 +1364,24 @@ bool btbh_gpu_staging_submit(
     btbh_gpu_staging_fences[btbh_gpu_staging_fence_count].fence = fence;
     btbh_gpu_staging_fences[btbh_gpu_staging_fence_count].serial = btbh_gpu_staging_submitted_serial;
     btbh_gpu_staging_fence_count += 1u;
-    chunk->last_serial = btbh_gpu_staging_submitted_serial;
+    for (uint32_t index = 0u; index < transfer_count; ++index) {
+        if (chunks[index] != BTBH_GPU_STAGING_CHUNKS) {
+            btbh_gpu_staging_chunks[chunks[index]].last_serial = btbh_gpu_staging_submitted_serial;
+        }
+    }
     btbh_gpu_staging_poll();
     /* (A budget lowered meanwhile.) */
     btbh_gpu_staging_trim(btbh_gpu_staging_budget);
     SDL_UnlockSpinlock(&btbh_gpu_staging_lock);
     return true;
+}
+
+bool btbh_gpu_staging_submit(
+    SDL_GPUDevice *device,
+    SDL_GPUCommandBuffer *command,
+    SDL_GPUTransferBuffer *transfer
+) {
+    return btbh_gpu_staging_submit_into(device, command, NULL, &transfer, 1u);
 }
 
 void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *transfer) {

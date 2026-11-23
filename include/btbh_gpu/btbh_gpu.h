@@ -1697,15 +1697,18 @@ void btbh_gpu_device_destroy(BTBHGPUDevice *device);
    Every upload copies its data into a transfer buffer (host-visible memory) first. By default (a budget of 0) each
    upload makes its own and releases it, and SDL frees that memory at the next frame that presents: after a level's
    load, the first frame frees every one the load made (SDL 3.4 on Vulkan: about 0.1 ms each, more for big ones; 17 to
-   28 ms for a load of 140 uploads on an RTX 3070 Ti). With a budget, the uploads of textures (made, loaded and updated)
-   and of the shared geometry buffers (models' primitives and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS meshes) take their
-   transfer buffer from a pool (at most 16, each a power of two of at least 64 KiB) and give it back when they submit;
-   the next upload reuses one whose upload the GPU has finished (checked, never waited for), so a load makes a few
-   buffers and frees none. An upload bigger than the budget, or one while every pooled buffer is still being read,
-   makes its own, as without a budget. The pool's memory stays allocated until the budget is lowered (idle buffers
-   beyond it are released) or the device shuts down. Uploads and frames are the same to the byte with or without it.
-   Custom meshes without SHARED_BUFFERS and instance buffers still make their own. One device at a time: another
-   device's call, a NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT. */
+   28 ms for a load of 140 uploads on an RTX 3070 Ti). With a budget, uploads take ranges of a few pooled transfer
+   buffers instead (at most 16, 4 MiB or a power of two that holds the upload), and a pooled buffer starts again once
+   the GPU has finished every upload that read it (checked with fences, never waited for), so a load makes a few
+   buffers and frees none. Pooled: textures (made, loaded, updated, arrays, heightfields), the shared geometry buffers
+   (models' primitives and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS meshes), custom meshes with buffers of their own (made,
+   updated, updated in part) and instance buffer uploads (plain and BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE). An
+   upload recorded into a frame waiting for its canvas (a NO_CYCLE upload or a plain mesh update meanwhile) still
+   makes its own; queued uploads are copied from the scene's own transfer buffer, as without a budget. An upload
+   bigger than the budget, or one while every pooled buffer is still being read, makes its own too. The pool's memory
+   stays allocated until the budget is lowered (idle buffers beyond it are released) or the device shuts down.
+   Uploads and frames are the same to the byte with or without it. One device at a time: another device's call, a
+   NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT. */
 BTBHGPUResult btbh_gpu_device_set_upload_staging_budget(
     BTBHGPUDevice *device,
     uint32_t bytes

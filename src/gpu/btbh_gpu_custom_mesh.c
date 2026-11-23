@@ -33,7 +33,8 @@ static void btbh_gpu_custom_mesh_error(
    (SDL's cycling), so that frame keeps the old data; a shared mesh's buffers are the arena's and must not cycle (the
    rest of the block would be lost), nor must a partial update's (the rest of the mesh would be). `into`: NULL to
    acquire and submit a command buffer of its own (as since 0.1.0); otherwise the copy pass is recorded into that one
-   (a frame waiting for the canvas, the upload queue's ordering rules) and nothing is submitted. */
+   (a frame waiting for the canvas, the upload queue's ordering rules) and nothing is submitted. The data is staged
+   through the upload staging pool when the device has a budget and `into` is NULL (btbh_gpu_staging_acquire_into). */
 static bool btbh_gpu_custom_mesh_upload_buffers(
     SDL_GPUDevice *device,
     SDL_GPUBuffer *vertex_buffer,
@@ -48,82 +49,28 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
     SDL_GPUCommandBuffer *into,
     BTBHGPUCustomMeshReport *report
 ) {
-    SDL_GPUTransferBuffer *vertex_transfer = NULL;
-    void *mapped = NULL;
-    if (vertex_byte_count > 0u) {
-        SDL_GPUTransferBufferCreateInfo vertex_transfer_info = {0};
-        vertex_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        vertex_transfer_info.size = vertex_byte_count;
-        vertex_transfer = SDL_CreateGPUTransferBuffer(
-            device,
-            &vertex_transfer_info
-        );
-        if (vertex_transfer == NULL) {
-            btbh_gpu_custom_mesh_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return false;
+    SDL_GPUTransferBuffer *transfers[2] = { NULL, NULL };
+    uint32_t staging_offsets[2] = { 0u, 0u };
+    const void *const sources[2] = { vertices, indices };
+    const uint32_t byte_counts[2] = { vertex_byte_count, index_byte_count };
+    for (uint32_t part = 0u; part < 2u; ++part) {
+        if (byte_counts[part] == 0u) {
+            continue;
         }
-
-        mapped = SDL_MapGPUTransferBuffer(
-            device,
-            vertex_transfer,
-            false
-        );
+        transfers[part] = btbh_gpu_staging_acquire_into(device, into, byte_counts[part], &staging_offsets[part]);
+        void *mapped = transfers[part] != NULL ? SDL_MapGPUTransferBuffer(device, transfers[part], false) : NULL;
         if (mapped == NULL) {
             btbh_gpu_custom_mesh_error(
                 report,
                 BTBH_GPU_DEVICE_FAILURE,
                 SDL_GetError()
             );
-            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
+            btbh_gpu_staging_abandon(device, transfers[1]);
+            btbh_gpu_staging_abandon(device, transfers[0]);
             return false;
         }
-        memcpy(mapped, vertices, vertex_byte_count);
-        SDL_UnmapGPUTransferBuffer(device, vertex_transfer);
-    }
-
-    SDL_GPUTransferBuffer *index_transfer = NULL;
-    if (index_byte_count > 0u) {
-        SDL_GPUTransferBufferCreateInfo index_transfer_info = {0};
-        index_transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-        index_transfer_info.size = index_byte_count;
-        index_transfer = SDL_CreateGPUTransferBuffer(
-            device,
-            &index_transfer_info
-        );
-        if (index_transfer == NULL) {
-            btbh_gpu_custom_mesh_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            if (vertex_transfer != NULL) {
-                SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
-            }
-            return false;
-        }
-        mapped = SDL_MapGPUTransferBuffer(
-            device,
-            index_transfer,
-            false
-        );
-        if (mapped == NULL) {
-            btbh_gpu_custom_mesh_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            SDL_ReleaseGPUTransferBuffer(device, index_transfer);
-            if (vertex_transfer != NULL) {
-                SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
-            }
-            return false;
-        }
-        memcpy(mapped, indices, index_byte_count);
-        SDL_UnmapGPUTransferBuffer(device, index_transfer);
+        memcpy((uint8_t *)mapped + staging_offsets[part], sources[part], byte_counts[part]);
+        SDL_UnmapGPUTransferBuffer(device, transfers[part]);
     }
 
     SDL_GPUCommandBuffer *command = into != NULL ? into : SDL_AcquireGPUCommandBuffer(device);
@@ -139,18 +86,15 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
         if (command != NULL && into == NULL) {
             (void) SDL_CancelGPUCommandBuffer(command);
         }
-        if (index_transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, index_transfer);
-        }
-        if (vertex_transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
-        }
+        btbh_gpu_staging_abandon(device, transfers[1]);
+        btbh_gpu_staging_abandon(device, transfers[0]);
         return false;
     }
 
     if (vertex_byte_count > 0u) {
         SDL_GPUTransferBufferLocation vertex_source = {0};
-        vertex_source.transfer_buffer = vertex_transfer;
+        vertex_source.transfer_buffer = transfers[0];
+        vertex_source.offset = staging_offsets[0];
         SDL_GPUBufferRegion vertex_destination = {0};
         vertex_destination.buffer = vertex_buffer;
         vertex_destination.offset = vertex_offset;
@@ -164,7 +108,8 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
     }
     if (index_byte_count > 0u) {
         SDL_GPUTransferBufferLocation index_source = {0};
-        index_source.transfer_buffer = index_transfer;
+        index_source.transfer_buffer = transfers[1];
+        index_source.offset = staging_offsets[1];
         SDL_GPUBufferRegion index_destination = {0};
         index_destination.buffer = index_buffer;
         index_destination.offset = index_offset;
@@ -178,13 +123,7 @@ static bool btbh_gpu_custom_mesh_upload_buffers(
     }
     SDL_EndGPUCopyPass(copy);
     /* (Recorded into a frame, the transfer buffers are released now and freed by SDL once that frame has run.) */
-    const bool submitted = into != NULL || SDL_SubmitGPUCommandBuffer(command);
-    if (index_transfer != NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, index_transfer);
-    }
-    if (vertex_transfer != NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, vertex_transfer);
-    }
+    const bool submitted = btbh_gpu_staging_submit_into(device, command, into, transfers, 2u);
     if (!submitted) {
         btbh_gpu_custom_mesh_error(
             report,
