@@ -321,6 +321,22 @@ struct BTBHGPUCustomMesh {
     uint64_t queue_copied_serial;
 };
 
+/* btbh_gpu_window_custom_mesh_create for a mesh with buffers of its own, its data queued (since 0.13.0, for the SDF
+   terrain's chunks, btbh_gpu_custom_mesh.c): the buffers are made now, and the window's next scene (a present or a
+   render into a target) copies the data into them before it draws, as it copies BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's.
+   Nothing draws the mesh before that scene. NULL, with the report's error, when the data is invalid, when the queue
+   can't take it (BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES) or when a buffer can't be made: the caller may make it the
+   plain way then. */
+BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_queued(
+    BTBHGPUWindow *window,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t vertex_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    BTBHGPUCustomMeshReport *report
+);
+
 /* The bounds of `vertex_count` custom mesh vertices' positions (the first three floats of each 24-float
    vertex); false, leaving minimum and maximum undefined, when one isn't finite. */
 bool btbh_gpu_custom_mesh_bounds(

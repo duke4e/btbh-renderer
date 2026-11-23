@@ -199,6 +199,8 @@ struct BTBHGPUSdfTerrain {
     uint32_t gpu_vertex_scratch_capacity;
     struct SdfBrickEval *brick_work;
     uint32_t brick_work_capacity;
+    /* Where the last update's time went (btbh_gpu_sdf_terrain_update_times, since 0.13.0). */
+    BTBHGPUSdfTerrainUpdateTimes times;
 };
 
 /* ------------------------------------------------------------------------------------------------ helpers */
@@ -2998,11 +3000,10 @@ static void sdf_gpu_upload_mask(BTBHGPUSdfTerrain *t) {
         memset(t->mask_tile_dirty, 0, tiles);
         return;
     }
-    SDL_GPUTransferBufferCreateInfo transfer_info;
-    SDL_zero(transfer_info);
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = (Uint32)bytes;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    /* (Since 0.13.0 from the upload staging pool when the host gave it a budget, as the other uploads: the same bytes
+       in a transfer buffer the pool keeps; without one, a buffer of its own as before.) */
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(device, (uint32_t)bytes, &staging_offset);
     if (transfer == NULL) {
         return;
     }
@@ -3016,10 +3017,10 @@ static void sdf_gpu_upload_mask(BTBHGPUSdfTerrain *t) {
         if (command != NULL) {
             (void)SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return;
     }
-    uint64_t offset = 0u;
+    uint64_t offset = staging_offset;
     for (uint32_t tile = 0u; tile < tiles; ++tile) {
         if (!sdf_mask_tile_needs_upload(t, tile)) {
             continue;
@@ -3058,13 +3059,20 @@ static void sdf_gpu_upload_mask(BTBHGPUSdfTerrain *t) {
     }
     SDL_UnmapGPUTransferBuffer(device, transfer);
     SDL_EndGPUCopyPass(copy);
-    (void)SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    (void)btbh_gpu_staging_submit(device, command, transfer);
     t->mask_upload_all = 0u;
     memset(t->mask_tile_dirty, 0, tiles);
+    t->times.mask_uploads += 1u;
+    t->times.mask_upload_bytes += bytes;
 }
 
-/* Uploads the chunks whose mesh switched and the mask tiles that changed (calling thread). */
+/* Uploads the chunks whose mesh switched and the mask tiles that changed (calling thread). Since 0.13.0 a chunk's mesh
+ * goes through the window's upload queue (made, or updated with BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED): the call copies
+ * its data there, and the window's next scene, a present or a render into a target, copies it to the GPU before it
+ * draws. Before, each chunk made two transfer buffers and submitted a command buffer of its own (about 0.17 ms each on
+ * Vulkan), past the update's budget. A host updates the terrain before the scene that draws it, so that scene shows
+ * the new meshes as it did, together with the mask (still uploaded here, before that scene). When the queue can't take
+ * a chunk (BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES), it is uploaded at once as before. */
 static void sdf_gpu_sync(BTBHGPUSdfTerrain *t) {
     if (t->window == NULL || t->window->device == NULL || t->window->device->shutdown) {
         return;
@@ -3073,8 +3081,10 @@ static void sdf_gpu_sync(BTBHGPUSdfTerrain *t) {
         SdfChunk *chunk = &t->chunk_array[t->gpu_dirty.items[index]];
         chunk->gpu_dirty = 0u;
         const SdfMesh *mesh = chunk->mesh;
+        const uint64_t chunk_started = sdf_now_ticks();
         if (mesh == NULL || mesh->index_count == 0u) {
             sdf_gpu_release_chunk(t, chunk);
+            t->times.mesh_uploads += (double)(sdf_now_ticks() - chunk_started) / 1000.0;
             continue;
         }
         const uint32_t floats = mesh->vertex_count * SDF_GPU_VERTEX_FLOATS;
@@ -3087,24 +3097,47 @@ static void sdf_gpu_sync(BTBHGPUSdfTerrain *t) {
             t->gpu_vertex_scratch_capacity = floats;
         }
         sdf_gpu_vertices(t, mesh, t->gpu_vertex_scratch);
+        const uint64_t upload_started = sdf_now_ticks();
+        t->times.gpu_vertices += (double)(upload_started - chunk_started) / 1000.0;
         /* Faceted meshes are triangle lists already: no index buffer on the GPU. */
         const bool faceted = t->desc.normals == BTBH_GPU_SDF_NORMALS_FACETED;
         const uint32_t *indices = faceted ? NULL : mesh->indices;
         const uint32_t index_count = faceted ? 0u : mesh->index_count;
+        t->times.mesh_upload_bytes +=
+            (uint64_t)floats * sizeof(float) + (uint64_t)index_count * sizeof(uint32_t);
         BTBHGPUCustomMeshReport report;
         if (chunk->gpu_mesh != NULL) {
-            if (btbh_gpu_custom_mesh_update(
+            if (chunk->gpu_mesh->vertex_count == mesh->vertex_count && chunk->gpu_mesh->index_count == index_count) {
+                t->times.meshes_same_counts += 1u;
+            }
+            BTBHGPUResult updated = btbh_gpu_custom_mesh_update_ex(
+                chunk->gpu_mesh,
+                t->gpu_vertex_scratch,
+                floats * (uint32_t)sizeof(float),
+                indices,
+                index_count,
+                BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED,
+                &report
+            );
+            if (updated == BTBH_GPU_OK) {
+                t->times.meshes_queued += 1u;
+            } else {
+                updated = btbh_gpu_custom_mesh_update(
                     chunk->gpu_mesh,
                     t->gpu_vertex_scratch,
                     floats * (uint32_t)sizeof(float),
                     indices,
                     index_count,
                     &report
-                ) != BTBH_GPU_OK) {
+                );
+            }
+            if (updated != BTBH_GPU_OK) {
                 sdf_gpu_release_chunk(t, chunk);
             }
+            t->times.meshes_updated += 1u;
         } else {
-            chunk->gpu_mesh = btbh_gpu_window_custom_mesh_create(
+            t->times.meshes_created += 1u;
+            chunk->gpu_mesh = btbh_gpu_window_custom_mesh_create_queued(
                 t->window,
                 t->gpu_vertex_scratch,
                 floats * (uint32_t)sizeof(float),
@@ -3113,17 +3146,33 @@ static void sdf_gpu_sync(BTBHGPUSdfTerrain *t) {
                 index_count,
                 &report
             );
+            if (chunk->gpu_mesh != NULL) {
+                t->times.meshes_queued += 1u;
+            } else {
+                chunk->gpu_mesh = btbh_gpu_window_custom_mesh_create(
+                    t->window,
+                    t->gpu_vertex_scratch,
+                    floats * (uint32_t)sizeof(float),
+                    mesh->vertex_count,
+                    indices,
+                    index_count,
+                    &report
+                );
+            }
         }
         t->mesh_gpu_bytes -= chunk->gpu_bytes;
         chunk->gpu_bytes = chunk->gpu_mesh != NULL
             ? (uint64_t)chunk->gpu_mesh->vertex_buffer_capacity + (uint64_t)chunk->gpu_mesh->index_buffer_capacity
             : 0u;
         t->mesh_gpu_bytes += chunk->gpu_bytes;
+        t->times.mesh_uploads += (double)(sdf_now_ticks() - upload_started) / 1000.0;
     }
     t->gpu_dirty.count = 0u;
+    const uint64_t mask_started = sdf_now_ticks();
     if (t->mask_texel_total > 0u) {
         if (t->mask_texture == NULL) {
             if (!sdf_gpu_create_mask(t)) {
+                t->times.mask_upload += (double)(sdf_now_ticks() - mask_started) / 1000.0;
                 return;
             }
             t->mask_upload_all = 1u;
@@ -3132,6 +3181,7 @@ static void sdf_gpu_sync(BTBHGPUSdfTerrain *t) {
     } else if (t->mask_texture != NULL) {
         sdf_gpu_release_mask(t);
     }
+    t->times.mask_upload += (double)(sdf_now_ticks() - mask_started) / 1000.0;
 }
 
 /* ------------------------------------------------------------------------------------------------ queries */
@@ -3617,8 +3667,14 @@ BTBHGPUResult btbh_gpu_sdf_terrain_update(
     }
     BTBHGPUSdfTerrain *t = terrain;
     const uint64_t started = sdf_now_ticks();
+    memset(&t->times, 0, sizeof(t->times));
     uint32_t bricks = 0u;
     uint32_t chunks = 0u;
+    /* Since 0.13.0, a budgeted update without run_jobs meshes one chunk at a time and checks the budget after each:
+       nothing runs them side by side, and a batch sized by the running average overran the budget by several chunks
+       where they cost more than those before (a crater's chunks differ by a factor of five). With run_jobs, up to 8
+       still run together. The chunks, their order and their meshes are the same either way. */
+    const uint32_t mesh_limit = budget_microseconds != 0u && t->desc.run_jobs == NULL ? 1u : 8u;
     for (;;) {
         const double elapsed = (double)(sdf_now_ticks() - started) / 1000.0;
         const double remaining = budget_microseconds != 0u ? (double)budget_microseconds - elapsed : -1.0;
@@ -3626,23 +3682,31 @@ BTBHGPUResult btbh_gpu_sdf_terrain_update(
             break;
         }
         const uint64_t batch_started = sdf_now_ticks();
-        uint32_t done = sdf_mesh_batch(t, sdf_batch_size(remaining, t->chunk_microseconds, 8u));
+        uint32_t done = sdf_mesh_batch(t, sdf_batch_size(remaining, t->chunk_microseconds, mesh_limit));
         if (done > 0u) {
             chunks += done;
-            const double each = (double)(sdf_now_ticks() - batch_started) / 1000.0 / (double)done;
+            const double spent = (double)(sdf_now_ticks() - batch_started) / 1000.0;
+            t->times.meshing += spent;
+            const double each = spent / (double)done;
             t->chunk_microseconds = 0.75 * t->chunk_microseconds + 0.25 * each;
             continue;
         }
         done = sdf_brick_batch(t, sdf_batch_size(remaining, t->brick_microseconds, 64u));
+        /* (The bricks' share includes the search for a chunk to mesh that found none, as their estimate does.) */
+        const double spent = (double)(sdf_now_ticks() - batch_started) / 1000.0;
+        t->times.bricks += spent;
         if (done == 0u) {
             break;
         }
         bricks += done;
-        const double each = (double)(sdf_now_ticks() - batch_started) / 1000.0 / (double)done;
+        const double each = spent / (double)done;
         t->brick_microseconds = 0.75 * t->brick_microseconds + 0.25 * each;
     }
+    const uint64_t switch_started = sdf_now_ticks();
     sdf_switch_ready(t);
+    t->times.switching = (double)(sdf_now_ticks() - switch_started) / 1000.0;
     sdf_gpu_sync(t);
+    t->times.total = (double)(sdf_now_ticks() - started) / 1000.0;
     t->last_bricks_evaluated = bricks;
     t->last_chunks_meshed = chunks;
     sdf_fill_report(t, report);
@@ -3903,6 +3967,17 @@ float btbh_gpu_sdf_terrain_mask_texel(const BTBHGPUSdfTerrain *terrain, uint32_t
         return SDF_MASK_SENTINEL_VALUE;
     }
     return sdf_half_to_float(tile[(size_t)(z % n) * n + (x % n)]);
+}
+
+void btbh_gpu_sdf_terrain_update_times(const BTBHGPUSdfTerrain *terrain, BTBHGPUSdfTerrainUpdateTimes *times) {
+    if (times == NULL) {
+        return;
+    }
+    if (terrain == NULL) {
+        memset(times, 0, sizeof(*times));
+        return;
+    }
+    *times = terrain->times;
 }
 
 uint64_t btbh_gpu_sdf_terrain_mask_texel_count(const BTBHGPUSdfTerrain *terrain) {

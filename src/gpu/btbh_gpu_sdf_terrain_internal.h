@@ -39,4 +39,26 @@ bool btbh_gpu_sdf_terrain_sample(const BTBHGPUSdfTerrain *terrain, int32_t x, in
 const uint8_t *btbh_gpu_sdf_terrain_chunk_materials(const BTBHGPUSdfTerrain *terrain, uint32_t index);
 const float *btbh_gpu_sdf_terrain_chunk_normals(const BTBHGPUSdfTerrain *terrain, uint32_t index);
 
+/* For the benches (since 0.13.0): where the last btbh_gpu_sdf_terrain_update's time went, in microseconds of the
+ * calling thread (the brick and mesh jobs' wall time when run_jobs spreads them). */
+typedef struct BTBHGPUSdfTerrainUpdateTimes {
+    double total;
+    double bricks;            /* evaluating stale bricks */
+    double meshing;           /* meshing chunks */
+    double switching;         /* switching the ready chunks, and their mask tiles */
+    double gpu_vertices;      /* the switched chunks' vertices in the GPU layout */
+    double mesh_uploads;      /* their custom meshes: updated, made or released */
+    double mask_upload;       /* the dig mask: made, uploaded or released */
+    uint32_t meshes_updated;
+    uint32_t meshes_created;
+    uint32_t meshes_queued;   /* of those updated or made, through the window's upload queue */
+    uint32_t meshes_same_counts; /* of those updated, with the vertex and index counts they had */
+    uint32_t mask_uploads;    /* 0 or 1 */
+    uint64_t mesh_upload_bytes;
+    uint64_t mask_upload_bytes;
+} BTBHGPUSdfTerrainUpdateTimes;
+/* Defined when btbh_gpu_sdf_terrain_update_times exists (since 0.13.0). */
+#define BTBH_GPU_SDF_TERRAIN_HAS_UPDATE_TIMES 1
+void btbh_gpu_sdf_terrain_update_times(const BTBHGPUSdfTerrain *terrain, BTBHGPUSdfTerrainUpdateTimes *times);
+
 #endif
