@@ -12,7 +12,12 @@
  * prewarm covers. A's canvas present and render to a target are logged as theirs. The report's refusals, its copy in
  * pieces and turning the log off are checked. Then, with the budget, textures of every upload path (made, updated,
  * loaded, an array, a heightfield, many small ones in a row, one bigger than the budget) read back as their pixels,
- * and the budget's refusals. It needs a GPU and the production shaders; with no device it is skipped (77). */
+ * and the budget's refusals; and instance buffers (plain and NO_CYCLE uploads, NO_CYCLE into a frame waiting for its
+ * canvas, QUEUED beside them) and custom meshes with buffers of their own (made, updated whole and in part, in part
+ * into a waiting frame) read back as written, in rounds before anything is read. Last, frame telemetry's fences: one of a
+ * frame that presented nothing is released only once its frame has run (blits queued before it are done by then), and
+ * a window that never polls keeps its newest samples. It needs a GPU and the production shaders; with no device it is
+ * skipped (77). */
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
@@ -381,6 +386,9 @@ static BTBHGPUResult prewarm(SmokeWindow *smoke) {
         batches, batch_count, &report);
 }
 
+/* Set: run_frame presents the scene and leaves it waiting for its canvas (returns NULL). */
+static bool run_frame_leaves_pending;
+
 /* Frame `frame` of the scene, presented (into `target` when given, else the window's frame, then copied out) and
    read back. */
 static uint8_t *run_frame(SmokeWindow *smoke, uint32_t frame, BTBHGPUTexture *target) {
@@ -417,6 +425,9 @@ static uint8_t *run_frame(SmokeWindow *smoke, uint32_t frame, BTBHGPUTexture *ta
     assert(result == BTBH_GPU_OK);
     if (target != NULL) {
         return read_texture(smoke->window, target, 0u);
+    }
+    if (run_frame_leaves_pending) {
+        return NULL;
     }
     BTBHGPUTextureReport copied;
     assert(btbh_gpu_window_copy_pending_scene_texture(smoke->window, smoke->frame, &copied) == BTBH_GPU_OK);
@@ -768,6 +779,315 @@ static void check_staging(BTBHGPUDevice *device) {
     btbh_gpu_window_destroy(window);
 }
 
+/* A GPU buffer's bytes [offset, offset + size), read back through SDL_GPU. */
+static uint8_t *read_buffer(BTBHGPUWindow *window, SDL_GPUBuffer *buffer, uint32_t offset, uint32_t size) {
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUTransferBufferCreateInfo info;
+    SDL_zero(info);
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    info.size = size;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &info);
+    assert(transfer != NULL);
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    assert(command != NULL);
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    SDL_GPUBufferRegion region;
+    SDL_zero(region);
+    region.buffer = buffer;
+    region.offset = offset;
+    region.size = size;
+    SDL_GPUTransferBufferLocation destination;
+    SDL_zero(destination);
+    destination.transfer_buffer = transfer;
+    SDL_DownloadFromGPUBuffer(copy, &region, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    assert(fence != NULL);
+    assert(SDL_WaitForGPUFences(device, true, &fence, 1u));
+    SDL_ReleaseGPUFence(device, fence);
+    uint8_t *bytes = malloc(size);
+    assert(bytes != NULL);
+    const void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    assert(mapped != NULL);
+    memcpy(bytes, mapped, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return bytes;
+}
+
+static void check_bytes(BTBHGPUWindow *window, SDL_GPUBuffer *buffer, uint32_t offset, const void *expected,
+    uint32_t size, const char *what) {
+    uint8_t *read = read_buffer(window, buffer, offset, size);
+    if (memcmp(read, expected, size) != 0) {
+        uint32_t differing = 0u;
+        for (uint32_t index = 0u; index < size; ++index) {
+            differing += read[index] != ((const uint8_t *)expected)[index] ? 1u : 0u;
+        }
+        fprintf(stderr, "%s: %u of %u bytes differ\n", what, differing, size);
+        assert(false);
+    }
+    free(read);
+}
+
+static uint32_t next_random(uint32_t *state) {
+    *state = *state * 1664525u + 1013904223u;
+    return *state >> 8;
+}
+
+/* `count` vertices of 24 floats (finite, the positions small) and `index_count` indices below the vertex count. */
+static float *mesh_vertices(uint32_t count, uint32_t *state) {
+    float *vertices = malloc((size_t)count * 24u * sizeof(float));
+    assert(vertices != NULL);
+    for (size_t index = 0u; index < (size_t)count * 24u; ++index) {
+        vertices[index] = (float)(next_random(state) % 2001u) / 1000.0f - 1.0f;
+    }
+    return vertices;
+}
+
+static uint32_t *mesh_indices(uint32_t count, uint32_t vertex_count, uint32_t *state) {
+    uint32_t *indices = malloc((size_t)count * sizeof(uint32_t));
+    assert(indices != NULL);
+    for (uint32_t index = 0u; index < count; ++index) {
+        indices[index] = next_random(state) % vertex_count;
+    }
+    return indices;
+}
+
+#define STAGING_BUFFERS 24u
+#define STAGING_MESHES 16u
+#define STAGING_STRIDE 96u
+
+/* Instance buffer uploads (plain, NO_CYCLE, NO_CYCLE into a frame waiting for its canvas, QUEUED beside them) and
+   custom meshes with buffers of their own (made, updated whole, updated in part, in part into a waiting frame), under
+   a staging budget, in rounds before anything is read back: every byte arrives. */
+static void check_staging_buffers(BTBHGPUDevice *device) {
+    assert(btbh_gpu_device_set_upload_staging_budget(device, 8u << 20) == BTBH_GPU_OK);
+    SmokeWindow smoke = open_window(device, "staging buffers", false);
+    BTBHGPUWindow *window = smoke.window;
+    const char *rounds_text = SDL_getenv("BTBH_LAZY_SMOKE_STAGING_ROUNDS");
+    const int rounds = rounds_text != NULL && rounds_text[0] != '\0' ? atoi(rounds_text) : 25;
+    uint32_t state = 777u;
+    uint32_t checks = 0u;
+    for (int round = 0; round < rounds; ++round) {
+        BTBHGPUInstanceBuffer *buffers[STAGING_BUFFERS];
+        uint8_t *expected[STAGING_BUFFERS];
+        uint32_t sizes[STAGING_BUFFERS];
+        for (uint32_t index = 0u; index < STAGING_BUFFERS; ++index) {
+            const uint32_t capacity = 1u + next_random(&state) % 1500u;
+            sizes[index] = capacity * STAGING_STRIDE;
+            BTBHGPUInstanceBufferReport report;
+            buffers[index] = btbh_gpu_window_instance_buffer_create(window, capacity, STAGING_STRIDE, &report);
+            assert(buffers[index] != NULL);
+            expected[index] = pattern(sizes[index] / 4u, 1u, next_random(&state));
+            assert(btbh_gpu_instance_buffer_upload(buffers[index], 0u, expected[index], sizes[index], &report) ==
+                BTBH_GPU_OK);
+            /* A part in place (NO_CYCLE), the rest kept. */
+            const uint32_t first = next_random(&state) % capacity;
+            const uint32_t count = 1u + next_random(&state) % (capacity - first);
+            uint8_t *part = pattern(count * STAGING_STRIDE / 4u, 1u, next_random(&state));
+            assert(btbh_gpu_instance_buffer_upload_ex(buffers[index], first * STAGING_STRIDE, part,
+                count * STAGING_STRIDE, BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE, &report) == BTBH_GPU_OK);
+            memcpy(expected[index] + (size_t)first * STAGING_STRIDE, part, (size_t)count * STAGING_STRIDE);
+            free(part);
+        }
+        BTBHGPUCustomMesh *meshes[STAGING_MESHES];
+        float *mesh_data[STAGING_MESHES];
+        uint32_t *mesh_index_data[STAGING_MESHES];
+        uint32_t vertex_counts[STAGING_MESHES];
+        uint32_t index_counts[STAGING_MESHES];
+        for (uint32_t index = 0u; index < STAGING_MESHES; ++index) {
+            vertex_counts[index] = 3u + next_random(&state) % 900u;
+            index_counts[index] = 3u * (1u + next_random(&state) % 600u);
+            mesh_data[index] = mesh_vertices(vertex_counts[index], &state);
+            mesh_index_data[index] = mesh_indices(index_counts[index], vertex_counts[index], &state);
+            BTBHGPUCustomMeshReport report;
+            meshes[index] = btbh_gpu_window_custom_mesh_create_ex(window, mesh_data[index],
+                vertex_counts[index] * STAGING_STRIDE, vertex_counts[index], mesh_index_data[index],
+                index_counts[index], 0u, &report);
+            assert(meshes[index] != NULL);
+            if (index % 3u == 0u) {
+                /* Updated whole (a new size), as a mesh of its own does (cycling). */
+                free(mesh_data[index]);
+                free(mesh_index_data[index]);
+                vertex_counts[index] = 3u + next_random(&state) % 900u;
+                index_counts[index] = 3u * (1u + next_random(&state) % 600u);
+                mesh_data[index] = mesh_vertices(vertex_counts[index], &state);
+                mesh_index_data[index] = mesh_indices(index_counts[index], vertex_counts[index], &state);
+                assert(btbh_gpu_custom_mesh_update_ex(meshes[index], mesh_data[index],
+                    vertex_counts[index] * STAGING_STRIDE, mesh_index_data[index], index_counts[index], 0u,
+                    &report) == BTBH_GPU_OK);
+            }
+            /* In part, in place. */
+            const uint32_t first_vertex = next_random(&state) % vertex_counts[index];
+            const uint32_t vertices = 1u + next_random(&state) % (vertex_counts[index] - first_vertex);
+            const uint32_t first_index = next_random(&state) % index_counts[index];
+            const uint32_t indices = index % 2u == 0u ? 1u + next_random(&state) % (index_counts[index] - first_index)
+                                                      : 0u;
+            float *new_vertices = mesh_vertices(vertices, &state);
+            uint32_t *new_indices = indices > 0u ? mesh_indices(indices, vertex_counts[index], &state) : NULL;
+            assert(btbh_gpu_custom_mesh_update_range(meshes[index], first_vertex, new_vertices,
+                vertices * STAGING_STRIDE, first_index, new_indices, indices, 0u, &report) == BTBH_GPU_OK);
+            memcpy(mesh_data[index] + (size_t)first_vertex * 24u, new_vertices, (size_t)vertices * STAGING_STRIDE);
+            if (indices > 0u) {
+                memcpy(mesh_index_data[index] + first_index, new_indices, (size_t)indices * sizeof(uint32_t));
+            }
+            free(new_vertices);
+            free(new_indices);
+        }
+        /* A frame waiting for its canvas: a NO_CYCLE upload and a range update go into it after its draws (buffers of
+           their own, not the pool's); a queued upload is copied by the next scene from the scene's transfer buffer. */
+        if (round % 5 == 0) {
+            const uint32_t queued = (uint32_t)round % STAGING_BUFFERS;
+            uint8_t *queued_part = pattern(STAGING_STRIDE / 4u, 1u, next_random(&state));
+            BTBHGPUInstanceBufferReport instance_report;
+            assert(btbh_gpu_instance_buffer_upload_ex(buffers[queued], 0u, queued_part, STAGING_STRIDE,
+                BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED, &instance_report) == BTBH_GPU_OK);
+            memcpy(expected[queued], queued_part, STAGING_STRIDE);
+            free(queued_part);
+            run_frame_leaves_pending = true;
+            (void)run_frame(&smoke, (uint32_t)round % FRAME_COUNT, NULL);
+            run_frame_leaves_pending = false;
+            const uint32_t into = ((uint32_t)round + 1u) % STAGING_BUFFERS;
+            uint8_t *into_part = pattern(STAGING_STRIDE / 4u, 1u, next_random(&state));
+            assert(btbh_gpu_instance_buffer_upload_ex(buffers[into], 0u, into_part, STAGING_STRIDE,
+                BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE, &instance_report) == BTBH_GPU_OK);
+            memcpy(expected[into], into_part, STAGING_STRIDE);
+            free(into_part);
+            const uint32_t mesh = (uint32_t)round % STAGING_MESHES;
+            float *into_vertices = mesh_vertices(1u, &state);
+            BTBHGPUCustomMeshReport mesh_report;
+            assert(btbh_gpu_custom_mesh_update_range(meshes[mesh], 0u, into_vertices, STAGING_STRIDE, 0u, NULL, 0u, 0u,
+                &mesh_report) == BTBH_GPU_OK);
+            memcpy(mesh_data[mesh], into_vertices, STAGING_STRIDE);
+            free(into_vertices);
+            BTBHGPUTextureReport copied;
+            assert(btbh_gpu_window_copy_pending_scene_texture(window, smoke.frame, &copied) == BTBH_GPU_OK);
+        }
+        for (uint32_t index = 0u; index < STAGING_BUFFERS; ++index) {
+            check_bytes(window, buffers[index]->buffer, 0u, expected[index], sizes[index],
+                "an instance buffer with a staging budget");
+            check_bytes(window, buffers[index]->vertex_buffer, 0u, expected[index], sizes[index],
+                "an instance buffer's vertex copy with a staging budget");
+            checks += 2u;
+            free(expected[index]);
+            btbh_gpu_instance_buffer_destroy(buffers[index]);
+        }
+        for (uint32_t index = 0u; index < STAGING_MESHES; ++index) {
+            check_bytes(window, meshes[index]->vertex_buffer, 0u, mesh_data[index],
+                vertex_counts[index] * STAGING_STRIDE, "a custom mesh's vertices with a staging budget");
+            check_bytes(window, meshes[index]->index_buffer, 0u, mesh_index_data[index],
+                index_counts[index] * (uint32_t)sizeof(uint32_t), "a custom mesh's indices with a staging budget");
+            checks += 2u;
+            free(mesh_data[index]);
+            free(mesh_index_data[index]);
+            btbh_gpu_custom_mesh_destroy(meshes[index]);
+        }
+    }
+    printf("staging: %d rounds of %u instance buffers and %u meshes, %u buffers read back as written\n", rounds,
+        STAGING_BUFFERS, STAGING_MESHES, checks);
+    assert(btbh_gpu_device_set_upload_staging_budget(device, 0u) == BTBH_GPU_OK);
+    btbh_gpu_window_destroy(window);
+}
+
+/* The canvas present that ends a frame (a hidden window: no swapchain image, so the frame presents nothing). */
+static void canvas_frame(BTBHGPUWindow *window) {
+    BTBHGPUCanvasPass pass;
+    memset(&pass, 0, sizeof(pass));
+    BTBHGPUCanvasReport report;
+    assert(btbh_gpu_window_canvas_present(window, shader_paths[11], shader_paths[12], shader_paths[13],
+        SMOKE_SHADER_FORMAT, NULL, 0u, NULL, 0u, &pass, 1u, &report) == BTBH_GPU_OK);
+}
+
+/* Frame telemetry's fences (0.11.0 fix): SDL hands a released fence to the next submission at once, so the core must
+   not release one before its frame has run. A frame that presented nothing (a hidden or minimized window) is held only
+   by the core's reference. The GPU is kept busy by blits submitted first (their fence `busy`); a frame follows them;
+   turning the telemetry off releases the frame's fence: it may do so only once the frame (and so the blits before it)
+   has run. Then a window that never polls keeps its newest samples, every fence held until it signalled. */
+static void check_frame_telemetry_fences(BTBHGPUDevice *device) {
+    SmokeWindow smoke = open_window(device, "telemetry fences", false);
+    BTBHGPUWindow *window = smoke.window;
+    SDL_GPUDevice *gpu = device->gpu;
+    /* (The scene's and the canvas's pipelines made first, so that a frame below takes little CPU.) */
+    free(run_frame(&smoke, 0u, NULL));
+    canvas_frame(window);
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    info.width = 4096u;
+    info.height = 4096u;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    SDL_GPUTexture *textures[2] = { SDL_CreateGPUTexture(gpu, &info), SDL_CreateGPUTexture(gpu, &info) };
+    assert(textures[0] != NULL && textures[1] != NULL);
+    for (uint32_t attempt = 0u; attempt < 3u; ++attempt) {
+        btbh_gpu_window_set_frame_telemetry_enabled(window, 1u);
+        SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(gpu);
+        assert(command != NULL);
+        SDL_GPUBlitInfo blit;
+        SDL_zero(blit);
+        blit.source.w = info.width;
+        blit.source.h = info.height;
+        blit.destination.w = info.width;
+        blit.destination.h = info.height;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = SDL_GPU_FILTER_LINEAR;
+        for (uint32_t index = 0u; index < 200u * (attempt + 1u); ++index) {
+            blit.source.texture = textures[index & 1u];
+            blit.destination.texture = textures[(index + 1u) & 1u];
+            SDL_BlitGPUTexture(command, &blit);
+        }
+        const uint64_t started = SDL_GetTicksNS();
+        SDL_GPUFence *busy = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+        assert(busy != NULL);
+        run_frame_leaves_pending = true;
+        (void)run_frame(&smoke, 1u, NULL);
+        run_frame_leaves_pending = false;
+        canvas_frame(window);
+        assert(window->frame_telemetry_pending_count == 1u);
+        const bool running = !SDL_QueryGPUFence(gpu, busy);
+        btbh_gpu_window_set_frame_telemetry_enabled(window, 0u);
+        const bool finished = SDL_QueryGPUFence(gpu, busy);
+        assert(SDL_WaitForGPUFences(gpu, true, &busy, 1u));
+        printf("telemetry fences: blits for %.1f ms; running when the frame's fence was released: %s; finished "
+            "after: %s\n", (double)(SDL_GetTicksNS() - started) / 1.0e6, running ? "yes" : "no",
+            finished ? "yes" : "no");
+        SDL_ReleaseGPUFence(gpu, busy);
+        if (running) {
+            /* The frame ran after the blits: its fence went back to SDL only once they had run too. */
+            assert(finished);
+            break;
+        }
+        /* (The GPU finished the blits before the check: try again with more.) */
+        assert(attempt + 1u < 3u);
+    }
+    SDL_ReleaseGPUTexture(gpu, textures[0]);
+    SDL_ReleaseGPUTexture(gpu, textures[1]);
+    /* A window that never polls: the newest samples stay, in order, and finishing waits for every one (256 at once
+       didn't wait at all). */
+    btbh_gpu_window_set_frame_telemetry_enabled(window, 1u);
+    const uint32_t frames = BTBH_GPU_FRAME_TELEMETRY_CAPACITY + 40u;
+    for (uint32_t frame = 0u; frame < frames; ++frame) {
+        run_frame_leaves_pending = true;
+        (void)run_frame(&smoke, frame % FRAME_COUNT, NULL);
+        run_frame_leaves_pending = false;
+        canvas_frame(window);
+        assert(window->frame_telemetry_pending_count <= BTBH_GPU_FRAME_TELEMETRY_CAPACITY);
+    }
+    static BTBHGPUFrameTelemetrySample samples[BTBH_GPU_FRAME_TELEMETRY_CAPACITY];
+    const uint32_t count = btbh_gpu_window_finish_frame_telemetry(window, samples, BTBH_GPU_FRAME_TELEMETRY_CAPACITY);
+    printf("telemetry fences: %u frames unpolled, %u samples kept, serials %llu..%llu\n", frames, count,
+        count > 0u ? (unsigned long long)samples[0].frame_serial : 0ull,
+        count > 0u ? (unsigned long long)samples[count - 1u].frame_serial : 0ull);
+    assert(count == BTBH_GPU_FRAME_TELEMETRY_CAPACITY);
+    for (uint32_t index = 0u; index < count; ++index) {
+        assert(samples[index].frame_serial == frames - BTBH_GPU_FRAME_TELEMETRY_CAPACITY + 1u + index);
+    }
+    btbh_gpu_window_set_frame_telemetry_enabled(window, 0u);
+    btbh_gpu_window_destroy(window);
+}
+
 int main(void) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
@@ -795,6 +1115,8 @@ int main(void) {
     }
     check_log(device);
     check_staging(device);
+    check_staging_buffers(device);
+    check_frame_telemetry_fences(device);
     btbh_gpu_device_shutdown(device);
     btbh_gpu_device_destroy(device);
     printf("lazy creation smoke passed\n");
