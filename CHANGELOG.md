@@ -4,115 +4,89 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] (0.11.0)
+## [Unreleased]
 
-RFC 0012's phase 1 and an extra, both asked for by Be The Bullet Hell v2. A static batch can be lifted by a heightfield
-in the vertex stage (`BTBHGPUSceneGeometryBatch.height_lift`), so ground pieces and their overlays follow a slope
-smoothly instead of stepping cell by cell; and custom-mesh updates can be queued into the next scene instead of each
-submitting a command buffer of its own (`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`). Both are opt-in: a batch without a lift
-and an update without the flag draw byte for byte as before, with the same shaders.
+0.11.0: everything in it was asked for by Be The Bullet Hell v2, and all of it is opt-in. With nothing set, every frame
+draws byte for byte as 0.10.0's, and every shader that 0.10.0 had and 0.11.0 doesn't change compiles to the same files.
+- **RFC 0012's phase 1:** a static batch lifted by a heightfield in the vertex stage
+  (`BTBHGPUSceneGeometryBatch.height_lift`), so ground pieces and their overlays follow a slope smoothly instead of
+  stepping cell by cell.
+- **Queued uploads:** custom-mesh updates queued into the next scene (`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`). This grew
+  into one upload queue a window, with queued or in-place instance buffer uploads (`btbh_gpu_instance_buffer_upload_ex`
+  with `BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED` or `_NO_CYCLE`) and partial mesh updates
+  (`btbh_gpu_custom_mesh_update_range`), so a city or kit chunk uploads only what changed, all of it in one copy pass
+  a frame.
+- **RFC 0013's phase 1:** a see-through surface lit per pixel (`BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`) with a normal and
+  thickness map, the soft and near fades and fog at its own depth, and a UV rect per instance
+  (`BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT`). Phase 2 (a transmittance map in sun space) follows v2's captures.
+- **A light factor per instance** (`BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR`): the instance's custom x scales its
+  emission, its glass's lit panes and its lamp lens's glow, on screen and in the radiance cascades' source field, for
+  v2's district blackouts.
+- **From v2's night perf round:** the lazy creation log (`btbh_gpu_window_lazy_creation_report`,
+  `BTBH_GPU_LOG_LAZY_CREATION=1`), which names what a prewarm missed; and the upload staging budget
+  (`btbh_gpu_device_set_upload_staging_budget`). The budget keeps a level's uploads from leaving SDL hundreds of
+  transfer buffers to free in the first frame after the load.
+- **Fixes:**
+  - `KEEP_HBAO`'s transparent part applies with any ambient occlusion.
+  - A dropped frame that copied queued uploads is submitted, so they land.
+  - Frame telemetry no longer hands SDL a fence while its frame may still run (a hidden or minimized window's
+    frames), and its finish waits for every pending frame.
 
-From v2's night perf round on the Deck preset, two more: instance buffer uploads can go into the next scene's copy pass
-and keep the rest of the buffer (`btbh_gpu_instance_buffer_upload_ex` with `BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED`,
-or `_NO_CYCLE` submitted at once), so v2 can upload the part of a city or kit chunk that changed, all of them in one
-copy pass a frame; and a custom mesh can be updated in part (`btbh_gpu_custom_mesh_update_range`), queued or not.
-Opt-in too: a host that sets neither draws byte for byte as before.
+**Shaders:** 76, against 0.10.0's 71.
+- New: `production_model_lift.vert` and `production_model_detail_table_lift.vert` (the lift);
+  `production_particle_lit.frag`, `production_particle_lit_2d_shadows.frag` and
+  `production_particle_lit_unshadowed.frag` (the lit particle); and the include `production_light_factor.hlsli`.
+- Changed:
+  - `production_model.vert` and the four built from it (the two lift shaders among them): the UV rect's test;
+  - the six `production_model*.frag`, `production_model_unlit.frag` and `production_rc_material_source.frag`: the
+    light factor.
+- Rebuild them all with the core.
 
-Tested on Windows (Vulkan), merged onto 0.10.0's candidate (`a89a4494`), from a cold build:
-- `check.ps1` with the GPU smokes passes 29/29: 0.10.0's 26, the height lift's native test, and the new height lift
-  and mesh queue smokes. All 73 shaders build, and the public headers compile clean under `/W4 /WX`.
+Tested on Windows (Vulkan), on the merged `release/0.11.0` (the code at `5f40c33a`; only this CHANGELOG follows it),
+from a cold build:
+- `check.ps1` with the GPU smokes passes 32/32. That is 0.10.0's 26 and:
+  - the height lift's native test and smoke;
+  - the mesh queue smoke (73 byte-for-byte checks, each rule it checks broken once on purpose and caught);
+  - the particle's native test and the lit particle smoke;
+  - the lazy creation smoke.
+
+  All 76 shaders build (SPIR-V and MSL), and the public headers compile clean under `/W4 /WX`.
 - The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
-- Identity against 0.10.0's candidate: the images its own verification wrote (from `b7f451ea`, the same code as
-  `a89a4494`) against this build's, every image of the eight image smokes. 235 images, 14,633,856 pixels; 0 differ, in
-  each of three modes:
+- **Identity with nothing set:** the images 0.11.0's first merge wrote (`fc2784ea`, `btbh-rel-0110-outs*`; those match
+  0.10.0's candidate's to the pixel) against this build's. Every image that exists there: the eight image smokes' and
+  the height lift smoke's 246 PNGs, and the prewarm smoke's 32 frames. 278 images and 16,219,008 pixels a mode;
+  0 differ, in each of three modes:
   - nothing set;
   - `BTBH_SMOKE_SHARED_MESHES=1`;
   - `BTBH_GPU_SCENE_RUNS=0`.
-- Every shader that existed compiles to 0.10.0's SPIR-V, MSL and reflection: 210 of 213 files. The other three are
-  FSR 3 MSL files, which differ between any two builds of the same source.
-- The height lift smoke draws the lift branch's 36 images (12 scenes, each lifted, lifted on the CPU and unlifted) as
-  that branch did, in all three modes, but for 1 pixel by 1 level in the CPU-lifted transparent scene. 0.10.0's
-  recompiled scene fragment shaders round it apart: with the branch's `production_model.frag` and
-  `production_model_2d_shadows.frag` the 36 images are byte for byte the branch's.
-- Its new scene is Be The Bullet Hell v2's overlays at night: a lifted unlit alpha overlay with `KEEP_NORMALS`, by two
-  point lights, under additive cascades with `KEEP_HBAO` and the HBAO. It draws with the fast unlit pipeline under the
-  cascades, as 0.10.0 draws such a batch unlifted. With no shadow, the sun's and the omni shadow, the frame is the frame
-  without the cascades, byte for byte, lifted on the GPU and on the CPU alike.
-- The mesh queue smoke passes in all three modes.
+- **Each branch's new images:**
+  - against the light factor branch's tip (`17d0fc35`, which holds RFC 0013's phase 1 too): all of its images,
+    including its flags smoke's 79 and its lit particle smoke's 60. 359 images and 17,739,648 pixels a mode; 0 differ,
+    in each of the three modes;
+  - against RFC 0013's own tip: the lit particle smoke's 60 images; 0 differ;
+  - the queued uploads' and the prewarm log's branches add no images, and their outputs equal the references above.
+- **Shader artifacts:** every SPIR-V, MSL and reflection file equals the light factor branch's build's. The exceptions
+  are three FSR 3 MSL files, which differ between any two builds of the same source. Against `fc2784ea`'s build, only
+  the 13 changed shaders listed above differ, and the lit particle's three are new.
+- **The merged header:**
+  - the batch is 288 bytes, with `world_detail_table` at 272 and `height_lift` at 280;
+  - batch bits 0–3, 5 and 6 are taken (3 is the UV rect, 5 no spot shadow, 6 the light factor), and bit 4 is free;
+  - post bits 0–2 are taken;
+  - the lighting struct is 3,340 bytes, with byte 3,337 free (`directional_shadow_reserved`) and
+    `spot_occluder_flags` at 3,338;
+  - the 33 `HAS_` macros are each defined once.
+- **The lazy creation smoke:**
+  - frames with the log on, and frames prewarmed under a staging budget, equal the frames with nothing set;
+  - under a budget, every upload path arrives whole: 25 rounds of 64 textures, and 25 rounds of 24 instance buffers
+    and 16 meshes of their own, each uploaded before anything is read back (300 rounds in a stress run);
+  - frame telemetry's fences: a hidden window's frame still running when the telemetry is turned off has finished by
+    the time its fence is released (the code before the fix fails this), and 296 frames left unpolled keep the newest
+    256 samples.
+
+  The mesh queue smoke also passes with an 8 MiB staging budget forced on (a scratch run).
 
 macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
-its Height terrain with it yet.
-
-RFC 0013's phase 1, asked for by Be The Bullet Hell v2 for its smoke: a see-through surface lit per pixel
-(`BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`) with a normal and thickness map, the soft and near fades and fog at its own
-depth, and a UV rect per instance (`BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT`) on every static vertex shader's path. Both
-are opt-in: with neither set every frame draws byte for byte as before. Its phase 2 (a transmittance map in sun space)
-follows v2's captures.
-
-Tested on Windows (Vulkan), on `release/0.11.0` (`fc2784ea`), from a cold build (then incremental ones):
-- `check.ps1` with the GPU smokes passes 31/31: the 29 above, the particle's native test and the lit particle
-  smoke. All 76 shaders build, and the public headers compile clean under `/W4 /WX`.
-- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
-- Identity against `fc2784ea`: the images the merged 0.11.0 build wrote, against this build's, every image of the
-  nine image smokes: 278 images, 16,219,008 pixels; 0 differ, in each of the three modes
-  (nothing set, `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`).
-- Every fragment shader and the skinned vertex shaders compile to `fc2784ea`'s SPIR-V, MSL and reflection. The five
-  static vertex shaders (`production_model.vert` and the four built from it) change, by the UV rect's test; their
-  reflection doesn't, and the identity runs above draw with them. The other three files that differ are FSR 3 MSL
-  files, which differ between any two builds of the same source.
-- The lit particle smoke: the light against a CPU reference at 41 pixels, 38 exact and 3 one level off in the 8-bit
-  output; the fog's make-up over a wall and over the sky within 0 levels, the fades within 0.0065 of the CPU's alpha, the UV
-  rect to the byte on eight paths, every refusal, prewarm, old shaders.
-
-macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
-its smoke with it yet.
-
-A light factor per instance, asked for by Be The Bullet Hell v2 for its district blackouts
-(`BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR`): the instance's custom x scales its emission, its glass's lit panes and
-its lamp lens's glow, on screen and in the radiance cascades' source field, so a blackout rewrites one float per
-instance instead of drawing the dark pieces as batches of their own. Opt-in: without the flag every frame draws byte for
-byte as before.
-
-Tested on Windows (Vulkan), at the branch's tip (with the `KEEP_HBAO` change below), from incremental builds:
-- `check.ps1` with the GPU smokes passes 31/31 (no new test executable). All 76 shaders build (no new shader file;
-  one new include), and the public headers compile clean under `/W4 /WX`.
-- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
-- Identity against `acb817e5` (RFC 0013 phase 1's tip): its images against this build's, every image of the nine image
-  smokes: 278 images, 16,219,008 pixels; 0 differ, in each of the three modes (nothing set,
-  `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`). The lit particle smoke's 60 images too.
-- Eight shaders change: the six `production_model*.frag` files, `production_model_unlit.frag` and
-  `production_rc_material_source.frag` (SPIR-V and MSL; the last two's reflection gains the input at location 5). Every
-  other shader compiles to `acb817e5`'s files, but the three FSR 3 MSL files, which differ between any two builds.
-- The flags smoke's blackout street through five cascade and shadow setups: every light-carrying piece at 1 renders as
-  unflagged, at 0 as v2's Dark batches and at 0.5 as half the energy and the share, each alone and all together, the
-  cascades' source field included (55 comparisons to the byte, 30 that must differ); eight refusals; a prewarm of the
-  unflagged scenes leaves the flagged renders no pipeline or shader to make.
-
-macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
-its blackouts with it yet.
-
-The queued uploads and partial updates, tested on Windows (Vulkan) on `release/0.11.0` (`fc2784ea`):
-- `check.ps1` with the GPU smokes passes 29/29; the mesh queue smoke now makes 73 byte-for-byte checks (17 before),
-  and each rule it checks was broken once on purpose and caught.
-- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
-- Identity against `fc2784ea`'s own images, every image of the eight image smokes and the height lift smoke: 278
-  images, 16,219,008 pixels, 0 differ, in each of the three modes above. No shader changed.
-
-Also for Be The Bullet Hell v2's night perf round (`feature/0.11.0-prewarm-log`): a log of what a window's presents
-make lazily, so that what a prewarm missed has a name, and an upload staging budget. The first frame after a level's
-load spent its time in SDL's submit, freeing every upload buffer the load had made; with the budget there are none to
-free. Both are off by default, and frames are the same to the byte with them or without. Tested on that branch, from
-`fc2784ea`:
-- `check.ps1` passes 30/30: the 29 above and the new lazy creation smoke. All 73 shaders build, and the public
-  headers compile clean under `/W4 /WX`.
-- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures (the window probes read
-  the canvas present from its new layout).
-- Identity against release/0.11.0's verification images (`btbh-rel-0110-outs*`): every picture of the eight image
-  smokes and the height lift smoke (246 PNGs) and the prewarm smoke's 32 frames, 278 images and 16,219,008 pixels a
-  mode; 0 differ, in each of the three modes above. Every smoke passes in each mode.
-- The lazy creation smoke: with the log on, and prewarmed under a staging budget, the frames are the frames with
-  nothing set; and 25 rounds of 64 textures uploaded before any is read back arrive whole through the pool (300 rounds
-  in a stress run).
+with 0.11.0 yet.
 
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
@@ -250,12 +224,17 @@ free. Both are off by default, and frames are the same to the byte with them or 
   - Only the presenting thread is recorded; uploads made outside a present (loading) aren't.
 - **`btbh_gpu_device_set_upload_staging_budget(device, bytes)`** (request 5's fix): keeps up to `bytes` of upload
   buffers for reuse. Without it (0, the default) every upload makes its own transfer buffer and releases it, and SDL
-  frees them all in the next submit that presents. With it, the uploads of textures (made, loaded, updated, arrays,
-  heightfields) and of the shared geometry buffers (models' primitives and `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`
-  meshes) take ranges of at most 16 pooled buffers (4 MiB, or a power of two that holds the upload), reused once the
-  GPU has finished every upload that read them (fences, never waited for). An upload bigger than the budget, or while
-  the pool is busy, makes its own as before; custom meshes of their own and instance buffers still do. Lowering the
-  budget lets idle buffers go; the device's shutdown releases the rest. `BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET`.
+  frees them all in the next submit that presents.
+  - With it, uploads take ranges of at most 16 pooled buffers (4 MiB, or a power of two that holds the upload), reused
+    once the GPU has finished every upload that read them (fences, never waited for).
+  - Pooled: textures (made, loaded, updated, arrays, heightfields), the shared geometry buffers (models' primitives and
+    `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS` meshes), custom meshes with buffers of their own (made, updated, updated in
+    part) and instance buffer uploads (plain and `NO_CYCLE`).
+  - Not pooled: an upload recorded into a frame waiting for its canvas (a `NO_CYCLE` upload or a plain mesh update
+    meanwhile) still makes its own; queued uploads are copied from the scene's own transfer buffer, as without a
+    budget; an upload bigger than the budget, or one made while the pool is busy, makes its own as before.
+  - Lowering the budget lets idle buffers go; the device's shutdown releases the rest.
+    `BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET`.
 
 ### Changed
 - The custom-mesh queue is the window's upload queue: an entry per range (a mesh's vertices or indices, an instance
@@ -325,9 +304,21 @@ free. Both are off by default, and frames are the same to the byte with them or 
   render to a target and a canvas present run inside the log's scope. With the log off that is a flag test a call and
   one atomic load a creation.
 - `btbh_gpu_window_scene_prewarm`'s header names the first frame's other costs: the frees after a load, and the log.
+- **Frame telemetry's fences** (found with the staging pool). SDL hands a released fence to the next submission at
+  once, so a fence released while its frame still runs can read signalled before that submission has run. A presented
+  frame's fence is also held by its swapchain, but a hidden or minimized window's frame was held only by the
+  telemetry.
+  - `btbh_gpu_window_release_frame_telemetry` (the telemetry turned off, the cascades leaving `AUTO`, the window
+    destroyed) now waits for a frame still running before it releases its fence.
+  - A full pending list (256 frames unpolled) drops its oldest sample, its fence long signalled, and keeps the newest.
+    Before, the newest was dropped and its fence released at once.
+  - `btbh_gpu_window_finish_frame_telemetry` waits 32 fences at a time: asked to wait for 256 at once, SDL 3.4 on
+    Vulkan (an RTX 3070 Ti, driver 621.14) returned at once with the newest frames still running.
 - Tests: `btbh_gpu_lazy_creation_smoke` (new: what cold frames log and prewarmed ones don't, frames with the log and
-  the budget against frames without, the canvas, a render to a target, the report's refusals and pieces, every upload
-  path through the pool); `btbh_gpu_stage_bench` (new, a measurement: a stage switch at v2's Deck preset, each frame's
+  the budget against frames without, the canvas, a render to a target, the report's refusals and pieces; under a
+  budget, textures, instance buffers and meshes of their own uploaded through the pool, with queued uploads and uploads
+  into a waiting frame among them; frame telemetry's fences on a hidden window and past 256 unpolled frames);
+  `btbh_gpu_stage_bench` (new, a measurement: a stage switch at v2's Deck preset, each frame's
   CPU split with the SDL calls from the log). `tools/check.ps1` and `tools/check.sh` skip the new smoke with the other
   GPU smokes.
 
@@ -386,6 +377,16 @@ twice a quiet machine's.
   - left with a budget: in a later frame, SDL frees the old stage's emptied 64–128 MB device memory blocks
     (0.4–17 ms, one a frame) and defragments (0.25–1.4 ms); a window resized at the switch remakes its swapchain in the
     first acquire (7.7 ms).
+- **The staging budget on every path** (the stage bench as above, its default kit: half the pieces in the shared
+  buffers, half with buffers of their own, plus 8 instance buffers; six switches a run, *locked*, on the merged
+  release). The machine ran faster than for the entry above, so compare within each entry. The first frame after the
+  load:
+  - nothing set: 18.6 ms (16.8–47.6, two runs), of which 15.5 ms is the submit;
+  - with a budget of 128 MiB: 4.1 ms (2.7–5.7), the submit 1.6–1.9 ms. Loading the meshes takes 1.3 ms instead of 6.3,
+    and the instance buffers 0.2 instead of 0.7;
+  - with the budget pooling only textures and the shared buffers (the prewarm log branch's build): 8.8 ms (7.5–9.7),
+    the submit 6.0–6.5 ms. The meshes with buffers of their own and the instance buffers still left about 60 transfer
+    buffers to free.
 - **The log off** (the frame bench's CPU mode, 2,001 batches, four alternating processes each, *locked*): the scene
   present takes 0.640 ms against the base's 0.659 (the processes' medians 0.62–0.72 and 0.61–0.72): no difference.
 
@@ -465,8 +466,6 @@ The light factor's runs, on the same machine and bench (the Deck preset, 2,001 k
   128 << 20)` once after making the device (128 MiB lets a 4096^2 texture's 64 MiB share the pool), and destroy the old
   stage's resources a few frames before the new stage's first frame (a loading screen's), so that SDL frees their
   memory there.
-
-## [Unreleased]
 
 ## [0.10.0] — 2026-11-23
 
