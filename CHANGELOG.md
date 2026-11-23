@@ -10,7 +10,7 @@ RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch t
 it only in its mesh and instance range now binds and pushes nothing new (same-material runs), the frame's lighting is
 filled once a pass instead of once a batch, and a creation flag puts custom meshes in the models' shared geometry
 buffers, so that neighbouring draws share their vertex and index buffers. Every game gains where its batches run by
-material, without changing anything; nothing it draws changes. No struct grows and no shader changes.
+material, without changing anything; nothing it draws changes. That part grows no struct and changes no shader.
 
 Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (25/25 with the new runs smoke, 71 shaders), the Swift
 build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.9.0's candidate (`d077b5e6`), each smoke's
@@ -18,6 +18,26 @@ images written by a build of it and by this one: 153 images, 10,577,792 pixels, 
 smokes' custom meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`) and with runs turned off
 (`BTBH_GPU_SCENE_RUNS=0`). macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The
 Bullet Hell v2 hasn't measured it at its map edge yet.
+
+Be The Bullet Hell v2's three findings against 0.9.0, and its kaiju's spot shadow. `KEEP_HBAO` frames now match the
+frame without the cascades under point lights too: the difference v2 saw wasn't the HBAO but the transparent pass,
+whose unlit batches drew with another shader under the cascades. The cascades' debug views no longer draw the
+transparent pass over them. Two opt-in additions: `BTBH_GPU_SCENE_POST_SSR_FACING_HITS`, which keeps the reflections
+from smearing a column of each thin thing down the wet ground under a steep camera, and the spot occluder's flags with
+`BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW`, for a kaiju shadow from the spot map that takes only the sun's light.
+No struct grows (the new fields take reserved bits and a reserved byte); five scene shaders changed, so rebuild the
+shaders with the C core.
+
+Tested on Windows (Vulkan), for the findings and the kaiju shadow:
+- `check.ps1` with the GPU smokes (25/25, 71 shaders);
+- the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures);
+- against c5390f0b (0.9.0's candidate with RFC 0011's phase 1), each smoke's images written by a build of it (with
+  this branch's flags smoke) and by this one: 164 images, 10,859,392 pixels. 0 differ with nothing set, and again
+  with `BTBH_SMOKE_SHARED_MESHES=1` and with `BTBH_GPU_SCENE_RUNS=0`. The SDF terrain smoke passes against its
+  fixture.
+
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't run
+any of it.
 
 ### Added
 - **`BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`** and **`btbh_gpu_window_custom_mesh_create_ex`** (the plain create's
@@ -34,8 +54,97 @@ Bullet Hell v2 hasn't measured it at its map edge yet.
     should keep buffers of their own.
   - `BTBH_GPU_HAS_SHARED_MESH_BUFFERS`.
 - `BTBH_GPU_SCENE_RUNS=0`, a measurement tool: every batch binds and pushes its whole state again.
+- **`BTBH_GPU_SCENE_POST_SSR_FACING_HITS`** (post flags bit 2): the screen-space reflections take only hits a ray can
+  make. v2 found that in the rain under a steep camera every actor (the kaiju, jets, enemies) left a noisy column of
+  itself smeared down the wet street below it, which `ssr_thickness` 0.1 instead of 0.6 mostly hid. The depth buffer
+  holds only the surfaces in front, so a ray that passed behind or beneath a thin thing within the thickness was taken
+  for a hit on its visible face.
+  - A hit on a surface that faces along the ray (its normal less than 90 degrees from the ray: the top of anything
+    seen from above, for a ray climbing from the street) can't be one, so the ray marches on past it. The hits left
+    fade as their surface turns edge on (within about 9 degrees) and as the ray passes farther behind it (from a
+    quarter of `ssr_thickness` to all of it).
+  - What stands on the ground keeps its reflection, and so do walls and the faces turned to the camera: a ray
+    reflected from level ground keeps the camera's heading, so it meets them from the front.
+  - It works with or without the cascades and with `SSR_SURFACE_REFLECTIVITY` or without; it changes nothing without
+    SSR. A new bit rather than a change to `SSR_SURFACE_REFLECTIVITY`: the artefact is the trace's, with the cascades
+    too, and 0.9.0's flag keeps its look. The SSAO resolve reads it from a uniform word added at the end of the post
+    uniforms (`ssr_hit_options`).
+  - In the smoke's steep street (a 67-degree camera, v2's SSR settings in the rain), the ground below a slab floating
+    1.6 units up reflected it over 376 pixels; with the flag 68 remain, its true mirror image. The tall box standing
+    on the ground keeps all 180 of its reflection's pixels. By day on the flat street, 316 of 2,801 reflecting
+    pixels change, by at most 10 levels, along silhouettes.
+  - `BTBH_GPU_SCENE_HAS_SSR_FACING_HITS`; Swift: `ScreenSpaceReflectionDescriptor.facingHits` (default false).
+- **`BTBHGPUSceneLighting.spot_occluder_flags`** (byte 3,338, which was `directional_shadow_reserved[1]`; an unknown
+  bit fails the present), for v2's kaiju shadow: it draws only the kaiju into the 1,024 spot map, fitted along the
+  sun round its body with an orthographic matrix, and darkens with `spot_occluder_shadow_strength`.
+  - **`BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY`**: the occluder's darkening takes only the sun's light (the primary
+    directional light), not the sun, the fill and the sky together. The spot map then acts as a sharper sun shadow of
+    the kaiju, which can leave the sun's map: taking all three, the shadow came out brown at dusk. Under cascades that
+    aren't additive their light (their own field, sun and sky in one) is still darkened as before.
+  - **`BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC`**: the spot matrix is orthographic. The reach is then the occluder's
+    distance from the map's near plane in world units along the light, read linearly from the depth, instead of a
+    perspective distance from the light; the darkening still eases out from 0.4 to 1 times it, and a reach of 2.5
+    times the map's depth range never eases. v2 had set the reach to 10,000 to get the same. The spot shadow's slope
+    bias also takes spot_direction for the light's direction.
+  - `BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS`.
+- **`BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW`** (batch flags bit 5; bits 3 and 4 are left to RFC 0013's draft):
+  the batch receives no spot or omni shadow: the spot light lights it unshadowed and the occluder's darkening takes
+  none of its light. v2 offered it as an alternative to the sun-only darkening; both stay, because they do different
+  things. With the sun-only darkening the kaiju shades itself like a sun shadow, at the spot map's resolution and with
+  its acne; this flag takes the kaiju out of its own map as a receiver (it keeps its sun-map self-shadow if it stays
+  in that map). What a batch casts is still `spot_shadow_visible`'s. `BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW`.
+- Tests: `btbh_gpu_scene_flags_smoke` (since 0.9.0) gains, unset, 12 gallery scenes (neon point lights at night by an
+  additive overlay and a refracting box with no, normal and additive cascades; the overlay under the cascades; the
+  steep street's reflections with and without them; the kaiju's spot shadow with no, normal and additive cascades),
+  and, set:
+  - the debug views 1, 5, 6, 7, 9 and 10 under normal and additive cascades render the same with the overlay and
+    without (the frame itself differs);
+  - `KEEP_HBAO` at night with two point lights of reach 2.6 and energy 2.1 in the building's corners, the overlay and
+    the refracting box: as no cascades, to the byte, through no shadow and the sun's (under the omni shadow, at most 1
+    pixel by 1 level); without the flag the overlay is brighter (2,710–4,222 pixels differ, up to 22 levels);
+  - `SSR_FACING_HITS` with no, normal and additive cascades: the slab's column goes, the tall box's reflection stays;
+    without SSR it changes nothing;
+  - the spot occluder: sun-only with no darkening, or without a sun, changes nothing; in the shadow it lies between
+    the frame without the sun and the one without the darkening (1,461 pixels, none outside by more than a level),
+    and is brighter than the classic one; under the cascades it differs from both. `RECEIVES_NO_SPOT_SHADOW` changes
+    only the box's own pixels (1,097), lighter. Orthographic: reach 80 against 10,000 and reach 5 against no
+    darkening are byte-identical, reach 12 eases; unset, an orthographic matrix's reach 5 eases nothing;
+  - refusals: batch bits 3 and 6, post bit 3, spot occluder bit 2.
+  - `BTBH_SMOKE_BENCH=facing` times `SSR_FACING_HITS` on the steep street at 1920x1080.
+  - `btbh_gpu_scene_order` checks the new bits, the lighting's size and `spot_occluder_flags`'s offset.
+
+### Fixed
+- **`BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO` frames under point lights** (v2's finding (b)). With nothing
+  glowing, the flag promises the frame without the cascades, but v2's night (its neon signs' point lights, reach 2.6,
+  energy 2.1, at the walls' feet) came out up to 45–50 sRGB levels brighter there (in its full 1600x900 frames, 14,387
+  pixels by more than 20 levels, at most 202).
+  - The cause wasn't the HBAO: the HBAO resolve darkens the same ambient target in both frames, and the point lights'
+    light goes to the colour target only, in both. It was the transparent pass. Without the cascades, a transparent
+    unlit batch draws with the fast unlit shader (`production_model_unlit.frag`), which adds no point light. Under the
+    cascades, it drew with the cascades' scene shader (`production_model_rc*.frag`), whose unlit path brightens the
+    colour by the point lights. v2's additive night overlays (the spills, pools and street wash) by its neon lights
+    therefore brightened. v2's frames without the neon and the overlays matched (9 pixels by 1 level).
+  - With the flag, transparent unlit batches now take the fast unlit shader under the cascades too, so the frame
+    matches the one without the cascades. **This changes `KEEP_HBAO` frames** wherever a point light, the dark scene
+    (`unlit_darkness`) or unlit 2 or 3 meets a transparent unlit batch.
+  - Unchanged, and reported to the coordinator instead: cascades on without the flag keep the scene shader for those
+    batches, as before, so their overlays still take the point lights there. Cascades off keep the fast shader, which
+    ignores the point lights, the dark scene and unlit 2 and 3's sun shadow for transparent unlit batches, although
+    the header says the point lights brighten unlit surfaces. Which of the two is right is a look decision; neither
+    default frame changed.
+  - Not changed either: under the omni shadow, a pixel of the smoke's night now and then differs by a level between
+    the cascades' variant of the scene shader and the plain one, with or without point lights. This is the two
+    compiled variants rounding the same light apart, and it was already so in 0.9.0.
 
 ### Changed
+- **The radiance cascades' debug views draw only the cascades** (v2's finding (a)): the transparent and refracting
+  batches are no longer drawn over them. v2's mean "no emitter" light in its views (27.7/19.9/2.6) was mostly its
+  additive night overlays. Debug-view output changes, frames without a debug view don't (`BTBHGPUSceneRadianceCascades
+  DebugView`'s doc). The views still go through the tone mapping and the grading, as before.
+- Shaders: `production_model.frag`, `production_model_2d_shadows.frag`, `production_model_rc.frag`,
+  `production_model_rc_2d_shadows.frag` (the spot occluder's flags in `secondary_directional_shadow_controls.z`, unused
+  before, and bit 8 of the fragment `unlit_enabled`) and `production_ssao_resolve.frag` (`ssr_hit_options`, a new
+  last uniform word). The other 66 shaders are byte for byte c5390f0b's SPIR-V.
 - **Same-material runs** (no API). In every pass that draws batches (opaque, transparent, refraction, the shadow maps,
   the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but `kind`,
   `model`, `custom_mesh`, `material_slot`, `first_instance` and `instance_count` (byte for byte, padding aside)
@@ -82,6 +191,20 @@ instance buffers, walls with the world-detail table and glass without). The marg
 - Prepare (0.03 µs) and shadow encode (0.01 µs) a ring batch are unchanged. The GPU's time wasn't measurable beside
   the `v2-game` processes; the GPU gets the same draws and bytes.
 
+**`SSR_FACING_HITS`'s GPU cost.**
+- Setup: `BTBH_SMOKE_BENCH=facing`, the steep street at 1920x1080, reflections without the cascades with
+  `SSR_SURFACE_REFLECTIVITY`. Seven series of 30–40 interleaved turns of 20 frames, under the machine's perf lock.
+  Four idle `v2-game` processes were open.
+- The flag cost nothing measurable. Against unset, the series' fastest turns moved by −0.26 to +0.08 ms (median
+  +0.01 ms) and their medians by −0.47 to +0.04 ms. In this scene the reflections themselves cost 0.23–0.48 ms
+  against none.
+- Unset, the new SSAO resolve and c5390f0b's are within noise of each other: the fastest turns differ by a median
+  of −0.05 ms.
+- A rejected hit marches on, so a frame whose thin things cover many reflecting pixels (v2's rain, where every wet
+  pixel traces) may pay a little more than this scene shows.
+- The other changes add a uniform branch each, or (`KEEP_HBAO`'s transparent pass) take the cheaper fast unlit
+  shader.
+
 ### Upgrading
 - Nothing to set: every game gets the runs and the once-a-pass lighting, and draws as before.
 - Rust hosts with bindgen regenerate the bindings for `btbh_gpu_window_custom_mesh_create_ex` and the flag; no struct
@@ -92,6 +215,16 @@ instance buffers, walls with the world-detail table and glass without). The marg
   - Within each chunk, submit the batches with a table first and those without after them (overlays after their
     ground), each group by material, mesh after mesh. The ring's chunks can share one instance buffer, with offsets.
 - Swift: nothing changes; a `sharedBuffers:` option can follow when Be The Bullet Hell (v1) asks.
+- v2's findings and the kaiju shadow (rebuild all 71 shaders and regenerate the bindings: the lighting's
+  `directional_shadow_reserved` shrinks to one byte, beside `spot_occluder_flags` and `spot_occluder_reserved`):
+  - `KEEP_HBAO` needs nothing new. Its night frames with the neon lights now match the cascades off.
+  - Rain with `SSR_SURFACE_REFLECTIVITY`: `post.flags |= BTBH_GPU_SCENE_POST_SSR_FACING_HITS as u8`, and `ssr_thickness`
+    can go back toward 0.6.
+  - The kaiju shadow: `lighting.spot_occluder_flags = (BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY |
+    BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC) as u8`, a reach in world units from the map's near plane (or 2.5
+    times its depth range for none), and the kaiju out of the sun's map if wanted. If its body shows the spot map's
+    acne, `flags |= BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW as u8` on its batches.
+  - Don't set the new bits with 0.9.0's shaders: nothing detects them, and they do nothing there.
 
 ## [Unreleased]
 
