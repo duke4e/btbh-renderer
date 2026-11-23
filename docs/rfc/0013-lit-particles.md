@@ -252,7 +252,7 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      * within each run between batches that keep their place: BTBH_GPU_SCENE_BATCH_KEEP_ORDER, persistent instance
      * buffers, bounds not known, a stencil in use. Equal depths keep the order given. Refracting batches keep their
      * own pass, in the order given. A batch's instances draw in their own order: sort them before the present. */
-    BTBH_GPU_SCENE_POST_SORT_TRANSPARENT = 1u << 2
+    BTBH_GPU_SCENE_POST_SORT_TRANSPARENT = 1u << 3
 
 /* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
@@ -266,11 +266,11 @@ typedef enum BTBHGPUSceneSurfaceVariant {
 | --- | --- | --- | --- |
 | `BTBHGPUSceneSurfaceVariant` | `LIT_PARTICLE` 11, `COUNT` 12 | – | `COUNT` 11 |
 | `BTBHGPUSceneGeometryBatch.flags` (280 bytes) | bit 3, and bit 4 in phase 2 | 253 | free bits |
-| `BTBHGPUScenePost.flags` (432 bytes) | bit 2 | 427 | a free bit |
-| `BTBHGPUSceneLighting` (3,340 bytes), phase 2 | `particle_shadow` | 3,337 | `directional_shadow_reserved[0]` |
+| `BTBHGPUScenePost.flags` (432 bytes) | bit 3 | 427 | a free bit (0.10.0 takes bit 2 for `SSR_FACING_HITS`) |
+| `BTBHGPUSceneLighting` (3,340 bytes), phase 2 | `particle_shadow` | 3,337 | `directional_shadow_reserved[0]` (0.10.0 keeps it free; `spot_occluder_flags` is at 3,338) |
 
 **Zero values.** A batch that doesn't use variant 11 and leaves bits 3 and 4 clear draws as before. So does a post
-without bit 2, and (phase 2) a lighting whose `particle_shadow` is 0.
+without bit 3, and (phase 2) a lighting whose `particle_shadow` is 0.
 
 **Refusals** (`BTBH_GPU_INVALID_ARGUMENT`, naming the batch, as the other batch checks):
 - `LIT_PARTICLE` with `transparency_enabled` 0, or a blend other than `ALPHA` and `PREMULTIPLIED_ALPHA`;
