@@ -714,10 +714,15 @@ typedef enum BTBHGPUSceneRadianceEmitterClass {
 
 typedef struct BTBHGPUSceneRadianceEmitter {
     uint64_t stable_id;
+    /* The field is drawn from above: the source's footprint lies round position_x and position_z. position_y is the
+     * direct light's height (direct_energy), and with BTBHGPUSceneRadianceCascades.source_tops 1 the base of the
+     * source's top (top_above). */
     float position_x;
     float position_y;
     float position_z;
     float radius;
+    /* A segment's width (shape SEGMENT; kept between 0.16 and 2 times the radius) and the direct light's range. It
+     * is no vertical extent: the field's sources have none, unless source_tops gives them a top (top_above). */
     float height;
     float red;
     float green;
@@ -731,7 +736,13 @@ typedef struct BTBHGPUSceneRadianceEmitter {
     float outer_cutoff;
     BTBHGPUSceneRadianceEmitterShape shape;
     BTBHGPUSceneRadianceEmitterClass light_class;
-    uint32_t reserved;
+    /* With BTBHGPUSceneRadianceCascades.source_tops 1: the source's top stands this far above position_y (world
+     * units; finite and at least 0; 0 puts the top at position_y). A ray piece that starts higher than the top
+     * passes over the source, so a large value makes the source a column that lights every height, as without
+     * tops. A spot (inner_cutoff and outer_cutoff set) has its top over its footprint, at least 1.5 field texels
+     * round it. Ignored, and not checked, with source_tops 0. (RFC 0010, since 0.10.0, in the four bytes that were
+     * reserved.) */
+    float top_above;
 } BTBHGPUSceneRadianceEmitter;
 
 typedef struct BTBHGPUSceneRadianceCascadesOcclusionCascade {
@@ -759,11 +770,42 @@ typedef struct BTBHGPUSceneRadianceCascades {
      * of what glows on top of the scene's own lighting (rather than being lit again by the
      * cascades). */
     uint8_t additive;
-    uint8_t reserved[1];
+    /* 0: as before: every source lights every ray that crosses it, at any height. 1: sources have tops (RFC 0010,
+     * since 0.10.0, in the byte that was reserved[0]).
+     * - A material source's top (a batch the cascades take light from: unlit and no rc_receiver, or with an
+     *   emission) is the highest world height of its glowing fragments in each field texel. An emitter's is
+     *   position_y + top_above.
+     * - A ray piece passes over a source whose top lies lower than the height the piece starts from, less a
+     *   twentieth of a field texel (cell_size / 20): the top of the occluder it starts in
+     *   (occlusion_cascades[0].samples), or 0 outside one. It takes none of the source's light then and isn't
+     *   dimmed by it. Occluders stop rays as before.
+     * - The cascades share ray pieces between receivers, and each piece starts from its own height, so the test
+     *   shields only what lies past the pieces that start on a roof. A band along a roof's edge still takes a street
+     *   glow's light, and a glow farther out reaches further in. Measured (RFC 0010's implementation notes): a lamp
+     *   head half a cell out from a two-storey facade leaves 16 % of its light in the roof's interior on Be The
+     *   Bullet Hell v2's High field (0 % on its Low); one a cell out leaves 78 % (75 %).
+     * - Steep faces (a normal less than 45 degrees from level) look the field up half a texel out from their wall,
+     *   on the street side, so a facade keeps the street's glow up its whole height, as without tops.
+     * - The cascades then read the field where its texels lie. With 0 they read it half a texel toward +x and +z, as
+     *   before, which sets the two directions along each axis a texel apart; with tops that made the shield depend
+     *   on which way a street runs. So 1 also moves the field's light by half a texel toward -x and -z.
+     * - Needs this release's radiance-cascade shaders (production_hrc_trace.comp and its siblings): with older ones
+     *   the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the trace shader (SPIR-V; Metal libraries aren't
+     *   checked).
+     * Other values, and with 1 an emitter's top_above that isn't finite or is below 0, are an invalid
+     * configuration, as the struct's other bad values are: the cascades are off for that present
+     * (BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION in the report's status) and the frame draws without them.
+     * Turning it on or off changes the field's light; the temporal history follows over a few frames, or at once
+     * with invalidate. */
+    uint8_t source_tops;
     const BTBHGPUSceneRadianceEmitter *emitters;
     BTBHGPUSceneRadianceCascadesOcclusionCascade
         occlusion_cascades[BTBH_GPU_RC_MAX_OCCLUSION_CASCADES];
 } BTBHGPUSceneRadianceCascades;
+
+/* Defined when BTBHGPUSceneRadianceCascades.source_tops and BTBHGPUSceneRadianceEmitter.top_above exist (since
+   0.10.0, RFC 0010). */
+#define BTBH_GPU_SCENE_HAS_RC_SOURCE_TOPS 1
 
 typedef struct BTBHGPUSceneRadianceCascadesPassTelemetry {
     double cpu_prepare_milliseconds;
