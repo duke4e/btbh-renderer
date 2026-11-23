@@ -12,7 +12,8 @@
  *   queue for the next; a window closed with updates queued;
  * - the refusals: an unknown flag, no report, invalid data (nothing queued).
  * BTBH_SMOKE_BENCH=mesh-queue: 200 updates of a 64-vertex mesh a frame, plain against queued (and in the shared
- * buffers), interleaved rounds; prints the CPU time of the updates and of the present per update.
+ * buffers), against the same frames without updates ("still"), interleaved rounds; prints the CPU time of the updates,
+ * of the present and of its upload, per update.
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -650,15 +651,21 @@ static int compare_doubles(const void *a, const void *b) {
 
 typedef struct BenchMode {
     const char *name;
+    bool updated;
     bool queued;
     bool shared;
+    uint32_t still;   /* the mode without updates of the same meshes, whose present this one's is compared with */
 } BenchMode;
 
+#define BENCH_MODES 5u
+
 static void run_bench(SmokeWindow *smoke) {
-    static const BenchMode modes[3] = {
-        { "plain", false, false },
-        { "queued", true, false },
-        { "queued, shared", true, true },
+    static const BenchMode modes[BENCH_MODES] = {
+        { "still", false, false, false, 0u },
+        { "plain", true, false, false, 0u },
+        { "queued", true, true, false, 0u },
+        { "still, shared", false, false, true, 3u },
+        { "queued, shared", true, true, true, 3u },
     };
     enum { ROUNDS = 12, FRAMES = 10 };
     /* 200 meshes of 64 vertices (a strip of 31 quads, 186 indices), each a batch of the scene. */
@@ -670,7 +677,7 @@ static void run_bench(SmokeWindow *smoke) {
         const uint32_t wound[6] = { a, a + 2u, a + 1u, a + 1u, a + 2u, a + 3u };
         memcpy(&indices[q * 6u], wound, sizeof(wound));
     }
-    BTBHGPUCustomMesh *meshes[3][BENCH_MESHES];
+    BTBHGPUCustomMesh *meshes[BENCH_MODES][BENCH_MESHES];
     memset(vertices, 0, sizeof(vertices));
     for (uint32_t v = 0u; v < BENCH_VERTICES; ++v) {
         vertices[v * FLOATS + 0u] = 0.02f * (float)(v / 2u);
@@ -682,7 +689,7 @@ static void run_bench(SmokeWindow *smoke) {
         vertices[v * FLOATS + 15u] = 1.0f;
         vertices[v * FLOATS + 20u] = 1.0f;
     }
-    for (uint32_t mode = 0u; mode < 3u; ++mode) {
+    for (uint32_t mode = 0u; mode < BENCH_MODES; ++mode) {
         for (uint32_t index = 0u; index < BENCH_MESHES; ++index) {
             BTBHGPUCustomMeshReport report;
             memset(&report, 0, sizeof(report));
@@ -700,19 +707,20 @@ static void run_bench(SmokeWindow *smoke) {
     }
     Scene scene;
     build_scene(smoke, smoke->ground, &scene);
-    static double update_ms[3][ROUNDS * FRAMES];
-    static double present_ms[3][ROUNDS * FRAMES];
-    uint32_t samples[3] = { 0u, 0u, 0u };
+    static double update_ms[BENCH_MODES][ROUNDS * FRAMES];
+    static double present_ms[BENCH_MODES][ROUNDS * FRAMES];
+    static double upload_ms[BENCH_MODES][ROUNDS * FRAMES];
+    uint32_t samples[BENCH_MODES] = { 0u, 0u, 0u, 0u, 0u };
     for (uint32_t round = 0u; round < ROUNDS; ++round) {
-        for (uint32_t step = 0u; step < 3u; ++step) {
-            const uint32_t mode = (round + step) % 3u;
+        for (uint32_t step = 0u; step < BENCH_MODES; ++step) {
+            const uint32_t mode = (round + step) % BENCH_MODES;
             for (uint32_t index = 0u; index < BENCH_MESHES; ++index) {
                 batches[index] = base_batch(meshes[mode][index], index);
             }
             for (uint32_t frame = 0u; frame < FRAMES + 2u; ++frame) {
                 /* Each mark moves a little every frame. */
                 const uint64_t update_started = SDL_GetTicksNS();
-                for (uint32_t index = 0u; index < BENCH_MESHES; ++index) {
+                for (uint32_t index = 0u; index < BENCH_MESHES && modes[mode].updated; ++index) {
                     vertices[1] = 0.001f * (float)(frame + index);
                     BTBHGPUCustomMeshReport report;
                     const BTBHGPUResult result = btbh_gpu_custom_mesh_update_ex(meshes[mode][index], vertices,
@@ -737,31 +745,43 @@ static void run_bench(SmokeWindow *smoke) {
                 if (frame >= 2u) {
                     update_ms[mode][samples[mode]] = (double)(present_started - update_started) / 1.0e6;
                     present_ms[mode][samples[mode]] = (double)(present_finished - present_started) / 1.0e6;
+                    /* The scene's upload: its map, copies and copy pass (the queued updates' included). */
+                    upload_ms[mode][samples[mode]] = report.cpu_upload_milliseconds;
                     samples[mode] += 1u;
                 }
             }
         }
     }
-    double median_update[3];
-    double median_present[3];
-    for (uint32_t mode = 0u; mode < 3u; ++mode) {
+    double median_update[BENCH_MODES];
+    double median_present[BENCH_MODES];
+    double median_upload[BENCH_MODES];
+    for (uint32_t mode = 0u; mode < BENCH_MODES; ++mode) {
         qsort(update_ms[mode], samples[mode], sizeof(double), compare_doubles);
         qsort(present_ms[mode], samples[mode], sizeof(double), compare_doubles);
+        qsort(upload_ms[mode], samples[mode], sizeof(double), compare_doubles);
         median_update[mode] = update_ms[mode][samples[mode] / 2u];
         median_present[mode] = present_ms[mode][samples[mode] / 2u];
-        printf("bench %-15s %u updates of %u vertices a frame, %u frames: updates %.3f ms (p10 %.3f, p90 %.3f), "
-            "%.2f us each; present %.3f ms (p10 %.3f)\n",
-            modes[mode].name, BENCH_MESHES, BENCH_VERTICES, samples[mode], median_update[mode],
-            update_ms[mode][samples[mode] / 10u], update_ms[mode][samples[mode] * 9u / 10u],
-            1000.0 * median_update[mode] / BENCH_MESHES, median_present[mode],
-            present_ms[mode][samples[mode] / 10u]);
+        median_upload[mode] = upload_ms[mode][samples[mode] / 2u];
+        printf("bench %-15s %3u updates of %u vertices a frame, %u frames: updates %.3f ms (p10 %.3f, p90 %.3f), "
+            "%.2f us each; present %.3f ms (p10 %.3f), its upload %.4f ms\n",
+            modes[mode].name, modes[mode].updated ? BENCH_MESHES : 0u, BENCH_VERTICES, samples[mode],
+            median_update[mode], update_ms[mode][samples[mode] / 10u], update_ms[mode][samples[mode] * 9u / 10u],
+            1000.0 * median_update[mode] / BENCH_MESHES, median_present[mode], present_ms[mode][samples[mode] / 10u],
+            median_upload[mode]);
     }
-    for (uint32_t mode = 1u; mode < 3u; ++mode) {
-        printf("bench %-15s updates + present per update: %.2f us (plain %.2f us)\n", modes[mode].name,
-            1000.0 * (median_update[mode] + median_present[mode] - median_present[0]) / BENCH_MESHES,
-            1000.0 * median_update[0] / BENCH_MESHES);
+    for (uint32_t mode = 0u; mode < BENCH_MODES; ++mode) {
+        if (!modes[mode].updated) {
+            continue;
+        }
+        const uint32_t still = modes[mode].still;
+        printf("bench %-15s per update: %.2f us at the call, %.2f us in the present (%.2f us in its upload) over "
+            "\"%s\": %.2f us in all\n",
+            modes[mode].name, 1000.0 * median_update[mode] / BENCH_MESHES,
+            1000.0 * (median_present[mode] - median_present[still]) / BENCH_MESHES,
+            1000.0 * (median_upload[mode] - median_upload[still]) / BENCH_MESHES, modes[still].name,
+            1000.0 * (median_update[mode] + median_present[mode] - median_present[still]) / BENCH_MESHES);
     }
-    for (uint32_t mode = 0u; mode < 3u; ++mode) {
+    for (uint32_t mode = 0u; mode < BENCH_MODES; ++mode) {
         for (uint32_t index = 0u; index < BENCH_MESHES; ++index) {
             btbh_gpu_custom_mesh_destroy(meshes[mode][index]);
         }
