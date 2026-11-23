@@ -1073,8 +1073,9 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(nativeScene.contains(
             "resolve_samplers[6].texture = runtime->emission_texture;"
         ))
+        // (Since 0.12.0 additive cascades with KEEP_HBAO keep the SSAO's ambient mode: scene_ambient_targets.)
         XCTAssertTrue(nativeScene.contains(
-            "radiance_cascades_active\n" +
+            "radiance_cascades_active && !scene_ambient_targets\n" +
                 "            ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE"
         ))
         XCTAssertTrue(nativeScene.contains(
