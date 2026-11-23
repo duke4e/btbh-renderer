@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-23
+
 0.13.0: the renderer's own backlog; nobody asked for these.
 - **`BTBH_GPU_SCENE_RUNS=verify`**, a permanent debug mode: every draw that continues a same-material run (RFC 0011)
   checks that the run key covers what the passes read. CTest runs the smokes with runs in it.
@@ -36,8 +38,8 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
   - `BTBH_GPU_SCENE_RUNS=verify`, against the references with nothing set.
 
   Every smoke passes in each mode, the mesh queue smoke included. The runs smoke's four waterfront images and the flags
-  smoke's six look-runs images exist only in the new build. The craters bench's 16 frames, each rendered after the update that switched its crater (so the queued
-  meshes had to be there), are byte for byte v0.12.0's core's.
+  smoke's six look-runs images exist only in the new build. The craters bench's 16 frames, each rendered after the
+  update that switched its crater (so the queued meshes had to be there), are byte for byte v0.12.0's core's.
 - **Run verify over the smokes** (each window's totals, 0 mismatches in all): the runs smoke 3,646 run draws checked,
   flags 82, world detail 771 (five windows), RC tops 422, SDF terrain 86, mesh queue 139, scene target 22, lazy
   creation 650. The height lift, lit particle, prewarm, font and model texture share smokes draw no run.
@@ -50,6 +52,18 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
   other three the FSR 3 MSL files that differ between any two builds.
 - **The header:** two macros (`BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET`, and the package-internal
   `BTBH_GPU_SCENE_HAS_RUN_VERIFY`); no struct, enum or function signature changed.
+
+Be The Bullet Hell v2 tested the candidate (2859fb54; the release adds only a smoke case and this file's corrections)
+on an RTX 3070 Ti, on its main at 1a31d2a9, on 0.12.0:
+- **Nothing set:** 0 pixels differ from 0.12.0 in day, night, rain, the Deck preset, the map edge and dusk, and in its
+  fights (the night glow at frames 900 and 2400, dusk, the heat ray at frame 1800). Its heat ray capture at frame 1200
+  varies from run to run, in 0.12.0 too (Known).
+- **First frames** (lockstep, the Deck preset, 0.12.0 → 0.13.0): a stage load's frame 125.7 → 121.5 ms, its prewarm
+  23.2 → 46.0 ms, its present 34.7 → 7.1 ms; frame 2 2.1 → 1.1 ms; stage 2's start 105.0 → 104.0 ms. v2 prewarms only
+  when its graphics, time of day or rain change, and nothing is made lazily after frame 1.
+- **`BTBH_GPU_SCENE_RUNS=verify`:** 0 mismatches in every run: 18,558,744 run draws over two stages on the Deck preset,
+  18,934,160 with the glow, 30,756,289 on High at night with the glow and the heat ray.
+- **The 32 MiB default budget** changes nothing for v2, which sets 128 MiB.
 
 ### Added
 - **`BTBH_GPU_SCENE_RUNS=verify`** (read once a present, like `=0`): runs stay on, and every draw that continues a run,
@@ -233,7 +247,7 @@ v0.12.0 is the release checkout built out of tree; a bench built against its hea
     - `BTBH_UPLOAD_BUDGET_MB=0` still gives it (3 of 10).
     - So it goes through the queued partial uploads into persistent instance buffers. Either the renderer's in-place
       copies are at fault, or v2 queues a region the previous frame still reads.
-- Not run here: Metal (`check.sh` on the Mac), the Steam Deck, the Vulkan validation layers, and v1 or v2 themselves.
+- Not run here: Metal (`check.sh` on the Mac), the Steam Deck, the Vulkan validation layers, and v1 itself.
 
 ## [0.12.0] — 2026-11-23
 
