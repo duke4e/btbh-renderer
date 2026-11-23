@@ -372,8 +372,9 @@ final class RadianceCascadesTests: XCTestCase {
         XCTAssertTrue(unlit.contains("output.emission = float4(emission"))
         XCTAssertFalse(sourceVertex.contains("cone_end_half_width"))
         XCTAssertTrue(sourceFragment.contains("if (is_spot)"))
+        // (RFC 0010: the source field is the first of the fragment's two outputs; the second is the source's top.)
         XCTAssertTrue(sourceFragment.contains(
-            "return float4(0.0f, 0.0f, 0.0f, 0.0f);"
+            "output.source = float4(0.0f, 0.0f, 0.0f, 0.0f);"
         ))
         XCTAssertFalse(sourceFragment.contains("clip(-1.0f)"))
         XCTAssertTrue(directionalSourceVertex.contains("emitter_index"))
