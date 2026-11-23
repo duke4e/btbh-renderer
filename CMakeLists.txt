@@ -195,6 +195,8 @@ if(BTBH_BUILD_GPU_SPIKE)
     set(BTBH_GPU_SHADER_SPECS
         "production_model.vert|vertex"
         "production_model_detail_table.vert|vertex"
+        "production_model_lift.vert|vertex"
+        "production_model_detail_table_lift.vert|vertex"
         "production_animated_model.vert|vertex"
         "production_shadow_fast.vert|vertex"
         "production_shadow_fast.frag|fragment"
@@ -307,16 +309,31 @@ if(BTBH_BUILD_GPU_SPIKE)
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.frag.hlsl"
             )
         endif()
-        # Vertex shaders built from another's source with a define (RFC 0009's table variant, the RC material
-        # sources).
+        # Vertex shaders built from another's source with a define (RFC 0009's table variant, RFC 0012's lifted ones,
+        # the RC material sources).
         if(
             _shader_name STREQUAL "production_model_detail_table.vert" OR
+            _shader_name STREQUAL "production_model_lift.vert" OR
+            _shader_name STREQUAL "production_model_detail_table_lift.vert" OR
             _shader_name STREQUAL "production_rc_material_source.vert"
         )
             list(
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.vert.hlsl"
+            )
+        endif()
+        if(
+            _shader_name STREQUAL "production_model.vert" OR
+            _shader_name STREQUAL "production_model_detail_table.vert" OR
+            _shader_name STREQUAL "production_model_lift.vert" OR
+            _shader_name STREQUAL "production_model_detail_table_lift.vert" OR
+            _shader_name STREQUAL "production_rc_material_source.vert"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_height_lift.hlsli"
             )
         endif()
         if(_shader_name STREQUAL "production_rc_animated_material_source.vert")
@@ -657,6 +674,29 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_world_detail_test
         )
 
+        # RFC 0012: the height lift's C copy (the heightfield's texels and halves, the bilinear read, the lift and the
+        # tilt), its block and its refusals, without a GPU.
+        add_executable(btbh_gpu_height_lift_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_height_lift_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_height_lift_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(btbh_gpu_height_lift_test PRIVATE btbh_gpu SDL3::SDL3-static)
+        if(MSVC)
+            target_compile_options(btbh_gpu_height_lift_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_height_lift_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+            target_link_libraries(btbh_gpu_height_lift_test PRIVATE m)
+        endif()
+        add_test(
+            NAME btbh_gpu_height_lift
+            COMMAND btbh_gpu_height_lift_test
+        )
+
         add_executable(btbh_gpu_gamepad_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_gamepad_test.c"
         )
@@ -801,6 +841,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             PRIVATE
                 BTBH_PRODUCTION_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model.vert.json"
                 BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_detail_table.vert.json"
+                BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_lift.vert.json"
+                BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_detail_table_lift.vert.json"
                 BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_animated_model.vert.json"
                 BTBH_PRODUCTION_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow.vert.json"
                 BTBH_PRODUCTION_FAST_SHADOW_VERTEX_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_shadow_fast.vert.json"
@@ -1089,6 +1131,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_dependencies(btbh_gpu_scene_runs_smoke btbh_gpu_shaders)
         add_test(NAME btbh_gpu_scene_runs_smoke COMMAND btbh_gpu_scene_runs_smoke)
         set_tests_properties(btbh_gpu_scene_runs_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
 
         # A measurement, not a test: a frame like Be The Bullet Hell v2's city (RFC 0009's follow-up); see the file
         # and tools/frame_bench_summary.py.

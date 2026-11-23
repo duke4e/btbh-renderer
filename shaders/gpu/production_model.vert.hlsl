@@ -14,6 +14,15 @@
 #if BTBH_WORLD_DETAIL_TABLE
 #include "production_world_detail.hlsli"
 #endif
+// RFC 0012: 1 in production_model_lift.vert and production_model_detail_table_lift.vert, the static vertex shaders of a
+// batch with a height lift (BTBHGPUSceneGeometryBatch.height_lift), which lift every vertex by a heightfield after
+// its instance's matrix and the wind. Every other static batch draws without it: these lines compile to nothing.
+#ifndef BTBH_HEIGHT_LIFT
+#define BTBH_HEIGHT_LIFT 0
+#endif
+#if BTBH_HEIGHT_LIFT
+#include "production_height_lift.hlsli"
+#endif
 
 struct InstanceData
 {
@@ -22,11 +31,17 @@ struct InstanceData
     float4 custom;
 };
 
+#if BTBH_HEIGHT_LIFT
+// After the heightfield (production_height_lift.hlsli).
+StructuredBuffer<InstanceData> instances : register(t1, space0);
+StructuredBuffer<float4> instance_motion : register(t2, space0);
+#else
 StructuredBuffer<InstanceData> instances : register(t0, space0);
 #if !BTBH_RC_SOURCE_PROJECTION
 // Each instance's world translation since the previous frame (xyz) and how many seconds its vertex-animated
 // surface (dissolve, shatter) advanced since then (w), read while temporal_controls.z is set.
 StructuredBuffer<float4> instance_motion : register(t1, space0);
+#endif
 #endif
 
 cbuffer SceneUniforms : register(b0, space1)
@@ -197,6 +212,21 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
             forward * local_tangent.z;
     }
 
+#if BTBH_HEIGHT_LIFT
+    // RFC 0012: the lift maps (x, y, z) to (x, y + h(x, z), z) after the instance and the wind (a lifted batch is
+    // never a billboard): the tangent goes through its Jacobian, the normal through its inverse transpose, so
+    // vertical faces keep their normals and level ones tilt with the slope. The flat position is kept for the
+    // previous frame's, which is lifted at its own xz.
+    const float3 height_lift_flat_world = world_position.xyz;
+    const float3 height_lift = btbh_height_lift(height_lift_flat_world.xz);
+    world_position.y += height_lift.x;
+    raw_world_normal = float3(
+        raw_world_normal.x - height_lift.y * raw_world_normal.y,
+        raw_world_normal.y,
+        raw_world_normal.z - height_lift.z * raw_world_normal.y
+    );
+    raw_world_tangent.y += height_lift.y * raw_world_tangent.x + height_lift.z * raw_world_tangent.z;
+#endif
     const float3 world_normal = stable_normalize(
         raw_world_normal,
         float3(0.0f, 0.0f, 1.0f)
@@ -237,6 +267,9 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     if (temporal_controls.z > 0.5f)
     {
         const float4 motion = instance_motion[instance_id];
+#if BTBH_HEIGHT_LIFT
+        previous_world_position = height_lift_flat_world;
+#endif
         previous_world_position -= motion.xyz;
         if (motion.w != 0.0f && billboard_mode == 0)
         {
@@ -256,6 +289,10 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
                 float4(previous_surface.position - surface.position, 0.0f)
             ).xyz;
         }
+#if BTBH_HEIGHT_LIFT
+        // Where the moving instance stood a frame ago, on the ground there (a second read).
+        previous_world_position.y += btbh_height_lift(previous_world_position.xz).x;
+#endif
     }
     const BTBHTemporalClip motion_clip = btbh_temporal_clip(
         output.position,

@@ -170,6 +170,10 @@ struct BTBHGPUTexture {
     uint32_t layer_count;
     /* Made with SDL_GPU_TEXTUREUSAGE_COLOR_TARGET (a render target): a scene can be drawn into it. */
     bool color_target;
+    /* RFC 0012 (since 0.11.0): a heightfield (btbh_gpu_window_heightfield_create), which only
+       BTBHGPUSceneHeightLift.heightfield takes (btbh_gpu_texture_is_heightfield), and its heights on the CPU
+       (width x height floats, row by row), for the opaque sort. NULL for every other texture. */
+    float *heights;
     /* Set while models share it (BTBH_GPU_MODEL_IMPORT_SHARE_EXTERNAL_TEXTURES): the share owns it,
        so btbh_gpu_texture_destroy leaves it alone; the last model that holds it frees it. */
     BTBHGPUModelTextureShare *share;
@@ -532,6 +536,11 @@ BTBHGPUTexture *btbh_gpu_window_texture_create_empty(
 /* Whether a texture is a 2D array (btbh_gpu_window_texture_array_*): a 2D slot refuses one (RFC 0009). */
 static inline bool btbh_gpu_texture_is_array(const BTBHGPUTexture *texture) {
     return texture != NULL && texture->layer_count != 0u;
+}
+
+/* Whether a texture is a heightfield (btbh_gpu_window_heightfield_create): only a height lift takes one (RFC 0012). */
+static inline bool btbh_gpu_texture_is_heightfield(const BTBHGPUTexture *texture) {
+    return texture != NULL && texture->heights != NULL;
 }
 
 /* Every shader and pipeline the renderer makes goes through these three (since 0.7.0): they count what was made

@@ -4,7 +4,8 @@
  * patterns' names, and RFC 0009's pattern 7 with x, y and z at 0. And the layouts of RFC 0009 phase 2's
  * world-detail table, its entry and the batch it is appended to. And RFC 0011's run key
  * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
- * don't, and the shared-mesh flag's constants. */
+ * don't, and the shared-mesh flag's constants. And RFC 0012's height lift: its struct's layout, the batch's pointer
+ * at 280 (288 bytes), and a lifted batch's sort key. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -28,7 +29,16 @@ _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail) == 264u, "world
 /* RFC 0009 phase 2 (0.8.0) appends world_detail_table after 0.6.0's and 0.7.0's 272 bytes. */
 _Static_assert(offsetof(BTBHGPUSceneGeometryBatch, world_detail_table) == 272u,
     "world_detail_table is appended at 272");
-_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 280u, "the batch grows from 272 to 280 bytes");
+/* RFC 0012 (0.11.0) appends height_lift after 0.8.0's to 0.10.0's 280 bytes. */
+_Static_assert(offsetof(BTBHGPUSceneGeometryBatch, height_lift) == 280u, "height_lift is appended at 280");
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 288u, "the batch grows from 280 to 288 bytes");
+_Static_assert(sizeof(BTBHGPUSceneHeightLift) == 40u, "BTBHGPUSceneHeightLift is 40 bytes");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, heightfield) == 0u, "heightfield");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, world_to_uv) == 8u, "world_to_uv");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, height_scale) == 24u, "height_scale");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, height_offset) == 28u, "height_offset");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, flags) == 32u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneHeightLift, reserved) == 36u, "reserved");
 _Static_assert(sizeof(BTBHGPUSceneWorldDetailTable) == 24u, "BTBHGPUSceneWorldDetailTable is 24 bytes");
 _Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, map_layers) == 0u, "map_layers");
 _Static_assert(offsetof(BTBHGPUSceneWorldDetailTable, entries) == 8u, "entries");
@@ -128,6 +138,18 @@ _Static_assert(sizeof(((BTBHGPUScenePost *)0)->flags) == 1u, "the post flags are
 _Static_assert(BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS == 1u, "the shared-buffers flag is bit 0");
 #if !defined(BTBH_GPU_HAS_SHARED_MESH_BUFFERS)
 #error "BTBH_GPU_HAS_SHARED_MESH_BUFFERS is defined with btbh_gpu_window_custom_mesh_create_ex"
+#endif
+
+/* RFC 0012 (0.11.0): the lift's pointer follows the table's; its flag, limits and macro. */
+_Static_assert(
+    offsetof(BTBHGPUSceneGeometryBatch, height_lift) ==
+        offsetof(BTBHGPUSceneGeometryBatch, world_detail_table) + sizeof(void *),
+    "height_lift follows world_detail_table"
+);
+_Static_assert(BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS == 1u, "KEEP_NORMALS is bit 0");
+_Static_assert(BTBH_GPU_HEIGHTFIELD_MAX_SIZE == 4096u, "a heightfield is at most 4096 a side");
+#if !defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT)
+#error "0.11.0's HAS_ macros are defined with their features"
 #endif
 
 #define MAX_INSTANCES 32u
@@ -310,6 +332,7 @@ static const RunField run_fields[] = {
     RUN_FIELD(dug_by, false),
     RUN_FIELD(world_detail, false),
     RUN_FIELD(world_detail_table, false),
+    RUN_FIELD(height_lift, false),
 };
 #undef RUN_FIELD
 #define RUN_FIELD_COUNT (sizeof(run_fields) / sizeof(run_fields[0]))
@@ -636,6 +659,47 @@ int main(void) {
         }
         printf("detail parameters: %u cases (pattern 7 only with x, y and z at 0; nothing past 7)\n",
             (unsigned)(sizeof(cases) / sizeof(cases[0])));
+    }
+
+    /* RFC 0012: a lifted batch's centres are lifted by its heightfield's CPU heights where they stand. A camera
+       looking straight down (clip w is the height below it): of two batches at y = -10 and -5, the first is lifted by
+       a field that rises along x to 7 under it, so it sorts first (-3). Without its heightfield it keeps y = -10. */
+    {
+        float down[16];
+        memset(down, 0, sizeof(down));
+        down[0] = 1.0f;
+        down[6] = 1.0f;
+        down[9] = 0.5f;
+        down[7] = -1.0f;  /* row 3: w = -y */
+        const uint32_t low = add_instance(4.0f, -10.0f, 0.0f, 1.0f);
+        const uint32_t high = add_instance(-4.0f, -5.0f, 0.0f, 1.0f);
+        /* A 2 x 2 field over x in [-8, 8] (texel centres at -4 and 4): heights 0 at x = -4, 7 at x = 4. */
+        static float heights[4] = { 0.0f, 7.0f, 0.0f, 7.0f };
+        BTBHGPUTexture field;
+        memset(&field, 0, sizeof(field));
+        field.width = 2u;
+        field.height = 2u;
+        field.heights = heights;
+        BTBHGPUSceneHeightLift lift;
+        memset(&lift, 0, sizeof(lift));
+        lift.heightfield = &field;
+        lift.world_to_uv[0] = 1.0f / 16.0f;
+        lift.world_to_uv[1] = 1.0f / 16.0f;
+        lift.world_to_uv[2] = 0.5f;
+        lift.world_to_uv[3] = 0.5f;
+        BTBHGPUSceneGeometryBatch batches[2] = { opaque(low, 1u), opaque(high, 1u) };
+        const uint32_t unlifted[2] = { 1u, 0u };
+        assert_order(order, order_of(batches, NULL, 2u, down, order), unlifted, 2u);
+        batches[0].height_lift = &lift;
+        const uint32_t lifted[2] = { 0u, 1u };
+        assert_order(order, order_of(batches, NULL, 2u, down, order), lifted, 2u);
+        /* height_scale and height_offset: 7 * 0.5 - 1 = 2.5 under it, -7.5: back behind. */
+        lift.height_scale = 0.5f;
+        lift.height_offset = -1.0f;
+        assert_order(order, order_of(batches, NULL, 2u, down, order), unlifted, 2u);
+        lift.heightfield = NULL;
+        assert_order(order, order_of(batches, NULL, 2u, down, order), unlifted, 2u);
+        printf("height lift: a lifted batch sorts by its lifted centre\n");
     }
 
     check_run_key();
