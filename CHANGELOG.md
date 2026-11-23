@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-23
+
 0.12.0: two additions to `BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO`, both asked for by Be The Bullet Hell v2
 (0.11.0's two Known items about the flag):
 - **A per-batch opt-out from its transparent routing**, in a new second byte of batch flags
@@ -41,6 +43,30 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.12.0-keep-hbao`:
 - **The header:** the batch is 288 bytes, with `flags` at 253, `flags2` at 254 and `ssao_reserved[1]` at 255; batch bits
   0–3, 5 and 6 are taken (bit 4 RFC 0013 phase 2's, bit 7 free); flags2 bit 0 is taken; the 34 `HAS_` macros are each
   defined once.
+
+Be The Bullet Hell v2 tested the candidate (957533cc) on its 0.11.0 adoption.
+- **Nothing set:** 0 pixels differ from 0.11.0 by day, at night, in rain, on the Deck preset, at the map edge and at
+  dusk. Two runs of each build match. `flags2` stays 0 from `Default`.
+- **Its glow views**, which set `KEEP_HBAO` with contact AO, change only through the new ambient part.
+  - At night, the lamp pools on cars and facades get darker: 5136 pixels by over 8 levels, up to 91.
+  - At dusk, 5921 pixels change, 78 % of them brighter, because contact AO no longer darkens the cascades' bounce.
+- **`KEEP_HBAO` with contact AO** under additive cascades with nothing glowing: 0 pixels differ from the cascades off,
+  lamp pools included, with SSR and at dusk. 0.11.0 differed there by 5106 pixels, up to 94 levels.
+- **`KEEP_CASCADES_LOOK`:**
+  - Its flagged batches get the point-light boost back; the others stay as under `KEEP_HBAO`.
+  - Without the cascades the flag changes nothing.
+  - With its prewarm copying the flagged batches, the lazy creation log shows nothing after the first frame.
+- **GPU** (cascades Low, stage 3 at night, medians):
+
+  | Preset | 0.11.0 | 0.12.0 |
+  | --- | --- | --- |
+  | Deck, static | 1.637 ms | 1.638 ms |
+  | Deck, fight | 1.692 ms | 1.691 ms |
+  | High, static | 4.030 ms | 4.030 ms |
+  | High, fight | 4.276 ms | 4.282 ms |
+
+  On High the AO's part grows by 0.06 ms, as the HBAO now runs before the cascades, and the main pass shrinks by
+  0.01 ms.
 
 ### Added
 - **`BTBHGPUSceneGeometryBatch.flags2`**, the batch flags' second byte: byte 254 on 64-bit, right after `flags`, the
@@ -142,9 +168,9 @@ the HBAO with SSR (`=hbao`). A frame takes about 1 ms there, so these are small 
 ### Known
 - **0.11.0's two Known items about `KEEP_HBAO` are settled**: the beams and glows keep the cascades' look with
   `KEEP_CASCADES_LOOK`, and lit surfaces in a street lamp's pool match the cascades off under contact AO with the flag.
-- **The smoke's lamp pools differ less than v2's**: without the flag they come out up to 6 levels brighter there
-  (v2: 94), as its contact AO is milder. The cause is the same, and the flag's frame matches the cascades off to the
-  byte; v2's own frames haven't been drawn with 0.12.0.
+- **`KEEP_CASCADES_LOOK` brings back everything the cascades add to a flagged batch**, a glow's white-out included.
+  Be The Bullet Hell v2 flags only its beam's glow draws: on its whole effect emitter, the flag brought back an additive
+  fire flipbook's white-out at a building's foot (up to 180 levels).
 - **macOS (Metal) and a real Steam Deck** aren't verified.
 
 ## [0.11.0] — 2026-11-23

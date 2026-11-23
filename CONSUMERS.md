@@ -82,8 +82,9 @@ Since 0.11.0:
 - `KEEP_HBAO` with contact AO;
 - lit smoke (RFC 0013 phase 1) behind a dev flag at an albedo gain of 0.38, waiting on its owner's choice.
 
-Testing the 0.12.0 candidate: `KEEP_CASCADES_LOOK` on its beams and glow sources, and `KEEP_HBAO`'s ambient part under
-contact AO.
+Adopting with 0.12.0 (tested on the candidate):
+- `KEEP_CASCADES_LOOK` on its beam's glow draws;
+- `KEEP_HBAO`'s ambient part under contact AO.
 
 Later: the particles' transmittance map (RFC 0013 phase 2), BC texture formats (RFC 0008 phase 2), and descriptor
 pools made before the first frames.
