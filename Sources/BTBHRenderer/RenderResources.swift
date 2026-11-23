@@ -992,8 +992,11 @@ public struct RadianceEmitter: Sendable, Equatable {
     public let directEnergy: Float
     /// Physical source radius. Illumination range is derived by RC transport.
     public let radius: Float
-    /// Vertical source extent in the 2.5D world field. For a directional
-    /// emitter with spot cutoffs, this is the cone length.
+    /// A segment's width (shape `.segment`, kept between 0.16 and 2 times
+    /// the radius) and the reach of the direct light (`directEnergy`); for an
+    /// emitter with spot cutoffs, that reach is the cone's length. Not a
+    /// vertical extent: the field's sources have none (the C core's
+    /// `top_above` gives them a top, RFC 0010).
     public let height: Float
     public let shape: RadianceEmitterShape
     public let lightClass: RadianceEmitterClass
