@@ -1037,8 +1037,17 @@ enum {
      * (BTBHGPUSceneRadianceCascades.occlusion_cascades), which no batch draws into, so the flag leaves it alone:
      * the batch blocks the cascades' light where that occlusion says so, with or without it. Without the
      * cascades, or on a batch that doesn't glow, it changes nothing. */
-    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2
+    BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2,
+    /* (Bits 3 and 4 are taken by RFC 0013's draft.) The batch receives no spot (or omni) shadow (since 0.10.0, asked
+     * for by Be The Bullet Hell v2: its kaiju, the only thing in its spot map, was darkened by its own map): the
+     * spot light lights it unshadowed, and spot_occluder_shadow_strength takes none of its light. What it casts is
+     * left to spot_shadow_visible, as before; the directional shadows are as before. Needs this release's scene
+     * shaders (production_model*.frag); older ones ignore it. */
+    BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW = 1u << 5
 };
+
+/* Defined when BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW exists (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW 1
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
  * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
@@ -1127,7 +1136,10 @@ typedef struct BTBHGPUSceneLighting {
     float spot_inner_cutoff;
     float spot_outer_cutoff;
     /* The share of the sun, fill and sky light the spot's shadow also takes where its occluder lies
-       within spot_occluder_shadow_reach of the light (0 = the classic spot shadow). */
+       within spot_occluder_shadow_reach of the light (0 = the classic spot shadow). The reach is read through a
+       perspective spot matrix (a near plane of 0.05, spot_range far), as the distance from the light: the darkening
+       eases out from 0.4 to 1 times it. spot_occluder_flags (since 0.10.0) can take only the sun's light instead,
+       and read the reach through an orthographic matrix. */
     float spot_occluder_shadow_strength;
     float spot_occluder_shadow_reach;
     float irradiance_sh[27];
@@ -1212,8 +1224,37 @@ typedef struct BTBHGPUSceneLighting {
     /* How the primary directional (sun) shadow is filtered: BTBHGPUSceneShadowFilter (0: the tent
      * as before). */
     uint8_t directional_shadow_filter;
-    uint8_t directional_shadow_reserved[3];
+    uint8_t directional_shadow_reserved[1];
+    /* BTBH_GPU_SCENE_SPOT_OCCLUDER_* bits (since 0.10.0, byte 3,338, which was directional_shadow_reserved[1], so
+     * the struct keeps its 3,340 bytes): how spot_occluder_shadow_strength darkens. 0 as before; a bit the renderer
+     * doesn't know fails the present with BTBH_GPU_INVALID_ARGUMENT. */
+    uint8_t spot_occluder_flags;
+    uint8_t spot_occluder_reserved[1];
 } BTBHGPUSceneLighting;
+
+/* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0, asked for by Be The Bullet Hell v2, which draws only its
+ * kaiju into the spot map, fitted along the sun round its body with an orthographic matrix, for a crisp kaiju
+ * shadow). They need this release's scene shaders (production_model*.frag); older ones ignore them. */
+enum {
+    /* The occluder's darkening takes only the primary directional light (the sun, with its own shadow), not the
+     * sun, fill (the secondary directional light) and sky (the ambient light) together: the spot map then acts as
+     * a sharper sun shadow of what it holds, and that can leave the sun's map (taking the fill and sky too, a shadow
+     * at dusk came out brown). The spot light's own shadow is as before. Radiance cascades that aren't additive
+     * light the surface with their own field, which carries the sun and the sky together, so their light is still
+     * darkened as before (else the field would fill the shadow in); additive ones add bounce light that the
+     * occluder takes either way. */
+    BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY = 1u << 0,
+    /* The spot matrix (spot_shadow_view_projection) is orthographic: a directional light's map. Its depth is read
+     * as linear from its near plane, so spot_occluder_shadow_reach is the occluder's distance from that plane, in
+     * world units along the light (the darkening eases out from 0.4 to 1 times it; a reach of at least 2.5 times the
+     * map's depth range, far less near, never eases). The spot shadow's slope bias takes the light's direction
+     * (spot_direction) instead of the direction to spot_position. Without it such a matrix's depth is read as perspective, and only a very large
+     * reach kept the easing off. Ignored for an omni shadow. */
+    BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC = 1u << 1
+};
+
+/* Defined when BTBHGPUSceneLighting.spot_occluder_flags and its two bits exist (since 0.10.0). */
+#define BTBH_GPU_SCENE_HAS_SPOT_OCCLUDER_FLAGS 1
 
 /* The order the opaque pass draws its batches in (BTBHGPUScenePost.opaque_sort, since 0.5.0). */
 typedef enum BTBHGPUSceneOpaqueSort {

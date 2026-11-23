@@ -4727,7 +4727,8 @@ static bool btbh_gpu_scene_validate_batches(
             (batch->flags & ~(uint32_t)(
                 BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
-                BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE
+                BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE |
+                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW
             )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
@@ -5731,6 +5732,10 @@ bool btbh_gpu_scene_lighting_valid(
         lighting->directional_shadow_enabled > 1u ||
         lighting->directional_shadow_filter >=
             BTBH_GPU_SCENE_SHADOW_FILTER_COUNT ||
+        (lighting->spot_occluder_flags & ~(uint32_t)(
+            BTBH_GPU_SCENE_SPOT_OCCLUDER_SUN_ONLY |
+            BTBH_GPU_SCENE_SPOT_OCCLUDER_ORTHOGRAPHIC
+        )) != 0u ||
         !isfinite(lighting->point_light_ceiling) ||
         lighting->point_light_ceiling < 0.0f ||
         !isfinite(lighting->directional_shadow_softness) ||
@@ -9136,6 +9141,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         fragment_uniforms
             .secondary_directional_shadow_controls[1] =
             lighting->secondary_directional_shadow_softness;
+        /* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0), as a whole number. */
+        fragment_uniforms
+            .secondary_directional_shadow_controls[2] =
+            (float)lighting->spot_occluder_flags;
         fragment_uniforms.spot_shadow_controls[0] =
             (float)shadow_enabled[2];
         fragment_uniforms.spot_shadow_controls[1] =
@@ -9304,7 +9313,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         ? 32u | ((uint32_t)batch->ssao_mode << 3u)
                         : 0u) |
                     (ssr_surface_reflectivity ? 64u : 0u) |
-                    (scene_ambient_targets ? 128u : 0u);
+                    (scene_ambient_targets ? 128u : 0u) |
+                    ((batch->flags &
+                      BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
+                        ? 256u
+                        : 0u);
                 fragment_uniforms.alpha_cutoff =
                     batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =
