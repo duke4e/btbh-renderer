@@ -1133,8 +1133,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         set_tests_properties(btbh_gpu_scene_runs_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
         # RFC 0012 (0.11.0): lifted batches against meshes lifted on the CPU, through every pass that draws them; the
-        # lift with a world-detail table; the refusals; prewarm (hidden windows).
-        foreach(_lift_smoke btbh_gpu_height_lift_smoke)
+        # lift with a world-detail table; the refusals; prewarm; and the queued custom-mesh updates (hidden windows).
+        foreach(_lift_smoke btbh_gpu_height_lift_smoke btbh_gpu_mesh_queue_smoke)
             add_executable(${_lift_smoke}
                 "${BTBH_RENDERER_ROOT}/Tests/${_lift_smoke}.c"
             )

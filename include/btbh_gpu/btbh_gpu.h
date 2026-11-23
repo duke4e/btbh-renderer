@@ -1883,6 +1883,47 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     uint32_t index_count,
     BTBHGPUCustomMeshReport *report
 );
+/* btbh_gpu_custom_mesh_update_ex's flags (since 0.11.0). */
+enum {
+    /* The update is queued into the window's next scene instead of submitted on its own (btbh_gpu_custom_mesh_update
+     * acquires and submits a command buffer per call, about 0.17 ms whatever its size). The data is copied at the
+     * call, as without the flag, into a staging area of the window that grows as needed; the mesh's counts and
+     * bounds change at once. The next btbh_gpu_window_scene_present_instances(_with_visibility) or
+     * btbh_gpu_window_scene_render_to_target of the mesh's window copies every queued update into the GPU at the
+     * start of its own command buffer, in one transfer and one copy pass with the scene's instances, before it draws
+     * anything: so the new data shows in the next scene that draws, whichever of the two comes first, and in every
+     * one after it. Rules:
+     * - A later update of the same mesh, queued or not, replaces a queued one that no scene has copied yet. A plain
+     *   update made after a queued one always lands after it: on a mesh in the shared buffers whose queued update a
+     *   scene presented but not yet submitted by the canvas has copied, the plain update is recorded into that
+     *   frame's command buffer after its draws, which keep the queued data.
+     * - btbh_gpu_custom_mesh_destroy drops the mesh's queued update; one already copied into a frame that isn't
+     *   submitted yet still runs (SDL frees the buffers after it).
+     * - A mesh in the shared buffers (BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS): as without the flag, the update must fit
+     *   the mesh's ranges and is written in place; a mesh with buffers of its own grows them at the call when the
+     *   update needs more, and its frames in flight keep their data (SDL's cycling).
+     * - A scene that fails before it is submitted leaves the queue as it was, for the next one. A window closed with
+     *   updates queued drops them.
+     * - The queue holds at most BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES of vertex and index data at a time (replaced
+     *   updates count until the next scene): past that the call fails with BTBH_GPU_INVALID_ARGUMENT and queues
+     *   nothing. One update's limits are btbh_gpu_custom_mesh_update's.
+     * A window that queues nothing draws as before. */
+    BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED = 1u << 0
+};
+#define BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES (256u * 1024u * 1024u)
+/* btbh_gpu_custom_mesh_update with BTBH_GPU_CUSTOM_MESH_UPDATE_* flags; 0 is btbh_gpu_custom_mesh_update. An unknown
+ * bit fails with BTBH_GPU_INVALID_ARGUMENT. The report is filled as by btbh_gpu_custom_mesh_update. */
+BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
+    BTBHGPUCustomMesh *mesh,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    uint32_t flags,
+    BTBHGPUCustomMeshReport *report
+);
+/* Defined when btbh_gpu_custom_mesh_update_ex and BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED exist (since 0.11.0). */
+#define BTBH_GPU_HAS_QUEUED_MESH_UPDATES 1
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
 /* Same-material runs (since 0.10.0, RFC 0011). In every pass that draws batches (opaque, transparent, refraction, the
  * shadow maps, the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but

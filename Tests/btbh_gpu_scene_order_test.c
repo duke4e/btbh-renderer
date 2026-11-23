@@ -5,7 +5,7 @@
  * world-detail table, its entry and the batch it is appended to. And RFC 0011's run key
  * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
  * don't, and the shared-mesh flag's constants. And RFC 0012's height lift: its struct's layout, the batch's pointer
- * at 280 (288 bytes), and a lifted batch's sort key. */
+ * at 280 (288 bytes), the queued mesh updates' constants, and a lifted batch's sort key. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -140,7 +140,7 @@ _Static_assert(BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS == 1u, "the shared-buffers fl
 #error "BTBH_GPU_HAS_SHARED_MESH_BUFFERS is defined with btbh_gpu_window_custom_mesh_create_ex"
 #endif
 
-/* RFC 0012 (0.11.0): the lift's pointer follows the table's; its flag, limits and macro. */
+/* RFC 0012 (0.11.0): the lift's pointer follows the table's; its flag, limits and macro; the queued mesh updates'. */
 _Static_assert(
     offsetof(BTBHGPUSceneGeometryBatch, height_lift) ==
         offsetof(BTBHGPUSceneGeometryBatch, world_detail_table) + sizeof(void *),
@@ -148,7 +148,9 @@ _Static_assert(
 );
 _Static_assert(BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS == 1u, "KEEP_NORMALS is bit 0");
 _Static_assert(BTBH_GPU_HEIGHTFIELD_MAX_SIZE == 4096u, "a heightfield is at most 4096 a side");
-#if !defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT)
+_Static_assert(BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED == 1u, "the queued-update flag is bit 0");
+_Static_assert(BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES == 268435456u, "the queue holds 256 MiB");
+#if !defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT) || !defined(BTBH_GPU_HAS_QUEUED_MESH_UPDATES)
 #error "0.11.0's HAS_ macros are defined with their features"
 #endif
 
