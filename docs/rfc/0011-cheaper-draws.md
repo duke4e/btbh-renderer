@@ -350,6 +350,20 @@ candidate, until the release commit.
 - `BTBH_GPU_SCENE_RUNS=0` (a measurement tool, read once a present) turns runs off. The package-internal telemetry
   counts the draws that continued a run per kind of pass (`geometry_run_draw_count`, `shadow_run_draw_count`,
   `rc_source_run_draw_count`); the pipeline bind and skip counts mean what they meant.
+- `BTBH_GPU_SCENE_RUNS=verify` (0.13.0, a debug mode, read once a present) keeps runs on and checks the run key
+  against what the passes read. Each pass routes the pushes and binds of a batch's state through small helpers
+  (`btbh_gpu_scene_run_*` in `btbh_gpu_scene.c`), which are the plain SDL calls when the mode is off. A draw that
+  starts a run records what it pushes and binds: the last block in each uniform slot, the vertex and fragment
+  samplers, the vertex storage buffers and the stencil reference. A draw that continues one runs the same code with
+  the helpers comparing instead: each block byte for byte at the size it would be pushed with, the bindings, the
+  stencil reference and the pipeline it would bind against the one bound. It leaves what the pass caches (the
+  pipeline bound, the table, lift and particle blocks pushed, the run's batch) alone, and pushes and binds nothing, so
+  the frame is the frame with runs on. A difference is logged through SDL_Log, naming the pass, the batch, the uniform
+  slot and the first field it touches (the first 64 per window), and counted: per present in the telemetry's
+  `run_verify_draw_count` and `run_verify_mismatch_count`, and over the window's life, renders into a target included,
+  by `btbh_gpu_window_scene_read_run_verify`. CTest runs the smokes with runs again in the mode
+  (`*_runs_verify`). The runs smoke's waterfront (0.13.0) has runs of every kind of batch added since 0.10.0. Dropping
+  `roughness` from the key on purpose makes the flags smoke log `material_factors (+8)` and fail.
 
 **The frame's uniforms once a pass** (phase 1c, as drafted): at the start of each geometry pass the frame's part of
 both uniform blocks is filled; each batch writes its own fields over it (the material, the bone offsets, the motion

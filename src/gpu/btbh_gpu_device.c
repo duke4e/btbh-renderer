@@ -156,6 +156,8 @@ static BTBHGPUFeatureFlags btbh_gpu_query_features(SDL_GPUDevice *device) {
     return features;
 }
 
+static void btbh_gpu_staging_start(const BTBHGPUDevice *device, BTBHGPUBackendRequest backend);
+
 BTBHGPUDevice *btbh_gpu_device_create(
     const BTBHGPUDeviceDescriptor *descriptor,
     BTBHGPUDeviceReport *report
@@ -262,6 +264,7 @@ BTBHGPUDevice *btbh_gpu_device_create(
     }
 
     report->error_stage = BTBH_GPU_ERROR_STAGE_NONE;
+    btbh_gpu_staging_start(device, descriptor->backend);
     return device;
 }
 
@@ -1124,6 +1127,26 @@ static void btbh_gpu_staging_trim(uint32_t target) {
     }
 }
 
+/* The budget a device starts with (since 0.13.0): BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET on Vulkan, none on Metal, or
+   BTBH_GPU_UPLOAD_STAGING_BUDGET's bytes when the variable is set (0: none). Only while no device has the pool. */
+static void btbh_gpu_staging_start(const BTBHGPUDevice *device, BTBHGPUBackendRequest backend) {
+    uint32_t budget = backend == BTBH_GPU_BACKEND_VULKAN ? (uint32_t)BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET : 0u;
+    const char *value = SDL_getenv("BTBH_GPU_UPLOAD_STAGING_BUDGET");
+    if (value != NULL && value[0] != '\0') {
+        const unsigned long long parsed = SDL_strtoull(value, NULL, 10);
+        budget = parsed > UINT32_MAX ? UINT32_MAX : (uint32_t)parsed;
+    }
+    if (device == NULL || device->gpu == NULL || budget == 0u) {
+        return;
+    }
+    SDL_LockSpinlock(&btbh_gpu_staging_lock);
+    if (btbh_gpu_staging_device == NULL) {
+        btbh_gpu_staging_device = device->gpu;
+        btbh_gpu_staging_budget = budget;
+    }
+    SDL_UnlockSpinlock(&btbh_gpu_staging_lock);
+}
+
 BTBHGPUResult btbh_gpu_device_set_upload_staging_budget(
     BTBHGPUDevice *device,
     uint32_t bytes
@@ -1399,6 +1422,29 @@ void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *tran
     if (index == BTBH_GPU_STAGING_CHUNKS) {
         SDL_ReleaseGPUTransferBuffer(device, transfer);
     }
+}
+
+/* ---- Submissions since the last presented frame (since 0.13.0) ---- */
+
+static SDL_AtomicInt btbh_gpu_unpresented_submits;
+
+bool btbh_gpu_submit_counted(SDL_GPUCommandBuffer *command) {
+    (void)SDL_AddAtomicInt(&btbh_gpu_unpresented_submits, 1);
+    return (SDL_SubmitGPUCommandBuffer)(command);
+}
+
+SDL_GPUFence *btbh_gpu_submit_counted_and_acquire_fence(SDL_GPUCommandBuffer *command) {
+    (void)SDL_AddAtomicInt(&btbh_gpu_unpresented_submits, 1);
+    return (SDL_SubmitGPUCommandBufferAndAcquireFence)(command);
+}
+
+void btbh_gpu_note_command_buffers_settled(void) {
+    SDL_SetAtomicInt(&btbh_gpu_unpresented_submits, 0);
+}
+
+uint32_t btbh_gpu_unpresented_submit_count(void) {
+    const int count = SDL_GetAtomicInt(&btbh_gpu_unpresented_submits);
+    return count > 0 ? (uint32_t)count : 0u;
 }
 
 void btbh_gpu_creation_stats(BTBHGPUCreationStats *stats) {

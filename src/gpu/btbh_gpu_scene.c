@@ -283,6 +283,8 @@ typedef struct BTBHGPUSceneLiftPipelines {
     BTBHGPUSceneModelPipelineSet sets[2][3];
 } BTBHGPUSceneLiftPipelines;
 
+typedef struct BTBHGPUSceneRunVerify BTBHGPUSceneRunVerify;
+
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
         BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
@@ -555,6 +557,9 @@ struct BTBHGPUSceneRuntime {
     uint32_t *opaque_geometry_base;
     uint64_t *opaque_order_keys;
     uint32_t opaque_order_capacity;
+    /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): what the pass encoding batches holds, made by the first present in
+       the mode. */
+    BTBHGPUSceneRunVerify *run_verify;
 };
 
 static bool btbh_gpu_scene_shadow_resources_ready(
@@ -638,6 +643,17 @@ uint8_t btbh_gpu_window_scene_read_telemetry(
         return 0u;
     }
     *report = window->scene_telemetry;
+    return 1u;
+}
+
+uint8_t btbh_gpu_window_scene_read_run_verify(
+    const BTBHGPUWindow *window,
+    BTBHGPUSceneRunVerifyReport *report
+) {
+    if (window == NULL || report == NULL) {
+        return 0u;
+    }
+    *report = window->scene_run_verify;
     return 1u;
 }
 
@@ -5330,11 +5346,553 @@ bool btbh_gpu_scene_batch_continues_run(
 #undef BTBH_GPU_SCENE_RUN_SAME
 }
 
-/* BTBH_GPU_SCENE_RUNS=0, a measurement tool (RFC 0011): every batch binds and pushes its whole state again, as
-   before 0.10.0 (the frame's uniforms are still filled once a pass). Read once a present. */
-static bool btbh_gpu_scene_runs_enabled(void) {
+/* BTBH_GPU_SCENE_RUNS, read once a present (RFC 0011). Unset (or any other value): runs on. "0", a measurement tool:
+   every batch binds and pushes its whole state again, as before 0.10.0 (the frame's uniforms are still filled once a
+   pass). "verify" (since 0.13.0), a debug mode: runs on, and every draw that continues a run also rebuilds what it
+   would push and bind without the run and compares that with what the pass holds (BTBHGPUSceneRunVerify below). */
+typedef enum BTBHGPUSceneRunsMode {
+    BTBH_GPU_SCENE_RUNS_ON = 0,
+    BTBH_GPU_SCENE_RUNS_OFF = 1,
+    BTBH_GPU_SCENE_RUNS_VERIFY = 2
+} BTBHGPUSceneRunsMode;
+
+static BTBHGPUSceneRunsMode btbh_gpu_scene_runs_mode(void) {
     const char *value = SDL_getenv("BTBH_GPU_SCENE_RUNS");
-    return value == NULL || strcmp(value, "0") != 0;
+    if (value == NULL) {
+        return BTBH_GPU_SCENE_RUNS_ON;
+    }
+    if (strcmp(value, "0") == 0) {
+        return BTBH_GPU_SCENE_RUNS_OFF;
+    }
+    return strcmp(value, "verify") == 0 ? BTBH_GPU_SCENE_RUNS_VERIFY : BTBH_GPU_SCENE_RUNS_ON;
+}
+
+/* ------------------------------------------------------------------------- BTBH_GPU_SCENE_RUNS=verify (0.13.0) */
+
+/* A pass that encodes batches holds one BTBHGPUSceneRunVerify while the mode is on (NULL otherwise, and then every
+   helper below is the SDL call it wraps). The pass routes the pushes and binds a batch makes for its run through the
+   helpers. A draw that starts a run (or draws without one) records what it pushes and binds; a draw that continues a
+   run runs the same code with `checking` set, and each helper compares instead of pushing or binding: the uniform
+   blocks byte for byte at the size they would be pushed with, the vertex and fragment samplers, the vertex storage
+   buffers, the stencil reference and the pipeline. The pass leaves the state it caches (the pipeline bound, the
+   table, lift and particle block pushed, run_batch) as it was. A difference is a run key that misses a field the
+   pass reads: it is logged (SDL_Log, the pass, the batch and the field; the first
+   BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT per window) and counted (the scene telemetry's run_verify_* for a present, and
+   btbh_gpu_window_scene_read_run_verify over the window's life, scenes rendered into a target included). The frame
+   is the frame with runs on: a checking draw pushes and binds nothing. */
+#define BTBH_GPU_SCENE_RUN_VERIFY_BLOCK_CAPACITY 4096u
+#define BTBH_GPU_SCENE_RUN_VERIFY_VERTEX_SLOTS 2u
+#define BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS 3u
+#define BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS 16u
+#define BTBH_GPU_SCENE_RUN_VERIFY_STORAGE_BUFFERS 4u
+#define BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT 64u
+/* The helpers that wrap the SDL calls are always inlined, so that with the mode off a push or bind costs one test of
+   `verify` more; the checks themselves stay out of line. */
+#if defined(_MSC_VER)
+#define BTBH_GPU_SCENE_RUN_INLINE static __forceinline
+#define BTBH_GPU_SCENE_RUN_NOINLINE static __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define BTBH_GPU_SCENE_RUN_INLINE static inline __attribute__((always_inline))
+#define BTBH_GPU_SCENE_RUN_NOINLINE static __attribute__((noinline))
+#else
+#define BTBH_GPU_SCENE_RUN_INLINE static inline
+#define BTBH_GPU_SCENE_RUN_NOINLINE static
+#endif
+
+/* A uniform block's fields by offset, so that a difference names the first field it touches. */
+typedef struct BTBHGPUSceneRunVerifyField {
+    const char *name;
+    uint32_t offset;
+} BTBHGPUSceneRunVerifyField;
+
+typedef struct BTBHGPUSceneRunVerifyLayout {
+    const char *name;
+    const BTBHGPUSceneRunVerifyField *fields;
+    uint32_t field_count;
+} BTBHGPUSceneRunVerifyLayout;
+
+#define BTBH_GPU_SCENE_RUN_FIELD(type, field) { #field, (uint32_t)offsetof(type, field) }
+#define BTBH_GPU_SCENE_RUN_LAYOUT(name, fields) { name, fields, (uint32_t)(sizeof(fields) / sizeof(fields[0])) }
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_vertex_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, camera_right),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, camera_up),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, camera_position),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, material_color),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, uv_transform),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, ambient_color_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, directional_direction_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, directional_color),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, secondary_directional_direction_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, secondary_directional_color),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, bone_offset),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, billboard_mode),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, unlit_enabled),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, surface_variant),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, surface_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, surface_parameters0),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, surface_parameters1),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, world_curvature),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, previous_world_curvature),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, previous_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, temporal_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, previous_bone_offset),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, instance_uv_rect),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneUniforms, temporal_reserved),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_fragment_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, camera_position),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, ambient_color_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, directional_direction_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, directional_color),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, secondary_directional_direction_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, secondary_directional_color),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_position_range),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_direction_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_color_falloff),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_cutoffs),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, material_factors),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, emission_color_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, unlit_enabled),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, alpha_cutoff),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, surface_variant),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, surface_time),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, surface_parameters0),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, surface_parameters1),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, irradiance_sh),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, ground_bottom_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, ground_horizon_curve),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, sky_top_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, sky_horizon_curve),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, sun_color_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, sun_direction_size),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, procedural_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, detail_parameters),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, surface_wetness),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, cloud_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, cloud_shape),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, lamp_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, lamp_position_reach),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, lamp_color_energy),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, point_light_count),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, point_lights),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, directional_shadow_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, secondary_directional_shadow_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_shadow_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, directional_shadow_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, secondary_directional_shadow_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, spot_shadow_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneFragmentUniforms, omni_shadow_position_range),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_extension_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneBatchExtensionUniforms, dig_mask.origin),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneBatchExtensionUniforms, dig_mask.scale),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneBatchExtensionUniforms, world_detail_tiles),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneBatchExtensionUniforms, world_detail_controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneBatchExtensionUniforms, world_detail_mode),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_shadow_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, light_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, camera_right),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, camera_up),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, bone_offset),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, billboard_mode),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, surface_variant),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, surface_time),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, surface_parameters0),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUShadowUniforms, surface_parameters1),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_dig_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneDigMaskUniforms, origin),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneDigMaskUniforms, scale),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_lift_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUHeightLiftUniforms, uv),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUHeightLiftUniforms, scale),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_table_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUWorldDetailTableUniforms, tiles),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUWorldDetailTableUniforms, controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUWorldDetailTableUniforms, layers),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUWorldDetailTableUniforms, count),
+};
+
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_particle_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, inverse_view_projection),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, controls),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, fog_color_density),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, fog_shape),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, fog_edge_bounds),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, fog_edge),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, cascade_origin),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, cascade_field),
+};
+
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_vertex_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneUniforms", btbh_gpu_scene_run_vertex_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_fragment_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneFragmentUniforms", btbh_gpu_scene_run_fragment_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_extension_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneBatchExtensionUniforms", btbh_gpu_scene_run_extension_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_shadow_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUShadowUniforms", btbh_gpu_scene_run_shadow_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_dig_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneDigMaskUniforms", btbh_gpu_scene_run_dig_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_lift_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUHeightLiftUniforms", btbh_gpu_scene_run_lift_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_table_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUWorldDetailTableUniforms", btbh_gpu_scene_run_table_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_particle_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneParticleFrameUniforms", btbh_gpu_scene_run_particle_fields);
+
+#undef BTBH_GPU_SCENE_RUN_LAYOUT
+#undef BTBH_GPU_SCENE_RUN_FIELD
+
+/* What the pass holds: the last block pushed to each uniform slot and the last bindings, in this pass. */
+typedef struct BTBHGPUSceneRunVerifyBlock {
+    const BTBHGPUSceneRunVerifyLayout *layout;
+    uint32_t size;  /* 0: nothing pushed to the slot in this pass */
+    uint8_t data[BTBH_GPU_SCENE_RUN_VERIFY_BLOCK_CAPACITY];
+} BTBHGPUSceneRunVerifyBlock;
+
+struct BTBHGPUSceneRunVerify {
+    BTBHGPUWindow *window;
+    BTBHGPUSceneTelemetryReport *telemetry;
+    const char *pass_name;
+    uint32_t batch_index;
+    bool checking;
+    BTBHGPUSceneRunVerifyBlock vertex_uniforms[BTBH_GPU_SCENE_RUN_VERIFY_VERTEX_SLOTS];
+    BTBHGPUSceneRunVerifyBlock fragment_uniforms[BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS];
+    SDL_GPUTextureSamplerBinding vertex_samplers[BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS];
+    uint32_t vertex_sampler_count;
+    SDL_GPUTextureSamplerBinding fragment_samplers[BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS];
+    uint32_t fragment_sampler_count;
+    SDL_GPUBuffer *vertex_storage_buffers[BTBH_GPU_SCENE_RUN_VERIFY_STORAGE_BUFFERS];
+    uint32_t vertex_storage_buffer_count;
+    uint8_t stencil_reference;
+    bool stencil_reference_set;
+};
+
+/* The window's state for this present when the mode is on, made the first time (NULL when it is off, or when it
+   can't be made: the present then draws with runs, unchecked). */
+static BTBHGPUSceneRunVerify *btbh_gpu_scene_run_verify_prepare(
+    BTBHGPUWindow *window,
+    BTBHGPUSceneRuntime *runtime,
+    BTBHGPUSceneTelemetryReport *telemetry,
+    BTBHGPUSceneRunsMode mode
+) {
+    if (mode != BTBH_GPU_SCENE_RUNS_VERIFY || window == NULL || runtime == NULL) {
+        return NULL;
+    }
+    if (runtime->run_verify == NULL) {
+        runtime->run_verify = (BTBHGPUSceneRunVerify *)calloc(1u, sizeof(*runtime->run_verify));
+        if (runtime->run_verify == NULL) {
+            return NULL;
+        }
+    }
+    runtime->run_verify->window = window;
+    runtime->run_verify->telemetry = telemetry;
+    return runtime->run_verify;
+}
+
+/* A pass that encodes batches begins: it holds nothing yet. */
+static void btbh_gpu_scene_run_verify_begin_pass(BTBHGPUSceneRunVerify *verify, const char *pass_name) {
+    if (verify == NULL) {
+        return;
+    }
+    verify->pass_name = pass_name;
+    verify->checking = false;
+    for (uint32_t slot = 0u; slot < BTBH_GPU_SCENE_RUN_VERIFY_VERTEX_SLOTS; ++slot) {
+        verify->vertex_uniforms[slot].size = 0u;
+    }
+    for (uint32_t slot = 0u; slot < BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS; ++slot) {
+        verify->fragment_uniforms[slot].size = 0u;
+    }
+    verify->vertex_sampler_count = 0u;
+    verify->fragment_sampler_count = 0u;
+    verify->vertex_storage_buffer_count = 0u;
+    verify->stencil_reference_set = false;
+}
+
+/* A geometry's batch state: recorded (it starts a run or has none) or checked (it continues one). */
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_verify_draw(
+    BTBHGPUSceneRunVerify *verify,
+    uint32_t batch_index,
+    bool checking
+) {
+    if (verify == NULL) {
+        return;
+    }
+    verify->batch_index = batch_index;
+    verify->checking = checking;
+    if (checking) {
+        verify->telemetry->run_verify_draw_count += 1u;
+        verify->window->scene_run_verify.checked_draw_count += 1u;
+    }
+}
+
+BTBH_GPU_SCENE_RUN_NOINLINE void btbh_gpu_scene_run_verify_mismatch(
+    BTBHGPUSceneRunVerify *verify,
+    const char *what,
+    const char *detail
+) {
+    verify->telemetry->run_verify_mismatch_count += 1u;
+    BTBHGPUSceneRunVerifyReport *totals = &verify->window->scene_run_verify;
+    totals->mismatch_count += 1u;
+    if (totals->mismatch_count <= BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT) {
+        SDL_Log(
+            "BTBH_GPU_SCENE_RUNS=verify: mismatch in the %s pass, batch %u: %s%s%s",
+            verify->pass_name != NULL ? verify->pass_name : "scene",
+            verify->batch_index,
+            what,
+            detail != NULL && detail[0] != '\0' ? ": " : "",
+            detail != NULL ? detail : ""
+        );
+        if (totals->mismatch_count == BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT) {
+            SDL_Log(
+                "BTBH_GPU_SCENE_RUNS=verify: %u mismatches logged; the window counts the rest without logging them",
+                BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT
+            );
+        }
+    }
+}
+
+/* Records a block about to be pushed (true: push it), or compares it with the block the slot holds (false). */
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_block(
+    BTBHGPUSceneRunVerify *verify,
+    BTBHGPUSceneRunVerifyBlock *held,
+    const char *stage,
+    uint32_t slot,
+    const void *data,
+    uint32_t size,
+    const BTBHGPUSceneRunVerifyLayout *layout
+) {
+    const uint32_t kept = size < BTBH_GPU_SCENE_RUN_VERIFY_BLOCK_CAPACITY ? size : BTBH_GPU_SCENE_RUN_VERIFY_BLOCK_CAPACITY;
+    if (!verify->checking) {
+        (void)memcpy(held->data, data, kept);
+        held->size = size;
+        held->layout = layout;
+        return true;
+    }
+    char what[160];
+    char detail[256];
+    (void)snprintf(what, sizeof(what), "%s uniform slot %u (%s)", stage, slot, layout != NULL ? layout->name : "block");
+    if (held->size == 0u) {
+        btbh_gpu_scene_run_verify_mismatch(verify, what, "the run's first batch pushed none");
+        return false;
+    }
+    if (held->size != size || held->layout != layout) {
+        (void)snprintf(
+            detail,
+            sizeof(detail),
+            "%u bytes (%s) against the %u held (%s)",
+            size,
+            layout != NULL ? layout->name : "block",
+            held->size,
+            held->layout != NULL ? held->layout->name : "block"
+        );
+        btbh_gpu_scene_run_verify_mismatch(verify, what, detail);
+        return false;
+    }
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint32_t first = 0u;
+    while (first < kept && bytes[first] == held->data[first]) {
+        first += 1u;
+    }
+    if (first == kept) {
+        return false;
+    }
+    const char *field = "?";
+    uint32_t field_offset = 0u;
+    if (layout != NULL) {
+        for (uint32_t index = 0u; index < layout->field_count; ++index) {
+            if (layout->fields[index].offset <= first) {
+                field = layout->fields[index].name;
+                field_offset = layout->fields[index].offset;
+            }
+        }
+    }
+    (void)snprintf(detail, sizeof(detail), "%s (+%u), byte %u of %u", field, first - field_offset, first, size);
+    btbh_gpu_scene_run_verify_mismatch(verify, what, detail);
+    return false;
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_push_vertex_uniforms(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPUCommandBuffer *command,
+    uint32_t slot,
+    const void *data,
+    uint32_t size,
+    const BTBHGPUSceneRunVerifyLayout *layout
+) {
+    if (verify != NULL && slot < BTBH_GPU_SCENE_RUN_VERIFY_VERTEX_SLOTS &&
+        !btbh_gpu_scene_run_verify_block(verify, &verify->vertex_uniforms[slot], "vertex", slot, data, size, layout)) {
+        return;
+    }
+    SDL_PushGPUVertexUniformData(command, slot, data, size);
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_push_fragment_uniforms(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPUCommandBuffer *command,
+    uint32_t slot,
+    const void *data,
+    uint32_t size,
+    const BTBHGPUSceneRunVerifyLayout *layout
+) {
+    if (verify != NULL && slot < BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS &&
+        !btbh_gpu_scene_run_verify_block(verify, &verify->fragment_uniforms[slot], "fragment", slot, data, size, layout)) {
+        return;
+    }
+    SDL_PushGPUFragmentUniformData(command, slot, data, size);
+}
+
+/* Records bindings from slot 0 about to be made (true: make them), or compares them with those held (false). */
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_bindings(
+    BTBHGPUSceneRunVerify *verify,
+    void *held,
+    uint32_t *held_count,
+    const void *bindings,
+    uint32_t count,
+    size_t binding_size,
+    uint32_t capacity,
+    const char *what
+) {
+    const uint32_t kept = count < capacity ? count : capacity;
+    if (!verify->checking) {
+        (void)memcpy(held, bindings, binding_size * kept);
+        *held_count = count;
+        return true;
+    }
+    if (*held_count != count) {
+        char detail[96];
+        (void)snprintf(detail, sizeof(detail), "%u bound against the %u held", count, *held_count);
+        btbh_gpu_scene_run_verify_mismatch(verify, what, detail);
+        return false;
+    }
+    for (uint32_t index = 0u; index < kept; ++index) {
+        if (memcmp(
+                (const uint8_t *)bindings + binding_size * index,
+                (const uint8_t *)held + binding_size * index,
+                binding_size
+            ) != 0) {
+            char detail[64];
+            (void)snprintf(detail, sizeof(detail), "slot %u differs", index);
+            btbh_gpu_scene_run_verify_mismatch(verify, what, detail);
+            return false;
+        }
+    }
+    return false;
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_fragment_samplers(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPURenderPass *pass,
+    const SDL_GPUTextureSamplerBinding *bindings,
+    uint32_t count
+) {
+    if (verify != NULL &&
+        !btbh_gpu_scene_run_verify_bindings(
+            verify,
+            verify->fragment_samplers,
+            &verify->fragment_sampler_count,
+            bindings,
+            count,
+            sizeof(bindings[0]),
+            BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS,
+            "fragment samplers"
+        )) {
+        return;
+    }
+    SDL_BindGPUFragmentSamplers(pass, 0u, bindings, count);
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_vertex_samplers(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPURenderPass *pass,
+    const SDL_GPUTextureSamplerBinding *bindings,
+    uint32_t count
+) {
+    if (verify != NULL &&
+        !btbh_gpu_scene_run_verify_bindings(
+            verify,
+            verify->vertex_samplers,
+            &verify->vertex_sampler_count,
+            bindings,
+            count,
+            sizeof(bindings[0]),
+            BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS,
+            "vertex samplers"
+        )) {
+        return;
+    }
+    SDL_BindGPUVertexSamplers(pass, 0u, bindings, count);
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_bind_vertex_storage_buffers(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPURenderPass *pass,
+    SDL_GPUBuffer *const *buffers,
+    uint32_t count
+) {
+    if (verify != NULL &&
+        !btbh_gpu_scene_run_verify_bindings(
+            verify,
+            verify->vertex_storage_buffers,
+            &verify->vertex_storage_buffer_count,
+            buffers,
+            count,
+            sizeof(buffers[0]),
+            BTBH_GPU_SCENE_RUN_VERIFY_STORAGE_BUFFERS,
+            "vertex storage buffers"
+        )) {
+        return;
+    }
+    SDL_BindGPUVertexStorageBuffers(pass, 0u, buffers, count);
+}
+
+/* Records the stencil reference about to be set (true: set it), or compares it with the one held (false). */
+BTBH_GPU_SCENE_RUN_NOINLINE bool btbh_gpu_scene_run_verify_stencil(BTBHGPUSceneRunVerify *verify, uint8_t reference) {
+    if (!verify->checking) {
+        verify->stencil_reference = reference;
+        verify->stencil_reference_set = true;
+        return true;
+    }
+    if (!verify->stencil_reference_set || verify->stencil_reference != reference) {
+        char detail[64];
+        (void)snprintf(detail, sizeof(detail), "%u against the %u held", reference, verify->stencil_reference);
+        btbh_gpu_scene_run_verify_mismatch(verify, "stencil reference", detail);
+    }
+    return false;
+}
+
+BTBH_GPU_SCENE_RUN_INLINE void btbh_gpu_scene_run_set_stencil_reference(
+    BTBHGPUSceneRunVerify *verify,
+    SDL_GPURenderPass *pass,
+    uint8_t reference
+) {
+    if (verify != NULL && !btbh_gpu_scene_run_verify_stencil(verify, reference)) {
+        return;
+    }
+    SDL_SetGPUStencilReference(pass, reference);
+}
+
+/* A checking draw's pipeline against the one the pass has bound (a recording draw binds as the pass always did). */
+static void btbh_gpu_scene_run_verify_pipeline(
+    BTBHGPUSceneRunVerify *verify,
+    const SDL_GPUGraphicsPipeline *pipeline,
+    const SDL_GPUGraphicsPipeline *bound
+) {
+    if (pipeline != bound) {
+        btbh_gpu_scene_run_verify_mismatch(verify, "pipeline", "another pipeline than the one bound");
+    }
 }
 
 /* The buffers and ranges a batch's geometry draws from: a model's primitive, or a custom mesh, in buffers of its own
@@ -6859,6 +7417,7 @@ static void btbh_gpu_scene_particle_frame(
    comparison sampler, the fill's and the spot's, and the omni cube; then (RFC 0013 phase 2) the particle
    transmittance map, or a fallback never read when the frame draws none. */
 static void btbh_gpu_scene_bind_lit_particle(
+    BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
     const BTBHGPUSceneRuntime *runtime,
     const BTBHGPUTexture *albedo,
@@ -6916,7 +7475,7 @@ static void btbh_gpu_scene_bind_lit_particle(
             : runtime->fallback_texture->sampler;
         count += 1u;
     }
-    SDL_BindGPUFragmentSamplers(pass, 0u, samplers, count);
+    btbh_gpu_scene_run_bind_fragment_samplers(verify, pass, samplers, count);
 }
 
 /* RFC 0013 phase 2: production_particle_transmittance.vert.hlsl's TransmittanceUniforms (the vertex block; 112
@@ -7226,7 +7785,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
     bool cycle_texture,
     bool bind_telemetry,
     BTBHGPUSceneTelemetryReport *telemetry,
-    bool runs_enabled
+    bool runs_enabled,
+    BTBHGPUSceneRunVerify *verify
 ) {
     SDL_GPUDepthStencilTargetInfo depth_target;
     SDL_zero(depth_target);
@@ -7247,6 +7807,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
     if (pass == NULL) {
         return false;
     }
+    btbh_gpu_scene_run_verify_begin_pass(verify, "shadow");
 
     uint32_t geometry_cursor = 0u;
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
@@ -7332,19 +7893,26 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 !animated &&
                 run_batch != NULL &&
                 (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
+            const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
                 telemetry->shadow_run_draw_count += 1u;
                 if (bind_telemetry) {
                     telemetry->shadow_pipeline_bind_skip_count += 1u;
                 }
-            } else {
+            }
+            if (!continues_run || run_check) {
+                btbh_gpu_scene_run_verify_draw(verify, batch_index, run_check);
                 if (uses_fast_shadow) {
                     if (!shadow_uniform_bound) {
-                        SDL_PushGPUVertexUniformData(
+                        /* (The fast shadow shader reads the block's first 64 bytes, the light's matrix.) */
+                        btbh_gpu_scene_run_push_vertex_uniforms(
+                            verify,
                             command,
                             0u,
                             light_view_projection,
-                            sizeof(float) * 16u
+                            sizeof(float) * 16u,
+                            &btbh_gpu_scene_run_shadow_layout
                         );
                         shadow_uniform_bound = true;
                     }
@@ -7365,11 +7933,13 @@ static bool btbh_gpu_scene_render_directional_shadow(
                         batch->surface_parameters1,
                         sizeof(uniforms.surface_parameters1)
                     );
-                    SDL_PushGPUVertexUniformData(
+                    btbh_gpu_scene_run_push_vertex_uniforms(
+                        verify,
                         command,
                         0u,
                         &uniforms,
-                        sizeof(uniforms)
+                        sizeof(uniforms),
+                        &btbh_gpu_scene_run_shadow_layout
                     );
                     shadow_uniform_bound = true;
                 }
@@ -7396,7 +7966,9 @@ static bool btbh_gpu_scene_render_directional_shadow(
                                 batch->cull_mode
                             ];
                 }
-                if (shadow_pipeline != bound_pipeline) {
+                if (run_check) {
+                    btbh_gpu_scene_run_verify_pipeline(verify, shadow_pipeline, bound_pipeline);
+                } else if (shadow_pipeline != bound_pipeline) {
                     SDL_BindGPUGraphicsPipeline(pass, shadow_pipeline);
                     bound_pipeline = shadow_pipeline;
                     if (bind_telemetry) {
@@ -7409,32 +7981,45 @@ static bool btbh_gpu_scene_render_directional_shadow(
                     (!dig_bound || bound_dig_texture != dig->texture)) {
                     BTBHGPUSceneDigMaskUniforms dig_uniforms;
                     btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
-                    SDL_PushGPUFragmentUniformData(command, 0u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+                    btbh_gpu_scene_run_push_fragment_uniforms(
+                        verify,
+                        command,
+                        0u,
+                        &dig_uniforms,
+                        (uint32_t)sizeof(dig_uniforms),
+                        &btbh_gpu_scene_run_dig_layout
+                    );
                     const SDL_GPUTextureSamplerBinding dig_sampler = btbh_gpu_scene_dig_sampler(runtime, dig);
-                    SDL_BindGPUFragmentSamplers(pass, 0u, &dig_sampler, 1u);
-                    dig_bound = true;
-                    bound_dig_texture = dig->texture;
+                    btbh_gpu_scene_run_bind_fragment_samplers(verify, pass, &dig_sampler, 1u);
+                    if (!run_check) {
+                        dig_bound = true;
+                        bound_dig_texture = dig->texture;
+                    }
                 }
                 if (animated) {
                     SDL_GPUBuffer *storage_buffers[2] = {
                         batch_instance_buffer,
                         bone_buffer
                     };
-                    SDL_BindGPUVertexStorageBuffers(
+                    btbh_gpu_scene_run_bind_vertex_storage_buffers(
+                        verify,
                         pass,
-                        0u,
                         storage_buffers,
                         2u
                     );
                 } else if (!uses_fast_shadow) {
-                    SDL_BindGPUVertexStorageBuffers(
+                    btbh_gpu_scene_run_bind_vertex_storage_buffers(
+                        verify,
                         pass,
-                        0u,
                         &batch_instance_buffer,
                         1u
                     );
                 }
-                run_batch = animated ? NULL : batch;
+                if (run_check) {
+                    verify->checking = false;
+                } else {
+                    run_batch = animated ? NULL : batch;
+                }
             }
             const BTBHGPUSceneGeometryDraw geometry =
                 btbh_gpu_scene_geometry_draw(batch, geometry_index);
@@ -7636,7 +8221,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     SDL_GPUBuffer *transient_instance_buffer,
     SDL_GPUBuffer *bone_buffer,
     bool runs_enabled,
-    uint32_t *run_draw_count
+    uint32_t *run_draw_count,
+    BTBHGPUSceneRunVerify *verify
 ) {
     if (command == NULL || runtime == NULL || config == NULL ||
         (batches == NULL && batch_count > 0u) ||
@@ -7686,6 +8272,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
     if (pass == NULL) {
         return false;
     }
+    btbh_gpu_scene_run_verify_begin_pass(verify, "cascade material source");
 
     uint32_t geometry_cursor = 0u;
     SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
@@ -7753,9 +8340,13 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 !animated &&
                 run_batch != NULL &&
                 (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
+            const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
                 *run_draw_count += 1u;
-            } else {
+            }
+            if (!continues_run || run_check) {
+                btbh_gpu_scene_run_verify_draw(verify, batch_index, run_check);
                 uniforms.material_color[0] =
                     (float)batch->albedo_red / 255.0f;
                 uniforms.material_color[1] =
@@ -7785,11 +8376,13 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     batch->surface_parameters1,
                     sizeof(uniforms.surface_parameters1)
                 );
-                SDL_PushGPUVertexUniformData(
+                btbh_gpu_scene_run_push_vertex_uniforms(
+                    verify,
                     command,
                     0u,
                     &uniforms,
-                    (uint32_t)sizeof(uniforms)
+                    (uint32_t)sizeof(uniforms),
+                    &btbh_gpu_scene_run_vertex_layout
                 );
 
                 BTBHGPUSceneFragmentUniforms fragment_uniforms;
@@ -7819,23 +8412,25 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                         ? (uint32_t)BTBH_GPU_SCENE_SURFACE_NONE
                         : (uint32_t)batch->surface_variant;
                 fragment_uniforms.surface_time = batch->surface_time;
-                SDL_PushGPUFragmentUniformData(
+                btbh_gpu_scene_run_push_fragment_uniforms(
+                    verify,
                     command,
                     0u,
                     &fragment_uniforms,
                     (uint32_t)offsetof(
                         BTBHGPUSceneFragmentUniforms,
                         surface_parameters0
-                    )
+                    ),
+                    &btbh_gpu_scene_run_fragment_layout
                 );
 
                 SDL_GPUBuffer *storage_buffers[2] = {
                     batch_instance_buffer,
                     bone_buffer
                 };
-                SDL_BindGPUVertexStorageBuffers(
+                btbh_gpu_scene_run_bind_vertex_storage_buffers(
+                    verify,
                     pass,
-                    0u,
                     storage_buffers,
                     animated ? 2u : 1u
                 );
@@ -7850,7 +8445,14 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
                 BTBHGPUSceneDigMaskUniforms dig_uniforms;
                 btbh_gpu_scene_dig_uniforms(dig, &dig_uniforms);
-                SDL_PushGPUFragmentUniformData(command, 1u, &dig_uniforms, (uint32_t)sizeof(dig_uniforms));
+                btbh_gpu_scene_run_push_fragment_uniforms(
+                    verify,
+                    command,
+                    1u,
+                    &dig_uniforms,
+                    (uint32_t)sizeof(dig_uniforms),
+                    &btbh_gpu_scene_run_dig_layout
+                );
                 SDL_GPUTextureSamplerBinding samplers[3];
                 SDL_zeroa(samplers);
                 samplers[0].texture = albedo_texture->texture;
@@ -7858,8 +8460,12 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 samplers[1].texture = emission_texture->texture;
                 samplers[1].sampler = emission_texture->sampler;
                 samplers[2] = btbh_gpu_scene_dig_sampler(runtime, dig);
-                SDL_BindGPUFragmentSamplers(pass, 0u, samplers, 3u);
-                run_batch = animated ? NULL : batch;
+                btbh_gpu_scene_run_bind_fragment_samplers(verify, pass, samplers, 3u);
+                if (run_check) {
+                    verify->checking = false;
+                } else {
+                    run_batch = animated ? NULL : batch;
+                }
             }
 
             const BTBHGPUSceneGeometryDraw geometry =
@@ -8695,7 +9301,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const uint64_t prepare_started_ticks = SDL_GetTicksNS();
     const bool detailed_prepare_telemetry =
         window != NULL && window->frame_telemetry_enabled;
-    const bool runs_enabled = btbh_gpu_scene_runs_enabled();
+    const BTBHGPUSceneRunsMode runs_mode = btbh_gpu_scene_runs_mode();
+    const bool runs_enabled = runs_mode != BTBH_GPU_SCENE_RUNS_OFF;
     if (window != NULL &&
         (window->pending_scene_ready ||
          window->pending_command != NULL)) {
@@ -8830,6 +9437,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     BTBHGPUSceneTelemetryReport *telemetry =
         &window->scene_telemetry;
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): NULL unless the mode is on. */
+    BTBHGPUSceneRunVerify *const run_verify =
+        btbh_gpu_scene_run_verify_prepare(window, runtime, telemetry, runs_mode);
     const bool radiance_cascades_active = setup.radiance_cascades_active;
     const bool radiance_cascades_fallback_debug =
         setup.radiance_cascades_fallback_debug;
@@ -9420,7 +10030,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         face == 0u,
                         detailed_prepare_telemetry,
                         telemetry,
-                        runs_enabled
+                        runs_enabled,
+                        run_verify
                     )) {
                     shadow_rendered = false;
                     break;
@@ -9446,7 +10057,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 true,
                 detailed_prepare_telemetry,
                 telemetry,
-                runs_enabled
+                runs_enabled,
+                run_verify
             );
         }
         if (!shadow_rendered) {
@@ -9973,6 +10585,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
             return report->result;
         }
+        btbh_gpu_scene_run_verify_begin_pass(
+            run_verify,
+            !transparent_phase ? "opaque" : (refraction_phase ? "refraction" : "transparent")
+        );
         SDL_GPUGraphicsPipeline *bound_model_pipeline = NULL;
         SDL_GPUBuffer *bound_index_buffer = NULL;
         /* RFC 0009: the world-detail table whose block the fragment uniform slot 2 holds in this pass. Pushed data
@@ -10450,12 +11066,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 !animated &&
                 run_batch != NULL &&
                 (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+            /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
+            const bool run_check = continues_run && run_verify != NULL;
             if (continues_run) {
                 telemetry->geometry_run_draw_count += 1u;
                 if (detailed_prepare_telemetry) {
                     telemetry->geometry_pipeline_bind_skip_count += 1u;
                 }
-            } else {
+            }
+            if (!continues_run || run_check) {
+                btbh_gpu_scene_run_verify_draw(run_verify, batch_index, run_check);
                 uniforms.material_color[0] =
                     (float)batch->albedo_red / 255.0f;
                 uniforms.material_color[1] =
@@ -10495,11 +11115,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 const bool batch_motion =
                     temporal_motion_ready && batch->instance_buffer == NULL;
                 uniforms.temporal_controls[2] = batch_motion ? 1.0f : 0.0f;
-                SDL_PushGPUVertexUniformData(
+                btbh_gpu_scene_run_push_vertex_uniforms(
+                    run_verify,
                     command,
                     0u,
                     &uniforms,
-                    sizeof(uniforms)
+                    sizeof(uniforms),
+                    &btbh_gpu_scene_run_vertex_layout
                 );
                 /* (RFC 0013: a lit particle without a normal_texture is flat; the fallback's rg is 127/255.) */
                 fragment_uniforms.material_factors[0] =
@@ -10579,7 +11201,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     batch->detail_parameters,
                     sizeof(fragment_uniforms.detail_parameters)
                 );
-                SDL_PushGPUFragmentUniformData(
+                btbh_gpu_scene_run_push_fragment_uniforms(
+                    run_verify,
                     command,
                     0u,
                     &fragment_uniforms,
@@ -10588,7 +11211,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         : (uint32_t)offsetof(
                             BTBHGPUSceneFragmentUniforms,
                             directional_shadow_view_projection
-                        )
+                        ),
+                    &btbh_gpu_scene_run_fragment_layout
                 );
                 BTBHGPUSceneStencilVariant stencil_variant;
                 if (!btbh_gpu_scene_stencil_variant(
@@ -10605,7 +11229,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     );
                     return report->result;
                 }
-                SDL_SetGPUStencilReference(
+                btbh_gpu_scene_run_set_stencil_reference(
+                    run_verify,
                     pass,
                     batch->stencil_reference
                 );
@@ -10622,7 +11247,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         batch,
                         stencil_variant
                     );
-                if (model_pipeline != bound_model_pipeline) {
+                if (run_check) {
+                    btbh_gpu_scene_run_verify_pipeline(run_verify, model_pipeline, bound_model_pipeline);
+                } else if (model_pipeline != bound_model_pipeline) {
                     SDL_BindGPUGraphicsPipeline(pass, model_pipeline);
                     bound_model_pipeline = model_pipeline;
                     if (detailed_prepare_telemetry) {
@@ -10642,9 +11269,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         bone_buffer,
                         batch_motion_buffer
                     };
-                    SDL_BindGPUVertexStorageBuffers(
+                    btbh_gpu_scene_run_bind_vertex_storage_buffers(
+                        run_verify,
                         pass,
-                        0u,
                         storage_buffers,
                         3u
                     );
@@ -10653,9 +11280,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         batch_instance_buffer,
                         batch_motion_buffer
                     };
-                    SDL_BindGPUVertexStorageBuffers(
+                    btbh_gpu_scene_run_bind_vertex_storage_buffers(
+                        run_verify,
                         pass,
-                        0u,
                         storage_buffers,
                         2u
                     );
@@ -10667,17 +11294,21 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         SDL_zero(field_binding);
                         field_binding.texture = field->texture;
                         field_binding.sampler = field->sampler;
-                        SDL_BindGPUVertexSamplers(pass, 0u, &field_binding, 1u);
+                        btbh_gpu_scene_run_bind_vertex_samplers(run_verify, pass, &field_binding, 1u);
                         if (batch->height_lift != pushed_lift) {
                             BTBHGPUHeightLiftUniforms lift_uniforms;
                             btbh_gpu_height_lift_pack(batch->height_lift, field->width, field->height, &lift_uniforms);
-                            SDL_PushGPUVertexUniformData(
+                            btbh_gpu_scene_run_push_vertex_uniforms(
+                                run_verify,
                                 command,
                                 1u,
                                 &lift_uniforms,
-                                (uint32_t)sizeof(lift_uniforms)
+                                (uint32_t)sizeof(lift_uniforms),
+                                &btbh_gpu_scene_run_lift_layout
                             );
-                            pushed_lift = batch->height_lift;
+                            if (!run_check) {
+                                pushed_lift = batch->height_lift;
+                            }
                         }
                     }
                 }
@@ -10700,6 +11331,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     /* RFC 0013: the lit particle's textures (production_particle_lit.frag's), and the pass's particle
                        block in fragment slot 1 when another batch's block took it since. */
                     btbh_gpu_scene_bind_lit_particle(
+                        run_verify,
                         pass,
                         runtime,
                         texture,
@@ -10712,13 +11344,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         setup.particle_shadow_active
                     );
                     if (!particle_frame_pushed) {
-                        SDL_PushGPUFragmentUniformData(
+                        btbh_gpu_scene_run_push_fragment_uniforms(
+                            run_verify,
                             command,
                             1u,
                             &particle_frame,
-                            (uint32_t)sizeof(particle_frame)
+                            (uint32_t)sizeof(particle_frame),
+                            &btbh_gpu_scene_run_particle_layout
                         );
-                        particle_frame_pushed = true;
+                        if (!run_check) {
+                            particle_frame_pushed = true;
+                        }
                     }
                 } else {
                     SDL_GPUTextureSamplerBinding samplers[16];
@@ -10827,32 +11463,44 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                                never read the slot. */
                             BTBHGPUWorldDetailTableUniforms table_uniforms;
                             btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
-                            SDL_PushGPUFragmentUniformData(
+                            btbh_gpu_scene_run_push_fragment_uniforms(
+                                run_verify,
                                 command,
                                 2u,
                                 &table_uniforms,
-                                (uint32_t)sizeof(table_uniforms)
+                                (uint32_t)sizeof(table_uniforms),
+                                &btbh_gpu_scene_run_table_layout
                             );
-                            pushed_table = batch->world_detail_table;
+                            if (!run_check) {
+                                pushed_table = batch->world_detail_table;
+                            }
                         }
                     }
-                    SDL_PushGPUFragmentUniformData(
+                    btbh_gpu_scene_run_push_fragment_uniforms(
+                        run_verify,
                         command,
                         1u,
                         &extension_uniforms,
                         batch_fast_unlit
                             ? (uint32_t)sizeof(extension_uniforms.dig_mask)
-                            : (uint32_t)sizeof(extension_uniforms)
+                            : (uint32_t)sizeof(extension_uniforms),
+                        &btbh_gpu_scene_run_extension_layout
                     );
-                    SDL_BindGPUFragmentSamplers(
+                    btbh_gpu_scene_run_bind_fragment_samplers(
+                        run_verify,
                         pass,
-                        0u,
                         samplers,
                         bound_sampler_count
                     );
-                    particle_frame_pushed = false;
+                    if (!run_check) {
+                        particle_frame_pushed = false;
+                    }
                 }
-                run_batch = animated ? NULL : batch;
+                if (run_check) {
+                    run_verify->checking = false;
+                } else {
+                    run_batch = animated ? NULL : batch;
+                }
             }
             const BTBHGPUSceneGeometryDraw geometry =
                 btbh_gpu_scene_geometry_draw(batch, geometry_index);
@@ -11015,7 +11663,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         transient_instance_buffer,
                         bone_buffer,
                         runs_enabled,
-                        &telemetry->rc_source_run_draw_count
+                        &telemetry->rc_source_run_draw_count,
+                        run_verify
                     );
                 btbh_gpu_cost_rc_emitters =
                     runtime->radiance_cascades.emitter_count;
@@ -12123,6 +12772,20 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             );
         }
         return report->result;
+    }
+    /* Since 0.13.0, on Vulkan: when the core submitted command buffers since the device's last presented frame (a
+       level's uploads, renders into targets, the prewarm's own uploads), wait for the GPU once, here. SDL 3.4 gives every
+       command buffer a descriptor-set cache from a pool (last in, first out) and takes the caches back only in a submit
+       that presents, or in a wait. A load's uploads emptied the pool, so the first frame after it drew with a new, empty
+       cache and made a descriptor pool for each layout it bound, 15 for a scene: about 0.5 ms, and 24 ms once when the
+       driver stalled in one. The wait gives every cache back, those the frames filled on top. Without such submissions
+       nothing waits. */
+    if (btbh_gpu_unpresented_submit_count() > 0u) {
+        const char *driver = SDL_GetGPUDeviceDriver(window->device->gpu);
+        if (driver != NULL && strcmp(driver, "vulkan") == 0) {
+            (void)SDL_WaitForGPUIdle(window->device->gpu);
+            btbh_gpu_note_command_buffers_settled();
+        }
     }
     report->result = BTBH_GPU_OK;
     report->drawable_width = drawable_width;
@@ -13291,6 +13954,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     free(window->scene_runtime->opaque_order);
     free(window->scene_runtime->opaque_geometry_base);
     free(window->scene_runtime->opaque_order_keys);
+    free(window->scene_runtime->run_verify);
     for (uint32_t check = 0u; check < BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY; ++check) {
         free(window->scene_runtime->scene_shader_checks[check].path);
     }

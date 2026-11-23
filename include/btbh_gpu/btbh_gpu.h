@@ -9,7 +9,7 @@ extern "C" {
 
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
-#define BTBH_GPU_VERSION_MINOR 12
+#define BTBH_GPU_VERSION_MINOR 13
 #define BTBH_GPU_VERSION_PATCH 0
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
@@ -1815,13 +1815,23 @@ void btbh_gpu_device_destroy(BTBHGPUDevice *device);
    bigger than the budget, or one while every pooled buffer is still being read, makes its own too. The pool's memory
    stays allocated until the budget is lowered (idle buffers beyond it are released) or the device shuts down.
    Uploads and frames are the same to the byte with or without it. One device at a time: another device's call, a
-   NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT. */
+   NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT.
+   Since 0.13.0 a device made with BTBH_GPU_BACKEND_VULKAN starts with a budget of
+   BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET (32 MiB), when no other device has the pool; a Metal device starts with none.
+   The environment variable BTBH_GPU_UPLOAD_STAGING_BUDGET=<bytes>, read when a device is made, sets the budget it starts
+   with instead (0: none, 0.12.0's behaviour), and this call changes it at any time. Why (Be The Bullet Hell v1's exit
+   stall): SDL 3.4 frees a released upload buffer's memory only in a submit that presents, or in SDL_DestroyGPUDevice
+   (about 0.1 ms each on an RTX 3070 Ti), so every upload since the last presented frame (a level streamed in, then
+   quit; a minimized window) waited for the device's destroy. 1,500 such uploads made the exit 246 ms instead of
+   about 70; with the budget, 77 ms. */
 BTBHGPUResult btbh_gpu_device_set_upload_staging_budget(
     BTBHGPUDevice *device,
     uint32_t bytes
 );
 /* Defined when btbh_gpu_device_set_upload_staging_budget exists (since 0.11.0). */
 #define BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET 1
+/* The upload staging budget a Vulkan device starts with (since 0.13.0). */
+#define BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET (32u * 1024u * 1024u)
 double btbh_gpu_monotonic_elapsed_seconds(void);
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
@@ -2344,7 +2354,14 @@ void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
  * 2. by material (every field but the six), mesh after mesh;
  * and by making the meshes drawn so with BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS, so that neighbours share their vertex
  * and index buffers. The instance buffer is part of the material: a run never spans two. With
- * BTBHGPUScenePost.opaque_sort, the opaque pass draws the batches it may move in its own order. */
+ * BTBHGPUScenePost.opaque_sort, the opaque pass draws the batches it may move in its own order.
+ * The environment variable BTBH_GPU_SCENE_RUNS, read once a present, is for measuring and debugging them: 0 turns runs
+ * off (every batch binds and pushes its whole state); verify (since 0.13.0) keeps them on and checks every draw that
+ * continues a run: it builds the uniforms, samplers, storage buffers, pipeline and stencil reference the batch would
+ * push and bind without the run and compares them with what the pass holds. Each difference is logged with SDL_Log
+ * (the first 64 a window finds), as a line starting "BTBH_GPU_SCENE_RUNS=verify: mismatch" that names the pass, the
+ * batch and the field, and a window destroyed after it checked says how many draws it checked and how many
+ * mismatches it found. The frames are those with runs on; verify costs the CPU work runs save, unset nothing. */
 BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -2444,7 +2461,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
    - The first frame or two after it still cost a few milliseconds more than the next ones: the GPU API's first
      use of the new pipelines' render passes, descriptor pools and uniform buffers, which only drawing makes.
    - After a level's load, the first frame that presents also frees every upload buffer the load made (in its submit,
-     outside the scene report's split): btbh_gpu_device_set_upload_staging_budget keeps them for reuse instead.
+     outside the scene report's split): btbh_gpu_device_set_upload_staging_budget keeps them for reuse instead (and a
+     Vulkan device has a budget from the start since 0.13.0).
+   - Since 0.13.0, on Vulkan, when the renderer submitted command buffers since the last frame that presented (a
+     level's uploads, renders into targets), it waits for the GPU once at its end, so that SDL takes back the
+     descriptor-set caches those command buffers held: SDL 3.4 hands each command buffer one and takes them back only
+     in a submit that presents or a wait, and without it the first frame after a load drew with an empty cache, making
+     15 descriptor pools in its draws (about 0.5 ms; 24 ms once when the driver stalled). The wait lasts as long as the
+     GPU still runs what was submitted; with nothing submitted since the last presented frame it doesn't happen.
    - The lazy creation log (btbh_gpu_window_set_lazy_creation_log_enabled, below) names what a frame made that a
      prewarm would have, and what nothing makes ahead.
    - Nothing is kept between runs: SDL 3.4 makes its Vulkan pipelines without a pipeline cache. The driver's own

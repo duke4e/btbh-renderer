@@ -2147,9 +2147,11 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(normalizedShadowFunction.contains(
             "} else { uniforms.bone_offset = animated ? bone_offset : 0u;"
         ))
+        // (Since 0.13.0 the pass pushes through btbh_gpu_scene_run_push_vertex_uniforms, which is the SDL call unless
+        // BTBH_GPU_SCENE_RUNS=verify checks a run.)
         XCTAssertEqual(
             shadowFunction.components(
-                separatedBy: "SDL_PushGPUVertexUniformData("
+                separatedBy: "btbh_gpu_scene_run_push_vertex_uniforms("
             ).count - 1,
             2
         )

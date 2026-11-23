@@ -166,7 +166,13 @@ BTBHGPUResult btbh_gpu_sdf_terrain_remove_edit(BTBHGPUSdfTerrain *terrain, uint3
  * until budget_microseconds of the calling thread's time is spent (0 = no limit). The rest waits for the
  * next call. Chunks that touch each other switch to their new meshes (and their rectangles of the dig mask) in
  * the same call, once none of them waits for a brick: a half-built crater is never shown. A region that keeps
- * changing faster than the budget rebuilds it switches once it settles. report may be NULL. */
+ * changing faster than the budget rebuilds it switches once it settles. report may be NULL.
+ * Since 0.13.0 the switched chunks' meshes go through the window's upload queue (as BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's
+ * updates): the call copies their data there, and the window's next scene, a present or a render into a target,
+ * copies it to the GPU before it draws, in its one copy pass, instead of a transfer and a submission per chunk past
+ * the budget. Update the terrain before the scene that draws it, as before: that scene shows the new meshes and mask
+ * together. A budgeted update without run_jobs meshes one chunk at a time, so it overruns its budget by about one
+ * chunk's meshing, the switch and the mask's upload. */
 BTBHGPUResult btbh_gpu_sdf_terrain_update(BTBHGPUSdfTerrain *terrain, uint32_t budget_microseconds,
                                           BTBHGPUSdfTerrainReport *report);
 

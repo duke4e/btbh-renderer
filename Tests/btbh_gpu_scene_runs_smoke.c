@@ -17,6 +17,18 @@
  *   continued a run in the geometry passes, the shadow passes and the cascades' sources (none without runs).
  * - BTBH_SCENE_RUNS_DUMP=<dir> writes the gallery (runs-<name>.png); BTBH_SCENE_RUNS_REFERENCE=<dir> compares every
  *   render (own and shared buffers, runs on and off) with that directory's and requires 0 differing pixels.
+ * - From 0.13.0, the waterfront (check_waterfront): Be The Bullet Hell v2's rainy quay, as the 0.10.1 investigation of
+ *   its rain glint probed it, with runs of each batch kind added since: wet, rained-on ground and paving, bollards,
+ *   water tiles (SURFACE_WATER), kit pieces before and after them, a model whole and slot by slot, a kaiju's
+ *   orthographic spot shadow with its occluder darkening, SSR with SURFACE_REFLECTIVITY and contact HBAO; lifted
+ *   pieces on a heightfield (RFC 0012), boxes with INSTANCE_LIGHT_FACTOR (each instance its own light), pieces with
+ *   INSTANCE_UV_RECT (each its own atlas cell), lit particles (RFC 0013) and two runs of beams, with
+ *   FLAGS2_KEEP_CASCADES_LOOK and without, under additive cascades with KEEP_HBAO. Two frames of two mixes, each in
+ *   own and shared buffers, with runs and without: all the same bytes. Presented, the telemetry counts runs in the
+ *   geometry and shadow passes (and the cascades' sources). BTBH_SCENE_RUNS_DUMP writes runs-waterfront-*.png.
+ * - From 0.13.0, started with BTBH_GPU_SCENE_RUNS=verify (CTest's btbh_gpu_scene_runs_smoke_runs_verify), "runs on"
+ *   is that mode: every draw that continues a run is checked as well (btbh_gpu_smoke_runs_verify.h), the telemetry's
+ *   run_verify_draw_count is every run draw, and the smoke fails on a mismatch.
  *
  * Shared meshes (0.10.0):
  * - Refusals: unknown flags, invalid data, no report; an update past the mesh's vertices or indices, and indices for
@@ -33,6 +45,7 @@
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
+#include "btbh_gpu_smoke_runs_verify.h"
 
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
@@ -50,8 +63,8 @@
 #define TEXELS (TARGET_SIZE * TARGET_SIZE)
 #define PIECES 10u
 #define CHUNK_INSTANCES 12u
-#define MAX_BATCHES 64u
-#define MAX_TRANSIENT 64u
+#define MAX_BATCHES 128u
+#define MAX_TRANSIENT 128u
 #define FLOATS 24u
 
 #if defined(BTBH_GPU_HAS_SHARED_MESH_BUFFERS)
@@ -416,9 +429,14 @@ static bool load_png(const char *path, uint8_t *pixels) {
     return true;
 }
 
+/* Started with BTBH_GPU_SCENE_RUNS=verify (0.13.0): runs on is that mode. */
+static bool runs_verify;
+
 /* The core reads BTBH_GPU_SCENE_RUNS once a present. */
 static void set_runs(bool enabled) {
-    if (enabled) {
+    if (enabled && runs_verify) {
+        (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "verify", true);
+    } else if (enabled) {
         (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
     } else {
         (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
@@ -946,9 +964,433 @@ static void check_run_counts(SmokeWindow *smoke) {
             assert(without.geometry_run_draw_count == 0u);
             assert(without.shadow_run_draw_count == 0u);
             assert(without.rc_source_run_draw_count == 0u);
+#if defined(BTBH_GPU_SCENE_HAS_RUN_VERIFY)
+            /* Verify checks every draw that continued a run, and nothing without runs. */
+            assert(with_runs.run_verify_draw_count == (runs_verify ? with_runs.geometry_run_draw_count +
+                with_runs.shadow_run_draw_count + with_runs.rc_source_run_draw_count : 0u));
+            assert(with_runs.run_verify_mismatch_count == 0u);
+            assert(without.run_verify_draw_count == 0u && without.run_verify_mismatch_count == 0u);
+#endif
         }
     }
 }
+
+/* ------------------------------------------------------------------------------------------- the waterfront */
+
+#if defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT) && defined(BTBH_GPU_SCENE_HAS_LIT_PARTICLE) && \
+    defined(BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT) && defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR) && \
+    defined(BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK)
+#define SMOKE_HAS_WATERFRONT 1
+
+enum {
+    WATERFRONT_SPOT = 1u,      /* the kaiju's orthographic spot shadow, its occluder darkening */
+    WATERFRONT_SSR = 2u,       /* SSR with SURFACE_REFLECTIVITY */
+    WATERFRONT_HBAO = 4u,      /* contact HBAO */
+    WATERFRONT_CASCADES = 8u,  /* additive cascades with KEEP_HBAO */
+};
+
+typedef struct WaterfrontParts {
+    BTBHGPUTexture *heightfield;
+    BTBHGPUSceneHeightLift lift;
+    BTBHGPUCustomMesh *quad;     /* a quad in local x and y, normal +z (the lit particles' billboard) */
+} WaterfrontParts;
+
+static uint32_t waterfront_instance(Scene *scene, float x, float y, float z, float sx, float sy, float sz, float yaw,
+    const float colour[4]) {
+    assert(scene->instance_count < MAX_TRANSIENT);
+    const uint32_t index = scene->instance_count++;
+    float *m = scene->instances[index];
+    instance_at(m, x, y, z, 1.0f, yaw, colour, (float)index);
+    m[0] *= sx;
+    m[2] *= sx;
+    m[5] = sy;
+    m[8] *= sz;
+    m[10] *= sz;
+    return index;
+}
+
+static void build_waterfront(const SmokeWindow *smoke, const WaterfrontParts *parts, uint32_t mix, uint32_t frame,
+    bool shared, Scene *scene) {
+    memset(scene, 0, sizeof(*scene));
+    scene->name = "waterfront";
+    const float time = 3.0f + 1.37f * (float)frame;
+    const float shift = 0.173f * (float)frame;
+    const float eye[3] = { 1.0f + shift, 8.0f, 7.5f };
+    const float centre[3] = { 0.5f + shift, 0.0f, 0.5f };
+    scene->camera = look_at(eye, centre, 1.0f, NULL);
+
+    BTBHGPUSceneLighting *l = &scene->lighting;
+    *l = scene_lighting(SHADOWS_SUN);
+    l->surface_wetness = 1.0f;
+    l->rain = 0.7f;
+    l->ambient_energy = 0.25f;
+    l->directional_energy = 0.9f;
+    if ((mix & WATERFRONT_SPOT) != 0u) {
+        l->spot_position_x = -1.0f;
+        l->spot_position_y = 6.0f;
+        l->spot_position_z = 1.0f;
+        l->spot_range = 14.0f;
+        l->spot_direction_x = 0.1f;
+        l->spot_direction_y = -1.0f;
+        l->spot_direction_z = -0.05f;
+        l->spot_energy = 3.0f;
+        l->spot_red = 1.0f;
+        l->spot_green = 0.8f;
+        l->spot_blue = 0.6f;
+        l->spot_inner_cutoff = 0.9f;
+        l->spot_outer_cutoff = 0.6f;
+        l->spot_falloff = 1.0f;
+        l->spot_shadow_enabled = 1u;
+        l->spot_shadow_near = 0.05f;
+        l->spot_shadow_softness = 1.0f;
+        l->spot_occluder_shadow_strength = 0.7f;
+        l->spot_occluder_shadow_reach = 4.0f;
+        const float spot_eye[3] = { -1.0f, 6.0f, 1.0f };
+        const float spot_at[3] = { -0.4f, 0.0f, 0.7f };
+        const SmokeCamera spot = look_at(spot_eye, spot_at, 1.6f, NULL);
+        memcpy(l->spot_shadow_view_projection, spot.view_projection, sizeof(l->spot_shadow_view_projection));
+    }
+    BTBHGPUScenePost *post = &scene->post;
+    post->tonemap_white = 1.0f;
+    post->exposure = 1.0f;
+    post->contrast = 1.0f;
+    post->saturation = 1.0f;
+    post->blur_curve = 1.0f;
+    post->tonemap_mode = BTBH_GPU_SCENE_TONEMAP_REINHARD;
+    post->upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
+    if ((mix & WATERFRONT_SSR) != 0u) {
+        post->ssr_intensity = 6.0f;
+        post->ssr_max_roughness = 0.35f;
+        post->ssr_max_distance = 8.0f;
+        post->ssr_thickness = 0.1f;
+        post->flags |= BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY;
+    }
+    if ((mix & WATERFRONT_HBAO) != 0u) {
+        post->ssao_enabled = 2u;
+        post->ssao_radius = 0.9f;
+        post->ssao_intensity = 1.2f;
+        post->ssao_power = 1.0f;
+        post->ssao_bias = 0.03f;
+        post->ssao_contact = 1u;
+    }
+    if ((mix & WATERFRONT_CASCADES) != 0u) {
+        post->radiance_cascades.tier = BTBH_GPU_SCENE_RC_LOW;
+        post->radiance_cascades.auto_frame_budget_milliseconds = 16.0f;
+        post->radiance_cascades.indirect_intensity = 1.0f;
+        post->radiance_cascades.hero_omni_emitter_index = -1;
+        post->radiance_cascades.invalidate = 1u;
+        post->radiance_cascades.additive = 1u;
+        post->flags |= BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    }
+    BTBHGPUCustomMesh *const *pieces = shared ? smoke->shared : smoke->own;
+    static const float grey[4] = { 0.45f, 0.45f, 0.47f, 1.0f };
+    static const float dark[4] = { 0.12f, 0.2f, 0.28f, 1.0f };
+    static const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    static const float stone[4] = { 0.6f, 0.58f, 0.55f, 1.0f };
+    static const float smoke_tint[4] = { 0.8f, 0.8f, 0.85f, 0.6f };
+    static const float beam_tint[4] = { 0.15f, 0.3f, 0.45f, 1.0f };
+
+    /* Kit pieces before the ground: one material, mesh after mesh. */
+    BTBHGPUSceneGeometryBatch wall = base_batch();
+    wall.albedo_texture = smoke->albedo;
+    wall.normal_texture = smoke->normal;
+    wall.orm_texture = smoke->orm;
+    wall.roughness = 0.8f;
+    wall.detail_parameters[2] = 2.0f;
+    wall.detail_parameters[3] = 3.0f;
+    for (uint32_t index = 0u; index < 12u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = wall;
+        batch.custom_mesh = pieces[index % PIECES];
+        batch.first_instance = waterfront_instance(scene, -4.0f + 0.7f * (float)index, 0.0f,
+            -2.5f + 0.3f * (float)(index % 3u), 0.6f, 0.6f + 0.15f * (float)(index % 4u), 0.6f, 0.2f * (float)index,
+            white);
+        add_batch(scene, batch);
+    }
+    /* The model: every primitive in one batch, twice, then slot by slot with two materials. */
+    {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+        batch.model = smoke->pair;
+        batch.cull_mode = BTBH_GPU_SCENE_CULL_NONE;
+        batch.roughness = 0.5f;
+        batch.first_instance = waterfront_instance(scene, 2.0f, 0.1f, -1.0f, 0.3f, 0.3f, 0.3f, 0.0f, white);
+        add_batch(scene, batch);
+        batch.first_instance = waterfront_instance(scene, 2.6f, 0.1f, -0.6f, 0.3f, 0.3f, 0.3f, 0.5f, white);
+        add_batch(scene, batch);
+        for (int32_t slot = 0; slot < (int32_t)smoke->pair->material_count; ++slot) {
+            BTBHGPUSceneGeometryBatch by_slot = batch;
+            by_slot.material_slot = slot;
+            by_slot.albedo_red = slot == 0 ? 220u : 90u;
+            by_slot.roughness = slot == 0 ? 0.3f : 0.7f;
+            by_slot.first_instance = waterfront_instance(scene, 3.2f, 0.1f, -0.2f, 0.3f, 0.3f, 0.3f, 1.0f, white);
+            add_batch(scene, by_slot);
+        }
+    }
+    /* The ground: wet and rained on (pattern 1), receive-only AO, no sun shadow cast. */
+    BTBHGPUSceneGeometryBatch ground = base_batch();
+    ground.custom_mesh = smoke->cube;
+    ground.roughness = 0.9f;
+    ground.ssao_mode = (uint8_t)BTBH_GPU_SCENE_SSAO_RECEIVE_ONLY;
+    ground.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+    ground.detail_parameters[0] = 0.12f;
+    ground.detail_parameters[1] = 0.01f;
+    ground.detail_parameters[2] = 2.5f;
+    ground.detail_parameters[3] = 1.0f;
+    ground.spot_shadow_visible = 0u;
+    for (uint32_t tile = 0u; tile < 4u; ++tile) {
+        BTBHGPUSceneGeometryBatch batch = ground;
+        batch.first_instance = waterfront_instance(scene, -5.0f + 3.0f * (float)tile, -0.25f, -1.0f, 3.0f, 0.5f, 5.0f,
+            0.0f, grey);
+        add_batch(scene, batch);
+    }
+    /* The quay: paving (pattern 4), a row of bollards on it. */
+    BTBHGPUSceneGeometryBatch quay = ground;
+    quay.detail_parameters[2] = 4.0f;
+    quay.detail_parameters[3] = 4.0f;
+    for (uint32_t tile = 0u; tile < 4u; ++tile) {
+        BTBHGPUSceneGeometryBatch batch = quay;
+        batch.first_instance = waterfront_instance(scene, -5.0f + 3.0f * (float)tile, -0.22f, 1.9f, 3.0f, 0.5f, 0.8f,
+            0.0f, stone);
+        add_batch(scene, batch);
+    }
+    for (uint32_t index = 0u; index < 16u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.custom_mesh = (index & 1u) != 0u ? smoke->cube : pieces[index % PIECES];
+        batch.albedo_red = 30u;
+        batch.albedo_green = 30u;
+        batch.albedo_blue = 34u;
+        batch.roughness = 0.4f;
+        batch.metalness = 0.6f;
+        batch.first_instance = waterfront_instance(scene, -5.5f + 0.75f * (float)index, 0.06f, 2.2f, 0.08f, 0.12f,
+            0.08f, 0.0f, white);
+        add_batch(scene, batch);
+    }
+    /* The water: dark, its waves (SURFACE_WATER), tiles in a run. */
+    BTBHGPUSceneGeometryBatch water = base_batch();
+    water.custom_mesh = smoke->plate;
+    water.albedo_red = 30u;
+    water.albedo_green = 52u;
+    water.albedo_blue = 70u;
+    water.roughness = 0.25f;
+    water.ssao_mode = (uint8_t)BTBH_GPU_SCENE_SSAO_RECEIVE_ONLY;
+    water.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+    water.surface_variant = BTBH_GPU_SCENE_SURFACE_WATER;
+    water.surface_time = time;
+    water.spot_shadow_visible = 0u;
+    for (uint32_t tile = 0u; tile < 6u; ++tile) {
+        BTBHGPUSceneGeometryBatch batch = water;
+        batch.first_instance = waterfront_instance(scene, -5.0f + 2.0f * (float)tile, -0.15f, 4.0f, 2.0f, 1.0f, 3.6f,
+            0.0f, dark);
+        add_batch(scene, batch);
+    }
+    /* Kit pieces after the water, then the kaiju-ish box (the only caster in the spot map). */
+    for (uint32_t index = 0u; index < 10u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = wall;
+        batch.custom_mesh = pieces[(index * 3u) % PIECES];
+        batch.roughness = 0.6f;
+        batch.spot_shadow_visible = 0u;
+        batch.first_instance = waterfront_instance(scene, -3.0f + 0.8f * (float)index, 0.0f, 0.2f, 0.5f, 0.8f, 0.5f,
+            0.4f * (float)index, white);
+        add_batch(scene, batch);
+    }
+    {
+        BTBHGPUSceneGeometryBatch kaiju = base_batch();
+        kaiju.custom_mesh = smoke->cube;
+        kaiju.albedo_red = 70u;
+        kaiju.albedo_green = 90u;
+        kaiju.albedo_blue = 60u;
+        kaiju.roughness = 0.5f;
+        kaiju.flags = BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW;
+        kaiju.first_instance = waterfront_instance(scene, -0.6f, 1.0f, 0.8f, 0.6f, 2.0f, 0.6f, 0.3f, white);
+        add_batch(scene, kaiju);
+    }
+    /* RFC 0012: pieces lifted on the heightfield, one lift for all (casting no shadow, as phase 1 requires). */
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = wall;
+        batch.custom_mesh = pieces[(index + 4u) % PIECES];
+        batch.height_lift = &parts->lift;
+        batch.roughness = 0.7f;
+        batch.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+        batch.spot_shadow_visible = 0u;
+        batch.first_instance = waterfront_instance(scene, -2.5f + 0.9f * (float)index, 0.0f, -1.6f, 0.4f, 0.5f, 0.4f,
+            0.5f * (float)index, white);
+        add_batch(scene, batch);
+    }
+    /* INSTANCE_LIGHT_FACTOR: emissive boxes, each instance its own light (custom x), the cascades' sources too. */
+    for (uint32_t index = 0u; index < 5u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.custom_mesh = (index & 1u) != 0u ? smoke->cube : pieces[index];
+        batch.emission_texture = smoke->glow;
+        batch.emission_red = 255u;
+        batch.emission_green = 190u;
+        batch.emission_blue = 120u;
+        batch.emission_energy = 3.0f;
+        batch.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+        batch.first_instance = waterfront_instance(scene, -1.8f + 0.8f * (float)index, 0.05f, 1.2f, 0.25f, 0.25f,
+            0.25f, 0.0f, white);
+        scene->instances[batch.first_instance][20] = 0.25f * (float)index;
+        add_batch(scene, batch);
+    }
+    /* INSTANCE_UV_RECT: pieces, each instance its own quarter of the albedo. */
+    for (uint32_t index = 0u; index < 4u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.custom_mesh = pieces[(index + 1u) % PIECES];
+        batch.albedo_texture = smoke->albedo;
+        batch.roughness = 0.5f;
+        batch.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+        batch.first_instance = waterfront_instance(scene, 1.0f + 0.7f * (float)index, 0.0f, -0.4f, 0.35f, 0.5f, 0.35f,
+            0.0f, white);
+        float *custom = &scene->instances[batch.first_instance][20];
+        custom[0] = 0.5f;
+        custom[1] = 0.5f;
+        custom[2] = 0.5f * (float)(index % 2u);
+        custom[3] = 0.5f * (float)(index / 2u);
+        add_batch(scene, batch);
+    }
+    /* RFC 0013: lit particles (the transparent pass), puffs of drifting smoke over the quay. */
+    for (uint32_t index = 0u; index < 4u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.custom_mesh = parts->quad;
+        batch.surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
+        batch.transparency_enabled = 1u;
+        batch.blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+        batch.billboard_mode = BTBH_GPU_SCENE_BILLBOARD_FRONT;
+        batch.cull_mode = BTBH_GPU_SCENE_CULL_NONE;
+        batch.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        batch.albedo_red = 200u;
+        batch.albedo_green = 190u;
+        batch.albedo_blue = 180u;
+        batch.normal_scale = 0.0f;
+        batch.surface_parameters0[3] = 0.4f;
+        batch.surface_parameters1[0] = 0.6f;
+        batch.surface_parameters1[1] = 0.5f;
+        batch.surface_parameters1[2] = 2.0f;
+        batch.spot_shadow_visible = 0u;
+        batch.first_instance = waterfront_instance(scene, -1.5f + 1.1f * (float)index, 1.2f + 0.2f * (float)index,
+            1.8f, 0.6f, 0.6f, 0.6f, 0.0f, smoke_tint);
+        add_batch(scene, batch);
+    }
+    /* Beams over the water: additive, unlit, transparent; a run with FLAGS2_KEEP_CASCADES_LOOK, then one without. */
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        BTBHGPUSceneGeometryBatch batch = base_batch();
+        batch.custom_mesh = smoke->cube;
+        batch.unlit_enabled = 1u;
+        batch.transparency_enabled = 1u;
+        batch.blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+        batch.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        batch.albedo_alpha = 200u;
+        batch.spot_shadow_visible = 0u;
+        batch.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW | BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+        batch.flags2 = index < 3u ? (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK : 0u;
+        batch.first_instance = waterfront_instance(scene, -3.0f + 1.2f * (float)index, 0.35f, 3.2f, 1.0f, 0.08f,
+            0.08f, 0.3f * (float)index, beam_tint);
+        add_batch(scene, batch);
+    }
+}
+
+static void check_waterfront(SmokeWindow *smoke) {
+    static Scene scene;
+    static const uint8_t clear[3] = { 12u, 14u, 20u };
+    const char *dump = SDL_getenv("BTBH_SCENE_RUNS_DUMP");
+    WaterfrontParts parts;
+    memset(&parts, 0, sizeof(parts));
+    {
+        float heights[16u * 16u];
+        for (uint32_t z = 0u; z < 16u; ++z) {
+            for (uint32_t x = 0u; x < 16u; ++x) {
+                heights[z * 16u + x] = 0.25f * sinf(0.7f * (float)x) * cosf(0.5f * (float)z);
+            }
+        }
+        BTBHGPUTextureReport texture_report;
+        memset(&texture_report, 0, sizeof(texture_report));
+        parts.heightfield = btbh_gpu_window_heightfield_create(smoke->window, heights, 16u, 16u, &texture_report);
+        assert(parts.heightfield != NULL);
+        parts.lift.heightfield = parts.heightfield;
+        parts.lift.world_to_uv[0] = 1.0f / 8.0f;
+        parts.lift.world_to_uv[1] = 1.0f / 8.0f;
+        parts.lift.world_to_uv[2] = 0.5f;
+        parts.lift.world_to_uv[3] = 0.5f;
+        parts.lift.height_scale = 1.0f;
+        parts.lift.height_offset = 0.05f;
+        /* A quad in local x and y, normal +z, tangent +x. */
+        float vertices[4u * FLOATS];
+        memset(vertices, 0, sizeof(vertices));
+        for (uint32_t corner = 0u; corner < 4u; ++corner) {
+            float *v = &vertices[corner * FLOATS];
+            const float u = (corner == 1u || corner == 2u) ? 1.0f : 0.0f;
+            const float w = corner >= 2u ? 1.0f : 0.0f;
+            v[0] = u - 0.5f;
+            v[1] = w - 0.5f;
+            v[5] = 1.0f;
+            v[6] = u;
+            v[7] = 1.0f - w;
+            v[8] = 1.0f;
+            v[11] = 1.0f;
+            v[12] = v[13] = v[14] = v[15] = 1.0f;
+            v[20] = 1.0f;
+        }
+        const uint32_t indices[6] = { 0u, 1u, 2u, 0u, 2u, 3u };
+        parts.quad = create_mesh(smoke->window, vertices, 4u, indices, 6u, false);
+    }
+    static const struct {
+        const char *name;
+        uint32_t mix;
+    } mixes[] = {
+        { "rain", WATERFRONT_SPOT | WATERFRONT_SSR | WATERFRONT_HBAO },
+        { "cascades", WATERFRONT_SPOT | WATERFRONT_HBAO | WATERFRONT_CASCADES },
+    };
+    for (uint32_t mix = 0u; mix < sizeof(mixes) / sizeof(mixes[0]); ++mix) {
+        for (uint32_t frame = 0u; frame < 2u; ++frame) {
+            printf("waterfront %-8s frame %u", mixes[mix].name, frame);
+            uint8_t *first = NULL;
+            /* Own buffers with runs, own without, shared with, shared without. */
+            for (uint32_t variant = 0u; variant < 4u; ++variant) {
+                const bool shared = variant >= 2u;
+                const bool runs = variant % 2u == 0u;
+                build_waterfront(smoke, &parts, mixes[mix].mix, frame, shared, &scene);
+                set_runs(runs);
+                uint8_t *image = render(smoke, &scene);
+                set_runs(true);
+                if (first == NULL) {
+                    first = image;
+                    printf(": %u lit pixels;", lit_pixels(image, clear));
+                    assert(lit_pixels(image, clear) > TEXELS / 2u);
+                    continue;
+                }
+                const uint32_t differing = differing_pixels(first, image);
+                printf(" %s, runs %s: %u differ;", shared ? "shared" : "own", runs ? "on" : "off", differing);
+                assert(differing == 0u);
+                free(image);
+            }
+            printf("\n");
+            if (dump != NULL && dump[0] != '\0') {
+                char path[1100];
+                (void)snprintf(path, sizeof(path), "%s/runs-waterfront-%s-%u.png", dump, mixes[mix].name, frame);
+                assert(btbh_gpu_write_png_rgba8(path, TARGET_SIZE, TARGET_SIZE, first) == BTBH_GPU_OK);
+            }
+            free(first);
+        }
+        /* Presented with runs: each pass found its runs (the cascades' sources too, with them). */
+        build_waterfront(smoke, &parts, mixes[mix].mix, 0u, true, &scene);
+        const BTBHGPUSceneTelemetryReport telemetry = present(smoke, &scene);
+        printf("waterfront %-8s presented: %u geometry, %u shadow, %u cascade-source draws continued a run",
+            mixes[mix].name, telemetry.geometry_run_draw_count, telemetry.shadow_run_draw_count,
+            telemetry.rc_source_run_draw_count);
+        assert(telemetry.geometry_run_draw_count >= 50u);
+        assert(telemetry.shadow_run_draw_count > 0u);
+        assert(((mixes[mix].mix & WATERFRONT_CASCADES) != 0u) == (telemetry.rc_source_run_draw_count > 0u));
+#if defined(BTBH_GPU_SCENE_HAS_RUN_VERIFY)
+        printf("; %u checked, %u mismatches", telemetry.run_verify_draw_count, telemetry.run_verify_mismatch_count);
+        assert(telemetry.run_verify_draw_count == (runs_verify ? telemetry.geometry_run_draw_count +
+            telemetry.shadow_run_draw_count + telemetry.rc_source_run_draw_count : 0u));
+        assert(telemetry.run_verify_mismatch_count == 0u);
+#endif
+        printf("\n");
+    }
+    btbh_gpu_custom_mesh_destroy(parts.quad);
+    btbh_gpu_texture_destroy(parts.heightfield);
+}
+#endif
 
 /* -------------------------------------------------------------------------------- shared meshes' rules */
 
@@ -1285,6 +1727,7 @@ static void close_smoke_window(SmokeWindow *smoke) {
 int main(void) {
     /* (Unbuffered: what was checked shows before a failed assertion.) */
     (void)setvbuf(stdout, NULL, _IONBF, 0);
+    runs_verify = smoke_runs_verify_requested();
     if (!load_shader_paths()) {
         return SMOKE_SKIP;
     }
@@ -1305,6 +1748,10 @@ int main(void) {
     check_gallery(&smoke);
 #if defined(SMOKE_HAS_SHARED)
     check_run_counts(&smoke);
+#if defined(SMOKE_HAS_WATERFRONT)
+    check_waterfront(&smoke);
+#endif
+    smoke_check_runs_verify(smoke.window, "btbh_gpu_scene_runs_smoke", runs_verify);
     check_shared_rules(device, &smoke);
 #endif
     close_smoke_window(&smoke);

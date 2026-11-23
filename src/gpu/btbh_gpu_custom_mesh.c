@@ -528,6 +528,134 @@ BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_ex(
     return mesh;
 }
 
+BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_queued(
+    BTBHGPUWindow *window,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t vertex_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    BTBHGPUCustomMeshReport *report
+) {
+    if (report == NULL) {
+        return NULL;
+    }
+    memset(report, 0, sizeof(*report));
+    if (
+        window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        window->device->shutdown ||
+        !window->claimed ||
+        !btbh_gpu_custom_mesh_validate_data(
+            vertices,
+            vertex_byte_count,
+            vertex_count,
+            indices,
+            index_count,
+            report
+        )
+    ) {
+        if (report->result == BTBH_GPU_OK) {
+            btbh_gpu_custom_mesh_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "Invalid GPU custom mesh descriptor"
+            );
+        }
+        return NULL;
+    }
+    const uint32_t index_byte_count = index_count * (uint32_t) sizeof(uint32_t);
+    char message[256];
+    bool out_of_memory = false;
+    if (!btbh_gpu_upload_queue_prepare(
+            window,
+            vertex_byte_count,
+            index_byte_count,
+            "GPU custom mesh queued creation",
+            message,
+            sizeof(message),
+            &out_of_memory
+        )
+    ) {
+        btbh_gpu_custom_mesh_error(
+            report,
+            out_of_memory ? BTBH_GPU_PLATFORM_FAILURE : BTBH_GPU_INVALID_ARGUMENT,
+            message
+        );
+        return NULL;
+    }
+    BTBHGPUCustomMesh *mesh = calloc(1, sizeof(*mesh));
+    if (mesh == NULL) {
+        btbh_gpu_custom_mesh_error(
+            report,
+            BTBH_GPU_PLATFORM_FAILURE,
+            "Could not allocate GPU custom mesh resource"
+        );
+        return NULL;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    mesh->vertex_buffer = btbh_gpu_custom_mesh_create_buffer(
+        device,
+        SDL_GPU_BUFFERUSAGE_VERTEX,
+        vertex_byte_count,
+        report
+    );
+    if (mesh->vertex_buffer != NULL && index_count > 0u) {
+        mesh->index_buffer = btbh_gpu_custom_mesh_create_buffer(
+            device,
+            SDL_GPU_BUFFERUSAGE_INDEX,
+            index_byte_count,
+            report
+        );
+    }
+    if (mesh->vertex_buffer == NULL || (index_count > 0u && mesh->index_buffer == NULL)) {
+        btbh_gpu_custom_mesh_release_handles(mesh, device);
+        free(mesh);
+        return NULL;
+    }
+    mesh->owner = window;
+    mesh->next = window->custom_mesh_head;
+    if (window->custom_mesh_head != NULL) {
+        window->custom_mesh_head->previous = mesh;
+    }
+    window->custom_mesh_head = mesh;
+    mesh->vertex_count = vertex_count;
+    mesh->index_count = index_count;
+    mesh->vertex_byte_count = vertex_byte_count;
+    mesh->vertex_buffer_capacity = vertex_byte_count;
+    mesh->index_buffer_capacity = index_byte_count;
+    btbh_gpu_custom_mesh_measure(mesh, vertices, vertex_count);
+    /* (New buffers nothing has read: written in place.) */
+    btbh_gpu_upload_queue_push(
+        window,
+        mesh,
+        NULL,
+        BTBH_GPU_UPLOAD_MESH_VERTICES,
+        0u,
+        vertices,
+        vertex_byte_count,
+        false
+    );
+    if (index_byte_count > 0u) {
+        btbh_gpu_upload_queue_push(
+            window,
+            mesh,
+            NULL,
+            BTBH_GPU_UPLOAD_MESH_INDICES,
+            0u,
+            indices,
+            index_byte_count,
+            false
+        );
+    }
+    report->result = BTBH_GPU_OK;
+    report->vertex_count = vertex_count;
+    report->index_count = index_count;
+    report->vertex_byte_count = vertex_byte_count;
+    return mesh;
+}
+
 /* ---- The window's upload queue (since 0.11.0): BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's updates, whole and partial, and
    BTBH_GPU_INSTANCE_BUFFER_UPLOAD_QUEUED's uploads, copied by the window's next scene ---- */
 

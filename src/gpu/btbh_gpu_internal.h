@@ -187,6 +187,8 @@ struct BTBHGPUWindow {
        Made by the first such scene. */
     BTBHGPUSceneRuntime *aside_scene_runtime;
     BTBHGPUSceneTelemetryReport scene_telemetry;
+    /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0, btbh_gpu_scene.c): the window's counts so far. */
+    BTBHGPUSceneRunVerifyReport scene_run_verify;
     uint32_t scene_shadow_update_period_frames[3];
     uint32_t scene_directional_shadow_size[2];  /* the primary directional shadow map's; 0: the default */
     BTBHGPUCanvasRuntime *canvas_runtime;
@@ -318,6 +320,22 @@ struct BTBHGPUCustomMesh {
     uint32_t queue_head;
     uint64_t queue_copied_serial;
 };
+
+/* btbh_gpu_window_custom_mesh_create for a mesh with buffers of its own, its data queued (since 0.13.0, for the SDF
+   terrain's chunks, btbh_gpu_custom_mesh.c): the buffers are made now, and the window's next scene (a present or a
+   render into a target) copies the data into them before it draws, as it copies BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED's.
+   Nothing draws the mesh before that scene. NULL, with the report's error, when the data is invalid, when the queue
+   can't take it (BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES) or when a buffer can't be made: the caller may make it the
+   plain way then. */
+BTBHGPUCustomMesh *btbh_gpu_window_custom_mesh_create_queued(
+    BTBHGPUWindow *window,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    uint32_t vertex_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    BTBHGPUCustomMeshReport *report
+);
 
 /* The bounds of `vertex_count` custom mesh vertices' positions (the first three floats of each 24-float
    vertex); false, leaving minimum and maximum undefined, when one isn't finite. */
@@ -818,6 +836,17 @@ bool btbh_gpu_staging_submit_into(
 void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *transfer);
 /* Releases the pool (btbh_gpu_device_shutdown, before the device goes). */
 void btbh_gpu_staging_release_device(SDL_GPUDevice *device);
+/* The command buffers the core submitted since the last frame that presented (since 0.13.0, btbh_gpu_device.c): every
+   SDL_SubmitGPUCommandBuffer and SDL_SubmitGPUCommandBufferAndAcquireFence in the core counts (the macros below), and
+   btbh_gpu_note_command_buffers_settled (SDL took back what finished command buffers held: the canvas's submit of a
+   frame with a swapchain image, or a wait for idle) starts it again from 0.
+   btbh_gpu_window_scene_prewarm reads it. */
+bool btbh_gpu_submit_counted(SDL_GPUCommandBuffer *command);
+SDL_GPUFence *btbh_gpu_submit_counted_and_acquire_fence(SDL_GPUCommandBuffer *command);
+void btbh_gpu_note_command_buffers_settled(void);
+uint32_t btbh_gpu_unpresented_submit_count(void);
+#define SDL_SubmitGPUCommandBuffer(command) btbh_gpu_submit_counted(command)
+#define SDL_SubmitGPUCommandBufferAndAcquireFence(command) btbh_gpu_submit_counted_and_acquire_fence(command)
 #define SDL_CreateGPUTexture(device, info) btbh_gpu_create_texture_at((device), (info), __func__)
 #define SDL_CreateGPUSampler(device, info) btbh_gpu_create_sampler_at((device), (info), __func__)
 #define SDL_CreateGPUBuffer(device, info) btbh_gpu_create_buffer_at((device), (info), __func__)

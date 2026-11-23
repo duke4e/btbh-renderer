@@ -19,6 +19,9 @@
  *   cells, 32-cell chunks, smooth normals, a heightfield base at the top of 1 m floor slabs): no floor pixel over the
  *   bowl where its wall drops across the cell columns under the lip (a sawtooth along the lip in 0.5.0), and no
  *   background anywhere. That frame is saved beside the shaders (sdf_terrain_lip.png).
+ * - From 0.13.0, BTBH_SDF_TERRAIN_DUMP=<dir> writes the frames that don't depend on the update budget's timing (the
+ *   plain ground, the crater, the curved world, the ground restored, the lip before and after), so that two builds can
+ *   be compared byte for byte; and BTBH_SMOKE_BENCH=craters times the updates (run_craters_bench).
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -27,6 +30,7 @@
 #include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
+#include "btbh_gpu_sdf_terrain_internal.h"
 
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
@@ -526,6 +530,17 @@ static void save(const char *name, const uint8_t *pixels) {
     printf("saved %s\n", path);
 }
 
+/* BTBH_SDF_TERRAIN_DUMP=<dir> (0.13.0): <dir>/sdf-<name>.png. */
+static void dump(const char *name, const uint8_t *pixels, uint32_t size) {
+    const char *directory = SDL_getenv("BTBH_SDF_TERRAIN_DUMP");
+    if (directory == NULL || directory[0] == '\0') {
+        return;
+    }
+    char path[1100];
+    (void)snprintf(path, sizeof(path), "%s/sdf-%s.png", directory, name);
+    assert(btbh_gpu_write_png_rgba8(path, size, size, pixels) == BTBH_GPU_OK);
+}
+
 /* ------------------------------------------------------------------------------------ the crater's lip */
 
 /* Be The Bullet Hell's set-up: 0.5 m cells, 32-cell chunks, smooth normals, a heightfield base at its floor tiles'
@@ -739,6 +754,7 @@ static int test_lip(Scene *scene) {
     assert(terrain != NULL);
     assert(btbh_gpu_window_sdf_terrain_attach(scene->window, terrain, &report) == BTBH_GPU_OK);
     uint8_t *untouched = render_lip(scene, terrain);
+    dump("lip-untouched", untouched, TARGET_SIZE);
     assert(pink_pixels(untouched) == 0u);
     assert(floor_over_bowl(terrain, untouched, NULL, NULL) == 0u);
 
@@ -773,6 +789,7 @@ static int test_lip(Scene *scene) {
 
     uint8_t *lip = render_lip(scene, terrain);
     save("lip", lip);
+    dump("lip", lip, TARGET_SIZE);
     uint8_t *marked = malloc(TARGET_SIZE * TARGET_SIZE * 4u);
     assert(marked != NULL);
     memcpy(marked, lip, TARGET_SIZE * TARGET_SIZE * 4u);
@@ -799,6 +816,324 @@ static int test_lip(Scene *scene) {
     return background == 0u && over_bowl == 0u;
 }
 
+/* ------------------------------------------------------------------------------------ the craters bench (0.13.0) */
+
+/* BTBH_SMOKE_BENCH=craters: Be The Bullet Hell v1's destructible ground at its sizes (0.5 m cells, 32-cell chunks of
+ * 16 m, smooth normals, a heightfield base) over 96 x 96 m, and BTBH_SMOKE_BENCH_CRATERS (12) craters of 13 m dug one
+ * after another as v1 digs them (a torus rim, then an ellipsoid bowl), some across chunk corners, some over earlier
+ * craters. After each crater's edits btbh_gpu_sdf_terrain_update runs with no budget, then (a fresh terrain) with
+ * BTBH_SMOKE_BENCH_BUDGET microseconds (2000), and a scene is rendered into a target after every call, as a game's
+ * frame follows its update, until the crater has switched. It prints each crater's update calls and where their time
+ * went (from 0.13.0's core: the bricks, the meshing, the switch, the GPU vertices, the custom meshes' uploads and the
+ * dig mask's), the slowest call, and the renders' time. With BTBH_SDF_TERRAIN_DUMP the unbudgeted pass writes the
+ * frame after each crater (sdf-bench-NN.png); BTBH_SMOKE_BENCH_STAGING=<bytes> sets the upload staging budget. */
+#define BENCH_SIZE 256u
+#define BENCH_HALF 48.0f
+#define BENCH_BASE 96u
+#define BENCH_MAX_CALLS 4096u
+
+static const float bench_craters[][2] = {
+    { 0.0f, 0.0f },     /* the corner of four chunks */
+    { -22.0f, -24.0f },
+    { 24.0f, -8.0f },
+    { -8.0f, 21.0f },
+    { 3.0f, 2.0f },     /* over the first */
+    { 16.0f, 24.0f },   /* on a chunk edge */
+    { -32.0f, 4.0f },
+    { 30.0f, -30.0f },
+    { -19.0f, -21.0f }, /* over the second */
+    { 8.0f, -32.0f },
+    { -36.0f, 34.0f },
+    { 34.0f, 12.0f },
+    { -4.0f, 18.0f },   /* over the fourth */
+    { 20.0f, -12.0f },  /* over the third */
+    { -12.0f, -6.0f },
+    { 12.0f, 10.0f },
+};
+#define BENCH_CRATER_COUNT ((uint32_t)(sizeof(bench_craters) / sizeof(bench_craters[0])))
+
+typedef struct BenchTotals {
+    uint32_t calls;
+    double update;
+    double slowest;
+    double render;
+    double bricks;
+    double meshing;
+    double switching;
+    double gpu_vertices;
+    double mesh_uploads;
+    double mask_upload;
+    uint32_t meshes_updated;
+    uint32_t meshes_created;
+    uint32_t meshes_queued;
+    uint32_t meshes_same;
+    uint32_t mask_uploads;
+    uint64_t mesh_bytes;
+    uint64_t mask_bytes;
+    /* The slowest call's split (0.13.0's core): bricks, meshing, switch, vertices, meshes, mask; and its chunks. */
+    double slowest_split[6];
+    uint32_t slowest_chunks;
+    uint32_t slowest_bricks;
+} BenchTotals;
+
+static int compare_doubles(const void *a, const void *b) {
+    const double x = *(const double *)a;
+    const double y = *(const double *)b;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+static uint8_t *render_bench(Scene *scene, BTBHGPUTexture *target, bool read_back) {
+    /* Straight down over the whole terrain, orthographic. */
+    const float eye[3] = { 0.0f, 40.0f, 0.01f };
+    const float centre[3] = { 0.0f, 0.0f, 0.0f };
+    const float rcp = 1.0f / 50.0f;
+    const float orthographic[16] = {
+        rcp, 0.0f, 0.0f, 0.0f,
+        0.0f, rcp, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f / 79.0f, 0.0f,
+        0.0f, 0.0f, -1.0f / 79.0f, 1.0f,
+    };
+    const Camera camera = look_at(eye, centre, 1.0f, orthographic);
+    BTBHGPUSceneLighting lighting = scene_lighting();
+    lighting.directional_shadow_enabled = 0u;
+    const BTBHGPUScenePost post = scene_post(0.0f);
+    const uint32_t chunk_count = btbh_gpu_sdf_terrain_chunk_count(scene->terrain);
+    float instances[2u * 24u];
+    const float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    instance(&instances[0], 0.0f, 0.3f - 0.5f, 0.0f, 2.0f * BENCH_HALF, 1.0f, 2.0f * BENCH_HALF, ground_colour);
+    instance(&instances[24], 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, white);
+    BTBHGPUSceneGeometryBatch *batches = calloc(1u + chunk_count, sizeof(BTBHGPUSceneGeometryBatch));
+    assert(batches != NULL);
+    uint32_t batch_count = 0u;
+    batches[batch_count] = mesh_batch(scene->cube, 0u);
+    batches[batch_count].dug_by = scene->terrain;
+    batch_count += 1u;
+    for (uint32_t index = 0u; index < chunk_count; ++index) {
+        BTBHGPUSdfTerrainChunk chunk;
+        if (btbh_gpu_sdf_terrain_chunk(scene->terrain, index, &chunk) && chunk.mesh != NULL) {
+            batches[batch_count++] = mesh_batch(chunk.mesh, 1u);
+        }
+    }
+    BTBHGPUSceneReport report;
+    memset(&report, 0, sizeof(report));
+    const BTBHGPUResult result = btbh_gpu_window_scene_render_to_target(scene->window, target,
+        shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+        shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+        shader_paths[8], shader_paths[9], shader_paths[10],
+        SMOKE_SHADER_FORMAT, BENCH_SIZE, BENCH_SIZE,
+        camera.view_projection, camera.right, camera.up, camera.position, &lighting, &post,
+        instances, 2u, 2u, batches, NULL, NULL, batch_count, 255u, 0u, 255u, 255u, &report);
+    if (result != BTBH_GPU_OK) {
+        fprintf(stderr, "bench render: %s\n", report.message);
+    }
+    assert(result == BTBH_GPU_OK);
+    free(batches);
+    return read_back ? read_texture(scene->window, target) : NULL;
+}
+
+static void bench_add(BenchTotals *totals, double update, double render, const BTBHGPUSdfTerrain *terrain,
+    const BTBHGPUSdfTerrainReport *report) {
+    totals->calls += 1u;
+    totals->update += update;
+    totals->render += render;
+    const bool slowest = update > totals->slowest;
+    if (slowest) {
+        totals->slowest = update;
+        totals->slowest_chunks = report->chunks_meshed;
+        totals->slowest_bricks = report->bricks_evaluated;
+    }
+#if defined(BTBH_GPU_SDF_TERRAIN_HAS_UPDATE_TIMES)
+    BTBHGPUSdfTerrainUpdateTimes times;
+    btbh_gpu_sdf_terrain_update_times(terrain, &times);
+    if (slowest) {
+        totals->slowest_split[0] = times.bricks / 1000.0;
+        totals->slowest_split[1] = times.meshing / 1000.0;
+        totals->slowest_split[2] = times.switching / 1000.0;
+        totals->slowest_split[3] = times.gpu_vertices / 1000.0;
+        totals->slowest_split[4] = times.mesh_uploads / 1000.0;
+        totals->slowest_split[5] = times.mask_upload / 1000.0;
+    }
+    totals->bricks += times.bricks / 1000.0;
+    totals->meshing += times.meshing / 1000.0;
+    totals->switching += times.switching / 1000.0;
+    totals->gpu_vertices += times.gpu_vertices / 1000.0;
+    totals->mesh_uploads += times.mesh_uploads / 1000.0;
+    totals->mask_upload += times.mask_upload / 1000.0;
+    totals->meshes_updated += times.meshes_updated;
+    totals->meshes_created += times.meshes_created;
+    totals->meshes_queued += times.meshes_queued;
+    totals->meshes_same += times.meshes_same_counts;
+    totals->mask_uploads += times.mask_uploads;
+    totals->mesh_bytes += times.mesh_upload_bytes;
+    totals->mask_bytes += times.mask_upload_bytes;
+#else
+    (void)terrain;
+#endif
+}
+
+static void bench_print(const char *what, const BenchTotals *t) {
+    printf("%s: %u calls, update %.2f ms (slowest %.2f); render %.2f ms", what, t->calls, t->update, t->slowest,
+        t->render);
+#if defined(BTBH_GPU_SDF_TERRAIN_HAS_UPDATE_TIMES)
+    printf(" | bricks %.2f, meshing %.2f, switch %.2f, vertices %.2f, meshes %.2f (%u made, %u updated, %u with "
+        "the same counts, %u of them queued, %.2f MB), mask %.2f (%u, %.2f MB)", t->bricks, t->meshing, t->switching,
+        t->gpu_vertices, t->mesh_uploads, t->meshes_created, t->meshes_updated, t->meshes_same, t->meshes_queued,
+        (double)t->mesh_bytes / 1.0e6, t->mask_upload, t->mask_uploads, (double)t->mask_bytes / 1.0e6);
+    printf(" | slowest: %u bricks, %u chunks; bricks %.2f, meshing %.2f, switch %.2f, vertices %.2f, meshes %.2f, "
+        "mask %.2f", t->slowest_bricks, t->slowest_chunks, t->slowest_split[0], t->slowest_split[1],
+        t->slowest_split[2], t->slowest_split[3], t->slowest_split[4], t->slowest_split[5]);
+#endif
+    printf("\n");
+}
+
+static void run_craters_bench(Scene *scene) {
+    const char *count_text = SDL_getenv("BTBH_SMOKE_BENCH_CRATERS");
+    uint32_t crater_count = count_text != NULL ? (uint32_t)atoi(count_text) : 12u;
+    if (crater_count == 0u || crater_count > BENCH_CRATER_COUNT) {
+        crater_count = BENCH_CRATER_COUNT;
+    }
+    const char *budget_text = SDL_getenv("BTBH_SMOKE_BENCH_BUDGET");
+    const uint32_t budget = budget_text != NULL ? (uint32_t)atoi(budget_text) : 2000u;
+    BTBHGPUTextureReport texture_report;
+    memset(&texture_report, 0, sizeof(texture_report));
+    BTBHGPUTexture *target = btbh_gpu_window_render_target_create(scene->window, BENCH_SIZE, BENCH_SIZE,
+        BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
+    assert(target != NULL);
+    static float heights[(BENCH_BASE + 1u) * (BENCH_BASE + 1u)];
+    for (uint32_t k = 0u; k <= BENCH_BASE; ++k) {
+        for (uint32_t i = 0u; i <= BENCH_BASE; ++i) {
+            heights[k * (BENCH_BASE + 1u) + i] = 0.3f + 0.15f * sinf(0.21f * (float)i) * cosf(0.17f * (float)k);
+        }
+    }
+    static double calls[BENCH_MAX_CALLS];
+    printf("craters bench: %u craters of 13 m over %.0f x %.0f m, 0.5 m cells, 32-cell chunks, smooth normals\n",
+        crater_count, 2.0f * BENCH_HALF, 2.0f * BENCH_HALF);
+    for (uint32_t pass = 0u; pass < 2u; ++pass) {
+        const uint32_t pass_budget = pass == 0u ? 0u : budget;
+        BTBHGPUSdfTerrainDesc desc;
+        memset(&desc, 0, sizeof(desc));
+        desc.bounds_min[0] = -BENCH_HALF;
+        desc.bounds_min[1] = -8.0f;
+        desc.bounds_min[2] = -BENCH_HALF;
+        desc.bounds_max[0] = BENCH_HALF;
+        desc.bounds_max[1] = 8.0f;
+        desc.bounds_max[2] = BENCH_HALF;
+        desc.cell_size = 0.5f;
+        desc.chunk_cells = 32u;
+        desc.base_heights = heights;
+        desc.base_width = BENCH_BASE;
+        desc.base_depth = BENCH_BASE;
+        desc.base_cell = 2.0f * BENCH_HALF / (float)BENCH_BASE;
+        desc.base_surface_material = 0u;
+        desc.base_subsurface_material = 1u;
+        desc.base_subsurface_depth = 0.3f;
+        desc.normals = BTBH_GPU_SDF_NORMALS_SMOOTH;
+        const float colours[3][4] = {
+            { 0.36f, 0.37f, 0.42f, 1.0f }, { 0.45f, 0.30f, 0.16f, 1.0f }, { 0.08f, 0.06f, 0.05f, 1.0f }
+        };
+        memcpy(desc.material_colors, colours, sizeof(colours));
+        BTBHGPUSdfTerrainReport report;
+        scene->terrain = btbh_gpu_sdf_terrain_create(&desc, &report);
+        assert(scene->terrain != NULL);
+        assert(btbh_gpu_window_sdf_terrain_attach(scene->window, scene->terrain, &report) == BTBH_GPU_OK);
+        free(render_bench(scene, target, false));
+        BenchTotals all;
+        memset(&all, 0, sizeof(all));
+        uint32_t call_count = 0u;
+        printf("budget %u us:\n", pass_budget);
+        for (uint32_t crater = 0u; crater < crater_count; ++crater) {
+            const float x = bench_craters[crater][0];
+            const float z = bench_craters[crater][1];
+            BTBHGPUSdfEdit rim;
+            memset(&rim, 0, sizeof(rim));
+            rim.shape = BTBH_GPU_SDF_SHAPE_TORUS;
+            rim.operation = BTBH_GPU_SDF_OPERATION_ADD;
+            rim.position[0] = x;
+            rim.position[1] = 0.0f;
+            rim.position[2] = z;
+            rim.size[0] = 6.0f;
+            rim.size[1] = 1.2f;
+            rim.smoothing = 1.0f;
+            rim.material = 1u;
+            BTBHGPUSdfEdit bowl;
+            memset(&bowl, 0, sizeof(bowl));
+            bowl.shape = BTBH_GPU_SDF_SHAPE_ELLIPSOID;
+            bowl.operation = BTBH_GPU_SDF_OPERATION_SUBTRACT;
+            bowl.position[0] = x;
+            bowl.position[1] = 1.5f;
+            bowl.position[2] = z;
+            bowl.size[0] = 6.5f;
+            bowl.size[1] = 4.0f;
+            bowl.size[2] = 6.5f;
+            bowl.smoothing = 0.5f;
+            bowl.material = 2u;
+            bowl.material_band = 0.4f;
+            assert(btbh_gpu_sdf_terrain_add_edit(scene->terrain, &rim) != 0u);
+            assert(btbh_gpu_sdf_terrain_add_edit(scene->terrain, &bowl) != 0u);
+            BenchTotals one;
+            memset(&one, 0, sizeof(one));
+            for (;;) {
+                const uint64_t started = SDL_GetTicksNS();
+                assert(btbh_gpu_sdf_terrain_update(scene->terrain, pass_budget, &report) == BTBH_GPU_OK);
+                const uint64_t updated = SDL_GetTicksNS();
+                free(render_bench(scene, target, false));
+                const uint64_t rendered = SDL_GetTicksNS();
+                const double update_ms = (double)(updated - started) / 1.0e6;
+                bench_add(&one, update_ms, (double)(rendered - updated) / 1.0e6, scene->terrain, &report);
+                if (call_count < BENCH_MAX_CALLS) {
+                    calls[call_count++] = update_ms;
+                }
+                if (report.pending_bricks == 0u && report.bricks_evaluated == 0u && report.chunks_meshed == 0u) {
+                    break;
+                }
+                assert(one.calls < 100000u);
+            }
+            char what[64];
+            (void)snprintf(what, sizeof(what), "  crater %2u at (%5.1f, %5.1f)", crater + 1u, x, z);
+            bench_print(what, &one);
+            all.calls += one.calls;
+            all.update += one.update;
+            all.render += one.render;
+            if (one.slowest > all.slowest) {
+                all.slowest = one.slowest;
+                memcpy(all.slowest_split, one.slowest_split, sizeof(all.slowest_split));
+                all.slowest_chunks = one.slowest_chunks;
+                all.slowest_bricks = one.slowest_bricks;
+            }
+            all.bricks += one.bricks;
+            all.meshing += one.meshing;
+            all.switching += one.switching;
+            all.gpu_vertices += one.gpu_vertices;
+            all.mesh_uploads += one.mesh_uploads;
+            all.mask_upload += one.mask_upload;
+            all.meshes_updated += one.meshes_updated;
+            all.meshes_created += one.meshes_created;
+            all.meshes_queued += one.meshes_queued;
+            all.meshes_same += one.meshes_same;
+            all.mask_uploads += one.mask_uploads;
+            all.mesh_bytes += one.mesh_bytes;
+            all.mask_bytes += one.mask_bytes;
+            if (pass == 0u) {
+                uint8_t *frame = render_bench(scene, target, true);
+                char name[32];
+                (void)snprintf(name, sizeof(name), "bench-%02u", crater + 1u);
+                dump(name, frame, BENCH_SIZE);
+                free(frame);
+            }
+        }
+        bench_print("  all", &all);
+        qsort(calls, call_count, sizeof(calls[0]), compare_doubles);
+        printf("  update calls: median %.3f ms, p90 %.3f, p99 %.3f, slowest %.3f (of %u); per crater %.2f ms\n",
+            calls[call_count / 2u], calls[(call_count * 9u) / 10u], calls[(call_count * 99u) / 100u],
+            calls[call_count - 1u], call_count, all.update / (double)crater_count);
+        printf("  mesh %llu bytes, mask %llu bytes\n", (unsigned long long)report.mesh_bytes,
+            (unsigned long long)report.mask_bytes);
+        btbh_gpu_sdf_terrain_destroy(scene->terrain);
+        scene->terrain = NULL;
+    }
+    btbh_gpu_texture_destroy(target);
+}
+
 int main(void) {
     (void)setvbuf(stdout, NULL, _IONBF, 0);
     for (int index = 0; index < 11; ++index) {
@@ -812,10 +1147,12 @@ int main(void) {
         fclose(file);
     }
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+    const char *bench = SDL_getenv("BTBH_SMOKE_BENCH");
+    const bool benching = bench != NULL && strcmp(bench, "craters") == 0;
     const BTBHGPUDeviceDescriptor device_descriptor = {
         .backend = SMOKE_BACKEND,
         .required_features = BTBH_GPU_REQUIRED_FEATURES,
-        .debug_mode = 1,
+        .debug_mode = benching ? 0u : 1u,
     };
     BTBHGPUDeviceReport device_report;
     memset(&device_report, 0, sizeof(device_report));
@@ -842,6 +1179,21 @@ int main(void) {
     scene.target = btbh_gpu_window_render_target_create(
         scene.window, TARGET_SIZE, TARGET_SIZE, BTBH_GPU_TEXTURE_FILTER_LINEAR, &texture_report);
     assert(scene.target != NULL);
+    if (benching) {
+        /* BTBH_SMOKE_BENCH_STAGING=<bytes>: the device's upload staging budget during the bench. */
+        const char *staging = SDL_getenv("BTBH_SMOKE_BENCH_STAGING");
+        if (staging != NULL && staging[0] != '\0') {
+            assert(btbh_gpu_device_set_upload_staging_budget(device, (uint32_t)strtoul(staging, NULL, 10)) ==
+                BTBH_GPU_OK);
+            printf("upload staging budget: %s bytes\n", staging);
+        }
+        run_craters_bench(&scene);
+        btbh_gpu_custom_mesh_destroy(scene.cube);
+        btbh_gpu_texture_destroy(scene.target);
+        btbh_gpu_window_destroy(scene.window);
+        btbh_gpu_device_destroy(device);
+        return 0;
+    }
 
     BTBHGPUSdfTerrainDesc desc;
     memset(&desc, 0, sizeof(desc));
@@ -870,6 +1222,7 @@ int main(void) {
     const RenderOptions plain = { 0, 1, 1, 0.0f };
     const RenderOptions dug = { 1, 1, 1, 0.0f };
     uint8_t *plain_image = render(&scene, plain);
+    dump("plain", plain_image, TARGET_SIZE);
     /* With BTBH_SDF_TERRAIN_BASELINE_SHADER_DIR (an earlier release's compiled shaders): the plain ground renders
      * byte-identical with them, so the shaders' new branch changes nothing for a batch without a mask. */
     const char *baseline_dir = SDL_getenv("BTBH_SDF_TERRAIN_BASELINE_SHADER_DIR");
@@ -961,6 +1314,7 @@ int main(void) {
         (unsigned long long)report.mesh_bytes, (unsigned long long)report.mask_bytes);
 
     uint8_t *crater = render(&scene, dug);
+    dump("crater", crater, TARGET_SIZE);
     assert(pink_pixels(crater) == 0u);
     /* The crater's floor (the image's centre, a little below it) shows the scorched patch, not the ground. */
     const uint32_t cx = TARGET_SIZE / 2u;
@@ -996,6 +1350,8 @@ int main(void) {
     const RenderOptions curved_plain = { 0, 1, 0, 0.03f };
     uint8_t *curved_image = render(&scene, curved);
     uint8_t *curved_plain_image = render(&scene, curved_plain);
+    dump("curved", curved_image, TARGET_SIZE);
+    dump("curved-plain", curved_plain_image, TARGET_SIZE);
     const uint32_t curved_ground_pink = pink_pixels(curved_plain_image);
     printf("curved world: %u background pixels without the crater, %u with it\n", curved_ground_pink,
         pink_pixels(curved_image));
@@ -1012,6 +1368,7 @@ int main(void) {
     } while (report.bricks_evaluated != 0u || report.chunks_meshed != 0u);
     assert(report.mask_bytes == 0u && report.mesh_bytes == 0u);
     uint8_t *restored = render(&scene, dug);
+    dump("restored", restored, TARGET_SIZE);
     assert(memcmp(plain_image, restored, TARGET_SIZE * TARGET_SIZE * 4u) == 0);
     free(restored);
 
