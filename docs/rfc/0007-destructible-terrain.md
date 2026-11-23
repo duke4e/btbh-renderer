@@ -484,6 +484,20 @@ it is written down here.
   settles.
 - A work item (one brick, or one chunk's mesh) is never split: a call can overrun its budget by one chunk's
   mesh (about 1 to 3 ms at the sizes below).
+- **Update spikes (0.13.0, Be The Bullet Hell v1's report: up to 3.8 ms with 32-cell chunks).** Two things overran
+  the budget besides the item in hand, measured with the SDF terrain smoke's `BTBH_SMOKE_BENCH=craters` (v1's sizes,
+  13 m craters):
+  - Uploads, after the budget: each switched chunk's custom mesh made two transfer buffers and submitted a command
+    buffer (0.13 to 0.17 ms a chunk), about a fifth of an unbudgeted crater's update. The chunk meshes now go through
+    the window's upload queue (a queued update, or a mesh made with its data queued), which the next scene copies in
+    its one copy pass before it draws: 6 to 10 µs a chunk. The dig mask is still uploaded in the update (one
+    submission, about 0.1 ms; from the staging pool when the device has a budget).
+  - Meshing in batches: without `run_jobs` a batch of up to 8 chunks was sized by the running average of a chunk's
+    time, and a crater's chunks differ by a factor of five, so a call overran by several chunks. A budgeted call
+    without `run_jobs` now meshes one chunk at a time and checks the budget after each; with `run_jobs`, batches of up
+    to 8 still go out together.
+  - Not done: partial updates of a chunk (`btbh_gpu_custom_mesh_update_range`). A re-meshed chunk keeps its vertex
+    and index counts in about 1 update of 6, and a queued update costs microseconds; nothing left to save there.
 
 **The mesh**
 - Surface nets as specified: the mass point, one Newton step along the exact field's gradient (tetrahedral
