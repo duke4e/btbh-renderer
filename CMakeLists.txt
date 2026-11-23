@@ -1287,6 +1287,32 @@ if(BTBH_BUILD_GPU_SPIKE)
             set_tests_properties(${_lift_smoke} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
 
+        # BTBH_GPU_SCENE_RUNS=verify (0.13.0): the smokes whose scenes have same-material runs (RFC 0011), again in the
+        # debug mode, where every draw that continues a run rebuilds what it would push and bind without the run and
+        # compares it with what the pass holds. The core logs a mismatch, which fails the test; the runs and flags
+        # smokes also read the window's counts at their end and fail on a mismatch or on nothing checked
+        # (Tests/btbh_gpu_smoke_runs_verify.h). The runs smoke's waterfront has runs of every kind of batch added since
+        # 0.10.0 (lifted, light factor, UV rect, flags2, lit particles); the others add tables, dig masks, the
+        # cascades' sources with tops, queued mesh updates and the lazy creation log's scenes. (The height lift, lit
+        # particle and prewarm smokes draw no run.)
+        foreach(_verify_smoke
+            btbh_gpu_scene_runs_smoke
+            btbh_gpu_scene_flags_smoke
+            btbh_gpu_world_detail_smoke
+            btbh_gpu_rc_tops_smoke
+            btbh_gpu_sdf_terrain_smoke
+            btbh_gpu_mesh_queue_smoke
+            btbh_gpu_scene_target_smoke
+            btbh_gpu_lazy_creation_smoke
+        )
+            add_test(NAME ${_verify_smoke}_runs_verify COMMAND ${_verify_smoke})
+            set_tests_properties(${_verify_smoke}_runs_verify PROPERTIES
+                SKIP_RETURN_CODE 77
+                ENVIRONMENT "BTBH_GPU_SCENE_RUNS=verify"
+                FAIL_REGULAR_EXPRESSION "BTBH_GPU_SCENE_RUNS=verify: mismatch;found [1-9][0-9]* mismatches"
+            )
+        endforeach()
+
         # A measurement, not a test: a frame like Be The Bullet Hell v2's city (RFC 0009's follow-up); see the file
         # and tools/frame_bench_summary.py.
         add_executable(btbh_gpu_frame_bench

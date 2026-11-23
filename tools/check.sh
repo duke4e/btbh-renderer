@@ -3,7 +3,7 @@
 # (SPIR-V, MSL, and metallib on macOS) and the native tests with the vendored SDL_shadercross, runs the tests
 # and compiles the public headers on their own.
 #
-#   tools/check.sh [build-dir]        SKIP_GPU_TESTS=1 skips the device, window, scene-target, model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift, mesh queue, lit particle and lazy creation smoke tests
+#   tools/check.sh [build-dir]        SKIP_GPU_TESTS=1 skips the device, window, scene-target, model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift, mesh queue, lit particle and lazy creation smoke tests (and the *_runs_verify runs of those with same-material runs)
 #
 # Needs CMake and a C/C++ compiler (Xcode's command line tools on macOS); uses Ninja when it is installed. A cold build compiles DXC
 # and takes a while; later runs are incremental. Submodules must be initialised

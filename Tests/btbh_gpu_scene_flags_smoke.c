@@ -102,6 +102,7 @@
 #include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
+#include "btbh_gpu_smoke_runs_verify.h"
 
 #include <SDL3/SDL_gpu.h>
 #include <SDL3/SDL_hints.h>
@@ -3033,6 +3034,9 @@ static void close_smoke_window(SmokeWindow *smoke) {
 int main(void) {
     /* (Unbuffered: what was checked shows before a failed assertion.) */
     (void)setvbuf(stdout, NULL, _IONBF, 0);
+    /* 0.13.0: started with BTBH_GPU_SCENE_RUNS=verify (CTest's btbh_gpu_scene_flags_smoke_runs_verify), every draw that
+       continues a run is checked, and a mismatch fails the smoke. */
+    const bool runs_verify = smoke_runs_verify_requested();
     if (!load_shader_paths()) {
         return SMOKE_SKIP;
     }
@@ -3095,6 +3099,7 @@ int main(void) {
 #endif
         check_refusals(&smoke);
 #endif
+        smoke_check_runs_verify(smoke.window, "btbh_gpu_scene_flags_smoke", runs_verify);
     }
 
     close_smoke_window(&smoke);
