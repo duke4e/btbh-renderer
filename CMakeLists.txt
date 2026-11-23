@@ -210,6 +210,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_model_rc.frag|fragment"
         "production_model_rc_2d_shadows.frag|fragment"
         "production_model_rc_unshadowed.frag|fragment"
+        "production_particle_lit.frag|fragment"
+        "production_particle_lit_2d_shadows.frag|fragment"
+        "production_particle_lit_unshadowed.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
@@ -309,6 +312,17 @@ if(BTBH_BUILD_GPU_SPIKE)
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.frag.hlsl"
             )
         endif()
+        # RFC 0013: the lit particle's shadow variants, built from its source with a define.
+        if(
+            _shader_name STREQUAL "production_particle_lit_2d_shadows.frag" OR
+            _shader_name STREQUAL "production_particle_lit_unshadowed.frag"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_particle_lit.frag.hlsl"
+            )
+        endif()
         # Vertex shaders built from another's source with a define (RFC 0009's table variant, RFC 0012's lifted ones,
         # the RC material sources).
         if(
@@ -346,6 +360,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         if(
             _shader_name MATCHES "^production_model" OR
             _shader_name MATCHES "^production_animated_model" OR
+            _shader_name MATCHES "^production_particle_lit" OR
             _shader_name MATCHES "^production_rc_.*material_source"
         )
             list(

@@ -66,7 +66,7 @@ cbuffer SceneUniforms : register(b0, space1)
     float4 surface_parameters1;
     float4 world_curvature;
     float4 previous_world_curvature;
-    BTBH_TEMPORAL_UNIFORMS
+    BTBH_TEMPORAL_UNIFORMS_STATIC
 };
 
 struct VertexInput
@@ -310,6 +310,12 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
         material_color;
     output.texture_coordinate =
         input.texture_coordinate * uv_transform.xy + uv_transform.zw;
+    // RFC 0013: BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT, the instance's cell of an atlas (custom xy its size, zw its
+    // corner). Other batches skip it, and their texture coordinate is what it was.
+    if (instance_uv_rect != 0u)
+    {
+        output.texture_coordinate = output.texture_coordinate * instance.custom.xy + instance.custom.zw;
+    }
     output.world_position = world_position.xyz;
     output.world_normal = world_normal;
     output.world_tangent = world_tangent;

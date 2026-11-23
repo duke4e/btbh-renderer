@@ -552,6 +552,9 @@ typedef enum BTBHGPUSceneSurfaceVariant {
     BTBH_GPU_SCENE_SURFACE_DISSOLVE = 3,
     BTBH_GPU_SCENE_SURFACE_SHATTER = 4,
     BTBH_GPU_SCENE_SURFACE_GLITTER = 5,
+    /* A see-through billboard that fades over surface_parameters0.x render units where it meets the opaque scene
+     * behind it, instead of cutting a straight edge through it (in the transparent pass; elsewhere, or when the
+     * scene's distance can't be drawn, it draws as NONE). Its other parameters are unused. */
     BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE = 6,
     /* A self-lit rim in a tint (parameters0: rgb tint, w rim strength; parameters1.x body glow). */
     BTBH_GPU_SCENE_SURFACE_RIM = 7,
@@ -577,8 +580,43 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      *   chromatic lines where the bend is steepest), z normal push (the vertex normal's direction on screen
      *   times this, in pixels at 1080: a ring with outward normals makes a shockwave), w reserved (0). */
     BTBH_GPU_SCENE_SURFACE_REFRACT = 10,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 11
+    /* A see-through surface lit per pixel, for smoke, dust and steam (RFC 0013, since 0.11.0). Drawn in the
+     * transparent pass with production_particle_lit.frag (its _2d_shadows or _unshadowed sibling by the frame's
+     * shadows), found beside the host's fragment shader: a present without it fails, naming the file. Diffuse only.
+     * Its light, each at the scale a lit surface takes it: the sky's ambient (the SH irradiance at its normal with
+     * IBL, else the flat ambient); the sun, its shadow through four plain comparison taps whatever
+     * directional_shadow_filter says, and the clouds; the fill and its shadow; the spot (or omni) light and its
+     * shadow; the street lamps and the point lights, each skipped beyond its reach; with the radiance cascades on
+     * (additive or not), their light at its world x and z from four directions; its emission, as a lit batch's.
+     * A light's share is albedo * (wrap + transmission) * light, where wrap = saturate((n.l + w) / (1 + w)) and
+     * the transmission (light from behind, through it) = x * exp(-thickness * z) * 4 pi * HG(y, the angle the
+     * light turns to reach the eye), HG being Henyey-Greenstein's phase; only the sun and the point lights give a
+     * transmission, the fill, the spot, the lamps and the cascades the wrap alone. Then fog at its own depth:
+     * written so that the HDR composite's fog at the opaque depth behind it leaves the puff fogged at its own depth
+     * over the background fogged at its own (exact while the fog's opacity there stays below 1).
+     * Its alpha: the albedo's times the vertex's, the instance's and the material's, times the fades.
+     * Its normal: normal_texture, linear, on the albedo's texture coordinate: rg a tangent-space normal (OpenGL +Y,
+     * z rebuilt) whose tilt normal_scale scales (0 flat), b the thickness 0..1. The frame is the vertex's: a
+     * billboard's lies in the camera's plane, so a quad in local x and y with normal +z and tangent +x (w +1) takes
+     * the instance's x and y axes. It is turned toward the side seen. Without normal_texture it is flat, 1 thick.
+     * surface_parameters0: x the soft fade (render units over which it fades where it meets the opaque scene behind
+     *   it, as SOFT_PARTICLE's; 0 none); y, z the near fade (gone nearer the camera than y render units, whole from
+     *   y + z on; z 0 none); w the wrap (0 Lambert, 1 lit all the way round to the back).
+     * surface_parameters1: x the transmission (0 none); y the asymmetry, clamped to -0.99..0.99 (above 0 the light
+     *   goes on forward, so a puff glows looking toward the light); z the optical depth at thickness 1 (taken as 0
+     *   when below); w reserved, 0.
+     * Needs transparency_enabled 1 with BTBH_GPU_SCENE_BLEND_ALPHA (straight alpha), unlit_enabled 0, a static
+     * geometry (animation_library and animation_pose NULL), dug_by NULL, no world_detail with a texture, no
+     * world_detail_table with map_layers, no height_lift with a heightfield, detail_parameters 0 and
+     * surface_parameters1[3] 0: otherwise the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
+     * casts no shadow, writes no motion and is never a source of the radiance cascades' light, with an emission or
+     * without (as if it had BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
+    BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE = 11,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 12
 } BTBHGPUSceneSurfaceVariant;
+
+/* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (RFC 0013, since 0.11.0). */
+#define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
 
 /* How a batch takes part in the horizon-based ambient occlusion (BTBHGPUScenePost.ssao_enabled 2; the
  * occlusion of ssao_enabled 1 takes every batch fully). */
@@ -1120,7 +1158,18 @@ enum {
      * the batch blocks the cascades' light where that occlusion says so, with or without it. Without the
      * cascades, or on a batch that doesn't glow, it changes nothing. */
     BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE = 1u << 2,
-    /* (Bits 3 and 4 are taken by RFC 0013's draft.) The batch receives no spot (or omni) shadow (since 0.10.0, asked
+    /* The instance's four custom floats are a rectangle of its textures (RFC 0013, since 0.11.0, asked for by Be The
+     * Bullet Hell v2): the texture coordinate, after uv_scale and uv_offset, is multiplied by custom x and y and
+     * offset by z and w, so one batch draws every cell of an atlas, a cell per instance. Every static vertex shader
+     * takes it (production_model.vert and the table's and the lift's), so it works in every pass that draws the
+     * batch: opaque or transparent, lit, unlit (the fast unlit shader too), soft and lit particles, lifted, and the
+     * radiance cascades' source pass. Shadows sample no texture and don't change. Static batches only, and not
+     * with the surface variants that read the custom floats (DISSOLVE, SHATTER, GLITTER) nor a world detail or table
+     * seeded by one (seed_component not 0): the present fails with BTBH_GPU_INVALID_ARGUMENT, naming the batch. It
+     * needs this release's static vertex shaders: with SPIR-V ones that don't read it, the present fails with the
+     * shader's path. (Bit 4 is kept for RFC 0013's phase 2.) */
+    BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT = 1u << 3,
+    /* The batch receives no spot (or omni) shadow (since 0.10.0, asked
      * for by Be The Bullet Hell v2: its kaiju, the only thing in its spot map, was darkened by its own map): the
      * spot light lights it unshadowed, and spot_occluder_shadow_strength takes none of its light. What it casts is
      * left to spot_shadow_visible, as before; the directional shadows are as before. Needs this release's scene
@@ -1130,6 +1179,8 @@ enum {
 
 /* Defined when BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW exists (since 0.10.0). */
 #define BTBH_GPU_SCENE_HAS_BATCH_RECEIVES_NO_SPOT_SHADOW 1
+/* Defined when BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT exists (RFC 0013, since 0.11.0). */
+#define BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT 1
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters[3], the procedural surface detail's pattern (rounded to the nearest
  * whole number). Values 0..6 are as before; their names and value 7 are new in 0.7.0. */
