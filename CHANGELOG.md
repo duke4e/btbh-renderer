@@ -12,19 +12,22 @@ into a map in sun space. Lit particles read it, so a smoke column's lee side dar
 surfaces the sun shadows, so the column's shadow falls on the street.
 
 Nothing changes until a host sets the lighting's new byte and flags a batch: with nothing set every frame draws byte for
-byte as 0.12.0's. Seven shader variants compile anew (four of the scene fragment shader's, the three lit particle ones)
+byte as 0.13.0's. Seven shader variants compile anew (four of the scene fragment shader's, the three lit particle ones)
 and two shaders are new (78).
 
-Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.14.0-particle-shadow`:
-- `check.ps1` with the GPU smokes passes 32/32 (no new test executable); all 78 shaders build (SPIR-V and MSL), and
-  the public headers compile clean under `/W4 /WX`.
+Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.14.0-particle-shadow` merged with v0.13.0:
+- `check.ps1` from a cold build passes 41/41: 0.13.0's 40 (with the eight `*_runs_verify` runs) and the lit particle
+  smoke's own verify run, new. All 78 shaders build (SPIR-V and MSL), and the public headers compile clean under
+  `/W4 /WX`.
 - The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
-- **Identity:** v0.12.0's references come from a build of its release checkout, out of tree. Every image both builds
-  write (the flags, font, height lift, lit particle, prewarm, RC tops, runs, scene target and world detail smokes): 376
-  images and 18,174,848 pixels a mode; 0 differ, in each of three modes: nothing set; `BTBH_SMOKE_SHARED_MESHES=1`;
-  `BTBH_GPU_SCENE_RUNS=0`. The SDF terrain and mesh queue smokes pass in each mode. The lit particle smoke's 26 new
-  images exist only in the new build.
-- **Shader artefacts:** against v0.12.0's build, 208 of 231 files are the same bytes. `production_model.frag`,
+- **Identity:** v0.13.0's references come from a build of its release checkout (`b223e7be`), out of tree. Every image
+  both builds write (the flags, font, height lift, lit particle, prewarm, RC tops, runs, SDF terrain, scene target and
+  world detail smokes): 393 images and 18,655,104 pixels a mode; 0 differ, in each of four modes: nothing set;
+  `BTBH_SMOKE_SHARED_MESHES=1`; `BTBH_GPU_SCENE_RUNS=0`; and `BTBH_GPU_SCENE_RUNS=verify` against the plain
+  references, where every window logs 0 mismatches (5,172 run draws checked, 4 of them the lit particle smoke's). All
+  eleven smokes exit 0 in each mode. The lit particle smoke's 28 new images exist only in the new build.
+- **Shader artefacts:** against v0.13.0's build (whose shaders are 0.12.0's), 208 of 231 files are the same bytes.
+  `production_model.frag`,
   `production_model_2d_shadows.frag`, `production_model_rc.frag` and `production_model_rc_2d_shadows.frag` differ
   (SPIR-V, MSL, reflection), and so do the three `production_particle_lit*.frag` (the unshadowed one's reflection is the
   same), with the three FSR 3 MSL files that differ between any two builds. The unshadowed scene shaders, the fast unlit
@@ -66,9 +69,10 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.14.0-particle-shadow`:
 - Prewarm: the map's texture and pipeline join `btbh_gpu_window_scene_prewarm` and the render target's prewarm, through
   the model pipelines' step. In the smoke, the renders after the prewarm make no pipeline, shader, sampler or texture.
 - Tests: the lit particle smoke's particle shadow checks (the lee side and the street against the CPU's slab, half and a
-  quarter, runs, the refusals, prewarm, old shaders: 174 checks, 126 before); the particle test's slab and refusals
-  (22,496 checks); the shader and order tests; the frame bench's `smoke-shadow`, `smoke-ground` and `+quarter` modes,
-  `BTBH_FRAME_BENCH_PRESET=high` (1920 x 1080) and `BTBH_FRAME_BENCH_SUN_MAP`.
+  quarter, runs, flagged and unflagged batches interleaved, the refusals, prewarm, old shaders: 176 checks, 126 before),
+  now also run under `BTBH_GPU_SCENE_RUNS=verify` (`btbh_gpu_lit_particle_smoke_runs_verify`); the particle test's slab
+  and refusals (22,496 checks); the shader and order tests; the frame bench's `smoke-shadow`, `smoke-ground` and
+  `+quarter` modes, `BTBH_FRAME_BENCH_PRESET=high` (1920 x 1080) and `BTBH_FRAME_BENCH_SUN_MAP`.
 - Swift: nothing. The Swift layer sets no batch flags and doesn't expose `particle_shadow`.
 
 ### Changed
@@ -103,15 +107,16 @@ rounds, the paired median and its 90 % interval. The map pass is in `shadow_ms`,
 - The map pass grows with the map's texels: on a 8192 sun map (the map 4096² or 2048²) +0.127 and +0.036 ms.
 - The ground's read is a fetch and the slab for every shaded opaque fragment (overdraw included), smoke over it or not,
   so it follows the view's shaded fragments, not the smoke.
-- **Off:** nothing to pay. v0.12.0's shaders against this build's under this core (Deck preset, 60 rounds): mode none,
-  the opaque pass -0.001 ms [-0.005, +0.007] and the frame +0.001 ms [-0.002, +0.004]; with the lit smoke, the
-  transparent pass +0.0006 ms [+0.0004, +0.0013] (the lit particle shader's unread branch).
+- **Off:** nothing to pay. v0.12.0's shaders (v0.13.0's are the same files) against this build's under this core (Deck
+  preset, 60 rounds; measured before the merge with v0.13.0, which changed no shader): mode none, the opaque pass
+  -0.001 ms [-0.005, +0.007] and the frame +0.001 ms [-0.002, +0.004]; with the lit smoke, the transparent pass
+  +0.0006 ms [+0.0004, +0.0013] (the lit particle shader's unread branch).
 - An earlier block (18:22 to 18:23) ran while other sessions' unlocked game runs kept the GPU at 100 %; it resolved
   nothing and isn't used.
 
 ### Upgrading
 - Nothing to set: a host that leaves `particle_shadow` 0 or flags no batch draws as before. Rebuild the scene shaders
-  (the seven variants changed, two are new): with 0.12.0's lit particle or scene shaders a frame that draws the map fails
+  (the seven variants changed, two are new): with 0.13.0's lit particle or scene shaders a frame that draws the map fails
   naming the shader, and without the map's shaders it fails naming them.
 - Rust hosts with bindgen regenerate the bindings: `directional_shadow_reserved` (one byte) becomes `particle_shadow`;
   `..Default::default()` leaves it 0. A host that left garbage in it now gets `BTBH_GPU_INVALID_ARGUMENT` for readers 3

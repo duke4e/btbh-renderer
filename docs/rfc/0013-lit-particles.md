@@ -970,6 +970,15 @@ one's reflection is the same) and the three FSR 3 MSL files that differ between 
 map's two shaders). `production_model_unshadowed`, `_rc_unshadowed`, the fast unlit shader and every other shader
 compile to the same bytes.
 
+**After the merge with v0.13.0** (`5c74e85c`, then `684629d1`): the lit particle smoke joins the `*_runs_verify`
+CTest runs (its column split into a batch a puff, and interleaved with unflagged batches of one material, draws runs on
+both sides of the flag; 176 checks), and the verify layout of the particle frame block names `shadow_controls`. From a
+cold build: `check.ps1` 41/41, Swift 301 tests (2 skipped, 0 failures). Identity against v0.13.0's release checkout
+(`b223e7be`, built out of tree): 393 images and 18,655,104 pixels a mode, 0 differ, in plain, shared meshes, runs off
+and `BTBH_GPU_SCENE_RUNS=verify` (against the plain references; every window logs 0 mismatches, 5,172 run draws
+checked); all eleven smokes exit 0 in each mode. The shader artefacts are those above (v0.13.0 changed no shader), so
+the costs below stand.
+
 **Cost.** Windows, RTX 3070 Ti, Vulkan, the frame bench's burning fight (`smoke-lit`: 170 lit puffs in one batch, 5
 columns of 12 over fires and 110 low ones, under 16 lamps, 10 point lights and the sun's shadow) with every puff
 flagged, under the machine's perf lock (18:39:07 to 18:40:45; 60 rounds, the paired median and its 90 % interval). The
