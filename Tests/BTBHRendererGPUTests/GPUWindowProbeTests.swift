@@ -2764,6 +2764,31 @@ final class GPUWindowProbeTests: XCTestCase {
             GPUSceneSurfaceVariant.softParticle.rawValue,
             UInt32(BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE.rawValue)
         )
+        // RFC 0013 (since 0.11.0): lit particles.
+        let lit = try GPUSceneSurfaceProjection.classify(
+            fragmentPath: "C:/game/Shaders/lit_particle.glsl",
+            parameters: [
+                "u_softFade": .float(0.4),
+                "u_nearStart": .float(0.5),
+                "u_nearFade": .float(1),
+                "u_wrap": .float(0.5),
+                "u_transmission": .float(0.8),
+                "u_asymmetry": .float(0.6),
+                "u_opticalDepth": .float(9),
+            ]
+        )
+        XCTAssertEqual(lit.variant, .litParticle)
+        XCTAssertEqual(lit.parameters0, .init(x: 0.4, y: 0.5, z: 1, w: 0.5))
+        XCTAssertEqual(lit.parameters1, .init(x: 0.8, y: 0.6, z: 9, w: 0))
+        XCTAssertEqual(
+            GPUSceneSurfaceVariant.litParticle.rawValue,
+            UInt32(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE.rawValue)
+        )
+        XCTAssertEqual(
+            try GPUSceneSurfaceProjection.classify(fragmentPath: "lit_particle.glsl", parameters: [:]),
+            .init(variant: .litParticle, parameters0: .init(x: 0, y: 0, z: 0, w: 0),
+                  parameters1: .init(x: 0, y: 0, z: 0, w: 0))
+        )
         XCTAssertThrowsError(
             try GPUSceneSurfaceProjection.classify(
                 fragmentPath: "unknown.glsl",
