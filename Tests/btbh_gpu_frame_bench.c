@@ -51,6 +51,14 @@
  *   smoke-lit as one lit particle batch with the UV rect, a normal and thickness atlas, the soft fade and the
  *   transmission; smoke-off draws none (the same lights). The cost log's transparent_ms holds the distance pass and
  *   the puffs. Before 0.11.0 smoke-lit draws as smoke-off.
+ * - RFC 0013 phase 2's particle shadow (0.14.0's bench): smoke-shadow is smoke-lit with the batch's
+ *   BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW and particle_shadow 1 (the map pass, in shadow_ms, and the lit particles'
+ *   read, in transparent_ms); smoke-ground with particle_shadow 2 (the ground's read too, in main_ms); +quarter the map
+ *   at a quarter of the sun map's size instead of half. All 170 puffs draw into the map. Before 0.14.0 both draw as
+ *   smoke-lit.
+ * - BTBH_FRAME_BENCH_PRESET=high (0.14.0's bench): 1920 x 1080, rendered at that size (no upscaling), instead of the
+ *   Deck preset's 960 x 600 upscaled to 1280 x 800. BTBH_FRAME_BENCH_SUN_MAP=<size>: the sun map's size (256 to 8192;
+ *   default the renderer's 2048).
  * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
  *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
  *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
@@ -77,10 +85,12 @@
 #include <string.h>
 
 #define BENCH_SKIP 77
-#define BENCH_WIDTH 1280u
-#define BENCH_HEIGHT 800u
-#define BENCH_RENDER_WIDTH 960u
-#define BENCH_RENDER_HEIGHT 600u
+/* The Deck preset's sizes; BTBH_FRAME_BENCH_PRESET=high takes 1920 x 1080 for both. */
+static uint32_t BENCH_WIDTH = 1280u;
+static uint32_t BENCH_HEIGHT = 800u;
+static uint32_t BENCH_RENDER_WIDTH = 960u;
+static uint32_t BENCH_RENDER_HEIGHT = 600u;
+#define BENCH_MAX_RENDER_PIXELS (1920u * 1080u)
 #define BENCH_PIECES 32u
 #define BENCH_MAX_WINDOWS 10u
 #define BENCH_FLOATS 24u
@@ -143,8 +153,10 @@ typedef struct BenchRing {
 typedef struct BenchWindow {
     BTBHGPUWindow *window;
     char mode[48];
-    /* RFC 0013's smoke: 0 none, 1 smoke-off, 2 smoke-soft, 3 smoke-lit. */
+    /* RFC 0013's smoke: 0 none, 1 smoke-off, 2 smoke-soft, 3 smoke-lit, 4 smoke-shadow, 5 smoke-ground. */
     int smoke;
+    /* RFC 0013 phase 2: +quarter, the particle transmittance map at a quarter of the sun map's size. */
+    bool smoke_quarter;
     /* The light factor: 0 none, 1 light-off, 2 light, 3 light-mixed. */
     int light;
     BTBHGPUTexture *smoke_atlas;
@@ -896,7 +908,7 @@ static void build_smoke(BenchWindow *bench, const BenchCamera *camera, const BTB
     }
     qsort(puffs, count, sizeof(puffs[0]), smoke_far_first);
     /* What they cover, the coverage discs (0.8 of a quad's half size) at the render size, and the lights in reach. */
-    static uint8_t layers[BENCH_RENDER_WIDTH * BENCH_RENDER_HEIGHT];
+    static uint8_t layers[BENCH_MAX_RENDER_PIXELS];
     memset(layers, 0, sizeof(layers));
     double disc_sum = 0.0;
     float lights_in_reach = 0.0f;
@@ -985,7 +997,7 @@ static void build_smoke(BenchWindow *bench, const BenchCamera *camera, const BTB
     puff.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
     puff.spot_shadow_visible = 0u;
     puff.surface_parameters0[0] = 0.4f;
-    if (bench->smoke == 3) {
+    if (bench->smoke >= 3) {
 #if defined(BTBH_GPU_SCENE_HAS_LIT_PARTICLE)
         puff.surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
         puff.normal_texture = bench->smoke_normals;
@@ -995,6 +1007,11 @@ static void build_smoke(BenchWindow *bench, const BenchCamera *camera, const BTB
         puff.surface_parameters1[1] = 0.6f;
         puff.surface_parameters1[2] = 9.0f;
         puff.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+#if defined(BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW)
+        if (bench->smoke >= 4) {
+            puff.flags |= BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW;
+        }
+#endif
         bench->batches[bench->batch_count++] = puff;
 #endif
         return;
@@ -1056,7 +1073,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     bench->light = strncmp(bench->mode, "light-off", 9) == 0 ? 1 :
         (strncmp(bench->mode, "light-mixed", 11) == 0 ? 3 : (strncmp(bench->mode, "light", 5) == 0 ? 2 : 0));
     bench->smoke = strncmp(bench->mode, "smoke-off", 9) == 0 ? 1 :
-        (strncmp(bench->mode, "smoke-soft", 10) == 0 ? 2 : (strncmp(bench->mode, "smoke-lit", 9) == 0 ? 3 : 0));
+        (strncmp(bench->mode, "smoke-soft", 10) == 0 ? 2 : (strncmp(bench->mode, "smoke-lit", 9) == 0 ? 3 :
+        (strncmp(bench->mode, "smoke-shadow", 12) == 0 ? 4 : (strncmp(bench->mode, "smoke-ground", 12) == 0 ? 5 : 0))));
+    bench->smoke_quarter = mode_has(bench->mode, "quarter");
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -1072,6 +1091,15 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     if (bench->window == NULL || btbh_gpu_window_claim(device, bench->window, &report) != BTBH_GPU_OK) {
         fprintf(stderr, "window: %s\n", report.message);
         exit(1);
+    }
+    {
+        const int sun_map = bench_env_int("BTBH_FRAME_BENCH_SUN_MAP", 0, 0, 8192);
+        if (sun_map >= 256 &&
+            btbh_gpu_window_scene_set_directional_shadow_size(bench->window, (uint32_t)sun_map, (uint32_t)sun_map) ==
+                0u) {
+            fprintf(stderr, "the sun map's size %d isn't taken\n", sun_map);
+            exit(1);
+        }
     }
     for (uint32_t index = 0u; index < 11u; ++index) {
         (void)snprintf(bench->scene_shaders[index], sizeof(bench->scene_shaders[index]), "%s/%s%s", directory,
@@ -1247,6 +1275,13 @@ static BTBHGPUSceneLighting window_lighting(const BenchWindow *bench, const BTBH
     if (bench->smoke == 0) {
         return result;
     }
+#if defined(BTBH_GPU_SCENE_HAS_PARTICLE_SHADOW)
+    if (bench->smoke >= 4) {
+        result.particle_shadow = (uint8_t)((bench->smoke == 5 ? BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND
+                                                              : BTBH_GPU_SCENE_PARTICLE_SHADOW_PARTICLES) |
+            (bench->smoke_quarter ? BTBH_GPU_SCENE_PARTICLE_SHADOW_QUARTER : 0u));
+    }
+#endif
     static const float neon[SMOKE_NEON][3] = {
         { -30.0f, 4.0f, 15.0f }, { 30.0f, 4.0f, -15.0f }, { -36.0f, 4.0f, -16.0f }, { 36.0f, 4.0f, 17.0f },
     };
@@ -1407,6 +1442,16 @@ int main(void) {
     (void)SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
     const char *cpu = SDL_getenv("BTBH_FRAME_BENCH_CPU");
     bench_cpu_mode = cpu != NULL && cpu[0] == '1';
+    const char *preset = SDL_getenv("BTBH_FRAME_BENCH_PRESET");
+    if (preset != NULL && strcmp(preset, "high") == 0) {
+        BENCH_WIDTH = 1920u;
+        BENCH_HEIGHT = 1080u;
+        BENCH_RENDER_WIDTH = 1920u;
+        BENCH_RENDER_HEIGHT = 1080u;
+    }
+    printf("BENCH preset %s: %ux%u rendered at %ux%u, sun map %d\n", preset != NULL ? preset : "deck", BENCH_WIDTH,
+        BENCH_HEIGHT, BENCH_RENDER_WIDTH, BENCH_RENDER_HEIGHT,
+        bench_env_int("BTBH_FRAME_BENCH_SUN_MAP", 2048, 0, 8192));
     if (!bench_cpu_mode) {
         (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_COST_LOG", "1", true);
     }
