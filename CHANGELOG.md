@@ -115,6 +115,11 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
   one of the three loads of a run 24 ms, the driver stalling in one of them). The core counts its submissions for this (package-internal macros over
   `SDL_SubmitGPUCommandBuffer` and `SDL_SubmitGPUCommandBufferAndAcquireFence`). With nothing submitted since the last
   presented frame, nothing waits.
+  - The wait costs as long as the GPU still runs the load's uploads, and that time comes off the first frame: it moves
+    the cost, for a small net gain, rather than adding 0.3–0.5 ms. Be The Bullet Hell v2's stage load (Deck, lockstep,
+    0.12.0 → 0.13.0): the prewarm 23.2 → 46.0 ms, the first frame's present 34.7 → 7.1 ms and its submit 27.8 → 1.2 ms,
+    the load frame 125.7 → 121.5 ms in all. In the renderer's stage bench, whose loads are small, the prewarm grows
+    from 0.08 ms to 0.3–0.5 ms (Measured).
 
 ### Measured
 Windows, RTX 3070 Ti, Vulkan, no debug device. Every number here was taken under the machine's perf lock, in three
@@ -186,7 +191,8 @@ v0.12.0 is the release checkout built out of tree; a bench built against its hea
 - Nothing to do. A host that wants 0.12.0's uploads back sets `BTBH_GPU_UPLOAD_STAGING_BUDGET=0` or calls
   `btbh_gpu_device_set_upload_staging_budget(device, 0)`; a host that set its own budget keeps it.
 - A host that calls the prewarm in the middle of play, right after uploads or renders into targets, now waits there for
-  the GPU to finish them.
+  the GPU to finish them. After a load the prewarm takes longer by about the time the GPU still needs for the load's
+  uploads (v2: 23 → 46 ms), and the first frame shorter by more (its present 34.7 → 7.1 ms).
 - No public struct changed (bindings stay as they are). The package-internal scene telemetry struct, which the Swift
   layer reads, grew two fields at its end.
 
@@ -365,8 +371,9 @@ the HBAO with SSR (`=hbao`). A frame takes about 1 ms there, so these are small 
 - **0.11.0's two Known items about `KEEP_HBAO` are settled**: the beams and glows keep the cascades' look with
   `KEEP_CASCADES_LOOK`, and lit surfaces in a street lamp's pool match the cascades off under contact AO with the flag.
 - **`KEEP_CASCADES_LOOK` brings back everything the cascades add to a flagged batch**, a glow's white-out included.
-  Be The Bullet Hell v2 flags only its beam's glow draws: on its whole effect emitter, the flag brought back an additive
-  fire flipbook's white-out at a building's foot (up to 180 levels).
+  Be The Bullet Hell v2 flags only its weapon beams' own draws: on its whole effect emitter, the flag brought back the
+  white-out of its city idle effects (the signs' neon halos and the power lines' surges) at a building's foot (up to
+  180 levels). (Corrected in 0.13.0: this said an additive fire flipbook.)
 - **macOS (Metal) and a real Steam Deck** aren't verified.
 
 ## [0.11.0] — 2026-11-23
