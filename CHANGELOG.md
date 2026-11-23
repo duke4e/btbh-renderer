@@ -6,7 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-0.14.0 (in progress): RFC 0013 phase 2, the particle transmittance map, asked for by Be The Bullet Hell v2 once its owner
+## [0.14.0] — 2026-11-23
+
+0.14.0: RFC 0013 phase 2, the particle transmittance map, asked for by Be The Bullet Hell v2 once its owner
 picked the lit smoke (`LIT_PARTICLE` at albedo gain 0.38) as its default. Batches with a new flag draw their coverage
 into a map in sun space. Lit particles read it, so a smoke column's lee side darkens; with `particle_shadow` 2 so do the
 surfaces the sun shadows, so the column's shadow falls on the street.
@@ -34,6 +36,25 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.14.0-particle-shadow` mer
   shader and every other shader are unchanged.
 - **The header:** the batch is 288 bytes with `flags` at 253; batch bits 0-6 are taken (bit 7 free); the lighting is
   3,340 bytes with `particle_shadow` at 3,337 (3,339 is still free).
+
+Be The Bullet Hell v2 tested the candidate (`cfcc84f7`; the release adds only this file's v2 results and the version) on
+an RTX 3070 Ti, on its main at `d925bdca`, on 0.13.0 with the lit smoke on:
+- **Nothing set** (`BTBH_QUEUED_UPLOADS=0` on both sides, for 0.13.0's open race): 0 pixels differ from 0.13.0 in day,
+  stage 3 at night, rain, dusk on the Deck preset, the map edge, dusk and the glow's night fight. A smoky day fight's
+  frame 2400 varies from run to run on 0.13.0 as well (3,497 pixels against itself, scattered single pixels, at most
+  57); the candidate's 2,728 against 0.13.0 are within that, and v2 is tracing it on its side. With queued uploads on,
+  the same plus the race.
+- **The look:** setting 1 darkens the puffs' lee side, and they read as volumes; setting 2 adds a soft shadow on the
+  street, subtle at full frame and clear up close; both are weaker under the moon. The quarter map looks almost the same
+  at v2's camera. By day on High, setting 1 changes 7.7 % of the frame's pixels, setting 2 14 %. v2's salience (smoke
+  kept in) stays 0.38 by day, 0.43 at dusk and 0.41 at night with setting 2.
+- **GPU** (median of 2): a fight on the Deck preset 1.175 ms off, 1.196 with setting 2 (+0.02) and 1.202 with 6
+  (`2 | QUARTER`); on High 2.996, 3.052 (+0.056) and 3.044. The map pass is about 0.01 ms and setting 1 is free; the
+  ground's read is the cost. With three full-screen smoke cards, setting 2 is within noise on the Deck preset and
+  +0.03 ms on High.
+- **First frames:** with the flagged smoke in its prewarm, the lazy creation log shows no pipeline after frame 1 at
+  settings 0, 2 and 6. The prewarm makes 1,273 batches, 1,274 with the flagged copy. Nothing was refused.
+- v2 adopts setting 2 at density 1 on High, and 5 (`1 | QUARTER`) on the Deck preset until it's measured on a real Deck.
 
 ### Added
 - **`BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW`** (batch bit 4, kept for it since 0.11.0) and
@@ -131,7 +152,12 @@ rounds, the paired median and its 90 % interval. The map pass is in `shadow_ms`,
 - **The map is the sun's alone:** the fill, the spot, the omni light, the lamps and the radiance cascades' own passes
   don't read it.
 - **The scene shader's sampler slots are full** in its full variant (above).
-- **macOS (Metal), the Vulkan validation layers and a real Steam Deck** aren't verified; nor are v2's own frames.
+- **0.13.0's queued-upload race** (v2's heat ray capture varies from run to run) is still open here; it is being fixed
+  separately.
+- **One start of v2's exited with 136 during its load**, with no log line and no Windows error report: its first run with
+  setting 2 after the build (High, 1280 x 720, a first prewarm of 6.1 s). It didn't recur in 21 more starts. Not
+  explained.
+- **macOS (Metal), the Vulkan validation layers and a real Steam Deck** aren't verified.
 
 ## [0.13.0] — 2026-11-23
 
