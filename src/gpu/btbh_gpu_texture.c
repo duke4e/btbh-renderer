@@ -366,12 +366,11 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
         &sampler_info
     );
 
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = (uint32_t)byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(
         window->device->gpu,
-        &transfer_info
+        (uint32_t)byte_count,
+        &staging_offset
     );
     if (
         resource->texture == NULL ||
@@ -380,7 +379,7 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     ) {
         btbh_gpu_texture_error(report, SDL_GetError());
         if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+            btbh_gpu_staging_abandon(window->device->gpu, transfer);
         }
         btbh_gpu_texture_destroy(resource);
         return NULL;
@@ -392,11 +391,11 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     );
     if (mapped == NULL) {
         btbh_gpu_texture_error(report, SDL_GetError());
-        SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+        btbh_gpu_staging_abandon(window->device->gpu, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
-    (void)memcpy(mapped, pixels, (size_t)byte_count);
+    (void)memcpy((uint8_t *)mapped + staging_offset, pixels, (size_t)byte_count);
     SDL_UnmapGPUTransferBuffer(window->device->gpu, transfer);
 
     SDL_GPUCommandBuffer *command =
@@ -409,12 +408,13 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
         if (command != NULL) {
             (void)SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+        btbh_gpu_staging_abandon(window->device->gpu, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
     SDL_GPUTextureTransferInfo source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     source.pixels_per_row = width;
     source.rows_per_layer = height;
     SDL_GPUTextureRegion destination = {0};
@@ -427,8 +427,7 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     if (resource->mip_count > 1u) {
         SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
     }
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+    const bool submitted = btbh_gpu_staging_submit(window->device->gpu, command, transfer);
     if (!submitted) {
         btbh_gpu_texture_error(report, SDL_GetError());
         btbh_gpu_texture_destroy(resource);
@@ -532,29 +531,28 @@ BTBHGPUResult btbh_gpu_texture_update_rgba8(
 
     SDL_GPUDevice *device = texture->owner->device->gpu;
     const uint32_t byte_count = width * height * 4u;
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(device, byte_count, &staging_offset);
     if (transfer == NULL) {
         return BTBH_GPU_DEVICE_FAILURE;
     }
     void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
     if (mapped == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return BTBH_GPU_DEVICE_FAILURE;
     }
-    memcpy(mapped, pixels, byte_count);
+    memcpy((uint8_t *)mapped + staging_offset, pixels, byte_count);
     SDL_UnmapGPUTransferBuffer(device, transfer);
 
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
     if (command == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return BTBH_GPU_DEVICE_FAILURE;
     }
     SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(command);
     SDL_GPUTextureTransferInfo source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     source.pixels_per_row = width;
     source.rows_per_layer = height;
     SDL_GPUTextureRegion destination = {0};
@@ -571,8 +569,7 @@ BTBHGPUResult btbh_gpu_texture_update_rgba8(
     if (texture->mip_count > 1u) {
         SDL_GenerateMipmapsForGPUTexture(command, texture->texture);
     }
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    const bool submitted = btbh_gpu_staging_submit(device, command, transfer);
     return submitted ? BTBH_GPU_OK : BTBH_GPU_DEVICE_FAILURE;
 }
 
@@ -842,12 +839,11 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
         &sampler_info
     );
 
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = (uint32_t) byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(
         window->device->gpu,
-        &transfer_info
+        (uint32_t) byte_count,
+        &staging_offset
     );
     if (
         resource->texture == NULL ||
@@ -857,7 +853,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
         btbh_gpu_texture_error(report, SDL_GetError());
         stbi_image_free(pixels);
         if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+            btbh_gpu_staging_abandon(window->device->gpu, transfer);
         }
         btbh_gpu_texture_destroy(resource);
         return NULL;
@@ -871,11 +867,11 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
     if (mapped == NULL) {
         btbh_gpu_texture_error(report, SDL_GetError());
         stbi_image_free(pixels);
-        SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+        btbh_gpu_staging_abandon(window->device->gpu, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
-    memcpy(mapped, pixels, (size_t) byte_count);
+    memcpy((uint8_t *)mapped + staging_offset, pixels, (size_t) byte_count);
     SDL_UnmapGPUTransferBuffer(window->device->gpu, transfer);
     stbi_image_free(pixels);
 
@@ -889,13 +885,14 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
         if (command != NULL) {
             (void) SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+        btbh_gpu_staging_abandon(window->device->gpu, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
 
     SDL_GPUTextureTransferInfo source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     source.pixels_per_row = resource->width;
     source.rows_per_layer = resource->height;
     SDL_GPUTextureRegion destination = {0};
@@ -908,8 +905,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
     if (resource->mip_count > 1u) {
         SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
     }
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+    const bool submitted = btbh_gpu_staging_submit(window->device->gpu, command, transfer);
     if (!submitted) {
         btbh_gpu_texture_error(report, SDL_GetError());
         btbh_gpu_texture_destroy(resource);
@@ -1096,14 +1092,12 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
     sampler_info.max_lod = (float)(mip_count - 1u);
     resource->sampler = SDL_CreateGPUSampler(device, &sampler_info);
 
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = (uint32_t)byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(device, (uint32_t)byte_count, &staging_offset);
     if (resource->texture == NULL || resource->sampler == NULL || transfer == NULL) {
         btbh_gpu_texture_error(report, SDL_GetError());
         if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
+            btbh_gpu_staging_abandon(device, transfer);
         }
         btbh_gpu_texture_destroy(resource);
         return NULL;
@@ -1111,12 +1105,12 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
     uint8_t *mapped = (uint8_t *)SDL_MapGPUTransferBuffer(device, transfer, false);
     if (mapped == NULL) {
         btbh_gpu_texture_error(report, SDL_GetError());
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
     for (uint32_t layer = 0u; layer < layer_count; ++layer) {
-        (void)memcpy(mapped + (size_t)layer_bytes * layer, layer_pixels[layer], (size_t)layer_bytes);
+        (void)memcpy(mapped + staging_offset + (size_t)layer_bytes * layer, layer_pixels[layer], (size_t)layer_bytes);
     }
     SDL_UnmapGPUTransferBuffer(device, transfer);
 
@@ -1127,7 +1121,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
         if (command != NULL) {
             (void)SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
@@ -1135,7 +1129,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
     for (uint32_t layer = 0u; layer < layer_count; ++layer) {
         SDL_GPUTextureTransferInfo source = {0};
         source.transfer_buffer = transfer;
-        source.offset = (uint32_t)(layer_bytes * layer);
+        source.offset = staging_offset + (uint32_t)(layer_bytes * layer);
         source.pixels_per_row = width;
         source.rows_per_layer = height;
         SDL_GPUTextureRegion destination = {0};
@@ -1150,8 +1144,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
     if (mip_count > 1u) {
         SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
     }
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    const bool submitted = btbh_gpu_staging_submit(device, command, transfer);
     if (!submitted) {
         btbh_gpu_texture_error(report, SDL_GetError());
         btbh_gpu_texture_destroy(resource);
@@ -1343,10 +1336,8 @@ BTBHGPUTexture *btbh_gpu_window_heightfield_create(
     sampler_info.max_lod = 0.0f;
     resource->sampler = SDL_CreateGPUSampler(device, &sampler_info);
 
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = (uint32_t)byte_count;
-    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(device, (uint32_t)byte_count, &staging_offset);
     void *mapped = resource->texture != NULL && resource->sampler != NULL && transfer != NULL
         ? SDL_MapGPUTransferBuffer(device, transfer, false)
         : NULL;
@@ -1354,12 +1345,12 @@ BTBHGPUTexture *btbh_gpu_window_heightfield_create(
         btbh_gpu_texture_error(report, SDL_GetError());
         free(texels);
         if (transfer != NULL) {
-            SDL_ReleaseGPUTransferBuffer(device, transfer);
+            btbh_gpu_staging_abandon(device, transfer);
         }
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
-    (void)memcpy(mapped, texels, byte_count);
+    (void)memcpy((uint8_t *)mapped + staging_offset, texels, byte_count);
     free(texels);
     SDL_UnmapGPUTransferBuffer(device, transfer);
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
@@ -1369,12 +1360,13 @@ BTBHGPUTexture *btbh_gpu_window_heightfield_create(
         if (command != NULL) {
             (void)SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         btbh_gpu_texture_destroy(resource);
         return NULL;
     }
     SDL_GPUTextureTransferInfo source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     source.pixels_per_row = width;
     source.rows_per_layer = height;
     SDL_GPUTextureRegion destination = {0};
@@ -1384,8 +1376,7 @@ BTBHGPUTexture *btbh_gpu_window_heightfield_create(
     destination.d = 1u;
     SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
     SDL_EndGPUCopyPass(copy_pass);
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    const bool submitted = btbh_gpu_staging_submit(device, command, transfer);
     if (!submitted) {
         btbh_gpu_texture_error(report, SDL_GetError());
         btbh_gpu_texture_destroy(resource);

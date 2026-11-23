@@ -1199,20 +1199,17 @@ bool btbh_gpu_geometry_copy(
     const void *bytes,
     uint32_t size
 ) {
-    SDL_GPUTransferBufferCreateInfo transfer_info = {0};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = size;
-    SDL_GPUTransferBuffer *transfer =
-        SDL_CreateGPUTransferBuffer(device, &transfer_info);
+    uint32_t staging_offset = 0u;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_staging_acquire(device, size, &staging_offset);
     if (transfer == NULL) {
         return false;
     }
     void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
     if (mapped == NULL) {
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return false;
     }
-    memcpy(mapped, bytes, size);
+    memcpy((uint8_t *)mapped + staging_offset, bytes, size);
     SDL_UnmapGPUTransferBuffer(device, transfer);
     SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass *copy =
@@ -1221,20 +1218,19 @@ bool btbh_gpu_geometry_copy(
         if (command != NULL) {
             (void) SDL_CancelGPUCommandBuffer(command);
         }
-        SDL_ReleaseGPUTransferBuffer(device, transfer);
+        btbh_gpu_staging_abandon(device, transfer);
         return false;
     }
     SDL_GPUTransferBufferLocation source = {0};
     source.transfer_buffer = transfer;
+    source.offset = staging_offset;
     SDL_GPUBufferRegion destination = {0};
     destination.buffer = buffer;
     destination.offset = offset;
     destination.size = size;
     SDL_UploadToGPUBuffer(copy, &source, &destination, false);
     SDL_EndGPUCopyPass(copy);
-    const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-    SDL_ReleaseGPUTransferBuffer(device, transfer);
-    return submitted;
+    return btbh_gpu_staging_submit(device, command, transfer);
 }
 
 /* Copies `size` bytes into the arena's open block (a new one when they do not fit), at an offset that is a multiple

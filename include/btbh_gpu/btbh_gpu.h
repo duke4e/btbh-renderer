@@ -1617,6 +1617,25 @@ BTBHGPUDevice *btbh_gpu_device_create(
 );
 void btbh_gpu_device_shutdown(BTBHGPUDevice *device);
 void btbh_gpu_device_destroy(BTBHGPUDevice *device);
+/* Upload staging (since 0.11.0, asked for by Be The Bullet Hell v2): keeps up to `bytes` of upload buffers for reuse.
+   Every upload copies its data into a transfer buffer (host-visible memory) first. By default (a budget of 0) each
+   upload makes its own and releases it, and SDL frees that memory at the next frame that presents: after a level's
+   load, the first frame frees every one the load made (SDL 3.4 on Vulkan: about 0.1 ms each, more for big ones; 17 to
+   28 ms for a load of 140 uploads on an RTX 3070 Ti). With a budget, the uploads of textures (made, loaded and updated)
+   and of the shared geometry buffers (models' primitives and BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS meshes) take their
+   transfer buffer from a pool (at most 16, each a power of two of at least 64 KiB) and give it back when they submit;
+   the next upload reuses one whose upload the GPU has finished (checked, never waited for), so a load makes a few
+   buffers and frees none. An upload bigger than the budget, or one while every pooled buffer is still being read,
+   makes its own, as without a budget. The pool's memory stays allocated until the budget is lowered (idle buffers
+   beyond it are released) or the device shuts down. Uploads and frames are the same to the byte with or without it.
+   Custom meshes without SHARED_BUFFERS and instance buffers still make their own. One device at a time: another
+   device's call, a NULL or shut-down device return BTBH_GPU_INVALID_ARGUMENT. */
+BTBHGPUResult btbh_gpu_device_set_upload_staging_budget(
+    BTBHGPUDevice *device,
+    uint32_t bytes
+);
+/* Defined when btbh_gpu_device_set_upload_staging_budget exists (since 0.11.0). */
+#define BTBH_GPU_HAS_UPLOAD_STAGING_BUDGET 1
 double btbh_gpu_monotonic_elapsed_seconds(void);
 BTBHGPUWindow *btbh_gpu_window_create(
     const BTBHGPUWindowDescriptor *descriptor,
@@ -2152,6 +2171,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
      targets and pipelines.
    - The first frame or two after it still cost a few milliseconds more than the next ones: the GPU API's first
      use of the new pipelines' render passes, descriptor pools and uniform buffers, which only drawing makes.
+   - After a level's load, the first frame that presents also frees every upload buffer the load made (in its submit,
+     outside the scene report's split): btbh_gpu_device_set_upload_staging_budget keeps them for reuse instead.
    - The lazy creation log (btbh_gpu_window_set_lazy_creation_log_enabled, below) names what a frame made that a
      prewarm would have, and what nothing makes ahead.
    - Nothing is kept between runs: SDL 3.4 makes its Vulkan pipelines without a pipeline cache. The driver's own

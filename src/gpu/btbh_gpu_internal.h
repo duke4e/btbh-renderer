@@ -704,6 +704,18 @@ SDL_GPUTransferBuffer *btbh_gpu_create_transfer_buffer_at(
     const SDL_GPUTransferBufferCreateInfo *info,
     const char *function
 );
+/* Upload staging (since 0.11.0, btbh_gpu_device_set_upload_staging_budget): the uploads of textures
+   (btbh_gpu_texture.c) and of the geometry arena (models, shared custom meshes) take `size` bytes of a transfer
+   buffer at *offset with btbh_gpu_staging_acquire (mapped without cycling: write at the mapped pointer plus *offset,
+   and copy from *offset), submit their command buffer with btbh_gpu_staging_submit (which hands the range back) and
+   hand it back unused with btbh_gpu_staging_abandon. With a budget, the range is part of a transfer buffer the pool
+   keeps, which starts again once the GPU has finished the uploads that read it (fences, never waited for); without
+   one (the default), each upload makes its own buffer (*offset 0) and releases it, as before. */
+SDL_GPUTransferBuffer *btbh_gpu_staging_acquire(SDL_GPUDevice *device, uint32_t size, uint32_t *offset);
+bool btbh_gpu_staging_submit(SDL_GPUDevice *device, SDL_GPUCommandBuffer *command, SDL_GPUTransferBuffer *transfer);
+void btbh_gpu_staging_abandon(SDL_GPUDevice *device, SDL_GPUTransferBuffer *transfer);
+/* Releases the pool (btbh_gpu_device_shutdown, before the device goes). */
+void btbh_gpu_staging_release_device(SDL_GPUDevice *device);
 #define SDL_CreateGPUTexture(device, info) btbh_gpu_create_texture_at((device), (info), __func__)
 #define SDL_CreateGPUSampler(device, info) btbh_gpu_create_sampler_at((device), (info), __func__)
 #define SDL_CreateGPUBuffer(device, info) btbh_gpu_create_buffer_at((device), (info), __func__)
