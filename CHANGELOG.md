@@ -37,6 +37,30 @@ Tested on Windows (Vulkan), merged onto 0.10.0's candidate (`a89a4494`), from a 
 macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
 its Height terrain with it yet.
 
+RFC 0013's phase 1, asked for by Be The Bullet Hell v2 for its smoke: a see-through surface lit per pixel
+(`BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`) with a normal and thickness map, the soft and near fades and fog at its own
+depth, and a UV rect per instance (`BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT`) on every static vertex shader's path. Both
+are opt-in: with neither set every frame draws byte for byte as before. Its phase 2 (a transmittance map in sun space)
+follows v2's captures.
+
+Tested on Windows (Vulkan), on `release/0.11.0` (`fc2784ea`), from a cold build (then incremental ones):
+- `check.ps1` with the GPU smokes passes 31/31: the 29 above, the particle's native test and the lit particle
+  smoke. All 76 shaders build, and the public headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- Identity against `fc2784ea`: the images the merged 0.11.0 build wrote, against this build's, every image of the
+  nine image smokes: 278 images, 16,219,008 pixels; 0 differ, in each of the three modes
+  (nothing set, `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`).
+- Every fragment shader and the skinned vertex shaders compile to `fc2784ea`'s SPIR-V, MSL and reflection. The five
+  static vertex shaders (`production_model.vert` and the four built from it) change, by the UV rect's test; their
+  reflection doesn't, and the identity runs above draw with them. The other three files that differ are FSR 3 MSL
+  files, which differ between any two builds of the same source.
+- The lit particle smoke: the light against a CPU reference at 41 pixels, 38 exact and 3 one level off in the 8-bit
+  output; the fog's make-up over a wall and over the sky within 0 levels, the fades within 0.0065 of the CPU's alpha, the UV
+  rect to the byte on eight paths, every refusal, prewarm, old shaders.
+
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
+its smoke with it yet.
+
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
   height samples (2..`BTBH_GPU_HEIGHTFIELD_MAX_SIZE`, 4096), sample (i, j) at the texel centre. Kept as RGBA16F, the
@@ -81,10 +105,58 @@ its Height terrain with it yet.
     is kept leaves the queue for the next; a closed window drops its queue.
   - At most `BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES` (256 MiB) queued at a time (replaced updates count until the next
     scene); past that the call fails and queues nothing. An unknown flag fails. `BTBH_GPU_HAS_QUEUED_MESH_UPDATES`.
+- **`BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`** (11; `BTBH_GPU_SCENE_SURFACE_COUNT` becomes 12): a see-through surface lit
+  per pixel, for smoke, dust and steam (RFC 0013). Drawn in the transparent pass with **`production_particle_lit.frag`**
+  (its **`_2d_shadows`** or **`_unshadowed`** sibling by the frame's shadows), beside the host's fragment shader.
+  - Its light, each at the scale a lit surface takes it: the sky's ambient; the sun, its shadow through four plain
+    comparison taps whatever the sun's filter, and the clouds; the fill and the spot (or omni) light with their
+    shadows; the street lamps and the point lights, each skipped beyond its reach; the radiance cascades' light at its
+    x and z, additive or not; its emission. A light's share is the albedo times the wrap
+    `saturate((n.l + w) / (1 + w))` plus, for the sun and the point lights only, a transmission
+    `x * exp(-thickness * z) * 4 pi * HG(y)` (Henyey-Greenstein's phase, tinted by the albedo).
+  - Its normal and thickness: `normal_texture`, linear, on the albedo's texture coordinate (rg the tilt, OpenGL +Y,
+    scaled by `normal_scale`; b the thickness). Without one it is flat and 1 thick.
+  - `surface_parameters0`: the soft fade (as `SOFT_PARTICLE`'s, with the scene's distance in a slot of its own), the
+    near fade's start and width, the wrap. `surface_parameters1`: the transmission, its asymmetry (clamped to
+    -0.99..0.99), the optical depth at thickness 1, and 0.
+  - Fog at its own depth: it writes the colour that the HDR composite's fog at the depth behind it turns into the puff
+    fogged at its own depth over the background fogged at its own, for every layer (exact while the fog's opacity there
+    stays below 1, as Be The Bullet Hell v2's always does). The distance pass runs on frames that draw one.
+  - Straight alpha (`BTBH_GPU_SCENE_BLEND_ALPHA`) only. It casts no shadow, writes no motion, and is never a source of
+    the radiance cascades' light, with an emission or without.
+  - Refused, naming the batch (`BTBH_GPU_INVALID_ARGUMENT`, "surface_variant LIT_PARTICLE: ..."): opaque, another blend,
+    unlit, animated, dug, a world detail with a texture, a table with `map_layers`, a lift with a heightfield,
+    procedural detail, `surface_parameters1[3]` not 0. A present whose shader directory lacks the file (or has one of
+    that name that isn't the lit particle's) fails, naming it.
+  - `BTBH_GPU_SCENE_HAS_LIT_PARTICLE`.
+- **`BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT`** (batch flag bit 3): the instance's four custom floats are a rectangle of
+  its textures (the texture coordinate, after `uv_scale` and `uv_offset`, times custom x and y plus z and w), so one
+  batch draws every cell of an atlas, a cell per instance. Every static vertex shader takes it, so it works in every
+  pass: opaque or transparent, lit, unlit (the fast unlit shader too), soft and lit particles, lifted, with a
+  world-detail table, and the radiance cascades' source pass. Refused, naming the batch: animated, `DISSOLVE`, `SHATTER`
+  or `GLITTER` (they read the custom floats), a world detail or table seeded by a custom float. A present with the flag
+  and a SPIR-V static vertex shader that doesn't read it fails, naming the file. `BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT`.
+  Batch bit 4 stays free for RFC 0013's phase 2.
 
 ### Changed
 - `production_model.vert` carries the lift under `#if BTBH_HEIGHT_LIFT`; without it, it and every shader built from it
   compile to 0.10.0's SPIR-V, MSL and reflection byte for byte.
+- RFC 0013: `production_model.vert` and the four files built from it read the UV rect's switch (a named word,
+  `instance_uv_rect`, the first of the vertex block's reserved ones, through `production_temporal.hlsli`'s new
+  `BTBH_TEMPORAL_UNIFORMS_STATIC`; the skinned shaders keep their block and their SPIR-V). An unflagged batch's texture
+  coordinate is bit for bit what it was. `SOFT_PARTICLE` gains its header comment. The scene's shader check reads up to
+  16 files (8 before).
+- Tests (RFC 0013): `btbh_gpu_particle_test` (new: the phase, the wrap, the transmission, the fog's amount and its
+  make-up over random stacks, every refusal); `btbh_gpu_lit_particle_smoke` (new: the light, the shadow, the fog, the
+  cascades, the fades against CPU references, the UV rect on eight paths, the refusals, prewarm, old shaders;
+  `BTBH_LIT_PARTICLE_DUMP`, and `BTBH_LIT_PARTICLE_OLD_SHADER_DIR` for an older release's static vertex shaders); the
+  order test's variant, bit and macros; the phase 2 shader test's three particle shaders; the flags smoke's unknown
+  batch flag is now bit 4; the Swift suite's check of the vertex uniforms' end; the frame bench's `smoke-off`,
+  `smoke-soft` and `smoke-lit` modes. `tools/check.ps1` and `tools/check.sh` skip the new smoke with the
+  other GPU smokes.
+- Swift: `GPUSceneSurfaceVariant.litParticle` (11), classified from a `lit_particle` surface shader (`u_softFade`,
+  `u_nearStart`, `u_nearFade`, `u_wrap`, `u_transmission`, `u_asymmetry`, `u_opticalDepth`), as `soft_particle` is. The
+  Swift layer sets no batch flags, so the UV rect has no Swift API.
 - `height_lift` is part of the same-material run key (RFC 0011): a run never spans two lifts.
 - Tests: `btbh_gpu_height_lift_test` (new, the C copy: halves, slopes, the bilinear read, a plane's lift and normal,
   orthogonality through the tilt, a v2-style lattice, the refusals' reasons); `btbh_gpu_height_lift_smoke` (new: lifted
@@ -121,6 +193,25 @@ twice a quiet machine's.
   costs, not the tilt). On the CPU a lifted batch costs 3–7 ns more geometry encode in a run and 2 ns more prepare;
   with runs off (each batch binding its heightfield) 6–16 ns more encode.
 
+RFC 0013's runs, on the same machine: the frame bench's Deck preset (960 x 600 upscaled to 1280 x 800, HBAO, FXAA, the
+soft sun shadow, 2,001 kit draws). Every one held the perf lock (*locked*, 06:35:51-06:37:30 on 2026-11-23); one other
+session's `v2-game` process ran through it anyway.
+
+- **Lit smoke against Be The Bullet Hell v2's smoke today** (the bench's `smoke-soft` and `smoke-lit` modes, *locked*: 170
+  puffs with discs 5.8 % of the screen's height; at least one layer over 11.2 % of the screen, three over 3.4 %, six over
+  1.2 %, the deepest stack 14; 3.4 lights in reach of a puff, under 16 lamps, 10 point lights and the sun's shadow; three
+  runs, 40 rounds a window, the windows rotated): the transparent pass, distance pass included, costs 0.067 ms without
+  puffs, 0.110 ms with v2's unlit soft particles in 10 draws and 0.112 ms with one lit particle batch. Lit against soft:
+  +0.002 ms (90 % interval -0.003 to +0.005; the 10th percentiles -0.001), the whole frame +0.005 ms (-0.012 to
+  +0.021): not resolved. The lit shader's light costs about what the soft particles' full scene shader does, and it
+  shades only the discs (a fragment whose alpha is 0 is discarded before its light). The Deck isn't measured.
+- **Off** (mode none: no lit particle, no rect; *locked*): this branch's shaders against `fc2784ea`'s under this core,
+  three runs: the opaque pass -0.002 ms (-0.004 to +0.001), the whole frame 0.000 ms (-0.003 to +0.004) for 2,001 draws
+  and 4.4 million vertices, so the rect's test isn't measurable. On the CPU (`fc2784ea`'s bench, core and shaders
+  against this branch's, 10 alternating processes each): prepare +5 us, geometry encode -8 us, shadow encode +1 us,
+  the present +4 us a frame, each inside its pairs' spread (tens of microseconds beside the other process): nothing
+  resolved.
+
 ### Upgrading
 - Nothing to set: hosts that don't lift or queue draw as before. Rust hosts with bindgen regenerate the bindings for
   the bigger batch (288 bytes) and the new functions; `..Default::default()` leaves `height_lift` null.
@@ -131,6 +222,13 @@ twice a quiet machine's.
   while a present that uses it runs. Bounds used for culling must span the lift.
 - To queue (v2's conformed marks): `btbh_gpu_custom_mesh_update_ex(..., BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED, ...)`.
 - Swift: nothing changes; a `heightLift` option can follow when Be The Bullet Hell (v1) asks.
+- RFC 0013: nothing to set; a host that draws no lit particle and sets no UV rect draws as before. Rebuild the five
+  static vertex shaders with the others. Rust hosts with bindgen get the new variant and flag; `..Default::default()`
+  leaves them off.
+- To draw lit smoke (v2): build the three `production_particle_lit*.frag` files (`CMakeLists.txt`'s list); bake a
+  normal and thickness atlas on the albedo's cells; make the smoke one batch of `BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`,
+  straight alpha, with `BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT` and each puff's cell in its custom floats; keep sorting the
+  puffs far to near. The five tilts, the sprite turning, the emission's sky fill and the CPU light gathering can go.
 
 ## [Unreleased]
 

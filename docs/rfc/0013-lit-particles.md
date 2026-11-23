@@ -572,8 +572,10 @@ cascades' and the post chain's shaders.
 - **The UV rect:** `instance_uv_rect` in both passes that fill the vertex uniforms, and the SPIR-V name check
   (`btbh_gpu_scene_check_uv_rect_shaders`, present and prewarm); the shader check cache grows from 8 to 16 paths.
 - **Missing files.** A lit particle whose `production_particle_lit*.frag` is missing fails the present with the file's
-  path ("… its fragment shader is missing (build the shaders from 0.11.0 or later): <path>"); a SPIR-V file of that name
-  that doesn't name `particle_scene_distance` is refused too. Older shaders draw everything else as before.
+  path ("A lit particle's fragment shader is missing (build the shaders from 0.11.0 or later): <path>"); a SPIR-V file of
+  that name that doesn't name `particle_scene_distance` is refused too ("… doesn't draw lit particles …"), and so is a
+  rect batch whose static vertex shader doesn't read the rect ("A batch's UV rect (INSTANCE_UV_RECT) isn't read by its
+  vertex shader …"). Older shaders draw everything else as before.
 
 ### Cost
 
@@ -764,8 +766,77 @@ about 9 in the examples.
 
 ## Implementation notes (phase 1, 2026-11-23)
 
-Filled in when phase 1 was built (`feature/0.11.0-lit-particles`, on `fc2784ea`); see the CHANGELOG's
-`[Unreleased] (0.11.0)` for the release's view.
+Built on `feature/0.11.0-lit-particles`, on `release/0.11.0` (`fc2784ea`). Nothing pushed or merged.
+
+**As built, against the draft.**
+- **Dropped:** the batch sort (1d) and its post flag and macro (decision 8).
+- **Narrowed by the decisions:** straight alpha only; the transmission for the sun and the point lights; lit particles
+  never in the cascades' source field (`btbh_gpu_scene_batch_material_source`, which the source pass and the UV rect's
+  shader check share).
+- **The slots** put the shadow maps last (t5–t8), so each variant's slots are the next one's and some more (9, 8, 5
+  samplers). The draft had the atlas at t8.
+- **The scene's distance is sampled** through a nearest sampler (the fallback texture's) at the pixel's centre: a
+  texture only loaded is reflected by shadercross as a storage texture, which the scene's pipelines don't declare.
+- **The fades' and the fog's distances** come from the fragment's depth through the frame's inverse view-projection:
+  the point the depth buffer would hold, the world bent as drawn, as the distance pass and the composite see it. The
+  light and the cascades read the flat world position. So the block grew from the draft's 112 to 176 bytes (the
+  inverse view-projection and the render size).
+- **The UV rect's word** is named through a second macro (`BTBH_TEMPORAL_UNIFORMS_STATIC`), so the skinned vertex
+  shaders keep their block's names and their SPIR-V.
+- **The lit particle's pipelines** are an array of their own (`[3][2][depth][cull][stencil]`, 54 pointers), not a third
+  value of every model pipeline array's last index, which would have grown each by half.
+- **A lit particle can't be lifted** (refused): its pipelines take only `production_model.vert`. A lifted batch takes
+  the UV rect.
+- **Without a `normal_texture`** a lit particle's block gets `normal_scale` 0 (the fallback's rg is 127/255, a tilt of
+  -0.004) and the fallback's b (1) as its thickness.
+- **Every texture with implicit derivatives is read before the discard;** a fragment the fades leave at alpha 0 is
+  discarded before its light. The omni cube is read at level 0.
+- **Without the distance** (its pass couldn't be made) there is no soft fade and no make-up: the composite fogs the
+  puff as any transparent batch.
+- **The messages:** "A lit particle's fragment shader is missing (build the shaders from 0.11.0 or later): <path>",
+  "… doesn't draw lit particles …", "A batch's UV rect (INSTANCE_UV_RECT) isn't read by its vertex shader …". The
+  report's 256 characters can cut a long path short.
+
+**Tests** (Windows, RTX 3070 Ti, Vulkan):
+- `tools/check.ps1`: 31/31 (29 before, the particle's native test and the lit particle smoke); 76 shaders; the public headers clean under `/W4 /WX`.
+- Swift (`BTBH_ENABLE_GPU_TESTS=1`): the build is clean; 301 tests, 2 skipped, 0 failures (the vertex uniforms' check updated for the named word).
+- `btbh_gpu_particle_test`: 20,155 checks.
+- `btbh_gpu_lit_particle_smoke`: 126 checks. The light against the CPU at 41 pixels (three channels each): 38 exact,
+  3 one level off. The fog's make-up over the wall and over the sky: within 0 levels (the composite alone would put the
+  puff 14 and 18 levels off). The soft fade within 0.0052 of the CPU's alpha over 200 fading pixels (and SOFT_PARTICLE's
+  within 0.03), the near fade within 0.0065 over 1,662. The UV rect: 0 pixels apart from four batches with `uv_offset`
+  on all eight paths. Prewarm: 43 pipelines and 61 shaders for 14 scenes into a target, then 0 made by the renders;
+  the window's prewarm, with and without FSR 3, then 0 made by its presents. With
+  `BTBH_LIT_PARTICLE_OLD_SHADER_DIR` at `fc2784ea`'s shaders: its `production_model.vert` draws unflagged batches as this
+  one's, to the byte, on four paths, and its `production_rc_material_source.vert` fails a rect source.
+- The flags smoke's unknown batch flag is now bit 4 (bit 3 is the rect).
+
+**Identity against `fc2784ea`.** The merged 0.11.0 build's images (`btbh-rel-0110-outs*`) against this build's, the nine
+image smokes (flags, font, lift, prewarm, runs, SDF terrain, scene target, RC tops, world detail): 278 images,
+16,219,008 pixels, 0 differ, in each of the three modes (nothing set, `BTBH_SMOKE_SHARED_MESHES=1`,
+`BTBH_GPU_SCENE_RUNS=0`). Shader artefacts: 206 of 219 files byte for byte; the 13 that differ are the five static
+vertex shaders' SPIR-V and MSL (the rect; their reflection is unchanged) and three FSR 3 MSL files that differ between
+any two builds. Every fragment shader and the skinned vertex shaders compile to the same bytes.
+
+**Cost.** Windows, RTX 3070 Ti, Vulkan, the frame bench's Deck preset (960 x 600 to 1280 x 800, HBAO,
+FXAA, the soft sun shadow, 2,001 kit draws), all under the machine's perf lock (06:35:51–06:37:30; one other session's
+`v2-game` process ran through it).
+- **Against v2's smoke today** (`smoke-soft`: unlit soft particles in 10 draws; `smoke-lit`: one lit particle batch with
+  the rect, a normal and thickness atlas, the soft fade and the transmission; 170 puffs, discs 5.8 % of the height, ≥1
+  layer over 11.2 % of the screen, ≥3 over 3.4 %, ≥6 over 1.2 %, the deepest stack 14, 3.4 lights in reach of a puff,
+  under 16 lamps, 10 point lights and the sun's shadow): the transparent pass, distance pass included, 0.067 ms without
+  puffs, 0.110 ms soft, 0.112 ms lit. Lit against soft +0.002 ms (90 % interval −0.003 to +0.005), the whole frame
+  +0.005 ms (−0.012 to +0.021): not resolved. The lit shader shades only the discs (alpha 0 is discarded first), where
+  the soft particles' full scene shader shades the whole card.
+- **Off:** this branch's shaders against `fc2784ea`'s under this core, mode none: the opaque pass −0.002 ms (−0.004 to
+  +0.001), the frame 0.000 ms (−0.003 to +0.004) for 4.4 million vertices: the rect's test isn't measurable. The CPU
+  (`fc2784ea`'s bench, core and shaders against this branch's, 10 alternating processes each): prepare +5 µs, geometry
+  encode −8 µs, shadow encode +1 µs, the present +4 µs a frame, all inside the pairs' spread: nothing resolved.
+- The Deck isn't measured; v2's captures will say.
+
+**Left for phase 2.** The transmittance map (2a) and the ground's read of it (2b); `surface_parameters1.w` (the density
+it shadows with) and batch bit 4 and lighting byte 3,337 stay reserved. Not done here: premultiplied alpha; the Metal
+build (`check.sh` on the Mac; the MSL is generated here); the Vulkan validation layers; the Deck; v2's own frames.
 
 ## Phases
 
