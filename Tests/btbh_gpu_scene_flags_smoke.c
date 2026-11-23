@@ -83,8 +83,9 @@
  *   cascades' shader variant's rounding); without it they differ. With no AO the night street renders that frame with
  *   the flag and without. On a street only the bounce light lights, contact AO and the SSAO with the flag render as no
  *   AO with it (the bounce light isn't darkened); without it they darken it. Contact AO's debug view is the same with
- *   the flag, without it and without the cascades. The opaque unlit box by the neon (0.11.0's leftover) now renders
- *   that frame too, and the SSAO case of 0.11.0's check renders it byte for byte.
+ *   the flag, without it and without the cascades. With the reflections, contact AO and the SSAO under the flag render
+ *   as no cascades with SSR_SURFACE_REFLECTIVITY. The opaque unlit box by the neon (0.11.0's leftover) now renders that
+ *   frame too, and the SSAO case of 0.11.0's check renders it byte for byte.
  * - BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (check_keep_cascades_look): a beam (a long thin additive unlit box)
  *   by the neon, additive cascades, no AO: with KEEP_HBAO the frame without the cascades; with the bit on the beam too,
  *   the frame under the cascades without KEEP_HBAO, byte for byte. With contact AO or the HBAO the bit changes the
@@ -1659,7 +1660,8 @@ static uint32_t expect_same_but_omni_rounding(const char *what, Shadows shadows,
      and the flag changes nothing there (no transparent unlit batch).
    The bounce light isn't darkened: on a street with no light of its own, which the cascades' bounce light from glows
    outside the view lights alone, contact AO and the SSAO with the flag render as no AO with it, byte for byte; without
-   the flag they darken that light. */
+   the flag they darken that light. Contact AO's debug view is the same with the flag, without it and without the
+   cascades; with the reflections, both render as no cascades with SSR_SURFACE_REFLECTIVITY. */
 static void check_keep_hbao_contact(SmokeWindow *smoke) {
     const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
     static const char *const shadow_names[3] = { "no shadow", "the sun's shadow", "the omni shadow" };
@@ -1776,6 +1778,21 @@ static void check_keep_hbao_contact(SmokeWindow *smoke) {
         for (uint32_t index = 0u; index < 3u; ++index) {
             free(views[index]);
         }
+    }
+    /* With the reflections, nothing glowing: the reflectivity from the ambient target's alpha, as without the cascades
+       with SSR_SURFACE_REFLECTIVITY (as with the HBAO under the flag, check_keep_hbao). */
+    for (uint32_t which = 0u; which < 2u; ++which) {
+        const Options options = { .name = "keep-contact-ssr", .shadows = SHADOWS_SUN,
+            .occlusion = occlusions[which].occlusion, .reflections = true, .gold = true, .unlit_box = true,
+            .neon = true, .lamps = true };
+        uint8_t *off = render_with(smoke, options, CASCADES_OFF, BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY, true);
+        uint8_t *kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, true);
+        char what[240];
+        (void)snprintf(what, sizeof(what), "KEEP_HBAO with the reflections, %s, at night by the street lamps, nothing "
+            "glowing: against none with SSR_SURFACE_REFLECTIVITY", occlusions[which].what);
+        expect_same(what, kept, off);
+        free(off);
+        free(kept);
     }
     printf("KEEP_HBAO with contact AO and the SSAO: %u pixels by a level under the omni shadow in all\n", rounded);
 }
