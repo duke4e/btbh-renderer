@@ -68,11 +68,31 @@
  * - prewarming the unflagged scenes in a fresh window leaves the flagged ones no pipeline or shader to make;
  * - refusals, naming the batch (present and prewarm): with INSTANCE_UV_RECT, DISSOLVE, GLITTER, a lit particle, a
  *   refracting batch, a world detail or table seeded by custom x; a detail seeded by w and SHATTER are taken.
- * - BTBH_SMOKE_BENCH=1 (or =ssr, =hbao): the flags' cost at 1920x1080, in interleaved turns (prints only):
- *   the reflections without the cascades unset (which return before they march), with the flag and off; the HBAO
- *   and the reflections under additive cascades with KEEP_HBAO and without, and without the cascades.
- *   BTBH_SMOKE_BENCH_ROUNDS turns (10, up to 40); BTBH_SCENE_FLAGS_BASELINE_SHADER_DIR=<dir> (0.8.0's shaders) adds
- *   the unset configuration in a window whose pipelines are made from those.
+ * - BTBH_SMOKE_BENCH=1 (or =ssr, =hbao, =facing, =contact): the flags' cost at 1920x1080, in interleaved turns
+ *   (prints only): the reflections without the cascades unset (which return before they march), with the flag and
+ *   off; the HBAO and the reflections under additive cascades with KEEP_HBAO and without, and without the cascades;
+ *   (0.12.0) contact AO on the night street with its lamps under additive cascades with KEEP_HBAO and without, and
+ *   without the cascades. BTBH_SMOKE_BENCH_ROUNDS turns (10, up to 40); BTBH_SCENE_FLAGS_BASELINE_SHADER_DIR=<dir> (an
+ *   earlier release's shaders) adds the unset configuration in a window whose pipelines are made from those.
+ *
+ * Set (0.12.0, Be The Bullet Hell v2's two asks):
+ * - KEEP_HBAO's ambient part with contact AO and the SSAO (check_keep_hbao_contact): nothing glowing, additive
+ *   cascades, the day street and the night street with two street lamps (over the metal box, before the building's
+ *   front) and the neon, through no shadow, the sun's and the omni shadow: with the flag, contact AO and the SSAO
+ *   render the frame without the cascades, byte for byte (under the omni shadow at most 4 pixels by a level, the
+ *   cascades' shader variant's rounding); without it they differ. With no AO the night street renders that frame with
+ *   the flag and without. On a street only the bounce light lights, contact AO and the SSAO with the flag render as no
+ *   AO with it (the bounce light isn't darkened); without it they darken it. Contact AO's debug view is the same with
+ *   the flag, without it and without the cascades. The opaque unlit box by the neon (0.11.0's leftover) now renders
+ *   that frame too, and the SSAO case of 0.11.0's check renders it byte for byte.
+ * - BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (check_keep_cascades_look): a beam (a long thin additive unlit box)
+ *   by the neon, additive cascades, no AO: with KEEP_HBAO the frame without the cascades; with the bit on the beam too,
+ *   the frame under the cascades without KEEP_HBAO, byte for byte. With contact AO or the HBAO the bit changes the
+ *   beam's pixels alone. It changes nothing without the cascades, under cascades not additive, without KEEP_HBAO, in a
+ *   debug view, on an opaque unlit box, on every batch of the street, on the beam drawn lit. Prewarming the flagged
+ *   scenes leaves their renders no pipeline to make. Refusals: flags2's bits 1 to 7 (present and prewarm).
+ * - The gallery's lamps-*, dark-bounce-contact-additive and beam-* frames are those scenes unset (as 0.11.0 draws
+ *   them).
  *
  * It needs a GPU and the production shaders; with no device it is skipped (77). */
 #undef NDEBUG
@@ -111,6 +131,12 @@
 /* 0.11.0: the instance's light factor (Be The Bullet Hell v2's blackouts). */
 #if defined(SMOKE_HAS_0100) && defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR) && defined(BTBH_GPU_SMOKE_FIXTURE_DIR)
 #define SMOKE_HAS_0110 1
+#endif
+/* 0.12.0: the batch flags' second byte and KEEP_CASCADES_LOOK; KEEP_HBAO with contact AO and the SSAO. Built against an
+   older header (0.11.0's) only the 0.12.0 checks that need no new API compile: run there, they fail where the older
+   core draws otherwise (the gallery, first, renders and writes as ever). */
+#if defined(SMOKE_HAS_0110) && defined(BTBH_GPU_SCENE_HAS_BATCH_KEEP_CASCADES_LOOK)
+#define SMOKE_HAS_0120 1
 #endif
 
 #if defined(__APPLE__)
@@ -440,6 +466,13 @@ typedef struct Options {
     bool overlay;         /* an additive transparent quad over the street (v2's night overlays) */
     bool steep;           /* the steep street instead (build_steep_scene): thin things over wet ground */
     bool kaiju;           /* dusk, and a tall box alone in an orthographic spot map along the sun (Scene.kaiju_box) */
+    /* 0.12.0: */
+    bool lamps;           /* night, and two street lamps (BTBHGPUSceneLighting's lamps): over the metal box (a car's
+                             roof) and before the building's front (v2's lamp pools) */
+    bool beam;            /* a long thin additive unlit box in the air by the building's foot (v2's weapon beams and
+                             glows), no source of the cascades' light (Scene.beam_box) */
+    bool dark;            /* no light of the scene's own on the street (ambient, sun 0; a spot that reaches nothing):
+                             what lights it is the cascades' bounce light alone */
     BTBHGPUSceneRadianceCascadesDebugView debug_view;
 } Options;
 
@@ -461,6 +494,7 @@ typedef struct Scene {
     uint32_t metal_boxes[2];
     uint32_t metal_box_count;
     uint32_t kaiju_box;
+    uint32_t beam_box;
 } Scene;
 
 static const float grey[4] = { 0.55f, 0.55f, 0.52f, 1.0f };
@@ -507,7 +541,7 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
     memset(scene, 0, sizeof(*scene));
     scene->name = options->name;
     scene->glow_box = scene->source_box = scene->far_glow_box = scene->far_source_box = scene->unlit_box =
-        scene->kaiju_box = MAX_BOXES;
+        scene->kaiju_box = scene->beam_box = MAX_BOXES;
     /* The steep street: the camera looks 67 degrees down. */
     const float eye[3] = { 0.0f, options->steep ? 9.0f : 5.5f, options->steep ? 3.2f : 6.5f };
     const float centre[3] = { 0.0f, options->steep ? 0.0f : 0.2f, options->steep ? -0.6f : -0.5f };
@@ -577,6 +611,39 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         };
         lighting->point_light_count = 2u;
         memcpy(lighting->point_lights, neon, sizeof(neon));
+    }
+    if (options->lamps) {
+        /* Night, and two warm street lamps: one over the metal box's front (a car's roof and side), one before the
+           building's front, low. They light lit surfaces through the scene's BRDF (evaluate_lamps). */
+        lighting->ambient_energy = 0.12f;
+        lighting->directional_energy = 0.15f;
+        static const float lamp_positions[2][4] = {
+            { -0.5f, 1.4f, 0.3f, 3.0f },
+            { -2.0f, 1.0f, -0.35f, 2.6f },
+        };
+        static const float lamp_colours[2][4] = {
+            { 1.0f, 0.82f, 0.55f, 6.0f },
+            { 1.0f, 0.75f, 0.5f, 6.0f },
+        };
+        lighting->lamp_count = 2u;
+        lighting->lamp_core_radius = 0.5f;
+        memcpy(lighting->lamp_position_reach, lamp_positions, sizeof(lamp_positions));
+        memcpy(lighting->lamp_color_energy, lamp_colours, sizeof(lamp_colours));
+    }
+    if (options->dark) {
+        /* No light of its own on the street: a spot (the scene's light must not be 0 altogether, or every surface
+           draws its albedo) far off, whose range ends before it. */
+        lighting->ambient_energy = 0.0f;
+        lighting->directional_energy = 0.0f;
+        lighting->spot_position_x = 0.0f;
+        lighting->spot_position_y = 40.0f;
+        lighting->spot_position_z = 0.0f;
+        lighting->spot_direction_y = -1.0f;
+        lighting->spot_range = 1.0f;
+        lighting->spot_energy = 1.0f;
+        lighting->spot_red = 1.0f;
+        lighting->spot_green = 1.0f;
+        lighting->spot_blue = 1.0f;
     }
 
     BTBHGPUScenePost *post = &scene->post;
@@ -654,11 +721,13 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         scene->metal_boxes[scene->metal_box_count++] =
             scene_add(scene, make_box(-0.5f, 0.5f, -0.6f, 1.0f, 1.0f, 1.0f, steel), batch);
     }
-    /* An unlit receiver. */
-    batch = cube_batch(smoke->cube);
-    batch.unlit_enabled = 1u;
-    batch.rc_receiver = 1u;
-    (void)scene_add(scene, make_box(2.4f, 0.3f, 0.9f, 0.6f, 0.6f, 0.6f, slate), batch);
+    /* An unlit receiver (not on the dark street, which only the bounce light lights: its colour is its own). */
+    if (!options->dark) {
+        batch = cube_batch(smoke->cube);
+        batch.unlit_enabled = 1u;
+        batch.rc_receiver = 1u;
+        (void)scene_add(scene, make_box(2.4f, 0.3f, 0.9f, 0.6f, 0.6f, 0.6f, slate), batch);
+    }
     if (options->gold) {
         batch = cube_batch(smoke->cube);
         batch.metalness = 1.0f;
@@ -706,6 +775,23 @@ static void build_scene(const SmokeWindow *smoke, const Options *options, Scene 
         batch.surface_parameters0[0] = 0.05f;
         batch.spot_shadow_visible = 0u;
         (void)scene_add(scene, make_box(1.2f, 0.5f, 1.4f, 0.8f, 0.8f, 0.8f, glass), batch);
+    }
+    if (options->beam) {
+        /* A beam: a long thin additive unlit box 0.3 over the street by the neon at the building's foot, drawn in the
+           transparent pass, no source of the cascades' light. */
+        static const float beam_colour[4] = { 0.15f, 0.3f, 0.45f, 1.0f };
+        batch = cube_batch(smoke->cube);
+        batch.unlit_enabled = 1u;
+        batch.transparency_enabled = 1u;
+        batch.blend_mode = BTBH_GPU_SCENE_BLEND_ADDITIVE;
+        batch.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+        batch.albedo_alpha = 200u;
+        batch.spot_shadow_visible = 0u;
+        batch.flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+#if defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE)
+        batch.flags |= BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+#endif
+        scene->beam_box = scene_add(scene, make_box(-1.0f, 0.3f, 0.05f, 3.4f, 0.16f, 0.16f, beam_colour), batch);
     }
     if (options->kaiju) {
         /* Dusk: a low warm sun, a cool fill and sky. Be The Bullet Hell v2's kaiju shadow: only the kaiju (a tall box)
@@ -888,6 +974,21 @@ static const Options gallery[] = {
       .occlusion = OCCLUSION_SSAO, .gold = true, .unlit_box = true, .neon = true, .overlay = true },
     { .name = "neon-no-ao-additive", .shadows = SHADOWS_NONE, .cascades = CASCADES_ADDITIVE,
       .gold = true, .unlit_box = true, .neon = true, .overlay = true },
+    /* Since 0.12.0's KEEP_HBAO with contact AO and the SSAO, and its per-batch opt-out: what they touch, unset (as
+       0.11.0 draws them). */
+    { .name = "lamps-contact", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO_CONTACT, .gold = true,
+      .unlit_box = true, .neon = true, .lamps = true },
+    { .name = "lamps-contact-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO_CONTACT, .gold = true, .unlit_box = true, .neon = true, .lamps = true },
+    { .name = "lamps-contact-additive-omni", .shadows = SHADOWS_OMNI, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO_CONTACT, .gold = true, .unlit_box = true, .neon = true, .lamps = true },
+    { .name = "lamps-ssao-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_SSAO, .gold = true, .unlit_box = true, .neon = true, .lamps = true },
+    { .name = "dark-bounce-contact-additive", .shadows = SHADOWS_NONE, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO_CONTACT, .far_glow = true, .dark = true },
+    { .name = "beam-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE, .neon = true, .beam = true },
+    { .name = "beam-contact-additive", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+      .occlusion = OCCLUSION_HBAO_CONTACT, .neon = true, .lamps = true, .beam = true },
 };
 #define GALLERY_COUNT (sizeof(gallery) / sizeof(gallery[0]))
 
@@ -1266,19 +1367,19 @@ static void check_keep_hbao(SmokeWindow *smoke) {
         free(both);
     }
     /* Ignored where it doesn't apply. (No transparent unlit batch here: since 0.11.0 the flag's transparent part
-       applies with contact AO and the SSAO too, check_keep_hbao_any_ao.) */
+       applies with contact AO, the SSAO and no AO too, check_keep_hbao_any_ao; since 0.12.0 the rest applies with
+       contact AO and the SSAO too, check_keep_hbao_contact. With no AO nothing is darkened: only the transparent part
+       applies.) */
     {
-        struct { const char *what; Options options; Cascades cascades; } cases[4] = {
+        struct { const char *what; Options options; Cascades cascades; } cases[3] = {
             { "cascades not additive", { .name = "keep-ignored-rc", .shadows = SHADOWS_SUN,
                 .occlusion = OCCLUSION_HBAO, .glow = true }, CASCADES_ON },
-            { "ssao_contact", { .name = "keep-ignored-contact", .shadows = SHADOWS_SUN,
-                .occlusion = OCCLUSION_HBAO_CONTACT, .glow = true }, CASCADES_ADDITIVE },
-            { "the SSAO", { .name = "keep-ignored-ssao", .shadows = SHADOWS_SUN,
-                .occlusion = OCCLUSION_SSAO, .glow = true }, CASCADES_ADDITIVE },
+            { "no AO", { .name = "keep-ignored-no-ao", .shadows = SHADOWS_SUN,
+                .occlusion = OCCLUSION_NONE, .glow = true, .gold = true, .unlit_box = true }, CASCADES_ADDITIVE },
             { "no cascades", { .name = "keep-ignored-off", .shadows = SHADOWS_SUN,
                 .occlusion = OCCLUSION_HBAO, .glow = true }, CASCADES_OFF },
         };
-        for (uint32_t index = 0u; index < 4u; ++index) {
+        for (uint32_t index = 0u; index < 3u; ++index) {
             uint8_t *without = render_with(smoke, cases[index].options, cases[index].cascades, 0u, false);
             uint8_t *with = render_with(smoke, cases[index].options, cases[index].cascades, keep, false);
             char what[160];
@@ -1439,12 +1540,11 @@ static void check_keep_hbao_point_lights(SmokeWindow *smoke) {
 
 #if defined(SMOKE_HAS_0110)
 /* 0.11.0: KEEP_HBAO's transparent part with any ambient occlusion (Be The Bullet Hell v2 draws with contact AO, where
-   0.10.0 ignored the flag). Additive cascades, nothing glowing, the overlays by the neon: with contact AO or none the
-   flag renders the frame without the cascades; with the SSAO (whose own darkening differs under the cascades) it
-   changes the overlays. Without it the overlays are brighter (the gallery's unset neon-*-additive frames keep
-   0.10.0's). With an opaque unlit box by the neon too, contact AO leaves that box as the cascades draw it (the flag's
-   other part, which draws opaque surfaces as without the cascades, needs the HBAO): only its pixels differ from the
-   frame without the cascades. */
+   0.10.0 ignored the flag). Additive cascades, nothing glowing, the overlays by the neon: with contact AO, the SSAO or
+   none the flag renders the frame without the cascades (with the SSAO since 0.12.0, whose own darkening differed under
+   the cascades in 0.11.0). Without it the overlays are brighter (the gallery's unset neon-*-additive frames keep
+   0.10.0's). With an opaque unlit box by the neon too, contact AO left that box as the cascades draw it in 0.11.0 (the
+   flag's other part needed the HBAO there); since 0.12.0 the frame is the frame without the cascades there too. */
 static void check_keep_hbao_any_ao(SmokeWindow *smoke) {
     const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
     static const struct {
@@ -1454,7 +1554,11 @@ static void check_keep_hbao_any_ao(SmokeWindow *smoke) {
     } cases[3] = {
         { "contact AO", OCCLUSION_HBAO_CONTACT, true },
         { "no AO", OCCLUSION_NONE, true },
+#if defined(SMOKE_HAS_0120)
+        { "the SSAO", OCCLUSION_SSAO, true },
+#else
         { "the SSAO", OCCLUSION_SSAO, false },
+#endif
     };
     static const char *const shadow_names[2] = { "no shadow", "the sun's shadow" };
     for (uint32_t shadows = 0u; shadows < 2u; ++shadows) {
@@ -1515,11 +1619,165 @@ static void check_keep_hbao_any_ao(SmokeWindow *smoke) {
         }
     }
     printf("KEEP_HBAO, contact AO, the sun's shadow, an opaque unlit box by the point lights too: additive cascades "
-           "with it against none: %u pixels differ on the box's rectangle (the cascades' own unlit shading), %u outside it\n",
+           "with it against none: %u pixels differ on the box's rectangle, %u outside it\n",
         inside, outside);
     assert(outside == 0u);
+#if defined(SMOKE_HAS_0120)
+    assert(inside == 0u);
+#endif
     free(off);
     free(kept);
+}
+
+/* Prints and asserts a comparison that must come out the same, but under the omni shadow, where at most 4 pixels may
+   differ by a level: the cascades' variant of the scene shader (production_model_rc.frag) rounds that light apart from
+   the plain one (0.9.0's and 0.10.0's note). Returns the pixels that differ. */
+static uint32_t expect_same_but_omni_rounding(const char *what, Shadows shadows, const uint8_t *a, const uint8_t *b) {
+    if (shadows != SHADOWS_OMNI) {
+        expect_same(what, a, b);
+        return 0u;
+    }
+    int largest = 0;
+    const uint32_t differing = differing_pixels(a, b, &largest);
+    printf("%s: %u pixels differ (largest %d levels; the omni shadow's variant rounding allows 4 by 1)\n", what,
+        differing, largest);
+    assert(differing <= 4u && largest <= 1);
+    return differing;
+}
+
+/* 0.12.0: KEEP_HBAO's ambient part with contact AO (ssao_contact 1) and the SSAO (ssao_enabled 1). Be The Bullet Hell
+   v2 draws with contact AO, where under additive cascades lit surfaces in a street lamp's pool (a car's roof, a facade)
+   came out up to 94 levels brighter than without the cascades, with the flag or without: the cascades' scene shader
+   puts the street lamps' light in the emission target, which contact AO keeps; and an opaque unlit surface's colour.
+   Additive cascades, nothing glowing (the unlit box no source):
+   - the day street, and the night street with its street lamps (over the metal box and before the building's front)
+     and the neon at the building's foot, through no shadow, the sun's and the omni shadow: with the flag, contact AO
+     and the SSAO render the frame without the cascades, byte for byte (under the omni shadow at most 4 pixels by a
+     level, expect_same_but_omni_rounding); without it they differ (printed; the gallery's unset lamps-* frames keep
+     0.11.0's);
+   - with no AO the night street renders the frame without the cascades with the flag and without: nothing darkens it,
+     and the flag changes nothing there (no transparent unlit batch).
+   The bounce light isn't darkened: on a street with no light of its own, which the cascades' bounce light from glows
+   outside the view lights alone, contact AO and the SSAO with the flag render as no AO with it, byte for byte; without
+   the flag they darken that light. */
+static void check_keep_hbao_contact(SmokeWindow *smoke) {
+    const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    static const char *const shadow_names[3] = { "no shadow", "the sun's shadow", "the omni shadow" };
+    static const struct {
+        const char *what;
+        Occlusion occlusion;
+    } occlusions[2] = {
+        { "contact AO", OCCLUSION_HBAO_CONTACT },
+        { "the SSAO", OCCLUSION_SSAO },
+    };
+    uint32_t rounded = 0u;
+    for (uint32_t street = 0u; street < 2u; ++street) {
+        const char *street_name = street == 0u ? "by day" : "at night by the street lamps and the neon";
+        for (uint32_t which = 0u; which < 2u; ++which) {
+            for (uint32_t shadows = 0u; shadows < 3u; ++shadows) {
+                const Options options = { .name = street == 0u ? "keep-contact-day" : "keep-contact-lamps",
+                    .shadows = (Shadows)shadows, .occlusion = occlusions[which].occlusion, .gold = true,
+                    .unlit_box = true, .neon = street != 0u, .lamps = street != 0u };
+                uint8_t *off = render_with(smoke, options, CASCADES_OFF, 0u, true);
+                uint8_t *additive = render_with(smoke, options, CASCADES_ADDITIVE, 0u, true);
+                uint8_t *kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, true);
+                char what[240];
+                (void)snprintf(what, sizeof(what),
+                    "KEEP_HBAO, %s, %s, %s, nothing glowing: additive cascades with it against none",
+                    occlusions[which].what, street_name, shadow_names[shadows]);
+                rounded += expect_same_but_omni_rounding(what, (Shadows)shadows, kept, off);
+                (void)snprintf(what, sizeof(what),
+                    "KEEP_HBAO, %s, %s, %s, nothing glowing: additive cascades without it against none",
+                    occlusions[which].what, street_name, shadow_names[shadows]);
+                (void)expect_different(what, additive, off);
+                if (street == 1u && shadows == 1u) {
+                    print_darkening("  without it against none", off, additive);
+                    dump_image(which == 0u ? "keep-contact-lamps-off" : "keep-ssao-lamps-off", off);
+                    dump_image(which == 0u ? "keep-contact-lamps-additive" : "keep-ssao-lamps-additive", additive);
+                    dump_image(which == 0u ? "keep-contact-lamps-kept" : "keep-ssao-lamps-kept", kept);
+                }
+                free(off);
+                free(additive);
+                free(kept);
+            }
+        }
+    }
+    for (uint32_t shadows = 0u; shadows < 3u; ++shadows) {
+        const Options options = { .name = "keep-no-ao-lamps", .shadows = (Shadows)shadows,
+            .occlusion = OCCLUSION_NONE, .gold = true, .unlit_box = true, .neon = true, .lamps = true };
+        uint8_t *off = render_with(smoke, options, CASCADES_OFF, 0u, true);
+        uint8_t *additive = render_with(smoke, options, CASCADES_ADDITIVE, 0u, true);
+        uint8_t *kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, true);
+        char what[240];
+        (void)snprintf(what, sizeof(what), "KEEP_HBAO, no AO, at night by the street lamps and the neon, %s, nothing "
+            "glowing: additive cascades with it against none", shadow_names[shadows]);
+        rounded += expect_same_but_omni_rounding(what, (Shadows)shadows, kept, off);
+        (void)snprintf(what, sizeof(what), "KEEP_HBAO, no AO, at night by the street lamps and the neon, %s, nothing "
+            "glowing: additive cascades without it against none", shadow_names[shadows]);
+        rounded += expect_same_but_omni_rounding(what, (Shadows)shadows, additive, off);
+        free(off);
+        free(additive);
+        free(kept);
+    }
+    /* The bounce light alone. */
+    {
+        Options options = { .name = "keep-contact-bounce", .shadows = SHADOWS_NONE, .occlusion = OCCLUSION_NONE,
+            .far_glow = true, .dark = true };
+        uint8_t *none = render_with(smoke, options, CASCADES_OFF, 0u, false);
+        uint8_t *bounce = render_with(smoke, options, CASCADES_ADDITIVE, 0u, false);
+        uint8_t *bounce_kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, false);
+        (void)expect_different("KEEP_HBAO, the bounce light alone, no AO: additive cascades against none", bounce,
+            none);
+        expect_same("KEEP_HBAO, the bounce light alone, no AO: additive cascades with it against without", bounce_kept,
+            bounce);
+        for (uint32_t which = 0u; which < 2u; ++which) {
+            options.occlusion = occlusions[which].occlusion;
+            uint8_t *occluded = render_with(smoke, options, CASCADES_ADDITIVE, 0u, false);
+            uint8_t *occluded_kept = render_with(smoke, options, CASCADES_ADDITIVE, keep, false);
+            char what[240];
+            (void)snprintf(what, sizeof(what), "KEEP_HBAO, the bounce light alone, %s: additive cascades with it "
+                "against no AO with it", occlusions[which].what);
+            expect_same(what, occluded_kept, bounce_kept);
+            (void)snprintf(what, sizeof(what), "KEEP_HBAO, the bounce light alone, %s: additive cascades without it "
+                "against no AO without it (it darkens the bounce light)", occlusions[which].what);
+            (void)expect_different(what, occluded, bounce);
+            if (which == 0u) {
+                dump_image("keep-contact-bounce-additive", occluded);
+                dump_image("keep-contact-bounce-kept", occluded_kept);
+            }
+            free(occluded);
+            free(occluded_kept);
+        }
+        free(none);
+        free(bounce);
+        free(bounce_kept);
+    }
+    /* Contact AO's debug view (the occlusion alone, in grey) on the glowing street: the same with the flag, without
+       it and without the cascades (it comes after the cascades' bounce light, as before). */
+    {
+        static Scene scene;
+        const Options options = { .name = "keep-contact-debug", .shadows = SHADOWS_SUN,
+            .occlusion = OCCLUSION_HBAO_CONTACT, .glow = true, .far_glow = true, .gold = true, .unlit_box = true,
+            .lamps = true };
+        uint8_t *views[3];
+        static const Cascades cascades[3] = { CASCADES_OFF, CASCADES_ADDITIVE, CASCADES_ADDITIVE };
+        for (uint32_t index = 0u; index < 3u; ++index) {
+            Options each = options;
+            each.cascades = cascades[index];
+            build_scene(smoke, &each, &scene);
+            scene.post.ssao_debug_view = 1u;
+            scene.post.flags = index == 2u ? keep : 0u;
+            views[index] = render(smoke, &scene);
+        }
+        expect_same("KEEP_HBAO, contact AO's debug view, glowing: additive cascades with it against without",
+            views[2], views[1]);
+        expect_same("KEEP_HBAO, contact AO's debug view, glowing: additive cascades with it against none", views[2],
+            views[0]);
+        for (uint32_t index = 0u; index < 3u; ++index) {
+            free(views[index]);
+        }
+    }
+    printf("KEEP_HBAO with contact AO and the SSAO: %u pixels by a level under the omni shadow in all\n", rounded);
 }
 #endif
 
@@ -2220,6 +2478,214 @@ static void check_light_factor(SmokeWindow *smoke, BTBHGPUDevice *device) {
 }
 #endif
 
+#if defined(SMOKE_HAS_0120)
+/* What carries BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK in render_look. */
+enum { LOOK_BEAM = 1u, LOOK_UNLIT_BOX = 2u, LOOK_EVERY = 4u };
+
+/* Renders `options` as render_with does (the unlit box no source), with the bit on what `look` names. */
+static uint8_t *render_look(SmokeWindow *smoke, Options options, Cascades cascades, uint8_t post_flags, uint32_t look) {
+    static Scene scene;
+    options.cascades = cascades;
+    build_scene(smoke, &options, &scene);
+    scene.post.flags = post_flags;
+    if (scene.unlit_box != MAX_BOXES) {
+        scene.batches[scene.unlit_box].flags = BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+    }
+    for (uint32_t index = 0u; index < scene.count; ++index) {
+        if ((look & LOOK_EVERY) != 0u || ((look & LOOK_BEAM) != 0u && index == scene.beam_box) ||
+            ((look & LOOK_UNLIT_BOX) != 0u && index == scene.unlit_box)) {
+            scene.batches[index].flags2 = BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK;
+        }
+    }
+    return render(smoke, &scene);
+}
+
+/* Pixels where a and b differ outside the box's rectangle, and inside it. */
+static void differing_around(const Scene *scene, uint32_t box_index, const uint8_t *a, const uint8_t *b,
+    uint32_t *inside, uint32_t *outside) {
+    int rectangle[4];
+    box_rectangle(scene, box_index, rectangle);
+    *inside = 0u;
+    *outside = 0u;
+    for (uint32_t y = 0u; y < TARGET_SIZE; ++y) {
+        for (uint32_t x = 0u; x < TARGET_SIZE; ++x) {
+            const uint32_t at = (y * TARGET_SIZE + x) * 4u;
+            if (memcmp(&a[at], &b[at], 4u) != 0) {
+                const bool in = (int)x >= rectangle[0] && (int)x <= rectangle[2] && (int)y >= rectangle[1] &&
+                    (int)y <= rectangle[3];
+                *inside += in ? 1u : 0u;
+                *outside += in ? 0u : 1u;
+            }
+        }
+    }
+}
+
+/* 0.12.0: BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK (Be The Bullet Hell v2's weapon beams and glows keep the
+   cascades' point-light boost under KEEP_HBAO, while its light overlays draw as without the cascades). A beam (a long
+   thin additive unlit box) over the street by the neon, nothing glowing, additive cascades:
+   - no AO (where KEEP_HBAO's transparent part alone applies), no shadow and the sun's: with KEEP_HBAO the beam draws as
+     without the cascades (the fast unlit shader), the frame without them; with the bit on the beam too, as under the
+     cascades without KEEP_HBAO, that frame, byte for byte; and the two differ;
+   - with contact AO and street lamps, and with the HBAO, under KEEP_HBAO: the bit changes the beam's pixels alone;
+   - the bit on every batch changes nothing without the cascades, under cascades that aren't additive (KEEP_HBAO set),
+     under additive ones without KEEP_HBAO, nor in a cascades' debug view; on an opaque unlit box (contact AO,
+     KEEP_HBAO) and on the beam drawn lit it changes nothing either;
+   - prewarming the flagged scenes in a fresh window leaves their renders no pipeline or shader to make. */
+static void check_keep_cascades_look(SmokeWindow *smoke, BTBHGPUDevice *device) {
+    const uint8_t keep = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO;
+    static const char *const shadow_names[2] = { "no shadow", "the sun's shadow" };
+    static Scene scene;
+    for (uint32_t shadows = 0u; shadows < 2u; ++shadows) {
+        const Options options = { .name = "look-beam", .shadows = (Shadows)shadows, .neon = true, .beam = true };
+        uint8_t *off = render_look(smoke, options, CASCADES_OFF, 0u, 0u);
+        uint8_t *additive = render_look(smoke, options, CASCADES_ADDITIVE, 0u, 0u);
+        uint8_t *kept = render_look(smoke, options, CASCADES_ADDITIVE, keep, 0u);
+        uint8_t *looked = render_look(smoke, options, CASCADES_ADDITIVE, keep, LOOK_BEAM);
+        char what[240];
+        (void)snprintf(what, sizeof(what), "KEEP_CASCADES_LOOK, no AO, %s, a beam by the neon: KEEP_HBAO without the "
+            "bit against no cascades", shadow_names[shadows]);
+        expect_same(what, kept, off);
+        (void)snprintf(what, sizeof(what), "KEEP_CASCADES_LOOK, no AO, %s, a beam by the neon: KEEP_HBAO with the bit "
+            "against additive cascades without KEEP_HBAO", shadow_names[shadows]);
+        expect_same(what, looked, additive);
+        (void)snprintf(what, sizeof(what), "KEEP_CASCADES_LOOK, no AO, %s, a beam by the neon: KEEP_HBAO with the bit "
+            "against without it", shadow_names[shadows]);
+        (void)expect_different(what, looked, kept);
+        if (shadows == 1u) {
+            dump_image("look-beam-off", off);
+            dump_image("look-beam-kept", kept);
+            dump_image("look-beam-looked", looked);
+        }
+        free(off);
+        free(additive);
+        free(kept);
+        free(looked);
+    }
+    /* With contact AO (and the street lamps), and with the HBAO: the beam's pixels alone. */
+    {
+        static const struct {
+            const char *what;
+            Occlusion occlusion;
+        } cases[2] = { { "contact AO", OCCLUSION_HBAO_CONTACT }, { "the HBAO", OCCLUSION_HBAO } };
+        for (uint32_t index = 0u; index < 2u; ++index) {
+            const Options options = { .name = "look-beam-ao", .shadows = SHADOWS_SUN,
+                .occlusion = cases[index].occlusion, .neon = true, .lamps = true, .beam = true, .unlit_box = true };
+            uint8_t *kept = render_look(smoke, options, CASCADES_ADDITIVE, keep, 0u);
+            uint8_t *looked = render_look(smoke, options, CASCADES_ADDITIVE, keep, LOOK_BEAM);
+            build_scene(smoke, &options, &scene);
+            uint32_t inside = 0u;
+            uint32_t outside = 0u;
+            differing_around(&scene, scene.beam_box, kept, looked, &inside, &outside);
+            printf("KEEP_CASCADES_LOOK, %s, the sun's shadow, a beam by the neon and the lamps: KEEP_HBAO with the "
+                   "bit against without it: %u pixels differ on the beam's rectangle, %u outside it\n",
+                cases[index].what, inside, outside);
+            assert(inside > 0u && outside == 0u);
+            free(kept);
+            free(looked);
+        }
+    }
+    /* Where it changes nothing. */
+    {
+        struct {
+            const char *what;
+            Options options;
+            Cascades cascades;
+            uint8_t post_flags;
+            uint32_t look;
+        } cases[6] = {
+            { "no cascades", { .name = "look-off", .shadows = SHADOWS_SUN, .neon = true, .beam = true,
+                .occlusion = OCCLUSION_HBAO_CONTACT }, CASCADES_OFF, 0u, LOOK_EVERY },
+            { "cascades not additive, KEEP_HBAO", { .name = "look-rc", .shadows = SHADOWS_SUN, .neon = true,
+                .beam = true }, CASCADES_ON, keep, LOOK_EVERY },
+            { "additive cascades without KEEP_HBAO", { .name = "look-additive", .shadows = SHADOWS_SUN, .neon = true,
+                .beam = true, .occlusion = OCCLUSION_HBAO_CONTACT }, CASCADES_ADDITIVE, 0u, LOOK_EVERY },
+            { "a debug view, KEEP_HBAO", { .name = "look-debug", .shadows = SHADOWS_SUN, .neon = true, .beam = true,
+                .debug_view = BTBH_GPU_SCENE_RC_DEBUG_FINAL_INDIRECT }, CASCADES_ADDITIVE, keep, LOOK_EVERY },
+            { "an opaque unlit box, contact AO, KEEP_HBAO", { .name = "look-unlit", .shadows = SHADOWS_SUN,
+                .neon = true, .lamps = true, .unlit_box = true, .occlusion = OCCLUSION_HBAO_CONTACT },
+                CASCADES_ADDITIVE, keep, LOOK_UNLIT_BOX },
+            { "every batch of the street without a beam, the HBAO, KEEP_HBAO", { .name = "look-others",
+                .shadows = SHADOWS_SUN, .neon = true, .lamps = true, .unlit_box = true, .gold = true,
+                .occlusion = OCCLUSION_HBAO }, CASCADES_ADDITIVE, keep, LOOK_EVERY },
+        };
+        for (uint32_t index = 0u; index < 6u; ++index) {
+            uint8_t *without = render_look(smoke, cases[index].options, cases[index].cascades,
+                cases[index].post_flags, 0u);
+            uint8_t *with = render_look(smoke, cases[index].options, cases[index].cascades, cases[index].post_flags,
+                cases[index].look);
+            char what[200];
+            (void)snprintf(what, sizeof(what), "KEEP_CASCADES_LOOK changes nothing: %s", cases[index].what);
+            expect_same(what, without, with);
+            free(without);
+            free(with);
+        }
+        /* The beam drawn lit (transparent, not unlit): no fast unlit shader to leave. */
+        const Options options = { .name = "look-lit-beam", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+            .neon = true, .beam = true };
+        build_scene(smoke, &options, &scene);
+        scene.post.flags = keep;
+        scene.batches[scene.beam_box].unlit_enabled = 0u;
+        uint8_t *lit = render(smoke, &scene);
+        scene.batches[scene.beam_box].flags2 = BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK;
+        uint8_t *lit_looked = render(smoke, &scene);
+        expect_same("KEEP_CASCADES_LOOK changes nothing: the beam drawn lit, KEEP_HBAO", lit, lit_looked);
+        free(lit);
+        free(lit_looked);
+    }
+    /* Prewarm: the flagged scenes' pipelines are made by prewarming them. */
+    {
+        SmokeWindow fresh = open_smoke_window(device, "BTBH scene flags smoke (keep cascades look prewarm)");
+        const Options prewarmed_options[3] = {
+            { .name = "look-prewarm-none", .shadows = SHADOWS_NONE, .cascades = CASCADES_ADDITIVE, .neon = true,
+                .beam = true },
+            { .name = "look-prewarm-sun", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE, .neon = true,
+                .beam = true },
+            { .name = "look-prewarm-contact", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE, .neon = true,
+                .lamps = true, .beam = true, .unlit_box = true, .occlusion = OCCLUSION_HBAO_CONTACT },
+        };
+        BTBHGPUCreationStats before;
+        btbh_gpu_creation_stats(&before);
+        for (uint32_t index = 0u; index < 3u; ++index) {
+            build_scene(&fresh, &prewarmed_options[index], &scene);
+            scene.post.flags = keep;
+            scene.batches[scene.beam_box].flags2 = BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK;
+            if (scene.unlit_box != MAX_BOXES) {
+                scene.batches[scene.unlit_box].flags = BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE;
+            }
+            BTBHGPUSceneReport report;
+            memset(&report, 0, sizeof(report));
+            const BTBHGPUResult result = btbh_gpu_window_scene_prewarm_render_to_target(fresh.window, fresh.target,
+                shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+                shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+                shader_paths[8], shader_paths[9], shader_paths[10],
+                SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE, &scene.lighting, &scene.post, scene.batches,
+                scene.count, &report);
+            if (result != BTBH_GPU_OK) {
+                fprintf(stderr, "keep cascades look prewarm %s: %s\n", prewarmed_options[index].name, report.message);
+            }
+            assert(result == BTBH_GPU_OK);
+        }
+        BTBHGPUCreationStats prewarmed;
+        btbh_gpu_creation_stats(&prewarmed);
+        for (uint32_t index = 0u; index < 3u; ++index) {
+            free(render_look(&fresh, prewarmed_options[index], CASCADES_ADDITIVE, keep, LOOK_BEAM));
+        }
+        BTBHGPUCreationStats rendered;
+        btbh_gpu_creation_stats(&rendered);
+        printf("KEEP_CASCADES_LOOK prewarm: %llu pipelines and %llu shaders made by prewarming 3 flagged scenes in a "
+               "fresh window; their renders then made %llu pipelines and %llu shaders\n",
+            (unsigned long long)(prewarmed.graphics_pipelines - before.graphics_pipelines),
+            (unsigned long long)(prewarmed.shaders - before.shaders),
+            (unsigned long long)(rendered.graphics_pipelines - prewarmed.graphics_pipelines),
+            (unsigned long long)(rendered.shaders - prewarmed.shaders));
+        assert(prewarmed.graphics_pipelines > before.graphics_pipelines);
+        assert(rendered.graphics_pipelines == prewarmed.graphics_pipelines);
+        assert(rendered.shaders == prewarmed.shaders);
+        close_smoke_window(&fresh);
+    }
+}
+#endif
+
 static void check_refusals(SmokeWindow *smoke) {
     static Scene scene;
     const Options options = { .name = "refusal", .shadows = SHADOWS_SUN, .occlusion = OCCLUSION_HBAO,
@@ -2263,7 +2729,28 @@ static void check_refusals(SmokeWindow *smoke) {
         BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY);
     uint8_t *image = render_scene(smoke, &scene, BTBH_GPU_OK, &report);
     free(image);
+#if defined(SMOKE_HAS_0120)
+    /* 0.12.0: flags2's bits 1 to 7 are unknown (present and prewarm); its bit 0 alone is taken. */
+    for (uint32_t bit = 1u; bit < 8u; ++bit) {
+        build_scene(smoke, &options, &scene);
+        scene.batches[1].flags2 = (uint8_t)((1u << bit) | BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK);
+        assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
+        assert(btbh_gpu_window_scene_prewarm(
+            smoke->window,
+            shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
+            shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
+            shader_paths[8], shader_paths[9], shader_paths[10],
+            SMOKE_SHADER_FORMAT, TARGET_SIZE, TARGET_SIZE, &scene.lighting, &scene.post, scene.batches, scene.count,
+            &prewarm_report) == BTBH_GPU_INVALID_ARGUMENT);
+    }
+    build_scene(smoke, &options, &scene);
+    scene.batches[1].flags2 = BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK;
+    free(render_scene(smoke, &scene, BTBH_GPU_OK, &report));
+    puts("refusals: unknown batch flags and flags2 bits, unknown post flags (present and prewarm), unknown spot "
+         "occluder flags");
+#else
     puts("refusals: unknown batch flags, unknown post flags (present and prewarm), unknown spot occluder flags");
+#endif
 }
 
 /* ----------------------------------------------------------------------------------------------- the bench */
@@ -2427,6 +2914,28 @@ static void run_bench(SmokeWindow *smoke, SmokeWindow *baseline, const char (*ba
         bench_configs("the reflections' facing hits", configs, 3u + extra, rounds);
     }
 #endif
+#if defined(SMOKE_HAS_0110)
+    if (strcmp(mode, "1") == 0 || strcmp(mode, "contact") == 0) {
+        /* 0.12.0's KEEP_HBAO with contact AO: the night street with its lamps and neon under additive cascades. */
+        BenchConfig configs[4];
+        memset(configs, 0, sizeof(configs));
+        const Options base = { .name = "bench-contact", .shadows = SHADOWS_SUN, .cascades = CASCADES_ADDITIVE,
+            .occlusion = OCCLUSION_HBAO_CONTACT, .gold = true, .unlit_box = true, .neon = true, .lamps = true };
+        configs[0] = (BenchConfig){ .name = "additive cascades, contact AO unset", .options = base };
+        configs[1] = (BenchConfig){ .name = "additive cascades, contact AO with KEEP_HBAO", .options = base,
+            .post_flags = BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO };
+        configs[2] = (BenchConfig){ .name = "no cascades, contact AO", .options = base };
+        configs[2].options.cascades = CASCADES_OFF;
+        configs[3] = (BenchConfig){ .name = "additive cascades, contact AO unset, baseline shaders",
+            .options = base };
+        for (uint32_t index = 0u; index < 4u; ++index) {
+            configs[index].smoke = index == 3u ? baseline : smoke;
+            configs[index].paths = index == 3u ? baseline_paths : (const char (*)[1024])shader_paths;
+            configs[index].target = index == 3u ? baseline_target : target;
+        }
+        bench_configs("contact AO under additive cascades", configs, 3u + extra, rounds);
+    }
+#endif
     if (baseline_target != NULL) {
         btbh_gpu_texture_destroy(baseline_target);
     }
@@ -2561,7 +3070,11 @@ int main(void) {
 #endif
 #if defined(SMOKE_HAS_0110)
         check_keep_hbao_any_ao(&smoke);
+        check_keep_hbao_contact(&smoke);
         check_light_factor(&smoke, device);
+#endif
+#if defined(SMOKE_HAS_0120)
+        check_keep_cascades_look(&smoke, device);
 #endif
         check_refusals(&smoke);
 #endif
