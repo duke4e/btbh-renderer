@@ -12,13 +12,30 @@ smoothly instead of stepping cell by cell; and custom-mesh updates can be queued
 submitting a command buffer of its own (`BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED`). Both are opt-in: a batch without a lift
 and an update without the flag draw byte for byte as before, with the same shaders.
 
-Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (28/28 with the new height lift and mesh queue smokes, 73
-shaders), the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.10.0's candidate
-(`c5390f0b`), each smoke's images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ,
-with nothing set and with the smokes' meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`); every shader that
-existed compiles to the same SPIR-V, MSL and reflection (three FSR 3 MSL files aside, which differ between any two
-builds of the same source). macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The
-Bullet Hell v2 hasn't drawn its Height terrain with it yet.
+Tested on Windows (Vulkan), merged onto 0.10.0's candidate (`a89a4494`), from a cold build:
+- `check.ps1` with the GPU smokes passes 29/29: 0.10.0's 26, the height lift's native test, and the new height lift
+  and mesh queue smokes. All 73 shaders build, and the public headers compile clean under `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- Identity against 0.10.0's candidate: the images its own verification wrote (from `b7f451ea`, the same code as
+  `a89a4494`) against this build's, every image of the eight image smokes. 235 images, 14,633,856 pixels; 0 differ, in
+  each of three modes:
+  - nothing set;
+  - `BTBH_SMOKE_SHARED_MESHES=1`;
+  - `BTBH_GPU_SCENE_RUNS=0`.
+- Every shader that existed compiles to 0.10.0's SPIR-V, MSL and reflection: 210 of 213 files. The other three are
+  FSR 3 MSL files, which differ between any two builds of the same source.
+- The height lift smoke draws the lift branch's 36 images (12 scenes, each lifted, lifted on the CPU and unlifted) as
+  that branch did, in all three modes, but for 1 pixel by 1 level in the CPU-lifted transparent scene. 0.10.0's
+  recompiled scene fragment shaders round it apart: with the branch's `production_model.frag` and
+  `production_model_2d_shadows.frag` the 36 images are byte for byte the branch's.
+- Its new scene is Be The Bullet Hell v2's overlays at night: a lifted unlit alpha overlay with `KEEP_NORMALS`, by two
+  point lights, under additive cascades with `KEEP_HBAO` and the HBAO. It draws with the fast unlit pipeline under the
+  cascades, as 0.10.0 draws such a batch unlifted. With no shadow, the sun's and the omni shadow, the frame is the frame
+  without the cascades, byte for byte, lifted on the GPU and on the CPU alike.
+- The mesh queue smoke passes in all three modes.
+
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't drawn
+its Height terrain with it yet.
 
 ### Added
 - **`btbh_gpu_window_heightfield_create(window, heights, width, height, report)`**: a heightfield for the lift, width x
@@ -34,8 +51,8 @@ Bullet Hell v2 hasn't drawn its Height terrain with it yet.
   the instance's matrix and the wind every vertex rises by `height_scale * h + height_offset`, h read at its flat world
   xz through `world_to_uv`; its normal and tangent tilt with the slope, unless
   **`BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS`** (overlays that keep their shading). In every pass that draws a static
-  batch: opaque, transparent, unlit (the fast unlit pipeline too), additive, soft particles, refraction, with or
-  without a world-detail table. FSR 3's previous position is lifted at its own xz (a static instance on a fixed field
+  batch: opaque, transparent, unlit (the fast unlit pipeline too, under additive cascades with `KEEP_HBAO` as well),
+  additive, soft particles, refraction, with or without a world-detail table. FSR 3's previous position is lifted at its own xz (a static instance on a fixed field
   moves 0); the opaque front-to-back sort lifts a lifted batch's centres from the CPU heights; the radiance cascades'
   material sources take it unlifted (they project straight down). Several batches may share a lift; a lift with
   `heightfield` NULL draws as none.
@@ -71,11 +88,13 @@ Bullet Hell v2 hasn't drawn its Height terrain with it yet.
 - `height_lift` is part of the same-material run key (RFC 0011): a run never spans two lifts.
 - Tests: `btbh_gpu_height_lift_test` (new, the C copy: halves, slopes, the bilinear read, a plane's lift and normal,
   orthogonality through the tilt, a v2-style lattice, the refusals' reasons); `btbh_gpu_height_lift_smoke` (new: lifted
-  batches against meshes lifted on the CPU through every pass, the table, every refusal, prewarm, old shaders);
+  batches against meshes lifted on the CPU through every pass, the table, a lifted unlit overlay under additive cascades
+  with `KEEP_HBAO`, every refusal, prewarm, old shaders);
   `btbh_gpu_mesh_queue_smoke` (new: every queue rule against meshes made with the data, in render-to-target and
   present, and `BTBH_SMOKE_BENCH=mesh-queue`); the order test's layouts, run key and lifted sort key; the phase 2
   shader test's lifted shaders; the frame bench's `lift`, `lift-keep` and `lift-flat` modes. `tools/check.ps1` and
-  `tools/check.sh` skip the new smokes with the other GPU smokes (`check.sh` now skips the runs smoke too).
+  `tools/check.sh` skip the new smokes with the other GPU smokes (`check.sh` now skips the runs and RC tops smokes
+  too).
 
 ### Measured
 Windows, RTX 3070 Ti, Vulkan, without a debug device. The machine's shared perf lock was held for the runs marked
