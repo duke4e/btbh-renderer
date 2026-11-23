@@ -1,7 +1,8 @@
 # Local release check for the renderer on Windows: builds the C core, every production shader (SPIR-V, MSL)
 # and the native tests with the vendored SDL_shadercross, runs the tests (the device, window, scene-target,
-# model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift and
-# mesh queue smoke tests need a GPU and a display, which this machine has) and compiles the public headers on their own.
+# model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift,
+# mesh queue and lit particle smoke tests need a GPU and a display, which this machine has) and compiles the public
+# headers on their own.
 #
 #   powershell -ExecutionPolicy Bypass -File tools/check.ps1 [-BuildDir <dir>] [-SkipGpuTests]
 #
@@ -45,7 +46,7 @@ if ($missing) { throw "missing shader artifacts: $($missing -join ', ')" }
 Write-Host "$($names.Count) shaders: SPIR-V and MSL present"
 
 Write-Host "== native tests"
-$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke`"" } else { "" }
+$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lit_particle_smoke`"" } else { "" }
 Invoke-Msvc "ctest --test-dir `"$BuildDir`" --output-on-failure $exclude"
 
 Write-Host "== public headers on their own (C11, C++17, /W4 /WX)"

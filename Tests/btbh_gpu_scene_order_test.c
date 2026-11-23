@@ -5,7 +5,8 @@
  * world-detail table, its entry and the batch it is appended to. And RFC 0011's run key
  * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
  * don't, and the shared-mesh flag's constants. And RFC 0012's height lift: its struct's layout, the batch's pointer
- * at 280 (288 bytes), the queued mesh updates' constants, and a lifted batch's sort key. */
+ * at 280 (288 bytes), the queued mesh updates' constants, and a lifted batch's sort key. And RFC 0013's variant, batch
+ * bit and macros. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -167,6 +168,22 @@ _Static_assert(BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED == 1u, "the queued-update flag
 _Static_assert(BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES == 268435456u, "the queue holds 256 MiB");
 #if !defined(BTBH_GPU_SCENE_HAS_HEIGHT_LIFT) || !defined(BTBH_GPU_HAS_QUEUED_MESH_UPDATES)
 #error "0.11.0's HAS_ macros are defined with their features"
+#endif
+
+/* RFC 0013 phase 1 (0.11.0): the lit particle is variant 11 (the count 12), the UV rect batch bit 3; batch bit 4 and the
+   lighting's byte 3,337 stay free for phase 2. No struct grows. */
+_Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11 && BTBH_GPU_SCENE_SURFACE_COUNT == 12,
+    "LIT_PARTICLE is variant 11");
+_Static_assert(BTBH_GPU_SCENE_SURFACE_REFRACT == 10, "the variants before it keep their numbers");
+_Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT == 8, "INSTANCE_UV_RECT is batch bit 3");
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(BTBHGPUSceneGeometryBatch) == 288u && offsetof(BTBHGPUSceneGeometryBatch, flags) == 253u,
+    "the batch keeps its size and its flags' byte");
+_Static_assert(offsetof(BTBHGPUSceneLighting, directional_shadow_reserved) == 3337u,
+    "phase 2's byte (3,337) stays reserved");
+#endif
+#if !defined(BTBH_GPU_SCENE_HAS_LIT_PARTICLE) || !defined(BTBH_GPU_SCENE_HAS_INSTANCE_UV_RECT)
+#error "RFC 0013's HAS_ macros are defined with their features"
 #endif
 
 #define MAX_INSTANCES 32u
