@@ -3,7 +3,7 @@
 # (SPIR-V, MSL, and metallib on macOS) and the native tests with the vendored SDL_shadercross, runs the tests
 # and compiles the public headers on their own.
 #
-#   tools/check.sh [build-dir]        SKIP_GPU_TESTS=1 skips the device, window, scene-target, model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift and mesh queue smoke tests
+#   tools/check.sh [build-dir]        SKIP_GPU_TESTS=1 skips the device, window, scene-target, model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift, mesh queue and lazy creation smoke tests
 #
 # Needs CMake and a C/C++ compiler (Xcode's command line tools on macOS); uses Ninja when it is installed. A cold build compiles DXC
 # and takes a while; later runs are incremental. Submodules must be initialised
@@ -46,7 +46,7 @@ echo "$count shaders present"
 
 echo "== native tests"
 if [ "${SKIP_GPU_TESTS:-0}" = "1" ]; then
-    ctest --test-dir "$build" --output-on-failure -E "btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke"
+    ctest --test-dir "$build" --output-on-failure -E "btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lazy_creation_smoke"
 else
     ctest --test-dir "$build" --output-on-failure
 fi
