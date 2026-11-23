@@ -4910,12 +4910,11 @@ static bool btbh_gpu_scene_validate_world_details(
             batch->albedo_texture, batch->normal_texture, batch->orm_texture, batch->emission_texture
         };
         for (uint32_t slot = 0u; slot < 4u; ++slot) {
-            if (btbh_gpu_texture_is_array(slots[slot])) {
-                btbh_gpu_scene_refuse_batch(report, index, slot_names[slot], array_in_2d_slot);
-                return false;
-            }
-            if (btbh_gpu_texture_is_heightfield(slots[slot])) {
-                btbh_gpu_scene_refuse_batch(report, index, slot_names[slot], heightfield_in_slot);
+            /* (One test for both kinds a 2D slot refuses: this loop runs for every batch of every present.) */
+            const BTBHGPUTexture *texture = slots[slot];
+            if (texture != NULL && (texture->layer_count != 0u || texture->heights != NULL)) {
+                btbh_gpu_scene_refuse_batch(report, index, slot_names[slot],
+                    texture->layer_count != 0u ? array_in_2d_slot : heightfield_in_slot);
                 return false;
             }
         }
@@ -4980,7 +4979,10 @@ static bool btbh_gpu_scene_validate_world_details(
         }
         /* RFC 0012: the lift itself (once per run of batches sharing it), then what a lifted batch may be. */
         const BTBHGPUSceneHeightLift *lift = batch->height_lift;
-        if (lift != NULL && lift != checked_lift) {
+        if (lift == NULL) {
+            continue;
+        }
+        if (lift != checked_lift) {
             const char *problem = btbh_gpu_height_lift_problem(lift);
             if (problem == NULL && lift->heightfield != NULL) {
                 if (!btbh_gpu_scene_texture_usable(window, lift->heightfield)) {
@@ -4995,7 +4997,7 @@ static bool btbh_gpu_scene_validate_world_details(
             }
             checked_lift = lift;
         }
-        if (btbh_gpu_height_lift_active(batch)) {
+        if (lift->heightfield != NULL) {
             const char *problem = btbh_gpu_height_lift_batch_problem(
                 batch,
                 directional_shadow_visibility != NULL ? directional_shadow_visibility[index] : 1u
