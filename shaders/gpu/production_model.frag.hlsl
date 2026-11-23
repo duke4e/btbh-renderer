@@ -1852,6 +1852,7 @@ FragmentOutput rc_material_output(
    light alone), with the reflectivity in the ambient target's alpha for the reflections. The emission target
    carries what the additive resolve reads instead (production_hrc_resolve.comp.hlsl's albedo_in_emission): the
    albedo the bounce light lands on, times 1 - metalness (an unlit receiver's albedo; 0 for a source, as
+   rc_material_output's albedo target holds, which the resolve's coarser samples blend into their neighbours'), and
    rc_material_output's marks in its alpha.
    unlit_enabled bit 10 (1024: the flag with the HBAO's contact mode, ssao_contact 1, since 0.12.0): the ambient
    target's rgb carries the emission instead (fragment_output's emission target, as without the cascades), which the
