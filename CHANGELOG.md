@@ -14,10 +14,11 @@ All notable changes to this project are documented here. The format follows
 - **The Vulkan exit stall** (v1): a Vulkan device starts with a 32 MiB upload staging budget.
 - **Descriptor pools after a load** (0.7.0's 25–28 ms frame): the prewarm lets SDL take its descriptor-set caches back.
 
-With nothing set every frame draws byte for byte as 0.12.0's, and no shader changed. Three things do change with
-nothing set, none of them in a frame: when an SDF terrain's meshes reach the GPU (in the next scene's copy pass, before
-it draws, instead of in the update), the memory a Vulkan device keeps for uploads (up to 32 MiB), and a prewarm after
-uploads, which now waits for the GPU once.
+With nothing set every frame draws byte for byte as 0.12.0's, and no shader changed. (Be The Bullet Hell v2's heat ray
+capture varies from run to run in both; see Known.) Three things do change with nothing set, none of them in a frame:
+when an SDF terrain's meshes reach the GPU (in the next scene's copy pass, before it draws, instead of in the update),
+the memory a Vulkan device keeps for uploads (up to 32 MiB), and a prewarm after uploads, which now waits for the GPU
+once.
 
 Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
 - `check.ps1` from a cold build directory passes 40/40: 0.12.0's 32 and the eight `*_runs_verify` runs. All 76 shaders
@@ -34,14 +35,17 @@ Tested on Windows (Vulkan, RTX 3070 Ti), on `feature/0.13.0-backlog`:
   - `BTBH_GPU_SCENE_RUNS=0`;
   - `BTBH_GPU_SCENE_RUNS=verify`, against the references with nothing set.
 
-  Every smoke passes in each mode, the mesh queue smoke included. The runs smoke's four waterfront images exist only in
-  the new build. The craters bench's 16 frames, each rendered after the update that switched its crater (so the queued
+  Every smoke passes in each mode, the mesh queue smoke included. The runs smoke's four waterfront images and the flags
+  smoke's six look-runs images exist only in the new build. The craters bench's 16 frames, each rendered after the update that switched its crater (so the queued
   meshes had to be there), are byte for byte v0.12.0's core's.
 - **Run verify over the smokes** (each window's totals, 0 mismatches in all): the runs smoke 3,646 run draws checked,
-  flags 72, world detail 771 (five windows), RC tops 422, SDF terrain 86, mesh queue 139, scene target 22, lazy
-  creation 650. The height lift, lit particle, prewarm, font and model texture share smokes draw no run. With
-  `roughness` dropped from the run key on purpose, the flags smoke logs `fragment uniform slot 0
-  (BTBHGPUSceneFragmentUniforms): material_factors (+8)` and fails.
+  flags 82, world detail 771 (five windows), RC tops 422, SDF terrain 86, mesh queue 139, scene target 22, lazy
+  creation 650. The height lift, lit particle, prewarm, font and model texture share smokes draw no run.
+  - With `roughness` dropped from the run key on purpose, the flags smoke logs `fragment uniform slot 0
+    (BTBHGPUSceneFragmentUniforms): material_factors (+8)` and fails.
+  - With `flags2` dropped instead, the flags smoke's new runs-next-to-KEEP_CASCADES_LOOK case differs by 96–182 pixels
+    from runs off. Its verify run logs `unlit_enabled (+0)`, `another pipeline than the one bound`, `80 bytes ...
+    against the 32 held` (the extension block) and `14 bound against the 3 held` (the samplers).
 - **Shader artifacts:** no shader source changed; against v0.12.0's build 228 of 231 files are byte-identical, the
   other three the FSR 3 MSL files that differ between any two builds.
 - **The header:** two macros (`BTBH_GPU_DEFAULT_UPLOAD_STAGING_BUDGET`, and the package-internal
@@ -206,6 +210,29 @@ v0.12.0 is the release checkout built out of tree; a bench built against its hea
   frame with the old meshes, as in 0.12.0.
 - The first three or four frames a device ever draws still each make their descriptor pools (15, about 0.5 ms): SDL
   makes a cache for each command buffer in flight.
+- **Be The Bullet Hell v2's heat ray capture varies from one run to the next, and 0.12.0's does too.** This is v2's
+  item 4 on the 0.13.0 candidate: not a regression of runs, and not fixed here.
+  - **The capture:** night, additive cascades, KEEP_HBAO with contact AO, SSR, the heat ray's shimmer; its frame 1200.
+  - **What varies:** the frame is one of a few images. The largest is 3,418 pixels off the usual one, almost all within a
+    level or two, around the beam's glow and shimmer and on lit windows.
+  - **How often, under a 16-core CPU load:**
+    - v0.12.0's build: 6 captures of 10, then 3 of 10.
+    - 0.13.0's builds with test switches present but off: 6 of 10 and 4 of 10.
+    - The shipped build: 1 of 10 with runs on (the 3-pixel image), 1 of 5 with runs off, none in 5 in verify mode.
+  - **Where it starts:** hashes of the captured frame's targets place it in the opaque pass's emission and ambient
+    targets in some runs. In others it first shows after the SSR resolve and the transparent pass. Everything the
+    cascades make is identical in every run.
+  - **What removes it:** waiting for the GPU after each submit (18 captures of 18), or a full barrier at every SDL
+    transition or before every pass (patched builds, 40 of 40), makes every capture the same image, 0.12.0's
+    reference. No single pass's barrier does, and neither does waiting before the submit.
+  - **What it points at:** a hazard across frames, the next frame's data written while the previous frame's draws still
+    read it.
+  - **v2's switches** (on v0.12.0's build, under the same load):
+    - `BTBH_QUEUED_UPLOADS=0` (whole-buffer, cycled uploads instead of 0.11.0's queued partial ones) never gives the
+      3,418-pixel image: none in 10, and two 1- and 6-pixel images once each.
+    - `BTBH_UPLOAD_BUDGET_MB=0` still gives it (3 of 10).
+    - So it goes through the queued partial uploads into persistent instance buffers. Either the renderer's in-place
+      copies are at fault, or v2 queues a region the previous frame still reads.
 - Not run here: Metal (`check.sh` on the Mac), the Steam Deck, the Vulkan validation layers, and v1 or v2 themselves.
 
 ## [0.12.0] — 2026-11-23
