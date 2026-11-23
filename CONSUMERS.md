@@ -64,11 +64,13 @@ outskirts ring. Since 0.9.0:
 - `SSR_SURFACE_REFLECTIVITY`, with `ssr_thickness` 0.1;
 - `btbh_gpu_window_scene_prewarm_render_to_target` for its V1 cards' pictures.
 
-Testing the 0.10.0 candidate:
-- RC source tops (RFC 0010);
-- cheaper draws with shared mesh buffers (RFC 0011 phase 1);
-- its fixes against 0.9.0: `KEEP_HBAO`, the debug views, `SSR_FACING_HITS`;
-- the kaiju's spot-shadow flags.
+Adopting with 0.10.0 (tested on the candidate):
+- the cheaper draws, with its kit libraries in the shared mesh buffers (RFC 0011 phase 1);
+- `SSR_FACING_HITS`, with `ssr_thickness` 0.6;
+- the kaiju's spot shadow with `SPOT_OCCLUDER_SUN_ONLY | SPOT_OCCLUDER_ORTHOGRAPHIC`, strength about 0.8, and the kaiju
+  out of the sun's map.
+
+RC source tops (RFC 0010) are kept for when its lamps return as explicit emitters.
 
 Requested for 0.11.0:
 - a vertex lift from a heightfield and mesh updates queued into the frame (RFC 0012);

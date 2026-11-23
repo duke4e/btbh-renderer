@@ -6,13 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-23
+
 This release has three parts for Be The Bullet Hell v2:
 - cheaper draws (RFC 0011's phase 1);
 - radiance-cascade sources with a top (RFC 0010);
 - fixes and options from its findings against 0.9.0 and its kaiju's spot shadow.
 
-The new features are opt-in, and the cheaper draws change nothing that is drawn. Unset, every frame renders byte for
-byte as in 0.9.0. No struct grows, and no shader file is added. Radiance-cascade and scene shaders changed, so rebuild
+The new features are opt-in, and the cheaper draws change nothing that is drawn. Unset, every image of this core's
+smokes renders byte for byte as in 0.9.0. Be The Bullet Hell v2's frames differ in a few dozen pixels (see Known).
+No struct grows, and no shader file is added. Radiance-cascade and scene shaders changed, so rebuild
 the shaders with the C core.
 
 RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch that differs from the one drawn before
@@ -51,8 +54,37 @@ Tested on Windows (Vulkan), the merged branch from a cold build:
 - `c5390f0b`'s shaders under this core draw RFC 0010's gallery byte for byte.
 - The SDF terrain smoke passes against its fixture.
 
-macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified. Be The Bullet Hell v2 hasn't tested this
-release yet.
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified.
+
+Be The Bullet Hell v2 tested the candidate (a89a4494) on its 0.9.0 adoption with a test patch, two rounds under the
+machine's perf lock. The only code change it needed was the emitter's `reserved`, now `top_above`.
+- **Unset:** its frames come out the same in every repeat. Against 0.9.0 they differ by a few dozen pixels (see
+  Known). `SHARED_BUFFERS` on its kit libraries changes 0 pixels.
+- **RFC 0011's CPU geometry encoding** (median per frame):
+
+  | View | 0.9.0 | With runs | Runs and shared library meshes |
+  | --- | --- | --- | --- |
+  | Map edge, Deck preset | 0.845 ms | 0.471 ms | 0.155 ms |
+  | Map edge, High at 1080p | 2.179 ms | 1.207 ms | 0.267 ms |
+  | City, stage 3, Deck | 0.775 ms | 0.432 ms | 0.136 ms |
+
+  The kit's share went from 0.69 ms to 0.08 ms, before its chunks share one instance buffer.
+- **RFC 0010:** one cell of shielding is enough for its streets. A red source on a roof now lights its own roof. With
+  its lamps out of the field, little street glow is left to shield (see Known).
+- **`KEEP_HBAO`** with HBAO matches the cascades off, 0 pixels with its neon point lights on.
+- **`SSR_FACING_HITS`** in rain removes the streaks under every actor at `ssr_thickness` 0.6, cleaner than its 0.1.
+  GPU time at 1440p in rain:
+
+  | Setting | GPU time |
+  | --- | --- |
+  | `ssr_thickness` 0.6 | 4.65–4.66 ms |
+  | 0.6 with `SSR_FACING_HITS` | 4.71–4.72 ms |
+  | 0.1 | 4.69–4.70 ms |
+
+- **The kaiju's spot shadow** (`SUN_ONLY | ORTHOGRAPHIC`, its reach 2.5 times the map's depth):
+  - It is as dark at dusk as before (0.22 of the light left), but tinted by the sky instead of brown: blue over red
+    3.67, against 1.86.
+  - Edges are crisp, with no acne. `RECEIVES_NO_SPOT_SHADOW` wasn't needed.
 
 ### Added
 - **`BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`** and **`btbh_gpu_window_custom_mesh_create_ex`** (the plain create's
@@ -316,6 +348,24 @@ bootstrap interval of the difference:
     times its depth range for none), and the kaiju out of the sun's map if wanted. If its body shows the spot map's
     acne, `flags |= BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW as u8` on its batches.
   - Don't set the new bits with 0.9.0's shaders: nothing detects them, and they do nothing there.
+
+### Known
+- **Be The Bullet Hell v2's frames aren't byte-identical to 0.9.0's with nothing new set**, though every repeat of
+  one build matches.
+  - Most scenes differ by 11–27 pixels, by 1 level (4 at most): by day, at night, at the map edge, and at dusk on the
+    Deck preset.
+  - Rain differs by 92 pixels, and the night with its cascades on by 71. Of those, 5–6 pixels in one water glint
+    differ by 57–61 levels.
+  - This core's smokes show 0 pixels changed (above).
+  - The cause isn't established. Five scene fragment shaders were recompiled for the findings (`KEEP_HBAO`'s routing,
+    the spot occluder's flags), and a glint is very sensitive to rounding. A comparison of v2's frames with runs off,
+    and with 0.9.0's shaders under this core, will tell.
+- **With `source_tops`, rays that pass over a source take none of its light and aren't dimmed by it**, as designed.
+  Where little street glow is left to shield, the indirect light gets brighter rather than darker. That is v2's night
+  with its lamps out of the field: the indirect mean went from 1.36/0.73/0.24 to 1.54/0.90/0.23.
+- **`KEEP_HBAO` is ignored with contact AO (`ssao_contact` 1)**, so the fix for transparent unlit batches doesn't
+  apply there. Under additive cascades they still take the point lights: in v2's night with its neon, +0.94 L over 19 %
+  of the pixels, up to 203 levels. Planned for 0.11.0.
 
 ## [0.9.0] — 2026-11-23
 

@@ -1,7 +1,8 @@
 # RFC 0011: Cheaper draws: shared mesh buffers and same-material runs; draw lists
 
-- **Status:** Phase 1 accepted on 2026-11-22 for 0.10.0 (the owner left the decision to the coordinator). Phase 2
-  waits for phase 1's numbers. See "Decisions"
+- **Status:** Phase 1 accepted on 2026-11-22 (the owner left the decision to the coordinator) and released in
+  v0.10.0. Phase 2 waits for phase 1's numbers: v2's geometry encoding fell to 0.14–0.27 ms with phase 1. See
+  "Decisions"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Phase 1's encode changes reach every game without an API and draw
   byte for byte as before: Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D change nothing and gain where their

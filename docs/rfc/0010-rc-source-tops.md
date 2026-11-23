@@ -2,7 +2,7 @@
 
 - **Status:** Accepted on 2026-11-23 for 0.10.0 (the owner left the decision to the coordinator). The wall falloff
   v2 prefers (high floors take less light, answer 5) isn't blocking and is deferred to phase 2. See "Decisions".
-  Phase 1 is implemented for 0.10.0 (unreleased): see "Implementation notes"
+  Phase 1 is released in v0.10.0: see "Implementation notes"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-22, after the owner's sixth play-test)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift) and Tyrian3D use the radiance
   cascades but don't set it, so nothing changes for them. CHIMERA doesn't use the cascades. All of them rebuild the
