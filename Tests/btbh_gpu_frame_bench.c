@@ -32,6 +32,12 @@
  *   mesh").
  *   Every frame of a ring window alternates with the ring and without it (the frame's draws alone). The other modes
  *   take +noruns too, and +arena for the 32 kit pieces (table+noruns, table+arena), for the GPU's time.
+ * - The radiance cascades (0.10.0's bench; it builds against 0.9.0 too): a mode with +rc turns them on as Be The
+ *   Bullet Hell v2 runs them at night: additive, tier High over 256^2 texels of half a unit (+low: tier Low over 128^2
+ *   of a unit), an occlusion field of 2 x 2 unit blocks on the 3 unit lots (0.385 to 3.535 high, v2's way: 0 inside,
+ *   the distance to the nearest inside texel outside), every 10th draw glowing (a material source) and 32 disk
+ *   emitters at 0.55. +tops sets RFC 0010's source_tops (emitters' top_above 0; ignored before 0.10.0). The cost
+ *   log's rc_src_ms, rc_field_ms and rc_screen_ms time the cascades' passes (frame_bench_summary.py --group).
  * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
  *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
  *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
@@ -64,6 +70,8 @@
 #define RING_PIECES (RING_CHUNKS * RING_CHUNK_PIECES)
 #define RING_MESHES (2u * RING_PIECES + 1u)
 #define RING_CHUNK_INSTANCES (3u * RING_CHUNK_PIECES)
+#define BENCH_RC_EMITTERS 32u
+#define BENCH_RC_FIELD 256u
 
 #if defined(__APPLE__)
 #define BENCH_SHADER_EXTENSION ".metallib"
@@ -111,6 +119,11 @@ typedef struct BenchWindow {
     BTBHGPUWindow *window;
     char mode[48];
     BenchRing ring;
+    bool rc;
+    bool rc_low;
+    bool rc_tops;
+    float *occlusion;
+    BTBHGPUSceneRadianceEmitter emitters[BENCH_RC_EMITTERS];
     char scene_shaders[11][1024];
     char canvas_shaders[3][1024];
     BTBHGPUCustomMesh *pieces[BENCH_PIECES];
@@ -398,6 +411,13 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->normal_texture = bench->normal;
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
+        if (bench->rc && draw % 10u == 0u) {
+            /* A glow: a material source of the cascades. */
+            batch->emission_red = 255u;
+            batch->emission_green = 190u;
+            batch->emission_blue = 120u;
+            batch->emission_energy = 2.0f;
+        }
 #if defined(BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE)
         if (strncmp(mode, "table", 5) == 0 || bench->ring.table) {
             batch->world_detail_table = &bench->table;
@@ -631,6 +651,81 @@ static void build_ring(BenchWindow *bench) {
     bench->batch_count += added;
 }
 
+/* v2's occlusion field over the bench's lots: a 2 x 2 unit block on each 3 unit lot (lots from -96, -72), most of them,
+   0.385 to 3.535 high; 0 inside, outside the distance to the nearest inside texel's centre and that block's top. */
+static uint32_t bench_lot_hash(int32_t lot_x, int32_t lot_z) {
+    uint32_t h = (uint32_t)(lot_x * 73856093) ^ (uint32_t)(lot_z * 19349663);
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15;
+    return h;
+}
+
+static void build_occlusion(BenchWindow *bench) {
+    const uint32_t size = bench->rc_low ? BENCH_RC_FIELD / 2u : BENCH_RC_FIELD;
+    const float cell = bench->rc_low ? 1.0f : 0.5f;
+    const float origin = -64.0f;
+    bench->occlusion = calloc((size_t)size * size * 2u, sizeof(float));
+    if (bench->occlusion == NULL) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    for (uint32_t row = 0u; row < size; ++row) {
+        for (uint32_t column = 0u; column < size; ++column) {
+            const float x = origin + ((float)column + 0.5f) * cell;
+            const float z = origin + ((float)row + 0.5f) * cell;
+            const int32_t lot_x = (int32_t)floorf((x + 96.0f) / 3.0f);
+            const int32_t lot_z = (int32_t)floorf((z + 72.0f) / 3.0f);
+            float nearest = 1.0e6f;
+            float top = 0.0f;
+            for (int32_t dz = -1; dz <= 1; ++dz) {
+                for (int32_t dx = -1; dx <= 1; ++dx) {
+                    const uint32_t hash = bench_lot_hash(lot_x + dx, lot_z + dz);
+                    if (hash % 4u == 0u) {
+                        continue;
+                    }
+                    /* The block's inside texel centres. */
+                    const float bx = -96.0f + 3.0f * (float)(lot_x + dx) + 0.5f;
+                    const float bz = -72.0f + 3.0f * (float)(lot_z + dz) + 0.5f;
+                    const float first_x = origin + (ceilf((bx - origin) / cell - 0.5f) + 0.5f) * cell;
+                    const float last_x = origin + (floorf((bx + 2.0f - origin) / cell - 0.5f) + 0.5f) * cell;
+                    const float first_z = origin + (ceilf((bz - origin) / cell - 0.5f) + 0.5f) * cell;
+                    const float last_z = origin + (floorf((bz + 2.0f - origin) / cell - 0.5f) + 0.5f) * cell;
+                    const float ex = fmaxf(fmaxf(first_x - x, x - last_x), 0.0f);
+                    const float ez = fmaxf(fmaxf(first_z - z, z - last_z), 0.0f);
+                    const float distance = sqrtf(ex * ex + ez * ez);
+                    if (distance < nearest) {
+                        nearest = distance;
+                        top = 0.385f + 0.35f * (float)((hash >> 8) % 10u);
+                    }
+                }
+            }
+            bench->occlusion[((size_t)row * size + column) * 2u] = nearest;
+            bench->occlusion[((size_t)row * size + column) * 2u + 1u] = top;
+        }
+    }
+    uint32_t state = 4242u;
+    for (uint32_t index = 0u; index < BENCH_RC_EMITTERS; ++index) {
+        BTBHGPUSceneRadianceEmitter *emitter = &bench->emitters[index];
+        memset(emitter, 0, sizeof(*emitter));
+        emitter->stable_id = 1u + index;
+        emitter->position_x = -48.0f + 96.0f * bench_unit(&state);
+        emitter->position_y = 0.55f;
+        emitter->position_z = -48.0f + 96.0f * bench_unit(&state);
+        emitter->radius = 0.6f;
+        emitter->height = 0.5f;
+        emitter->red = 1.0f;
+        emitter->green = 0.6f;
+        emitter->blue = 0.3f;
+        emitter->energy = 3.0f;
+        emitter->direction_z = 1.0f;
+        emitter->inner_cutoff = -1.0f;
+        emitter->outer_cutoff = -2.0f;
+        emitter->shape = BTBH_GPU_SCENE_RADIANCE_EMITTER_DISK;
+        emitter->light_class = BTBH_GPU_SCENE_RADIANCE_EMITTER_CLASS_TRANSIENT;
+    }
+}
+
 static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const char *directory, uint32_t number,
     uint32_t draws) {
     memset(bench, 0, sizeof(*bench));
@@ -646,6 +741,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
         /* (table+noruns, table+arena: runs off, the kit pieces in the shared buffers.) */
         bench->ring.runs_off = mode_has(bench->mode, "noruns");
     }
+    bench->rc = mode_has(bench->mode, "rc");
+    bench->rc_low = mode_has(bench->mode, "low");
+    bench->rc_tops = mode_has(bench->mode, "tops");
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -734,6 +832,37 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     if (bench->ring.enabled) {
         build_ring(bench);
     }
+    if (bench->rc) {
+        build_occlusion(bench);
+    }
+}
+
+/* The window's post: the cascades as its mode asks. */
+static BTBHGPUScenePost window_post(const BenchWindow *bench, const BTBHGPUScenePost *post) {
+    BTBHGPUScenePost result = *post;
+    if (!bench->rc) {
+        return result;
+    }
+    BTBHGPUSceneRadianceCascades *cascades = &result.radiance_cascades;
+    cascades->tier = bench->rc_low ? BTBH_GPU_SCENE_RC_LOW : BTBH_GPU_SCENE_RC_HIGH;
+    cascades->auto_frame_budget_milliseconds = 16.0f;
+    cascades->indirect_intensity = 1.0f;
+    cascades->hero_omni_emitter_index = -1;
+    cascades->additive = 1u;
+    cascades->emitter_count = BENCH_RC_EMITTERS;
+    cascades->emitters = bench->emitters;
+    cascades->occlusion_cascade_count = 1u;
+    cascades->occlusion_cascades[0].origin_world_x = -64.0f;
+    cascades->occlusion_cascades[0].origin_world_z = -64.0f;
+    cascades->occlusion_cascades[0].cell_size = bench->rc_low ? 1.0f : 0.5f;
+    cascades->occlusion_cascades[0].width = bench->rc_low ? BENCH_RC_FIELD / 2u : BENCH_RC_FIELD;
+    cascades->occlusion_cascades[0].height = cascades->occlusion_cascades[0].width;
+    cascades->occlusion_cascades[0].revision = 1u;
+    cascades->occlusion_cascades[0].samples = bench->occlusion;
+#if defined(BTBH_GPU_SCENE_HAS_RC_SOURCE_TOPS)
+    cascades->source_tops = bench->rc_tops ? 1u : 0u;
+#endif
+    return result;
 }
 
 static BTBHGPUSceneLighting bench_lighting(void) {
@@ -821,6 +950,8 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
     if (bench->ring.runs_off) {
         (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "0", true);
     }
+    const BTBHGPUScenePost frame_post = window_post(bench, post);
+    post = &frame_post;
     const uint64_t started = SDL_GetTicksNS();
     const BTBHGPUResult presented = btbh_gpu_window_scene_present_instances(bench->window,
         bench->scene_shaders[0], bench->scene_shaders[1], bench->scene_shaders[2], bench->scene_shaders[3],
@@ -836,6 +967,10 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
     }
     if (presented != BTBH_GPU_OK) {
         fprintf(stderr, "present: %s\n", report.message);
+        exit(1);
+    }
+    if (bench->rc && report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_OFF) {
+        fprintf(stderr, "the cascades didn't run (fallback %d)\n", (int)report.radiance_cascades.fallback_reason);
         exit(1);
     }
     if (bench_cpu_mode && round >= 0) {
@@ -940,6 +1075,7 @@ int main(void) {
     for (uint32_t w = 0u; w < window_count; ++w) {
         free(windows[w].instances);
         free(windows[w].batches);
+        free(windows[w].occlusion);
         btbh_gpu_window_destroy(windows[w].window);
     }
     btbh_gpu_device_shutdown(device);

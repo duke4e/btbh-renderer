@@ -5,8 +5,9 @@ r"""Summarises btbh_gpu_frame_bench logs (Tests/btbh_gpu_frame_bench.c).
 A configuration is a window's shader directory and mode ("BENCH window" lines); the names go to the first log's
 windows in order, and the first is the reference. The logs may give the configurations to other windows (a run that
 rotates them cancels what a window's own resources cost). Per turn the first --skip frames are dropped (the
-window's caches are cold after another window's turn); the rest give main_ms (split frames: the opaque pass) and
-gpu_ms (whole frames).
+window's caches are cold after another window's turn); the rest give main_ms (split frames: the opaque pass; --group
+picks another of the split frame's fields, or a sum of them: --group rc_src+rc_field+rc_screen) and gpu_ms (whole
+frames).
 
 - Paired: each turn against the reference's turn of the same round. A round with a turn over --limit times the 10th
   percentile of its configuration's turns is dropped (another process on the GPU). The median difference, with a
@@ -21,7 +22,7 @@ import statistics
 from collections import defaultdict
 
 
-def parse(paths, skip):
+def parse(paths, skip, group="main"):
     """turns[(log, configuration, round)] = {"main": [...], "frame": [...]}; the configurations of each log."""
     turns = defaultdict(lambda: {"main": [], "frame": []})
     configurations = []
@@ -49,7 +50,8 @@ def parse(paths, skip):
                 if seen <= skip:
                     continue
                 if "split=1" in line:
-                    turns[current]["main"].append(float(re.search(r"main_ms=([\d.]+)", line).group(1)))
+                    turns[current]["main"].append(sum(
+                        float(re.search(name + r"_ms=([\d.]+)", line).group(1)) for name in group.split("+")))
                 else:
                     turns[current]["frame"].append(float(re.search(r"gpu_ms=([\d.]+)", line).group(1)))
         configurations.append([windows[index] for index in sorted(windows)])
@@ -81,8 +83,9 @@ def main():
     parser.add_argument("logs", nargs="+")
     parser.add_argument("--skip", type=int, default=2)
     parser.add_argument("--limit", type=float, default=1.08)
+    parser.add_argument("--group", default="main")
     arguments = parser.parse_args()
-    turns, configurations = parse(arguments.logs, arguments.skip)
+    turns, configurations = parse(arguments.logs, arguments.skip, arguments.group)
     order = configurations[0]
     names = dict(zip(order, arguments.names.split(",")))
     reference = order[0]
