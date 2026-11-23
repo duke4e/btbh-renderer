@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.11.0` (tag `v0.11.0`; BTBH `43fec660`, 2026-11-23) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.5.1` (tag `v0.5.1`; CHIMERA `a9f7be79`, 2026-11-12) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.12.0` (tag `v0.12.0`; BTBH `1a31d2a9`, 2026-11-23) |
 
 ## Features used
 
@@ -82,9 +82,9 @@ Since 0.11.0:
 - `KEEP_HBAO` with contact AO;
 - lit smoke (RFC 0013 phase 1) behind a dev flag at an albedo gain of 0.38, waiting on its owner's choice.
 
-Adopting with 0.12.0 (tested on the candidate):
-- `KEEP_CASCADES_LOOK` on its beam's glow draws;
-- `KEEP_HBAO`'s ambient part under contact AO.
+Since 0.12.0:
+- `KEEP_HBAO` with contact AO, including its ambient part;
+- `KEEP_CASCADES_LOOK` (`flags2`) on its weapon beams' own unlit draws only, with flagged copies in its prewarm.
 
 Later: the particles' transmittance map (RFC 0013 phase 2), BC texture formats (RFC 0008 phase 2), and descriptor
 pools made before the first frames.
