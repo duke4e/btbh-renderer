@@ -1251,7 +1251,10 @@ typedef struct BTBHGPUSceneLighting {
        btbh_rain_ripples). */
     float rain;
     // Small point lights without shadows (explosions' flashes): per light x, y, z, radius, red,
-    // green, blue, energy. They light lit surfaces (diffuse) and brighten unlit ones.
+    // green, blue, energy. They light lit surfaces (diffuse) and brighten opaque unlit ones.
+    // Transparent unlit batches take them only under the radiance cascades without
+    // BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO. Without the cascades, or with that flag, those
+    // batches draw with the fast unlit shader, which adds no point light.
     uint32_t point_light_count;
     float point_lights[BTBH_GPU_SCENE_POINT_LIGHTS][8];
     /* A dark scene: unlit surfaces keep 1 - unlit_darkness of their colour (0: all of it, as

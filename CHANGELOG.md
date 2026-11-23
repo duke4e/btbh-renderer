@@ -4,7 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] (0.10.0)
+## [Unreleased]
+
+This release has three parts for Be The Bullet Hell v2:
+- cheaper draws (RFC 0011's phase 1);
+- radiance-cascade sources with a top (RFC 0010);
+- fixes and options from its findings against 0.9.0 and its kaiju's spot shadow.
+
+The new features are opt-in, and the cheaper draws change nothing that is drawn. Unset, every frame renders byte for
+byte as in 0.9.0. No struct grows, and no shader file is added. Radiance-cascade and scene shaders changed, so rebuild
+the shaders with the C core.
 
 RFC 0011's phase 1, asked for by Be The Bullet Hell v2: cheaper draws. A batch that differs from the one drawn before
 it only in its mesh and instance range now binds and pushes nothing new (same-material runs), the frame's lighting is
@@ -18,16 +27,6 @@ starts on a roof higher than a source's top passes over it. A glowing batch's to
 emitter's is `position_y + top_above`. Off, nothing changes, byte for byte. Neither struct grows (a byte and a float
 from reserved fields); six radiance-cascade shaders changed: rebuild the shaders with the C core.
 
-Tested on Windows (Vulkan): `check.ps1` with the GPU smokes (26/26 with the runs smoke and the new RC tops smoke, 71
-shaders), the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures). Against 0.9.0's candidate
-(`d077b5e6`), each smoke's images written by a build of it and by this one: 153 images, 10,577,792 pixels, 0 differ,
-with nothing set, with the smokes' custom meshes in the shared buffers (`BTBH_SMOKE_SHARED_MESHES=1`) and with runs
-turned off (`BTBH_GPU_SCENE_RUNS=0`). Against RFC 0011's tip (`c5390f0b`), with RFC 0010's switch off: 161 images (the
-new smoke's gallery, with garbage in `top_above`, among them), 11,102,080 pixels, 0 differ, three times again; and
-c5390f0b's shaders under this core draw the new gallery byte for byte. macOS (Metal), the Vulkan validation layers and a
-Steam Deck aren't verified, Be The Bullet Hell v2 hasn't measured RFC 0011 at its map edge yet nor seen RFC 0010 in its
-city.
-
 Be The Bullet Hell v2's three findings against 0.9.0, and its kaiju's spot shadow. `KEEP_HBAO` frames now match the
 frame without the cascades under point lights too: the difference v2 saw wasn't the HBAO but the transparent pass,
 whose unlit batches drew with another shader under the cascades. The cascades' debug views no longer draw the
@@ -37,16 +36,23 @@ from smearing a column of each thin thing down the wet ground under a steep came
 No struct grows (the new fields take reserved bits and a reserved byte); five scene shaders changed, so rebuild the
 shaders with the C core.
 
-Tested on Windows (Vulkan), for the findings and the kaiju shadow:
-- `check.ps1` with the GPU smokes (25/25, 71 shaders);
-- the Swift build and the full Swift suite (301 tests, 2 skipped, 0 failures);
-- against c5390f0b (0.9.0's candidate with RFC 0011's phase 1), each smoke's images written by a build of it (with
-  this branch's flags smoke) and by this one: 164 images, 10,859,392 pixels. 0 differ with nothing set, and again
-  with `BTBH_SMOKE_SHARED_MESHES=1` and with `BTBH_GPU_SCENE_RUNS=0`. The SDF terrain smoke passes against its
-  fixture.
+Tested on Windows (Vulkan), the merged branch from a cold build:
+- `check.ps1` with the GPU smokes passes 26/26. All 71 shaders build, and the public headers compile clean under
+  `/W4 /WX`.
+- The Swift build is clean, and the full Swift suite runs 301 tests: 2 skipped, 0 failures.
+- Identity against `c5390f0b` (0.9.0's candidate with RFC 0011's phase 1): builds of it and of this branch wrote every
+  image of the eight image smokes. 173 distinct images, 11,409,280 pixels; 0 differ, in each of three modes:
+  - nothing set;
+  - `BTBH_SMOKE_SHARED_MESHES=1`;
+  - `BTBH_GPU_SCENE_RUNS=0`.
+- `c5390f0b` was itself 0 pixels from 0.9.0's candidate over 153 images, in the same three modes.
+- The merged build draws each branch's new images byte for byte as that branch did: RFC 0010's with tops on, and the
+  findings' new flags.
+- `c5390f0b`'s shaders under this core draw RFC 0010's gallery byte for byte.
+- The SDF terrain smoke passes against its fixture.
 
-macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified, and Be The Bullet Hell v2 hasn't run
-any of it.
+macOS (Metal), the Vulkan validation layers and a Steam Deck aren't verified. Be The Bullet Hell v2 hasn't tested this
+release yet.
 
 ### Added
 - **`BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS`** and **`btbh_gpu_window_custom_mesh_create_ex`** (the plain create's
@@ -310,8 +316,6 @@ bootstrap interval of the difference:
     times its depth range for none), and the kaiju out of the sun's map if wanted. If its body shows the spot map's
     acne, `flags |= BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW as u8` on its batches.
   - Don't set the new bits with 0.9.0's shaders: nothing detects them, and they do nothing there.
-
-## [Unreleased]
 
 ## [0.9.0] — 2026-11-23
 
