@@ -210,6 +210,9 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_model_rc.frag|fragment"
         "production_model_rc_2d_shadows.frag|fragment"
         "production_model_rc_unshadowed.frag|fragment"
+        "production_particle_lit.frag|fragment"
+        "production_particle_lit_2d_shadows.frag|fragment"
+        "production_particle_lit_unshadowed.frag|fragment"
         "production_post.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
@@ -309,6 +312,17 @@ if(BTBH_BUILD_GPU_SPIKE)
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_model.frag.hlsl"
             )
         endif()
+        # RFC 0013: the lit particle's shadow variants, built from its source with a define.
+        if(
+            _shader_name STREQUAL "production_particle_lit_2d_shadows.frag" OR
+            _shader_name STREQUAL "production_particle_lit_unshadowed.frag"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_particle_lit.frag.hlsl"
+            )
+        endif()
         # Vertex shaders built from another's source with a define (RFC 0009's table variant, RFC 0012's lifted ones,
         # the RC material sources).
         if(
@@ -346,12 +360,24 @@ if(BTBH_BUILD_GPU_SPIKE)
         if(
             _shader_name MATCHES "^production_model" OR
             _shader_name MATCHES "^production_animated_model" OR
+            _shader_name MATCHES "^production_particle_lit" OR
             _shader_name MATCHES "^production_rc_.*material_source"
         )
             list(
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_temporal.hlsli"
+            )
+        endif()
+        # The instance's light factor (BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR, since 0.11.0).
+        if(
+            _shader_name MATCHES "^production_model.*\\.frag$" OR
+            _shader_name STREQUAL "production_rc_material_source.frag"
+        )
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_light_factor.hlsli"
             )
         endif()
         if(_shader_name MATCHES "^production_fsr3_")
@@ -674,6 +700,29 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_world_detail_test
         )
 
+        # RFC 0013: the lit particle's C copies (the wrap, the phase, the transmission, the fog and its make-up), the
+        # refusals of a lit particle and of the UV rect, and the frame block's layout, without a GPU.
+        add_executable(btbh_gpu_particle_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_particle_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_particle_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(btbh_gpu_particle_test PRIVATE btbh_gpu)
+        if(MSVC)
+            target_compile_options(btbh_gpu_particle_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_particle_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+            target_link_libraries(btbh_gpu_particle_test PRIVATE m)
+        endif()
+        add_test(
+            NAME btbh_gpu_particle
+            COMMAND btbh_gpu_particle_test
+        )
+
         # RFC 0012: the height lift's C copy (the heightfield's texels and halves, the bilinear read, the lift and the
         # tilt), its block and its refusals, without a GPU.
         add_executable(btbh_gpu_height_lift_test
@@ -851,6 +900,9 @@ if(BTBH_BUILD_GPU_SPIKE)
                 BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_2d_shadows.frag.json"
                 BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unshadowed.frag.json"
                 BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_unlit.frag.json"
+                BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit.frag.json"
+                BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit_2d_shadows.frag.json"
+                BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_particle_lit_unshadowed.frag.json"
                 BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
                 BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
                 BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"
@@ -1049,6 +1101,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             PRIVATE
                 SDL_MAIN_HANDLED
                 BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
         )
         target_link_libraries(
             btbh_gpu_scene_flags_smoke
@@ -1166,7 +1219,10 @@ if(BTBH_BUILD_GPU_SPIKE)
 
         # RFC 0012 (0.11.0): lifted batches against meshes lifted on the CPU, through every pass that draws them; the
         # lift with a world-detail table; the refusals; prewarm; and the queued custom-mesh updates (hidden windows).
-        foreach(_lift_smoke btbh_gpu_height_lift_smoke btbh_gpu_mesh_queue_smoke)
+        # RFC 0013 (0.11.0): lit particles against CPU references (the sun with its shadow, the wrap, the transmission,
+        # the point lights, the fill, the spot and the lamps, the fog's make-up, the cascades, the fades), the UV rect on
+        # every static vertex shader's path, the refusals, prewarm and old shaders (hidden windows).
+        foreach(_lift_smoke btbh_gpu_height_lift_smoke btbh_gpu_mesh_queue_smoke btbh_gpu_lit_particle_smoke)
             add_executable(${_lift_smoke}
                 "${BTBH_RENDERER_ROOT}/Tests/${_lift_smoke}.c"
             )

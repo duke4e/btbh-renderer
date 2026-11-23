@@ -21,6 +21,7 @@
 #include "production_temporal.hlsli"
 #include "production_dig_mask.hlsli"
 #include "production_world_detail.hlsli"
+#include "production_light_factor.hlsli"
 
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
@@ -1892,6 +1893,12 @@ float btbh_paving_slab(float2 value, float footprint, out float shade)
 // at night, as the windows' light (surface_wetness.y) rises: bright enough to bloom.
 static const float btbh_lamp_lens_gain = 8.0f;
 
+// BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0): the instance's light (btbh_instance_light_factor), set
+// by shade_fragment before anything reads it; 1 for a batch without the flag. It scales the material's emission (as
+// its energy), the glass's share of lit panes and the lamp lens's glow. Each is a product with it in place of the
+// value it scales, so at 1 every result is the value's own, bit for bit.
+static float btbh_light_factor = 1.0f;
+
 // Glass (detail pattern 5) reflects like coated glass, and its own colour shows half as strongly: what lies
 // behind a window is darker than the wall around it.
 static const float btbh_glass_reflectance = 0.12f;
@@ -1938,11 +1945,12 @@ bool btbh_glass_pane(
 }
 
 // A pane's light at night (surface_wetness.y is its energy): about detail_parameters.y of the panes are lit,
-// some storeys of a block more than others, each a warm, neutral or cool white at its own brightness.
+// some storeys of a block more than others, each a warm, neutral or cool white at its own brightness. The light
+// factor scales the share: as it falls, the lit panes go out one by one, each keeping its light until it does.
 float3 btbh_window_light(float2 cell)
 {
     const float energy = surface_wetness.y;
-    const float share = detail_parameters.y;
+    const float share = detail_parameters.y * btbh_light_factor;
     if (energy <= 0.0f || share <= 0.0f)
     {
         return float3(0.0f, 0.0f, 0.0f);
@@ -1982,7 +1990,7 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     }
     if (pattern == 6u)
     {
-        emission += albedo.rgb * surface_wetness.y * btbh_lamp_lens_gain;
+        emission += albedo.rgb * (surface_wetness.y * btbh_light_factor) * btbh_lamp_lens_gain;
         return float3(0.0f, 0.0f, 0.0f);
     }
     if (pattern == 7u)
@@ -2321,11 +2329,12 @@ FragmentOutput shade_fragment(FragmentInput input)
         raw_albedo_sample.rgb * input.color.rgb,
         raw_albedo_sample.a * input.color.a
     );
+    btbh_light_factor = btbh_instance_light_factor(unlit_enabled, input.instance_custom);
     float3 emission = emission_texture.SampleBias(
         emission_sampler,
         input.texture_coordinate,
         lod_bias
-    ).rgb * emission_color_energy.rgb * emission_color_energy.w;
+    ).rgb * emission_color_energy.rgb * (emission_color_energy.w * btbh_light_factor);
     float3 mapped_normal = normal_texture.SampleBias(
         normal_sampler,
         input.texture_coordinate,

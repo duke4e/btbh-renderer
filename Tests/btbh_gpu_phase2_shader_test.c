@@ -35,6 +35,9 @@
 #ifndef BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#if !defined(BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH) ||     !defined(BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH) ||     !defined(BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH)
+#error "the lit particle's reflection paths must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
@@ -531,6 +534,33 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH,
             "\"name\": \"out.var.TEXCOORD10\", \"type\": \"float2\", \"location\": 10"
+        ) ||
+        /* RFC 0013: the lit particle's three variants: the albedo, the normal, the scene's distance (sampled, so no
+           storage texture), the emission and the cascades' atlas, then 4, 3 or no shadow maps; the material and the
+           frame's block; the static vertex shader's outputs it reads, and the colour and the reactive mask. */
+        !require_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 9, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 8, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
+            "\"samplers\": 5, \"storage_textures\": 0, \"storage_buffers\": 0, \"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD6\", \"type\": \"float3\", \"location\": 6"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
+            "\"location\": 5"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_PARTICLE_LIT_FRAGMENT_REFLECTION_PATH,
+            "\"name\": \"out.var.SV_Target1\", \"type\": \"float4\", \"location\": 1"
         )) {
         return 1;
     }

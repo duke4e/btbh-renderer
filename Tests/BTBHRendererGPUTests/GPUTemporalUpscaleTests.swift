@@ -189,12 +189,17 @@ final class GPUTemporalUpscaleTests: XCTestCase {
         let scene = try read("src/gpu/btbh_gpu_scene.c")
         let animated = try read("shaders/gpu/production_animated_model.vert.hlsl")
         let temporal = try read("shaders/gpu/production_temporal.hlsli")
-        // The C vertex uniforms and the shaders' cbuffer end alike.
+        // The C vertex uniforms and the shaders' cbuffer end alike: the skinned shaders' three reserved words, of
+        // which the static shaders name the first (RFC 0013's instance_uv_rect, since 0.11.0).
+        XCTAssertTrue(scene.contains("    uint32_t previous_bone_offset;\n"))
         XCTAssertTrue(scene.contains(
-            "    uint32_t previous_bone_offset;\n    uint32_t temporal_reserved[3];\n} BTBHGPUSceneUniforms;"
+            "    uint32_t instance_uv_rect;\n    uint32_t temporal_reserved[2];\n} BTBHGPUSceneUniforms;"
         ))
         XCTAssertTrue(temporal.contains(
             "    float4 temporal_controls; \\\n    uint previous_bone_offset; \\\n    uint3 temporal_reserved;"
+        ))
+        XCTAssertTrue(temporal.contains(
+            "    uint previous_bone_offset; \\\n    uint instance_uv_rect; \\\n    uint2 temporal_reserved;"
         ))
         // The previous palettes sit in the bone buffer after this frame's, one per pose and skin, and
         // only a temporal frame that continues the previous one reads them.

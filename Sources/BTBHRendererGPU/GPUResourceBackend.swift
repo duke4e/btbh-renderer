@@ -37,6 +37,8 @@ enum GPUSceneSurfaceVariant: UInt32, Equatable {
     case glitter = 5
     case softParticle = 6
     case rim = 7
+    /// RFC 0013 (since 0.11.0): `BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE`, a see-through surface lit per pixel.
+    case litParticle = 11
 }
 
 /// A shader file's name without its directory and last extension, lower-cased (`glitter_static` for
@@ -148,6 +150,26 @@ struct GPUSceneSurfaceProjection: Equatable {
                     w: 0
                 ),
                 parameters1: .init(x: 0, y: 0, z: 0, w: 0)
+            )
+        case "lit_particle":
+            // RFC 0013 (since 0.11.0): smoke, dust and steam lit per pixel (BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE). The
+            // material must be transparent with the mix blend (straight alpha) and lit; its normal map, linear, holds
+            // the tilt in rg and the thickness in b. Parameters: the soft fade, the near fade (start, width), the wrap,
+            // the transmission, its asymmetry (-1...1) and the optical depth at thickness 1.
+            return .init(
+                variant: .litParticle,
+                parameters0: .init(
+                    x: float("u_softFade", default: 0),
+                    y: float("u_nearStart", default: 0),
+                    z: float("u_nearFade", default: 0),
+                    w: float("u_wrap", default: 0)
+                ),
+                parameters1: .init(
+                    x: float("u_transmission", default: 0),
+                    y: float("u_asymmetry", default: 0),
+                    z: float("u_opticalDepth", default: 0),
+                    w: 0
+                )
             )
         case "glitter":
             let player = vec3("u_playerPos", default: .zero)

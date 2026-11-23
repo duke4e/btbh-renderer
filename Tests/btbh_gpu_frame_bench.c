@@ -42,6 +42,21 @@
  *   unit, over the city: hills up to about 3 units), lift-keep (the same with KEEP_NORMALS), lift-flat (the same
  *   draws without a lift). In all three the pieces cast no shadow (a lifted batch casts none), so lift - lift-flat is
  *   what the lift costs. Before 0.11.0 lift and lift-keep draw as lift-flat.
+ * - RFC 0013's smoke (0.11.0's bench): smoke-off, smoke-soft and smoke-lit add Be The Bullet Hell v2's burning fight to the
+ *   frame: 170 puffs of a 2 x 2 atlas of 128-pixel cells (5 columns of 12 over fires, 110 low ones scattered), sorted
+ *   far to near, straight alpha capped at 0.5, their discs about 5.6 % of the screen's height (printed: the share of
+ *   the screen they cover, the deepest stack, the lights in reach of a puff), by 6 fire and 4 neon point lights and
+ *   16 lamps (the frame's 8 and a second row: v2's High preset at night).
+ *   smoke-soft draws them as v2 does before RFC 0013 (soft particles, unlit, a batch per cell and tilt: 10 draws),
+ *   smoke-lit as one lit particle batch with the UV rect, a normal and thickness atlas, the soft fade and the
+ *   transmission; smoke-off draws none (the same lights). The cost log's transparent_ms holds the distance pass and
+ *   the puffs. Before 0.11.0 smoke-lit draws as smoke-off.
+ * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
+ *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
+ *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
+ *   BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR at custom x 1 (the same pixels as light-off: light - light-off is what
+ *   the flag costs); light-mixed at 1, 0.5 and 0 by instance (a district going dark). Before 0.11.0 both draw as
+ *   light-off.
  * - BTBH_FRAME_BENCH_CPU=1: no cost log; after each present a line "BENCH cpu <window> <round> ring=<0|1>
  *   prepare=<ms> shadow=<ms> geometry=<ms> present=<ms> draws=<n>" with the scene report's CPU fields and the
  *   present call's wall clock (tools/frame_bench_cpu.py summarises them).
@@ -119,9 +134,22 @@ typedef struct BenchRing {
     uint32_t batch_count;
 } BenchRing;
 
+#define SMOKE_PUFFS 170u
+#define SMOKE_COLUMNS 5u
+#define SMOKE_COLUMN_PUFFS 12u
+#define SMOKE_LIGHTS 6u
+#define SMOKE_NEON 4u
+
 typedef struct BenchWindow {
     BTBHGPUWindow *window;
     char mode[48];
+    /* RFC 0013's smoke: 0 none, 1 smoke-off, 2 smoke-soft, 3 smoke-lit. */
+    int smoke;
+    /* The light factor: 0 none, 1 light-off, 2 light, 3 light-mixed. */
+    int light;
+    BTBHGPUTexture *smoke_atlas;
+    BTBHGPUTexture *smoke_normals;
+    BTBHGPUCustomMesh *puff;
     BenchRing ring;
     bool rc;
     bool rc_low;
@@ -404,8 +432,8 @@ static void fill_batch(BTBHGPUSceneGeometryBatch *batch, BTBHGPUCustomMesh *mesh
 static void build_frame(BenchWindow *bench, uint32_t draws) {
     const char *mode = bench->mode;
     uint32_t state = 12345u;
-    bench->instances = calloc(((size_t)draws * 5u + 1u) * BENCH_FLOATS, sizeof(float));
-    bench->batches = calloc((size_t)draws + 1u + 2u * RING_PIECES + 1u, sizeof(BTBHGPUSceneGeometryBatch));
+    bench->instances = calloc(((size_t)draws * 5u + 1u + SMOKE_PUFFS) * BENCH_FLOATS, sizeof(float));
+    bench->batches = calloc((size_t)draws + 1u + 2u * RING_PIECES + 1u + 16u, sizeof(BTBHGPUSceneGeometryBatch));
     if (bench->instances == NULL || bench->batches == NULL) {
         fprintf(stderr, "out of memory\n");
         exit(1);
@@ -419,6 +447,23 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->normal_texture = bench->normal;
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
+        if (bench->light != 0) {
+            /* v2's lit kit at night: a glow on every piece, glass on every fourth. */
+            batch->emission_red = 255u;
+            batch->emission_green = 190u;
+            batch->emission_blue = 120u;
+            batch->emission_energy = 1.5f;
+            if (draw % 4u == 0u) {
+                batch->detail_parameters[1] = 0.5f;
+                batch->detail_parameters[2] = 3.0f;
+                batch->detail_parameters[3] = 5.0f;
+            }
+#if defined(BTBH_GPU_SCENE_HAS_INSTANCE_LIGHT_FACTOR)
+            if (bench->light >= 2) {
+                batch->flags |= BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR;
+            }
+#endif
+        }
         if (bench->rc && draw % 10u == 0u) {
             /* A glow: a material source of the cascades. */
             batch->emission_red = 255u;
@@ -464,6 +509,10 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
             instance[18] = 0.6f + 0.4f * bench_unit(&state);
             instance[19] = 1.0f;
             instance[23] = (float)(lot % 97u);   /* the lot's seed in custom.w */
+            if (bench->light != 0) {
+                /* The light factor in custom x: 1, or (light-mixed) 1, 0.5 and 0 by instance. */
+                instance[20] = bench->light == 3 ? 0.5f * (float)(bench->instance_count % 3u) : 1.0f;
+            }
             bench->triangles += (uint64_t)piece_boxes(piece) * 12u;
         }
     }
@@ -744,6 +793,248 @@ static void build_occlusion(BenchWindow *bench) {
     }
 }
 
+/* The smoke's fires: the columns' feet, where the point lights burn (and one more in the middle). */
+static const float smoke_fires[SMOKE_LIGHTS][2] = {
+    { -20.0f, -5.0f }, { -8.0f, 6.0f }, { 4.0f, -3.0f }, { 14.0f, 8.0f }, { 24.0f, -8.0f }, { 0.0f, 2.0f },
+};
+
+/* A 256 x 256 atlas of 2 x 2 cells of 128 pixels: a soft blob each (`normals`: its sphere's normal in rg, OpenGL +Y,
+   and its thickness in b, linear; else grey, alpha the coverage). */
+static BTBHGPUTexture *smoke_texture(BTBHGPUWindow *window, bool normals) {
+    uint8_t *pixels = malloc(256u * 256u * 4u);
+    if (pixels == NULL) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    uint32_t state = 99u;
+    for (uint32_t y = 0u; y < 256u; ++y) {
+        for (uint32_t x = 0u; x < 256u; ++x) {
+            const float u = ((float)(x % 128u) + 0.5f) / 64.0f - 1.0f;
+            const float v = ((float)(y % 128u) + 0.5f) / 64.0f - 1.0f;
+            const float r = sqrtf(u * u + v * v) / 0.8f;
+            const float wobble = 0.08f * bench_unit(&state);
+            float coverage = 1.0f - r * r + wobble;
+            coverage = coverage < 0.0f ? 0.0f : (coverage > 1.0f ? 1.0f : coverage);
+            const float rise = r < 1.0f ? sqrtf(1.0f - r * r) : 0.0f;
+            uint8_t *texel = &pixels[(y * 256u + x) * 4u];
+            if (normals) {
+                const float nx = r < 1.0f ? u / 0.8f : 0.0f;
+                const float ny = r < 1.0f ? -v / 0.8f : 0.0f;
+                texel[0] = (uint8_t)(127.5f + 127.0f * nx);
+                texel[1] = (uint8_t)(127.5f + 127.0f * ny);
+                texel[2] = (uint8_t)(255.0f * rise);
+                texel[3] = 255u;
+            } else {
+                texel[0] = (uint8_t)(200u + bench_random(&state) % 40u);
+                texel[1] = texel[0];
+                texel[2] = texel[0];
+                texel[3] = (uint8_t)(255.0f * coverage);
+            }
+        }
+    }
+    BTBHGPUTextureReport report;
+    BTBHGPUTexture *texture = btbh_gpu_window_texture_create_rgba8_ex(window, pixels, 256u, 256u, 1u,
+        BTBH_GPU_TEXTURE_FILTER_TRILINEAR, BTBH_GPU_TEXTURE_WRAP_CLAMP,
+        normals ? BTBH_GPU_TEXTURE_COLOR_SPACE_LINEAR : BTBH_GPU_TEXTURE_COLOR_SPACE_SRGB, &report);
+    free(pixels);
+    if (texture == NULL) {
+        fprintf(stderr, "smoke texture: %s\n", report.message);
+        exit(1);
+    }
+    return texture;
+}
+
+typedef struct SmokePuff {
+    float position[3];
+    float scale;
+    uint32_t cell;
+    float depth;
+} SmokePuff;
+
+static int smoke_far_first(const void *left, const void *right) {
+    const float a = ((const SmokePuff *)left)->depth;
+    const float b = ((const SmokePuff *)right)->depth;
+    return a < b ? 1 : (a > b ? -1 : 0);
+}
+
+/* The burning fight's puffs after the frame's draws: smoke-soft as soft particles, a batch per cell and tilt (10),
+   each sorted far to near; smoke-lit as one lit particle batch with the UV rect, sorted far to near; smoke-off none.
+   Prints what they cover at the render size and the lights in reach of a puff. */
+static void build_smoke(BenchWindow *bench, const BenchCamera *camera, const BTBHGPUSceneLighting *lighting) {
+    if (bench->smoke == 0) {
+        return;
+    }
+    static SmokePuff puffs[SMOKE_PUFFS];
+    uint32_t state = 4242u;
+    uint32_t count = 0u;
+    for (uint32_t column = 0u; column < SMOKE_COLUMNS; ++column) {
+        for (uint32_t k = 0u; k < SMOKE_COLUMN_PUFFS; ++k) {
+            SmokePuff *puff = &puffs[count++];
+            puff->position[0] = smoke_fires[column][0] + 1.2f * (bench_unit(&state) - 0.5f) + 0.15f * (float)k;
+            puff->position[1] = 1.5f + 0.9f * (float)k;
+            puff->position[2] = smoke_fires[column][1] + 1.2f * (bench_unit(&state) - 0.5f);
+            puff->scale = 3.6f * (0.8f + 0.5f * bench_unit(&state)) * (1.0f + 0.04f * (float)k);
+            puff->cell = bench_random(&state) % 4u;
+        }
+    }
+    while (count < SMOKE_PUFFS) {
+        SmokePuff *puff = &puffs[count++];
+        puff->position[0] = -46.0f + 92.0f * bench_unit(&state);
+        puff->position[1] = 0.5f + 3.0f * bench_unit(&state);
+        puff->position[2] = -28.0f + 56.0f * bench_unit(&state);
+        puff->scale = 4.6f * (0.7f + 0.6f * bench_unit(&state));
+        puff->cell = bench_random(&state) % 4u;
+    }
+    float forward[3];
+    cross3(camera->up, camera->right, forward);
+    for (uint32_t index = 0u; index < count; ++index) {
+        const float offset[3] = {
+            puffs[index].position[0] - camera->position[0], puffs[index].position[1] - camera->position[1],
+            puffs[index].position[2] - camera->position[2],
+        };
+        puffs[index].depth = dot3(offset, forward);
+    }
+    qsort(puffs, count, sizeof(puffs[0]), smoke_far_first);
+    /* What they cover, the coverage discs (0.8 of a quad's half size) at the render size, and the lights in reach. */
+    static uint8_t layers[BENCH_RENDER_WIDTH * BENCH_RENDER_HEIGHT];
+    memset(layers, 0, sizeof(layers));
+    double disc_sum = 0.0;
+    float lights_in_reach = 0.0f;
+    const float *m = camera->view_projection;
+    for (uint32_t index = 0u; index < count; ++index) {
+        const float *p = puffs[index].position;
+        const float clip_x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+        const float clip_y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+        const float clip_w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+        const float cx = (clip_x / clip_w * 0.5f + 0.5f) * (float)BENCH_RENDER_WIDTH;
+        const float cy = (0.5f - clip_y / clip_w * 0.5f) * (float)BENCH_RENDER_HEIGHT;
+        /* (The projection's y scale, 1 / tan(0.45), the camera's fov 0.9.) */
+        const float radius = 0.8f * puffs[index].scale * (1.0f / tanf(0.45f)) / clip_w * 0.5f *
+            (float)BENCH_RENDER_HEIGHT;
+        disc_sum += 2.0 * (double)radius / (double)BENCH_RENDER_HEIGHT;
+        for (int y = (int)(cy - radius); y <= (int)(cy + radius); ++y) {
+            for (int x = (int)(cx - radius); x <= (int)(cx + radius); ++x) {
+                if (x < 0 || y < 0 || x >= (int)BENCH_RENDER_WIDTH || y >= (int)BENCH_RENDER_HEIGHT) {
+                    continue;
+                }
+                const float dx = (float)x + 0.5f - cx;
+                const float dy = (float)y + 0.5f - cy;
+                if (dx * dx + dy * dy <= radius * radius && layers[y * (int)BENCH_RENDER_WIDTH + x] < 255u) {
+                    layers[y * (int)BENCH_RENDER_WIDTH + x] += 1u;
+                }
+            }
+        }
+        for (uint32_t lamp = 0u; lamp < lighting->lamp_count; ++lamp) {
+            const float *l = lighting->lamp_position_reach[lamp];
+            const float d[3] = { l[0] - p[0], l[1] - p[1], l[2] - p[2] };
+            lights_in_reach += dot3(d, d) < l[3] * l[3] ? 1.0f : 0.0f;
+        }
+        for (uint32_t light = 0u; light < lighting->point_light_count; ++light) {
+            const float *l = lighting->point_lights[light];
+            const float d[3] = { l[0] - p[0], l[1] - p[1], l[2] - p[2] };
+            lights_in_reach += dot3(d, d) < l[3] * l[3] ? 1.0f : 0.0f;
+        }
+    }
+    uint32_t covered[3] = { 0u, 0u, 0u };
+    uint32_t deepest = 0u;
+    for (uint32_t index = 0u; index < BENCH_RENDER_WIDTH * BENCH_RENDER_HEIGHT; ++index) {
+        covered[0] += layers[index] >= 1u ? 1u : 0u;
+        covered[1] += layers[index] >= 3u ? 1u : 0u;
+        covered[2] += layers[index] >= 6u ? 1u : 0u;
+        deepest = layers[index] > deepest ? layers[index] : deepest;
+    }
+    const double pixels = (double)BENCH_RENDER_WIDTH * BENCH_RENDER_HEIGHT;
+    printf("BENCH smoke %s: %u puffs, mean disc %.1f %% of the height; covered >=1 %.1f %%, >=3 %.1f %%, >=6 %.1f %%, "
+        "deepest %u; %.2f lights in reach of a puff\n", bench->mode, count, 100.0 * disc_sum / (double)count,
+        100.0 * covered[0] / pixels, 100.0 * covered[1] / pixels, 100.0 * covered[2] / pixels, deepest,
+        lights_in_reach / (float)count);
+    if (bench->smoke == 1) {
+        return;
+    }
+    /* The puffs' instances: billboards, straight alpha capped at 0.5, the cell in custom (the UV rect). */
+    const uint32_t first = bench->instance_count;
+    for (uint32_t index = 0u; index < count; ++index) {
+        float *instance = &bench->instances[(size_t)bench->instance_count++ * BENCH_FLOATS];
+        memset(instance, 0, BENCH_FLOATS * sizeof(float));
+        instance[0] = puffs[index].scale;
+        instance[5] = puffs[index].scale;
+        instance[10] = puffs[index].scale;
+        instance[12] = puffs[index].position[0];
+        instance[13] = puffs[index].position[1];
+        instance[14] = puffs[index].position[2];
+        instance[15] = 1.0f;
+        instance[16] = 1.0f;
+        instance[17] = 1.0f;
+        instance[18] = 1.0f;
+        instance[19] = 0.5f;
+        instance[20] = 0.5f;
+        instance[21] = 0.5f;
+        instance[22] = 0.5f * (float)(puffs[index].cell % 2u);
+        instance[23] = 0.5f * (float)(puffs[index].cell / 2u);
+    }
+    BTBHGPUSceneGeometryBatch puff;
+    fill_batch(&puff, bench->puff, first, count);
+    puff.albedo_texture = bench->smoke_atlas;
+    puff.albedo_red = 110u;
+    puff.albedo_green = 105u;
+    puff.albedo_blue = 100u;
+    puff.transparency_enabled = 1u;
+    puff.blend_mode = BTBH_GPU_SCENE_BLEND_ALPHA;
+    puff.billboard_mode = BTBH_GPU_SCENE_BILLBOARD_FRONT;
+    puff.cull_mode = BTBH_GPU_SCENE_CULL_NONE;
+    puff.depth_compare = BTBH_GPU_SCENE_DEPTH_LESS_EQUAL;
+    puff.spot_shadow_visible = 0u;
+    puff.surface_parameters0[0] = 0.4f;
+    if (bench->smoke == 3) {
+#if defined(BTBH_GPU_SCENE_HAS_LIT_PARTICLE)
+        puff.surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
+        puff.normal_texture = bench->smoke_normals;
+        puff.normal_scale = 1.0f;
+        puff.surface_parameters0[3] = 0.5f;
+        puff.surface_parameters1[0] = 0.8f;
+        puff.surface_parameters1[1] = 0.6f;
+        puff.surface_parameters1[2] = 9.0f;
+        puff.flags = BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;
+        bench->batches[bench->batch_count++] = puff;
+#endif
+        return;
+    }
+    /* v2's soft particles: unlit, a batch per cell and tilt (2 tilts of 4 cells, and 2 more for the columns' tops),
+       each batch's puffs contiguous and far to near. */
+    puff.surface_variant = BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE;
+    puff.unlit_enabled = 1u;
+    puff.uv_scale_x = 0.5f;
+    puff.uv_scale_y = 0.5f;
+    static SmokePuff grouped[SMOKE_PUFFS];
+    uint32_t cursor = 0u;
+    for (uint32_t group = 0u; group < 10u; ++group) {
+        const uint32_t start = cursor;
+        for (uint32_t index = 0u; index < count; ++index) {
+            if ((index * 7u + puffs[index].cell) % 10u == group) {
+                grouped[cursor++] = puffs[index];
+            }
+        }
+        if (cursor == start) {
+            continue;
+        }
+        BTBHGPUSceneGeometryBatch batch = puff;
+        batch.first_instance = first + start;
+        batch.instance_count = cursor - start;
+        batch.uv_offset_x = 0.5f * (float)(group % 2u);
+        batch.uv_offset_y = 0.5f * (float)((group / 2u) % 2u);
+        bench->batches[bench->batch_count++] = batch;
+    }
+    for (uint32_t index = 0u; index < count; ++index) {
+        float *instance = &bench->instances[((size_t)first + index) * BENCH_FLOATS];
+        instance[0] = grouped[index].scale;
+        instance[5] = grouped[index].scale;
+        instance[10] = grouped[index].scale;
+        instance[12] = grouped[index].position[0];
+        instance[13] = grouped[index].position[1];
+        instance[14] = grouped[index].position[2];
+    }
+}
+
 static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const char *directory, uint32_t number,
     uint32_t draws) {
     memset(bench, 0, sizeof(*bench));
@@ -762,6 +1053,10 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     bench->rc = mode_has(bench->mode, "rc");
     bench->rc_low = mode_has(bench->mode, "low");
     bench->rc_tops = mode_has(bench->mode, "tops");
+    bench->light = strncmp(bench->mode, "light-off", 9) == 0 ? 1 :
+        (strncmp(bench->mode, "light-mixed", 11) == 0 ? 3 : (strncmp(bench->mode, "light", 5) == 0 ? 2 : 0));
+    bench->smoke = strncmp(bench->mode, "smoke-off", 9) == 0 ? 1 :
+        (strncmp(bench->mode, "smoke-soft", 10) == 0 ? 2 : (strncmp(bench->mode, "smoke-lit", 9) == 0 ? 3 : 0));
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -806,6 +1101,35 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
             vertex_count, indices, index_count, &mesh_report);
         if (bench->ground == NULL) {
             fprintf(stderr, "ground: %s\n", mesh_report.message);
+            exit(1);
+        }
+    }
+    if (bench->smoke != 0) {
+        bench->smoke_atlas = smoke_texture(bench->window, false);
+        bench->smoke_normals = smoke_texture(bench->window, true);
+        /* The puff: a quad over local x and y facing +z, tangent +x, uv 0..1. */
+        float vertices[4u * BENCH_FLOATS];
+        memset(vertices, 0, sizeof(vertices));
+        static const float corners[4][2] = { { -1.0f, 1.0f }, { 1.0f, 1.0f }, { 1.0f, -1.0f }, { -1.0f, -1.0f } };
+        for (uint32_t corner = 0u; corner < 4u; ++corner) {
+            float *vertex = &vertices[corner * BENCH_FLOATS];
+            vertex[0] = corners[corner][0];
+            vertex[1] = corners[corner][1];
+            vertex[5] = 1.0f;
+            vertex[6] = 0.5f * corners[corner][0] + 0.5f;
+            vertex[7] = 0.5f - 0.5f * corners[corner][1];
+            vertex[8] = 1.0f;
+            vertex[11] = 1.0f;
+            vertex[12] = vertex[13] = vertex[14] = vertex[15] = 1.0f;
+            vertex[20] = 1.0f;
+        }
+        const uint32_t indices[6] = { 0u, 1u, 2u, 0u, 2u, 3u };
+        BTBHGPUCustomMeshReport mesh_report;
+        memset(&mesh_report, 0, sizeof(mesh_report));
+        bench->puff = btbh_gpu_window_custom_mesh_create(bench->window, vertices, (uint32_t)sizeof(vertices), 4u,
+            indices, 6u, &mesh_report);
+        if (bench->puff == NULL) {
+            fprintf(stderr, "puff: %s\n", mesh_report.message);
             exit(1);
         }
     }
@@ -914,6 +1238,44 @@ static BTBHGPUScenePost window_post(const BenchWindow *bench, const BTBHGPUScene
     return result;
 }
 
+/* The window's lighting: the smoke modes add the fires' and four neon signs' point lights, and a second row of lamps. */
+static BTBHGPUSceneLighting window_lighting(const BenchWindow *bench, const BTBHGPUSceneLighting *lighting) {
+    BTBHGPUSceneLighting result = *lighting;
+    if (bench->light != 0) {
+        result.window_glow = 1.5f;
+    }
+    if (bench->smoke == 0) {
+        return result;
+    }
+    static const float neon[SMOKE_NEON][3] = {
+        { -30.0f, 4.0f, 15.0f }, { 30.0f, 4.0f, -15.0f }, { -36.0f, 4.0f, -16.0f }, { 36.0f, 4.0f, 17.0f },
+    };
+    result.point_light_count = SMOKE_LIGHTS + SMOKE_NEON;
+    for (uint32_t light = 0u; light < SMOKE_LIGHTS + SMOKE_NEON; ++light) {
+        float *point = result.point_lights[light];
+        const bool fire = light < SMOKE_LIGHTS;
+        point[0] = fire ? smoke_fires[light][0] : neon[light - SMOKE_LIGHTS][0];
+        point[1] = fire ? 1.0f : neon[light - SMOKE_LIGHTS][1];
+        point[2] = fire ? smoke_fires[light][1] : neon[light - SMOKE_LIGHTS][2];
+        point[3] = fire ? 11.0f : 12.0f;
+        point[4] = fire ? 1.0f : 0.9f;
+        point[5] = fire ? 0.5f : 0.3f;
+        point[6] = fire ? 0.2f : 1.0f;
+        point[7] = fire ? 2.0f : 1.2f;
+    }
+    const uint32_t first_lamp = result.lamp_count;
+    for (uint32_t lamp = 0u; lamp < 8u && first_lamp + lamp < BTBH_GPU_SCENE_MAX_LAMPS; ++lamp) {
+        float *position = result.lamp_position_reach[first_lamp + lamp];
+        position[0] = -35.0f + 10.0f * (float)lamp;
+        position[1] = 3.0f;
+        position[2] = 16.0f;
+        position[3] = 15.0f;
+        memcpy(result.lamp_color_energy[first_lamp + lamp], result.lamp_color_energy[0], 4u * sizeof(float));
+        result.lamp_count += 1u;
+    }
+    return result;
+}
+
 static BTBHGPUSceneLighting bench_lighting(void) {
     BTBHGPUSceneLighting lighting;
     memset(&lighting, 0, sizeof(lighting));
@@ -1001,6 +1363,8 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
     }
     const BTBHGPUScenePost frame_post = window_post(bench, post);
     post = &frame_post;
+    const BTBHGPUSceneLighting frame_lighting = window_lighting(bench, lighting);
+    lighting = &frame_lighting;
     const uint64_t started = SDL_GetTicksNS();
     const BTBHGPUResult presented = btbh_gpu_window_scene_present_instances(bench->window,
         bench->scene_shaders[0], bench->scene_shaders[1], bench->scene_shaders[2], bench->scene_shaders[3],
@@ -1065,6 +1429,11 @@ int main(void) {
     const int rounds = bench_env_int("BTBH_FRAME_BENCH_ROUNDS", 30, 1, 1000);
     const int frames = bench_env_int("BTBH_FRAME_BENCH_FRAMES", 8, 1, 1000);
     const uint32_t draws = (uint32_t)bench_env_int("BTBH_FRAME_BENCH_DRAWS", 2000, 1, 20000);
+    const float eye[3] = { 0.0f, 95.0f, 95.0f };
+    const float centre[3] = { 0.0f, 0.0f, 0.0f };
+    const BenchCamera camera = look_at(eye, centre, 0.9f, (float)BENCH_WIDTH / (float)BENCH_HEIGHT);
+    const BTBHGPUSceneLighting lighting = bench_lighting();
+    const BTBHGPUScenePost post = bench_post();
     static BenchWindow windows[BENCH_MAX_WINDOWS];
     uint32_t window_count = 0u;
     for (const char *at = list; *at != 0 && window_count < BENCH_MAX_WINDOWS;) {
@@ -1073,6 +1442,10 @@ int main(void) {
         char directory[1024];
         (void)snprintf(directory, sizeof(directory), "%.*s", (int)length, at);
         open_bench_window(&windows[window_count], device, directory, window_count, draws);
+        {
+            const BTBHGPUSceneLighting smoke_lighting = window_lighting(&windows[window_count], &lighting);
+            build_smoke(&windows[window_count], &camera, &smoke_lighting);
+        }
         printf("BENCH window %u %s mode=%s draws=%u instances=%u triangles=%llu ring=%u%s\n", window_count,
             directory, windows[window_count].mode, windows[window_count].batch_count,
             windows[window_count].instance_count, (unsigned long long)windows[window_count].triangles,
@@ -1086,11 +1459,6 @@ int main(void) {
         window_count += 1u;
         at = end != NULL ? end + 1 : at + length;
     }
-    const float eye[3] = { 0.0f, 95.0f, 95.0f };
-    const float centre[3] = { 0.0f, 0.0f, 0.0f };
-    const BenchCamera camera = look_at(eye, centre, 0.9f, (float)BENCH_WIDTH / (float)BENCH_HEIGHT);
-    const BTBHGPUSceneLighting lighting = bench_lighting();
-    const BTBHGPUScenePost post = bench_post();
     /* Pipelines, caches and clocks first. */
     for (uint32_t w = 0u; w < window_count; ++w) {
         for (int frame = 0; frame < 10; ++frame) {

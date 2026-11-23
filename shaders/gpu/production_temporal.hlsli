@@ -16,6 +16,17 @@
     uint previous_bone_offset; \
     uint3 temporal_reserved;
 
+// The static vertex shaders' block (production_model.vert and the files built from it): the same words, the first
+// reserved one named. instance_uv_rect (RFC 0013): 1 for a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT, whose
+// instances' custom floats are a rectangle of its textures; the core looks for the name in the SPIR-V. The skinned
+// vertex shaders keep BTBH_TEMPORAL_UNIFORMS (the flag is refused on skinned batches).
+#define BTBH_TEMPORAL_UNIFORMS_STATIC \
+    float4x4 previous_view_projection; \
+    float4 temporal_controls; \
+    uint previous_bone_offset; \
+    uint instance_uv_rect; \
+    uint2 temporal_reserved;
+
 // Render-only world curvature (curvature: x the signed curvature, 1 / radius; y, z the world x and z it
 // bends around). Positive: a small planet. The ground keeps its x and z and drops by the sphere's sag,
 // and anything above it leans out along the sphere's normal. Negative: a hyperbolic bowl. Distance from

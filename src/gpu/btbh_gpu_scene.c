@@ -4,6 +4,7 @@
 #include "btbh_gpu_sdf_terrain_internal.h"
 #include "btbh_gpu_world_detail.h"
 #include "btbh_gpu_height_lift.h"
+#include "btbh_gpu_particle.h"
 
 #include <float.h>
 #include <math.h>
@@ -45,8 +46,9 @@
 #define BTBH_GPU_SCENE_REACTIVE_NONE_SCALE 1.0e-6f
 
 /* RFC 0009: what a scene fragment shader file samples, read from its SPIR-V names (btbh_gpu_scene_check_scene_shader).
-   Six variants, and room for a host that switches shader directories. */
-#define BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY 8u
+   Six variants, and room for a host that switches shader directories; RFC 0013 adds the static vertex shaders a
+   batch with the UV rect draws with (up to five). */
+#define BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY 16u
 typedef struct BTBHGPUSceneShaderCheck {
     char *path;
     bool has_dig_mask;
@@ -54,6 +56,8 @@ typedef struct BTBHGPUSceneShaderCheck {
     bool has_world_detail_table;
     /* RFC 0010: the radiance cascades' trace shader reads the sources' tops (btbh_gpu_scene_check_rc_shader). */
     bool has_source_top;
+    /* RFC 0013: a static vertex shader reads the instance's UV rect (btbh_gpu_scene_check_uv_rect_shaders). */
+    bool has_instance_uv_rect;
 } BTBHGPUSceneShaderCheck;
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -92,7 +96,10 @@ typedef struct BTBHGPUSceneUniforms {
     /* The bone palette the previous temporal frame drew this geometry's skin with
        (bones[previous_bone_offset + joint]); bone_offset when that frame had none. */
     uint32_t previous_bone_offset;
-    uint32_t temporal_reserved[3];
+    /* RFC 0013: 1 for a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (production_temporal.hlsli's
+       BTBH_TEMPORAL_UNIFORMS_STATIC; the skinned shaders' first reserved word). */
+    uint32_t instance_uv_rect;
+    uint32_t temporal_reserved[2];
 } BTBHGPUSceneUniforms;
 
 typedef struct BTBHGPUSceneFragmentUniforms {
@@ -361,6 +368,14 @@ struct BTBHGPUSceneRuntime {
     [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
     [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     BTBHGPUSceneLiftPipelines *lift_pipelines;
+    /* RFC 0013: the lit particles' pipelines (production_model.vert with production_particle_lit.frag, its
+       _2d_shadows or its _unshadowed sibling), [0 the sun's and the omni shadow, 1 the sun's only, 2 unshadowed]
+       [1 while the temporal upscaler runs][depth][cull][stencil]: always transparent with straight alpha, so their
+       colour targets are the transparent pass's alone. */
+    SDL_GPUGraphicsPipeline *lit_particle_pipelines[3][2]
+        [BTBH_GPU_SCENE_DEPTH_COUNT]
+        [BTBH_GPU_SCENE_CULL_COUNT]
+        [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT];
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
@@ -2580,6 +2595,20 @@ static bool btbh_gpu_scene_batches_have_soft_particles(
     return false;
 }
 
+/* RFC 0013: lit particles read the scene's distance (their soft fade and their fog's make-up), so the distance pass
+   runs on frames that draw one. */
+static bool btbh_gpu_scene_batches_have_lit_particles(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count
+) {
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        if (btbh_gpu_particle_lit(&batches[index])) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Refracting batches draw in a pass of their own after the transparent one, over a copy of the scene. */
 static bool btbh_gpu_scene_batches_have_refraction(
     const BTBHGPUSceneGeometryBatch *batches,
@@ -2966,17 +2995,18 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
 }
 
 /* Whether a batch draws with the fast unlit shader (production_model_unlit.frag, btbh_gpu_scene_uses_fast_unlit_pipeline:
-   a transparent unlit batch): without the radiance cascades, and under them with
-   BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO (scene_ambient_targets, since 0.10.0). The fast shader takes no
-   point light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent
-   pass draws as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came
-   out up to 200 levels brighter). Cascades without the flag keep the scene shader, as before. */
+   a transparent unlit batch): without the radiance cascades, and under them with cascades_fast_unlit
+   (BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO under additive cascades: since 0.10.0 with the HBAO, since 0.11.0
+   with any ambient occlusion or none, BTBHGPUSceneFrameSetup.cascades_fast_unlit). The fast shader takes no point
+   light, no dark scene and no sun shadow; the cascades' scene shader does, so under the flag the transparent pass draws
+   as without the cascades (Be The Bullet Hell v2's additive night overlays by its neon point lights came out up to 200
+   levels brighter). Cascades without the flag keep the scene shader, as before. */
 static bool btbh_gpu_scene_batch_fast_unlit(
     const BTBHGPUSceneGeometryBatch *batch,
     bool radiance_cascades_active,
-    bool scene_ambient_targets
+    bool cascades_fast_unlit
 ) {
-    return (!radiance_cascades_active || scene_ambient_targets) &&
+    return (!radiance_cascades_active || cascades_fast_unlit) &&
         btbh_gpu_scene_uses_fast_unlit_pipeline(batch);
 }
 
@@ -2985,7 +3015,7 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
-    bool scene_ambient_targets,
+    bool cascades_fast_unlit,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -3001,12 +3031,17 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     const uint32_t fast_unlit = btbh_gpu_scene_batch_fast_unlit(
         batch,
         radiance_cascades_active,
-        scene_ambient_targets
+        cascades_fast_unlit
     ) ? 1u : 0u;
     const uint32_t color_target_variant =
         (temporal ? 4u : 0u) +
         (radiance_cascades_active ? 2u : 0u) +
         (auxiliary_geometry_outputs ? 1u : 0u);
+    if (!animated && btbh_gpu_particle_lit(batch)) {
+        /* RFC 0013: a lit particle's pipeline (always transparent, straight alpha, never lifted or with a table). */
+        const uint32_t shadow_set = !shadows_active ? 2u : (omni_shadows_active ? 0u : 1u);
+        return &runtime->lit_particle_pipelines[shadow_set][temporal ? 1u : 0u][depth][cull][stencil];
+    }
     if (!animated && btbh_gpu_height_lift_active(batch)) {
         /* RFC 0012: production_model_lift.vert's and production_model_detail_table_lift.vert's pipelines; NULL until
            the first lifted batch made their sets (btbh_gpu_scene_ensure_model_pipeline). */
@@ -3192,6 +3227,48 @@ static bool btbh_gpu_scene_check_lift_shader(
     return true;
 }
 
+/* RFC 0013's name check: a lit particle needs production_particle_lit.frag (or its _2d_shadows or _unshadowed
+   sibling), files new in 0.11.0, beside the host's fragment shader. A missing one fails the present with its path;
+   a SPIR-V one must name the scene's distance (particle_scene_distance), so that a file of that name that isn't the
+   lit particle isn't drawn with. Read when its pipeline is made (once per pipeline). */
+static bool btbh_gpu_scene_check_particle_shader(
+    const char *path,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUSceneReport *report
+) {
+    size_t byte_count = 0u;
+    uint8_t *bytes = (uint8_t *)SDL_LoadFile(path, &byte_count);
+    char message[sizeof(report->message)];
+    if (bytes == NULL || byte_count == 0u) {
+        SDL_free(bytes);
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A lit particle's fragment shader is missing (build the shaders from 0.11.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    static const char name[] = "particle_scene_distance";
+    bool named = project_format != BTBH_GPU_SHADER_FORMAT_SPIRV;
+    for (size_t offset = 0u; !named && offset + sizeof(name) - 1u <= byte_count; ++offset) {
+        named = memcmp(bytes + offset, name, sizeof(name) - 1u) == 0;
+    }
+    SDL_free(bytes);
+    if (!named) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A lit particle's fragment shader doesn't draw lit particles (build the shaders from 0.11.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
 static bool btbh_gpu_scene_ensure_model_pipeline(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -3202,7 +3279,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     bool auxiliary_geometry_outputs,
     bool temporal,
     bool radiance_cascades_active,
-    bool scene_ambient_targets,
+    bool cascades_fast_unlit,
     bool shadows_active,
     bool omni_shadows_active,
     bool animated,
@@ -3223,7 +3300,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         auxiliary_geometry_outputs,
         temporal,
         radiance_cascades_active,
-        scene_ambient_targets,
+        cascades_fast_unlit,
         shadows_active,
         omni_shadows_active,
         animated,
@@ -3232,6 +3309,49 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     );
     if (slot != NULL && *slot != NULL) {
         return true;
+    }
+    if (!animated && btbh_gpu_particle_lit(batch)) {
+        /* RFC 0013: production_particle_lit.frag (its _2d_shadows or _unshadowed sibling by the frame's shadows),
+           beside the host's fragment shader, after the host's static vertex shader. Its textures: the albedo, the
+           normal, the scene's distance, the emission, the cascades' atlas, then the sun's (comparison), the fill's
+           and the spot's maps and the omni cube as the variant has them; its uniforms the material and the frame's
+           block. */
+        char particle_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        char filename[128];
+        (void)snprintf(
+            filename,
+            sizeof(filename),
+            !shadows_active
+                ? "production_particle_lit_unshadowed.frag.%s"
+                : (omni_shadows_active
+                    ? "production_particle_lit.frag.%s"
+                    : "production_particle_lit_2d_shadows.frag.%s"),
+            project_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "metallib" : "spv"
+        );
+        if (!btbh_gpu_scene_sibling_path(fragment_shader_path, filename, particle_path)) {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Lit particle fragment shader path is too long");
+            return false;
+        }
+        if (!btbh_gpu_scene_check_particle_shader(particle_path, project_format, report)) {
+            return false;
+        }
+        return btbh_gpu_scene_create_model_pipeline(
+            window,
+            vertex_shader_path,
+            particle_path,
+            project_format,
+            false,
+            false,
+            !shadows_active ? 5u : (omni_shadows_active ? 9u : 8u),
+            2u,
+            /* Transparent: the pass's own targets, with the auxiliary outputs or without. */
+            false,
+            temporal,
+            batch,
+            stencil_variant,
+            slot,
+            report
+        );
     }
     const bool lifted = !animated && btbh_gpu_height_lift_active(batch);
     if (slot == NULL) {
@@ -3251,7 +3371,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             auxiliary_geometry_outputs,
             temporal,
             radiance_cascades_active,
-            scene_ambient_targets,
+            cascades_fast_unlit,
             shadows_active,
             omni_shadows_active,
             animated,
@@ -3262,7 +3382,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     const bool fast_unlit = btbh_gpu_scene_batch_fast_unlit(
         batch,
         radiance_cascades_active,
-        scene_ambient_targets
+        cascades_fast_unlit
     );
     char variant_fragment_shader_path[
         BTBH_GPU_SCENE_PATH_CAPACITY
@@ -4845,7 +4965,9 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW |
                 BTBH_GPU_SCENE_BATCH_KEEP_ORDER |
                 BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE |
-                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW
+                BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT |
+                BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW |
+                BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
             )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
@@ -4926,9 +5048,10 @@ static void btbh_gpu_scene_refuse_batch(
 }
 
 /* RFC 0008: each batch's world detail, and RFC 0009: its world-detail table, and no array texture in a 2D slot.
-   RFC 0012: its height lift, and no heightfield in any other slot. Batches often share a detail, a table or a lift,
-   so a run of batches pointing at the same one checks it once. directional_shadow_visibility: the
-   _with_visibility calls' array, or NULL. False with the report naming the batch and the fault. */
+   RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
+   UV rect may be; and (0.11.0) one with the light factor. Batches often share a detail, a table or a lift, so a run of
+   batches pointing at the same one checks it once. directional_shadow_visibility: the _with_visibility calls' array, or
+   NULL. False with the report naming the batch and the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -4955,6 +5078,27 @@ static bool btbh_gpu_scene_validate_world_details(
             if (texture != NULL && (texture->layer_count != 0u || texture->heights != NULL)) {
                 btbh_gpu_scene_refuse_batch(report, index, slot_names[slot],
                     texture->layer_count != 0u ? array_in_2d_slot : heightfield_in_slot);
+                return false;
+            }
+        }
+        if (btbh_gpu_particle_lit(batch)) {
+            const char *problem = btbh_gpu_particle_lit_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "surface_variant LIT_PARTICLE", problem);
+                return false;
+            }
+        }
+        if (btbh_gpu_particle_uv_rect(batch)) {
+            const char *problem = btbh_gpu_particle_uv_rect_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "flags INSTANCE_UV_RECT", problem);
+                return false;
+            }
+        }
+        if (btbh_gpu_scene_light_factor(batch)) {
+            const char *problem = btbh_gpu_scene_light_factor_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "flags INSTANCE_LIGHT_FACTOR", problem);
                 return false;
             }
         }
@@ -6222,6 +6366,7 @@ static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRu
     fresh.has_world_detail = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_normal_texture");
     fresh.has_world_detail_table = btbh_gpu_scene_bytes_name(bytes, byte_count, "world_detail_maps");
     fresh.has_source_top = btbh_gpu_scene_bytes_name(bytes, byte_count, "source_top_texture");
+    fresh.has_instance_uv_rect = btbh_gpu_scene_bytes_name(bytes, byte_count, "instance_uv_rect");
     SDL_free(bytes);
     const size_t path_length = strlen(path);
     fresh.path = (char *)malloc(path_length + 1u);
@@ -6369,6 +6514,97 @@ static bool btbh_gpu_scene_check_rc_shader(
     return false;
 }
 
+/* Whether a batch is a source of the radiance cascades' light through their material pass
+   (btbh_gpu_scene_encode_rc_material_sources): unlit and no receiver, or with an emission; never with
+   BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE, never refracting, and (RFC 0013) never a lit particle. */
+static bool btbh_gpu_scene_batch_material_source(const BTBHGPUSceneGeometryBatch *batch) {
+    return (batch->flags & BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE) == 0u &&
+        batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
+        !btbh_gpu_particle_lit(batch) &&
+        ((batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
+         (batch->emission_energy > 0.0f &&
+          (batch->emission_red != 0u ||
+           batch->emission_green != 0u ||
+           batch->emission_blue != 0u)));
+}
+
+/* RFC 0013: older static vertex shaders draw a batch with BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT without a word,
+   showing the whole atlas on every instance. So each vertex shader such a batch draws with must name
+   instance_uv_rect (SPIR-V keeps a block's member names): the host's production_model.vert, or its table or lifted
+   sibling, and with the cascades on, for a batch that is their source, production_rc_material_source.vert beside the
+   post vertex shader. Each path is read once, as the scene shaders are; Metal libraries aren't checked. A file that
+   can't be read is left to the shader load (or the lift's check), which names it. False, with the report set
+   (BTBH_GPU_INVALID_ARGUMENT, the path), when one doesn't name it. */
+static bool btbh_gpu_scene_check_uv_rect_shaders(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const char *vertex_shader_path,
+    const char *post_vertex_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    bool radiance_cascades_active,
+    BTBHGPUSceneReport *report
+) {
+    if (shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV || vertex_shader_path == NULL) {
+        return true;
+    }
+    /* Bit 0 production_model.vert, 1 the table's, 2 the lifted, 3 the lifted table's, 4 the cascades' source. */
+    uint32_t wanted = 0u;
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[index];
+        if (!btbh_gpu_particle_uv_rect(batch)) {
+            continue;
+        }
+        const bool lifted = btbh_gpu_height_lift_active(batch);
+        const bool tabled = btbh_gpu_world_detail_table_active(batch);
+        wanted |= 1u << ((lifted ? 2u : 0u) + (tabled ? 1u : 0u));
+        if (radiance_cascades_active && btbh_gpu_scene_batch_material_source(batch)) {
+            wanted |= 1u << 4u;
+        }
+    }
+    static const char *const names[5] = {
+        NULL,
+        "production_model_detail_table.vert.spv",
+        "production_model_lift.vert.spv",
+        "production_model_detail_table_lift.vert.spv",
+        "production_rc_material_source.vert.spv",
+    };
+    for (uint32_t which = 0u; which < 5u; ++which) {
+        if ((wanted & (1u << which)) == 0u) {
+            continue;
+        }
+        char path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        if (which == 0u) {
+            const size_t length = strlen(vertex_shader_path);
+            if (length + 1u > sizeof(path)) {
+                continue;
+            }
+            (void)memcpy(path, vertex_shader_path, length + 1u);
+        } else if (!btbh_gpu_scene_sibling_path(
+                which == 4u ? post_vertex_shader_path : vertex_shader_path,
+                names[which],
+                path
+            )) {
+            continue;
+        }
+        const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, path);
+        if (checked == NULL || checked->has_instance_uv_rect) {
+            continue;
+        }
+        char message[sizeof(report->message)];
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A batch's UV rect (INSTANCE_UV_RECT) isn't read by its vertex shader (build the shaders from 0.11.0 or "
+            "later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
 static void btbh_gpu_scene_dig_uniforms(
     const BTBHGPUSdfTerrainMaskBinding *binding,
     BTBHGPUSceneDigMaskUniforms *uniforms
@@ -6416,6 +6652,118 @@ static void btbh_gpu_scene_world_detail_samplers(
         samplers[index].texture = textures[index]->texture;
         samplers[index].sampler = textures[index]->sampler;
     }
+}
+
+/* RFC 0013: the lit particles' block for a pass (production_particle_lit.frag.hlsl's ParticleFrame): the frame's
+   inverse view-projection and render size, whether the scene's distance is bound, the HDR composite's fog when it
+   fogs (hdr_composite_active and the post's fog on), and the radiance cascades' field when they lit this frame
+   (their light, this frame's, is in hrc_quadrant_textures[hrc_history_read_index] once their compose ran). */
+static void btbh_gpu_scene_particle_frame(
+    const BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUScenePost *post,
+    const float inverse_view_projection[16],
+    uint32_t render_width,
+    uint32_t render_height,
+    bool scene_distance_ready,
+    bool hdr_composite_active,
+    bool radiance_cascades_lit,
+    BTBHGPUSceneParticleFrameUniforms *frame
+) {
+    SDL_zerop(frame);
+    (void)memcpy(frame->inverse_view_projection, inverse_view_projection, sizeof(frame->inverse_view_projection));
+    frame->controls[0] = 1.0f / (float)render_width;
+    frame->controls[1] = 1.0f / (float)render_height;
+    frame->controls[2] = scene_distance_ready ? 1.0f : 0.0f;
+    frame->controls[3] = hdr_composite_active && post->fog_enabled != 0u ? 1.0f : 0.0f;
+    frame->fog_color_density[0] = post->fog_color[0];
+    frame->fog_color_density[1] = post->fog_color[1];
+    frame->fog_color_density[2] = post->fog_color[2];
+    frame->fog_color_density[3] = post->fog_density;
+    frame->fog_shape[0] = post->fog_start_distance;
+    frame->fog_shape[1] = post->fog_maximum_opacity;
+    frame->fog_shape[2] = post->fog_enabled != 0u ? 1.0f : 0.0f;
+    for (uint32_t edge = 0u; edge < 4u; ++edge) {
+        frame->fog_edge_bounds[edge] = post->fog_edge_bounds[edge];
+    }
+    frame->fog_edge[0] = post->fog_edge_fade_distance;
+    frame->fog_edge[1] = post->fog_enabled != 0u && post->fog_edge_enabled != 0u ? 1.0f : 0.0f;
+    frame->fog_edge[2] = post->fog_edge_clear_distance;
+    const BTBHGPUSceneRadianceCascadesRuntime *cascades = &runtime->radiance_cascades;
+    const uint32_t read_index = cascades->hrc_history_read_index;
+    if (radiance_cascades_lit &&
+        cascades->hrc_history_valid &&
+        read_index <= 2u &&
+        cascades->hrc_quadrant_textures[read_index] != NULL &&
+        cascades->sampler != NULL &&
+        cascades->hrc_history_cell_size > 0.0f &&
+        cascades->source_field_width != 0u &&
+        cascades->source_field_height != 0u &&
+        post->radiance_cascades.indirect_intensity > 0.0f) {
+        frame->cascade_origin[0] = cascades->hrc_history_origin_x;
+        frame->cascade_origin[1] = cascades->hrc_history_origin_z;
+        frame->cascade_origin[2] = 1.0f / cascades->hrc_history_cell_size;
+        frame->cascade_origin[3] = 2.0f * post->radiance_cascades.indirect_intensity;
+        frame->cascade_field[0] = (float)cascades->source_field_width;
+        frame->cascade_field[1] = (float)cascades->source_field_height;
+        frame->cascade_field[2] = post->radiance_cascades.source_tops != 0u ? 1.0f : 0.0f;
+    }
+}
+
+/* RFC 0013: a lit particle's textures, in production_particle_lit.frag's slots: the albedo, the normal (rg) and
+   thickness (b), the scene's distance (a fallback never read without it), the emission, the cascades' quadrant atlas
+   (a fallback never read when they didn't light this frame), then the variant's shadow maps: the sun's through the
+   comparison sampler, the fill's and the spot's, and the omni cube. */
+static void btbh_gpu_scene_bind_lit_particle(
+    SDL_GPURenderPass *pass,
+    const BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUTexture *albedo,
+    const BTBHGPUTexture *normal,
+    const BTBHGPUTexture *emission,
+    bool scene_distance_ready,
+    bool radiance_cascades_lit,
+    bool shadows_active,
+    bool omni_shadows_active
+) {
+    SDL_GPUTextureSamplerBinding samplers[9];
+    SDL_zeroa(samplers);
+    samplers[0].texture = albedo->texture;
+    samplers[0].sampler = albedo->sampler;
+    samplers[1].texture = normal->texture;
+    samplers[1].sampler = normal->sampler;
+    samplers[2].texture = scene_distance_ready
+        ? runtime->scene_distance_texture
+        : runtime->fallback_texture->texture;
+    /* (Nearest and clamped: the fallback's sampler. The shader reads the texel at its pixel.) */
+    samplers[2].sampler = runtime->fallback_texture->sampler;
+    samplers[3].texture = emission->texture;
+    samplers[3].sampler = emission->sampler;
+    const BTBHGPUSceneRadianceCascadesRuntime *cascades = &runtime->radiance_cascades;
+    const uint32_t read_index = cascades->hrc_history_read_index;
+    const bool cascade_light =
+        radiance_cascades_lit &&
+        read_index <= 2u &&
+        cascades->hrc_quadrant_textures[read_index] != NULL &&
+        cascades->sampler != NULL;
+    samplers[4].texture = cascade_light
+        ? cascades->hrc_quadrant_textures[read_index]
+        : runtime->fallback_texture->texture;
+    samplers[4].sampler = cascade_light ? cascades->sampler : runtime->scene_color_sampler;
+    uint32_t count = 5u;
+    if (shadows_active) {
+        samplers[5].texture = runtime->directional_shadow_textures[0];
+        samplers[5].sampler = runtime->directional_shadow_compare_sampler;
+        samplers[6].texture = runtime->directional_shadow_textures[1];
+        samplers[6].sampler = runtime->directional_shadow_sampler;
+        samplers[7].texture = runtime->directional_shadow_textures[2];
+        samplers[7].sampler = runtime->directional_shadow_sampler;
+        count = 8u;
+        if (omni_shadows_active) {
+            samplers[8].texture = runtime->omni_shadow_texture;
+            samplers[8].sampler = runtime->directional_shadow_sampler;
+            count = 9u;
+        }
+    }
+    SDL_BindGPUFragmentSamplers(pass, 0u, samplers, count);
 }
 
 static bool btbh_gpu_scene_render_directional_shadow(
@@ -6925,16 +7273,9 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
          batch_index < batch_count;
          ++batch_index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[batch_index];
-        /* BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: no source, whatever it shows (since 0.9.0). Its geometries still
-           count below, for the bone offsets. */
-        const bool material_emits =
-            (batch->flags & BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE) == 0u &&
-            batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT &&
-            ((batch->unlit_enabled != 0u && batch->rc_receiver == 0u) ||
-             (batch->emission_energy > 0.0f &&
-              (batch->emission_red != 0u ||
-               batch->emission_green != 0u ||
-               batch->emission_blue != 0u)));
+        /* BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE: no source, whatever it shows (since 0.9.0); nor is a lit particle
+           (RFC 0013), with an emission or without. Its geometries still count below, for the bone offsets. */
+        const bool material_emits = btbh_gpu_scene_batch_material_source(batch);
         SDL_GPUBuffer *batch_instance_buffer =
             batch->instance_buffer != NULL
                 ? batch->instance_buffer->buffer
@@ -6987,6 +7328,8 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 uniforms.uv_transform[2] = batch->uv_offset_x;
                 uniforms.uv_transform[3] = batch->uv_offset_y;
                 uniforms.bone_offset = animated ? bone_offset : 0u;
+                /* RFC 0013: the source's texture coordinate takes the instance's UV rect too. */
+                uniforms.instance_uv_rect = btbh_gpu_particle_uv_rect(batch) ? 1u : 0u;
                 uniforms.billboard_mode = (uint32_t)batch->billboard_mode;
                 uniforms.unlit_enabled = (uint32_t)batch->unlit_enabled;
                 uniforms.surface_variant = (uint32_t)batch->surface_variant;
@@ -7022,9 +7365,12 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                     (float)batch->emission_blue / 255.0f;
                 fragment_uniforms.emission_color_energy[3] =
                     batch->emission_energy;
+                /* Bit 9 (512): BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0), the instance's custom x
+                   scales its emission here too (production_light_factor.hlsli). */
                 fragment_uniforms.unlit_enabled =
                     (uint32_t)batch->unlit_enabled |
-                    (batch->rc_receiver != 0u ? 4u : 0u);
+                    (batch->rc_receiver != 0u ? 4u : 0u) |
+                    (btbh_gpu_scene_light_factor(batch) ? 512u : 0u);
                 fragment_uniforms.alpha_cutoff = batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =
                     batch->surface_variant ==
@@ -7160,6 +7506,8 @@ typedef struct BTBHGPUSceneFrameSetup {
     bool bloom_active;
     bool hdr_composite_active;
     bool soft_particles_active;
+    /* RFC 0013: a batch is a lit particle (the distance pass runs). */
+    bool lit_particles_active;
     bool refraction_active;
     bool auxiliary_geometry_outputs;
     uint32_t shadow_enabled[3];
@@ -7170,6 +7518,10 @@ typedef struct BTBHGPUSceneFrameSetup {
        takes the albedo from the emission target, and the HBAO resolve and the SSR read them as without the
        cascades. */
     bool scene_ambient_targets;
+    /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO's transparent part (with any ambient occlusion since 0.11.0; it
+       needed the HBAO's in 0.10.0): under additive cascades, transparent unlit batches take the fast unlit shader, as
+       without the cascades (btbh_gpu_scene_batch_fast_unlit). True wherever scene_ambient_targets is. */
+    bool cascades_fast_unlit;
     /* BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY where it applies (the reflections on, the cascades off): the
        opaque pass writes the reflectivity to the ambient target's alpha and marks unlit surfaces in the emission
        target's (unlit_enabled bit 6), and the SSR reads them. */
@@ -7335,6 +7687,10 @@ static bool btbh_gpu_scene_prepare_frame(
         batch_count > 0u &&
         batches != NULL &&
         btbh_gpu_scene_batches_have_soft_particles(batches, batch_count);
+    const bool lit_particles_active =
+        batch_count > 0u &&
+        batches != NULL &&
+        btbh_gpu_scene_batches_have_lit_particles(batches, batch_count);
     const bool refraction_active =
         batch_count > 0u &&
         batches != NULL &&
@@ -7419,6 +7775,7 @@ static bool btbh_gpu_scene_prepare_frame(
     setup->bloom_active = bloom_active;
     setup->hdr_composite_active = hdr_composite_active;
     setup->soft_particles_active = soft_particles_active;
+    setup->lit_particles_active = lit_particles_active;
     setup->refraction_active = refraction_active;
     setup->auxiliary_geometry_outputs = auxiliary_geometry_outputs;
     (void)memcpy(setup->shadow_enabled, shadow_enabled, sizeof(setup->shadow_enabled));
@@ -7430,6 +7787,10 @@ static bool btbh_gpu_scene_prepare_frame(
         radiance_cascades_active &&
         post->radiance_cascades.additive != 0u &&
         post->ssao_contact == 0u &&
+        (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
+    setup->cascades_fast_unlit =
+        radiance_cascades_active &&
+        post->radiance_cascades.additive != 0u &&
         (post->flags & BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO) != 0u;
     setup->ssr_surface_reflectivity =
         ssr_active &&
@@ -7492,7 +7853,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     setup->auxiliary_geometry_outputs,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
-                    setup->scene_ambient_targets,
+                    setup->cascades_fast_unlit,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -7517,7 +7878,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
                     false,
                     setup->temporal_active,
                     setup->radiance_cascades_active,
-                    setup->scene_ambient_targets,
+                    setup->cascades_fast_unlit,
                     setup->shadows_active,
                     setup->omni_shadows_active,
                     animated,
@@ -7702,9 +8063,10 @@ static bool btbh_gpu_scene_ensure_frame_targets(
     BTBHGPUSceneReport scene_distance_report;
     SDL_zero(scene_distance_report);
     /* Refraction reads the distance too: a displaced sample nearer than the refracting surface (a unit in
-       front of it) falls back to the undisplaced one. */
+       front of it) falls back to the undisplaced one. So do lit particles (RFC 0013): their soft fade, and their fog
+       made up for the composite's at the depth behind them. */
     *scene_distance_ready =
-        (setup->soft_particles_active || setup->refraction_active) &&
+        (setup->soft_particles_active || setup->refraction_active || setup->lit_particles_active) &&
         btbh_gpu_scene_ensure_scene_distance_pipeline(
             window,
             post_vertex_shader_path,
@@ -7924,6 +8286,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const bool omni_shadows_active = setup.omni_shadows_active;
     const bool shadows_active = setup.shadows_active;
     const bool scene_ambient_targets = setup.scene_ambient_targets;
+    const bool cascades_fast_unlit = setup.cascades_fast_unlit;
     const bool ssr_surface_reflectivity = setup.ssr_surface_reflectivity;
     if (!runtime->temporal_debug_view_read) {
         /* BTBH_DEBUG_MOTION_VECTORS=1 shows the upscaler's inputs, =2 the motion vectors' reprojection
@@ -8100,6 +8463,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime,
             post,
             post_fragment_shader_path,
+            shader_format,
+            setup.radiance_cascades_active,
+            report
+        ) ||
+        !btbh_gpu_scene_check_uv_rect_shaders(
+            runtime,
+            batches,
+            batch_count,
+            vertex_shader_path,
+            post_vertex_shader_path,
             shader_format,
             setup.radiance_cascades_active,
             report
@@ -8653,6 +9026,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     uint64_t geometry_encode_nanoseconds = 0u;
     SDL_GPUTexture *radiance_cascades_post_input =
         runtime->scene_color_texture;
+    /* RFC 0013: the cascades ran this frame (not their fallback view): the lit particles take their light. */
+    bool radiance_cascades_lit = false;
     double radiance_cascades_encode_milliseconds = 0.0;
     const bool hero_omni_shadow_ready =
         omni_shadows_active &&
@@ -9051,6 +9426,24 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         /* RFC 0012: the height lift whose block the vertex uniform slot 1 holds in this pass, pushed as the table's
            is: once per run of lifted batches sharing it. */
         const BTBHGPUSceneHeightLift *pushed_lift = NULL;
+        /* RFC 0013: the lit particles' block, the same for every one in the pass, and whether fragment uniform slot 1
+           holds it (every other batch pushes its own block there). */
+        BTBHGPUSceneParticleFrameUniforms particle_frame;
+        SDL_zero(particle_frame);
+        bool particle_frame_pushed = false;
+        if (transparent_phase && setup.lit_particles_active) {
+            btbh_gpu_scene_particle_frame(
+                runtime,
+                post,
+                inverse_view_projection,
+                render_width,
+                render_height,
+                scene_distance_ready,
+                hdr_composite_active,
+                radiance_cascades_lit,
+                &particle_frame
+            );
+        }
         /* RFC 0011: the batch whose state the pass holds (phase 1b; NULL before the first draw and after a skinned
            geometry), the vertex buffer bound last, and the frame's part of both uniform blocks, filled once a pass
            (phase 1c): each batch writes its own fields over it before it pushes them. */
@@ -9516,6 +9909,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     animated ? previous_bone_offset : 0u;
                 uniforms.billboard_mode =
                     (uint32_t)batch->billboard_mode;
+                /* RFC 0013: BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT (0 for every other batch, as the reserved word was). */
+                uniforms.instance_uv_rect = btbh_gpu_particle_uv_rect(batch) ? 1u : 0u;
                 uniforms.unlit_enabled =
                     (uint32_t)batch->unlit_enabled;
                 uniforms.surface_variant =
@@ -9542,8 +9937,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &uniforms,
                     sizeof(uniforms)
                 );
+                /* (RFC 0013: a lit particle without a normal_texture is flat; the fallback's rg is 127/255.) */
                 fragment_uniforms.material_factors[0] =
-                    batch->normal_scale;
+                    btbh_gpu_particle_lit(batch) && batch->normal_texture == NULL
+                        ? 0.0f
+                        : batch->normal_scale;
                 fragment_uniforms.material_factors[1] =
                     batch->occlusion;
                 fragment_uniforms.material_factors[2] =
@@ -9569,7 +9967,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     ((batch->flags &
                       BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW) != 0u
                         ? 256u
-                        : 0u);
+                        : 0u) |
+                    /* BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0): the instance's custom x scales its
+                       light (production_light_factor.hlsli; the fast unlit shader reads it too). */
+                    (btbh_gpu_scene_light_factor(batch) ? 512u : 0u);
                 fragment_uniforms.alpha_cutoff =
                     batch->alpha_cutoff;
                 fragment_uniforms.surface_variant =
@@ -9647,7 +10048,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         phase_auxiliary_geometry_outputs,
                         temporal_active,
                         radiance_cascades_active,
-                        scene_ambient_targets,
+                        cascades_fast_unlit,
                         shadows_active,
                         omni_shadows_active,
                         animated,
@@ -9728,120 +10129,146 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     batch->orm_texture != NULL
                         ? batch->orm_texture
                         : window->scene_runtime->fallback_texture;
-                SDL_GPUTextureSamplerBinding samplers[15];
-                SDL_zeroa(samplers);
-                samplers[0].texture = texture->texture;
-                samplers[0].sampler = texture->sampler;
-                samplers[1].texture = emission_texture->texture;
-                samplers[1].sampler = emission_texture->sampler;
-                samplers[2].texture = normal_texture->texture;
-                samplers[2].sampler = normal_texture->sampler;
-                if (transparent_phase &&
-                    scene_distance_ready &&
-                    batch->surface_variant ==
-                        BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE) {
-                    /* A soft particle has no normal map; the slot carries the scene's distance. */
-                    samplers[2].texture = runtime->scene_distance_texture;
-                    samplers[2].sampler = runtime->scene_color_sampler;
-                }
-                if (batch_refracts) {
-                    /* Refraction samples no material: the albedo slot carries the scene copy, the normal
-                       slot the scene's distance. */
-                    samplers[0].texture = runtime->refraction_texture;
-                    samplers[0].sampler = runtime->scene_color_sampler;
-                    if (scene_distance_ready) {
+                if (btbh_gpu_particle_lit(batch)) {
+                    /* RFC 0013: the lit particle's textures (production_particle_lit.frag's), and the pass's particle
+                       block in fragment slot 1 when another batch's block took it since. */
+                    btbh_gpu_scene_bind_lit_particle(
+                        pass,
+                        runtime,
+                        texture,
+                        normal_texture,
+                        emission_texture,
+                        scene_distance_ready,
+                        radiance_cascades_lit,
+                        shadows_active,
+                        omni_shadows_active
+                    );
+                    if (!particle_frame_pushed) {
+                        SDL_PushGPUFragmentUniformData(
+                            command,
+                            1u,
+                            &particle_frame,
+                            (uint32_t)sizeof(particle_frame)
+                        );
+                        particle_frame_pushed = true;
+                    }
+                } else {
+                    SDL_GPUTextureSamplerBinding samplers[15];
+                    SDL_zeroa(samplers);
+                    samplers[0].texture = texture->texture;
+                    samplers[0].sampler = texture->sampler;
+                    samplers[1].texture = emission_texture->texture;
+                    samplers[1].sampler = emission_texture->sampler;
+                    samplers[2].texture = normal_texture->texture;
+                    samplers[2].sampler = normal_texture->sampler;
+                    if (transparent_phase &&
+                        scene_distance_ready &&
+                        batch->surface_variant ==
+                            BTBH_GPU_SCENE_SURFACE_SOFT_PARTICLE) {
+                        /* A soft particle has no normal map; the slot carries the scene's distance. */
                         samplers[2].texture = runtime->scene_distance_texture;
                         samplers[2].sampler = runtime->scene_color_sampler;
                     }
-                }
-                samplers[3].texture = orm_texture->texture;
-                samplers[3].sampler = orm_texture->sampler;
-                samplers[4].texture = runtime->brdf_lut_texture;
-                samplers[4].sampler = runtime->brdf_lut_sampler;
-                samplers[5].texture =
-                    runtime->directional_shadow_textures[0];
-                samplers[5].sampler =
-                    runtime->directional_shadow_sampler;
-                samplers[6].texture =
-                    runtime->directional_shadow_textures[1];
-                samplers[6].sampler =
-                    runtime->directional_shadow_sampler;
-                samplers[7].texture =
-                    runtime->directional_shadow_textures[2];
-                samplers[7].sampler =
-                    runtime->directional_shadow_sampler;
-                /* The primary map again, through the comparison sampler (the soft sun shadow filter's taps). */
-                samplers[8].texture =
-                    runtime->directional_shadow_textures[0];
-                samplers[8].sampler =
-                    runtime->directional_shadow_compare_sampler;
-                if (omni_shadows_active) {
-                    samplers[9].texture = runtime->omni_shadow_texture;
-                    samplers[9].sampler =
-                        runtime->directional_shadow_sampler;
-                }
-                /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
-                   (RFC 0008) and the world-detail table's array (RFC 0009; these four not in the fast unlit shader),
-                   with their placement in the fragment uniform slot 1, and a table's entries in slot 2. */
-                const bool batch_fast_unlit = btbh_gpu_scene_batch_fast_unlit(
-                    batch,
-                    radiance_cascades_active,
-                    scene_ambient_targets
-                );
-                const uint32_t material_sampler_count =
-                    batch_fast_unlit
-                        ? 2u
-                        : (shadows_active
-                            ? (omni_shadows_active ? 10u : 9u)
-                            : 5u);
-                const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
-                samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
-                uint32_t bound_sampler_count = material_sampler_count + 1u;
-                BTBHGPUSceneBatchExtensionUniforms extension_uniforms;
-                btbh_gpu_scene_dig_uniforms(dig, &extension_uniforms.dig_mask);
-                btbh_gpu_world_detail_pack(
-                    batch,
-                    extension_uniforms.world_detail_tiles,
-                    extension_uniforms.world_detail_controls,
-                    extension_uniforms.world_detail_mode
-                );
-                if (!batch_fast_unlit) {
-                    btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
-                    bound_sampler_count += 3u;
-                    const BTBHGPUTexture *maps = btbh_gpu_world_detail_table_active(batch)
-                        ? batch->world_detail_table->map_layers
-                        : runtime->fallback_array_texture;
-                    samplers[bound_sampler_count].texture = maps->texture;
-                    samplers[bound_sampler_count].sampler = maps->sampler;
-                    bound_sampler_count += 1u;
-                    if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
-                        /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
-                           never read the slot. */
-                        BTBHGPUWorldDetailTableUniforms table_uniforms;
-                        btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
-                        SDL_PushGPUFragmentUniformData(
-                            command,
-                            2u,
-                            &table_uniforms,
-                            (uint32_t)sizeof(table_uniforms)
-                        );
-                        pushed_table = batch->world_detail_table;
+                    if (batch_refracts) {
+                        /* Refraction samples no material: the albedo slot carries the scene copy, the normal
+                           slot the scene's distance. */
+                        samplers[0].texture = runtime->refraction_texture;
+                        samplers[0].sampler = runtime->scene_color_sampler;
+                        if (scene_distance_ready) {
+                            samplers[2].texture = runtime->scene_distance_texture;
+                            samplers[2].sampler = runtime->scene_color_sampler;
+                        }
                     }
+                    samplers[3].texture = orm_texture->texture;
+                    samplers[3].sampler = orm_texture->sampler;
+                    samplers[4].texture = runtime->brdf_lut_texture;
+                    samplers[4].sampler = runtime->brdf_lut_sampler;
+                    samplers[5].texture =
+                        runtime->directional_shadow_textures[0];
+                    samplers[5].sampler =
+                        runtime->directional_shadow_sampler;
+                    samplers[6].texture =
+                        runtime->directional_shadow_textures[1];
+                    samplers[6].sampler =
+                        runtime->directional_shadow_sampler;
+                    samplers[7].texture =
+                        runtime->directional_shadow_textures[2];
+                    samplers[7].sampler =
+                        runtime->directional_shadow_sampler;
+                    /* The primary map again, through the comparison sampler (the soft sun shadow filter's taps). */
+                    samplers[8].texture =
+                        runtime->directional_shadow_textures[0];
+                    samplers[8].sampler =
+                        runtime->directional_shadow_compare_sampler;
+                    if (omni_shadows_active) {
+                        samplers[9].texture = runtime->omni_shadow_texture;
+                        samplers[9].sampler =
+                            runtime->directional_shadow_sampler;
+                    }
+                    /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
+                       (RFC 0008) and the world-detail table's array (RFC 0009; these four not in the fast unlit shader),
+                       with their placement in the fragment uniform slot 1, and a table's entries in slot 2. */
+                    const bool batch_fast_unlit = btbh_gpu_scene_batch_fast_unlit(
+                        batch,
+                        radiance_cascades_active,
+                        cascades_fast_unlit
+                    );
+                    const uint32_t material_sampler_count =
+                        batch_fast_unlit
+                            ? 2u
+                            : (shadows_active
+                                ? (omni_shadows_active ? 10u : 9u)
+                                : 5u);
+                    const BTBHGPUSdfTerrainMaskBinding *dig = &runtime->dig_bindings[batch_index];
+                    samplers[material_sampler_count] = btbh_gpu_scene_dig_sampler(runtime, dig);
+                    uint32_t bound_sampler_count = material_sampler_count + 1u;
+                    BTBHGPUSceneBatchExtensionUniforms extension_uniforms;
+                    btbh_gpu_scene_dig_uniforms(dig, &extension_uniforms.dig_mask);
+                    btbh_gpu_world_detail_pack(
+                        batch,
+                        extension_uniforms.world_detail_tiles,
+                        extension_uniforms.world_detail_controls,
+                        extension_uniforms.world_detail_mode
+                    );
+                    if (!batch_fast_unlit) {
+                        btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
+                        bound_sampler_count += 3u;
+                        const BTBHGPUTexture *maps = btbh_gpu_world_detail_table_active(batch)
+                            ? batch->world_detail_table->map_layers
+                            : runtime->fallback_array_texture;
+                        samplers[bound_sampler_count].texture = maps->texture;
+                        samplers[bound_sampler_count].sampler = maps->sampler;
+                        bound_sampler_count += 1u;
+                        if (btbh_gpu_world_detail_table_active(batch) && batch->world_detail_table != pushed_table) {
+                            /* Only a table batch pushes the block, when its table isn't the one pushed last; the others
+                               never read the slot. */
+                            BTBHGPUWorldDetailTableUniforms table_uniforms;
+                            btbh_gpu_world_detail_table_pack(batch->world_detail_table, &table_uniforms);
+                            SDL_PushGPUFragmentUniformData(
+                                command,
+                                2u,
+                                &table_uniforms,
+                                (uint32_t)sizeof(table_uniforms)
+                            );
+                            pushed_table = batch->world_detail_table;
+                        }
+                    }
+                    SDL_PushGPUFragmentUniformData(
+                        command,
+                        1u,
+                        &extension_uniforms,
+                        batch_fast_unlit
+                            ? (uint32_t)sizeof(extension_uniforms.dig_mask)
+                            : (uint32_t)sizeof(extension_uniforms)
+                    );
+                    SDL_BindGPUFragmentSamplers(
+                        pass,
+                        0u,
+                        samplers,
+                        bound_sampler_count
+                    );
+                    particle_frame_pushed = false;
                 }
-                SDL_PushGPUFragmentUniformData(
-                    command,
-                    1u,
-                    &extension_uniforms,
-                    batch_fast_unlit
-                        ? (uint32_t)sizeof(extension_uniforms.dig_mask)
-                        : (uint32_t)sizeof(extension_uniforms)
-                );
-                SDL_BindGPUFragmentSamplers(
-                    pass,
-                    0u,
-                    samplers,
-                    bound_sampler_count
-                );
                 run_batch = animated ? NULL : batch;
             }
             const BTBHGPUSceneGeometryDraw geometry =
@@ -10030,6 +10457,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             }
             if (radiance_cascades_encoded) {
                 radiance_cascades_post_input = composed_texture;
+                radiance_cascades_lit = radiance_cascades_active;
             } else if (radiance_cascades_active) {
                 btbh_gpu_radiance_cascades_runtime_invalidate_history(
                     &runtime->radiance_cascades
@@ -10997,6 +11425,16 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             window->scene_runtime,
             post,
             post_fragment_shader_path,
+            shader_format,
+            setup.radiance_cascades_active,
+            report
+        ) ||
+        !btbh_gpu_scene_check_uv_rect_shaders(
+            window->scene_runtime,
+            batches,
+            batch_count,
+            vertex_shader_path,
+            post_vertex_shader_path,
             shader_format,
             setup.radiance_cascades_active,
             report
@@ -12161,6 +12599,11 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 }
             }
         }
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            &window->scene_runtime->lit_particle_pipelines[0][0][0][0][0],
+            sizeof(window->scene_runtime->lit_particle_pipelines) / sizeof(SDL_GPUGraphicsPipeline *)
+        );
     }
     free(window->scene_runtime->lift_pipelines);
     window->scene_runtime->lift_pipelines = NULL;

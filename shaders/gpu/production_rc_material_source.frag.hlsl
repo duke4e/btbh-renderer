@@ -7,6 +7,7 @@ Texture2D<float> dig_mask_texture : register(t2, space2);
 SamplerState dig_mask_sampler : register(s2, space2);
 
 #include "production_dig_mask.hlsli"
+#include "production_light_factor.hlsli"
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -24,11 +25,15 @@ cbuffer DigMask : register(b1, space3)
     float4 dig_mask_scale;
 };
 
+// The locations are production_model.vert's outputs' (and production_animated_model.vert's).
 struct FragmentInput
 {
-    float4 color : TEXCOORD0;
-    float2 texture_coordinate : TEXCOORD1;
-    float3 world_position : TEXCOORD2;
+    [[vk::location(0)]] float4 color : TEXCOORD0;
+    [[vk::location(1)]] float2 texture_coordinate : TEXCOORD1;
+    [[vk::location(2)]] float3 world_position : TEXCOORD2;
+    // BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR (since 0.11.0): custom x, the instance's light, scales its emission
+    // here as on screen (an unlit batch's colour stays a source whole).
+    [[vk::location(5)]] float4 instance_custom : TEXCOORD5;
 };
 
 struct FragmentOutput
@@ -57,7 +62,8 @@ FragmentOutput main(FragmentInput input)
     float3 radiance = emission_texture.Sample(
         emission_sampler,
         input.texture_coordinate
-    ).rgb * emission_color_energy.rgb * emission_color_energy.w;
+    ).rgb * emission_color_energy.rgb *
+        (emission_color_energy.w * btbh_instance_light_factor(unlit_enabled, input.instance_custom));
     // Unlit surfaces are sources (their colour), unless they receive (bit 4, rc_receiver).
     if ((unlit_enabled & 3u) != 0u && (unlit_enabled & 4u) == 0u)
     {
