@@ -8,6 +8,12 @@
 #ifndef BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH must be defined"
+#endif
+#ifndef BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH
+#error "BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH
 #error "BTBH_PRODUCTION_ANIMATED_VERTEX_REFLECTION_PATH must be defined"
 #endif
@@ -490,6 +496,41 @@ int main(void)
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
             "\"name\": \"in.var.TEXCOORD4\""
+        ) ||
+        /* RFC 0012: the lifted static vertex shaders take the heightfield (one sampler), the instances and their
+           motions (two storage buffers) and the lift's block (a second uniform buffer); their inputs and outputs are
+           their bases' (the table's index at location 5 in the table's). production_model.vert takes none of it. */
+        !require_text(
+            BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0, \"storage_buffers\": 2, \"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH,
+            "\"samplers\": 1, \"storage_textures\": 0, \"storage_buffers\": 2, \"uniform_buffers\": 2"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_VERTEX_REFLECTION_PATH,
+            "\"samplers\": 0, \"storage_textures\": 0, \"storage_buffers\": 2, \"uniform_buffers\": 1"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TABLE_VERTEX_REFLECTION_PATH,
+            "\"samplers\": 0, \"storage_textures\": 0, \"storage_buffers\": 2, \"uniform_buffers\": 1"
+        ) ||
+        !forbid_text(
+            BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD7\""
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH,
+            "\"name\": \"in.var.TEXCOORD7\", \"type\": \"float\", \"location\": 5"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_LIFT_VERTEX_REFLECTION_PATH,
+            "\"name\": \"out.var.TEXCOORD10\", \"type\": \"float2\", \"location\": 10"
+        ) ||
+        !require_text(
+            BTBH_PRODUCTION_TABLE_LIFT_VERTEX_REFLECTION_PATH,
+            "\"name\": \"out.var.TEXCOORD10\", \"type\": \"float2\", \"location\": 10"
         )) {
         return 1;
     }

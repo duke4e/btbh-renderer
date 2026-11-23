@@ -3,6 +3,7 @@
 #include "btbh_gpu_fsr3.h"
 #include "btbh_gpu_sdf_terrain_internal.h"
 #include "btbh_gpu_world_detail.h"
+#include "btbh_gpu_height_lift.h"
 
 #include <float.h>
 #include <math.h>
@@ -254,6 +255,24 @@ typedef struct BTBHGPUSceneTemporalPalette {
     uint32_t first_matrix;
 } BTBHGPUSceneTemporalPalette;
 
+/* RFC 0012: one set of static model pipelines, indexed as model_pipelines. */
+typedef SDL_GPUGraphicsPipeline *BTBHGPUSceneModelPipelineSet[
+    BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
+][
+    BTBH_GPU_SCENE_BLEND_COUNT
+][BTBH_GPU_SCENE_DEPTH_COUNT]
+[BTBH_GPU_SCENE_TRANSPARENCY_COUNT]
+[BTBH_GPU_SCENE_CULL_COUNT]
+[BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
+[BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
+
+/* RFC 0012: the lifted static batches' pipelines (production_model_lift.vert, production_model_detail_table_lift.vert),
+   [0 without a world-detail table, 1 with][0 the sun's and the omni shadow, 1 the sun's only, 2 unshadowed]. Made by
+   the first lifted batch (btbh_gpu_scene_ensure_model_pipeline), so a host that lifts nothing never holds them. */
+typedef struct BTBHGPUSceneLiftPipelines {
+    BTBHGPUSceneModelPipelineSet sets[2][3];
+} BTBHGPUSceneLiftPipelines;
+
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
         BTBH_GPU_SCENE_COLOR_TARGET_VARIANT_COUNT
@@ -341,6 +360,7 @@ struct BTBHGPUSceneRuntime {
     [BTBH_GPU_SCENE_CULL_COUNT]
     [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
     [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
+    BTBHGPUSceneLiftPipelines *lift_pipelines;
     SDL_GPUGraphicsPipeline
         *shadow_pipelines[BTBH_GPU_SCENE_CULL_COUNT];
     SDL_GPUGraphicsPipeline
@@ -1366,6 +1386,7 @@ static bool btbh_gpu_scene_create_model_pipeline(
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
     bool animated,
+    bool lifted,
     uint32_t fragment_sampler_count,
     uint32_t fragment_uniform_buffer_count,
     bool auxiliary_geometry_outputs,
@@ -1388,10 +1409,11 @@ static bool btbh_gpu_scene_create_model_pipeline(
         entrypoint,
         format,
         SDL_GPU_SHADERSTAGE_VERTEX,
-        /* Instances, the bone palette when animated, and the instances' motion. */
+        /* Instances, the bone palette when animated, and the instances' motion; RFC 0012: a lifted static shader's
+           heightfield (one sampler) and its block (a second uniform buffer). */
         animated ? 3u : 2u,
-        0u,
-        1u,
+        lifted ? 1u : 0u,
+        lifted ? 2u : 1u,
         report
     );
     if (vertex_shader == NULL) {
@@ -2985,6 +3007,18 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         (temporal ? 4u : 0u) +
         (radiance_cascades_active ? 2u : 0u) +
         (auxiliary_geometry_outputs ? 1u : 0u);
+    if (!animated && btbh_gpu_height_lift_active(batch)) {
+        /* RFC 0012: production_model_lift.vert's and production_model_detail_table_lift.vert's pipelines; NULL until
+           the first lifted batch made their sets (btbh_gpu_scene_ensure_model_pipeline). */
+        if (runtime->lift_pipelines == NULL) {
+            return NULL;
+        }
+        const uint32_t table = btbh_gpu_world_detail_table_active(batch) ? 1u : 0u;
+        const uint32_t shadow_set = !shadows_active ? 2u : (omni_shadows_active ? 0u : 1u);
+        return &runtime->lift_pipelines->sets[table][shadow_set]
+            [color_target_variant][blend][depth][transparent]
+            [cull][stencil][fast_unlit];
+    }
     if (!animated && btbh_gpu_world_detail_table_active(batch)) {
         /* RFC 0009: production_model_detail_table.vert's pipelines (never fast unlit). */
         if (!shadows_active) {
@@ -3115,6 +3149,49 @@ static bool btbh_gpu_scene_variant_fragment_shader_path(
     return true;
 }
 
+/* RFC 0012's name check: a lifted batch needs production_model_lift.vert (or production_model_detail_table_lift.vert),
+   files new in 0.11.0, beside the host's static vertex shader. A missing one fails the present with its path; a
+   SPIR-V one must name the heightfield (height_lift_field: SPIR-V keeps its resources' names), so that a file of
+   that name that doesn't lift isn't drawn with. Read when a lifted pipeline is made (once per pipeline). */
+static bool btbh_gpu_scene_check_lift_shader(
+    const char *path,
+    BTBHGPUShaderFormat project_format,
+    BTBHGPUSceneReport *report
+) {
+    size_t byte_count = 0u;
+    uint8_t *bytes = (uint8_t *)SDL_LoadFile(path, &byte_count);
+    char message[sizeof(report->message)];
+    if (bytes == NULL || byte_count == 0u) {
+        SDL_free(bytes);
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A batch has a height_lift, and its vertex shader is missing (build the shaders from 0.11.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    static const char name[] = "height_lift_field";
+    bool named = project_format != BTBH_GPU_SHADER_FORMAT_SPIRV;
+    for (size_t offset = 0u; !named && offset + sizeof(name) - 1u <= byte_count; ++offset) {
+        named = memcmp(bytes + offset, name, sizeof(name) - 1u) == 0;
+    }
+    SDL_free(bytes);
+    if (!named) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A batch has a height_lift, and its vertex shader doesn't read a heightfield (build the shaders from "
+            "0.11.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
 static bool btbh_gpu_scene_ensure_model_pipeline(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -3153,8 +3230,34 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         batch,
         stencil_variant
     );
-    if (*slot != NULL) {
+    if (slot != NULL && *slot != NULL) {
         return true;
+    }
+    const bool lifted = !animated && btbh_gpu_height_lift_active(batch);
+    if (slot == NULL) {
+        /* RFC 0012: the first lifted batch makes the lifted pipelines' sets (only a lifted batch finds none). */
+        window->scene_runtime->lift_pipelines =
+            (BTBHGPUSceneLiftPipelines *)calloc(1u, sizeof(BTBHGPUSceneLiftPipelines));
+        if (window->scene_runtime->lift_pipelines == NULL) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_PLATFORM_FAILURE,
+                "Could not allocate the lifted batches' pipelines"
+            );
+            return false;
+        }
+        slot = btbh_gpu_scene_pipeline_slot(
+            window->scene_runtime,
+            auxiliary_geometry_outputs,
+            temporal,
+            radiance_cascades_active,
+            scene_ambient_targets,
+            shadows_active,
+            omni_shadows_active,
+            animated,
+            batch,
+            stencil_variant
+        );
     }
     const bool fast_unlit = btbh_gpu_scene_batch_fast_unlit(
         batch,
@@ -3210,18 +3313,24 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     }
     /* RFC 0009: a static batch with a world-detail table reads its vertices' table index with
        production_model_detail_table.vert, beside the host's production_model.vert; a host without that file
-       can't draw a table (the shader load fails with its path). */
+       can't draw a table (the shader load fails with its path). RFC 0012: a lifted static batch draws with
+       production_model_lift.vert, or production_model_detail_table_lift.vert with a table, from there too; a host
+       without the file can't draw a lift (btbh_gpu_scene_check_lift_shader names it). */
     const char *selected_vertex_shader_path =
         animated ? animated_vertex_shader_path : vertex_shader_path;
     char table_vertex_shader_path[
         BTBH_GPU_SCENE_PATH_CAPACITY
     ];
-    if (!animated && btbh_gpu_world_detail_table_active(batch)) {
+    if (lifted || (!animated && btbh_gpu_world_detail_table_active(batch))) {
         char filename[128];
         (void)snprintf(
             filename,
             sizeof(filename),
-            "production_model_detail_table.vert.%s",
+            lifted
+                ? (btbh_gpu_world_detail_table_active(batch)
+                    ? "production_model_detail_table_lift.vert.%s"
+                    : "production_model_lift.vert.%s")
+                : "production_model_detail_table.vert.%s",
             project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
                 ? "metallib"
                 : "spv"
@@ -3234,11 +3343,16 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             btbh_gpu_scene_error(
                 report,
                 BTBH_GPU_INVALID_ARGUMENT,
-                "World-detail table vertex shader path is too long"
+                lifted
+                    ? "Lifted vertex shader path is too long"
+                    : "World-detail table vertex shader path is too long"
             );
             return false;
         }
         selected_vertex_shader_path = table_vertex_shader_path;
+    }
+    if (lifted && !btbh_gpu_scene_check_lift_shader(selected_vertex_shader_path, project_format, report)) {
+        return false;
     }
     return btbh_gpu_scene_create_model_pipeline(
         window,
@@ -3246,6 +3360,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         selected_fragment_shader_path,
         project_format,
         animated,
+        lifted,
         /* Each variant's textures, then an SDF terrain's dig mask (RFC 0007), then the world detail's three
            (RFC 0008) and the world-detail table's array (RFC 0009); the last four not in the fast unlit shader. */
         fast_unlit
@@ -4811,18 +4926,23 @@ static void btbh_gpu_scene_refuse_batch(
 }
 
 /* RFC 0008: each batch's world detail, and RFC 0009: its world-detail table, and no array texture in a 2D slot.
-   Batches often share a detail or a table, so a run of batches pointing at the same one checks it once. False with
-   the report naming the batch and the fault. */
+   RFC 0012: its height lift, and no heightfield in any other slot. Batches often share a detail, a table or a lift,
+   so a run of batches pointing at the same one checks it once. directional_shadow_visibility: the
+   _with_visibility calls' array, or NULL. False with the report naming the batch and the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *directional_shadow_visibility,
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
     static const char array_in_2d_slot[] =
         "is a 2D array texture (only world_detail_table.map_layers takes one)";
+    static const char heightfield_in_slot[] =
+        "is a heightfield (only height_lift.heightfield takes one)";
     const BTBHGPUSceneWorldDetail *checked = NULL;
     const BTBHGPUSceneWorldDetailTable *checked_table = NULL;
+    const BTBHGPUSceneHeightLift *checked_lift = NULL;
     for (uint32_t index = 0u; index < batch_count; ++index) {
         const BTBHGPUSceneGeometryBatch *batch = &batches[index];
         const char *const slot_names[4] = { "albedo_texture", "normal_texture", "orm_texture", "emission_texture" };
@@ -4830,8 +4950,11 @@ static bool btbh_gpu_scene_validate_world_details(
             batch->albedo_texture, batch->normal_texture, batch->orm_texture, batch->emission_texture
         };
         for (uint32_t slot = 0u; slot < 4u; ++slot) {
-            if (btbh_gpu_texture_is_array(slots[slot])) {
-                btbh_gpu_scene_refuse_batch(report, index, slot_names[slot], array_in_2d_slot);
+            /* (One test for both kinds a 2D slot refuses: this loop runs for every batch of every present.) */
+            const BTBHGPUTexture *texture = slots[slot];
+            if (texture != NULL && (texture->layer_count != 0u || texture->heights != NULL)) {
+                btbh_gpu_scene_refuse_batch(report, index, slot_names[slot],
+                    texture->layer_count != 0u ? array_in_2d_slot : heightfield_in_slot);
                 return false;
             }
         }
@@ -4849,6 +4972,12 @@ static bool btbh_gpu_scene_validate_world_details(
                  btbh_gpu_texture_is_array(detail->normal_texture) ||
                  btbh_gpu_texture_is_array(detail->orm_texture))) {
                 problem = "a texture is a 2D array texture (only world_detail_table.map_layers takes one)";
+            }
+            if (problem == NULL &&
+                (btbh_gpu_texture_is_heightfield(detail->albedo_texture) ||
+                 btbh_gpu_texture_is_heightfield(detail->normal_texture) ||
+                 btbh_gpu_texture_is_heightfield(detail->orm_texture))) {
+                problem = "a texture is a heightfield (only height_lift.heightfield takes one)";
             }
             if (problem != NULL) {
                 btbh_gpu_scene_refuse_batch(report, index, "world_detail", problem);
@@ -4888,6 +5017,36 @@ static bool btbh_gpu_scene_validate_world_details(
                 "the batch has a world_detail with a texture too; set one or the other");
             return false;
         }
+        /* RFC 0012: the lift itself (once per run of batches sharing it), then what a lifted batch may be. */
+        const BTBHGPUSceneHeightLift *lift = batch->height_lift;
+        if (lift == NULL) {
+            continue;
+        }
+        if (lift != checked_lift) {
+            const char *problem = btbh_gpu_height_lift_problem(lift);
+            if (problem == NULL && lift->heightfield != NULL) {
+                if (!btbh_gpu_scene_texture_usable(window, lift->heightfield)) {
+                    problem = "heightfield belongs to another window or was destroyed";
+                } else if (!btbh_gpu_texture_is_heightfield(lift->heightfield)) {
+                    problem = "heightfield isn't one (btbh_gpu_window_heightfield_create)";
+                }
+            }
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "height_lift", problem);
+                return false;
+            }
+            checked_lift = lift;
+        }
+        if (lift->heightfield != NULL) {
+            const char *problem = btbh_gpu_height_lift_batch_problem(
+                batch,
+                directional_shadow_visibility != NULL ? directional_shadow_visibility[index] : 1u
+            );
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "height_lift", problem);
+                return false;
+            }
+        }
     }
     return true;
 }
@@ -4923,6 +5082,7 @@ bool btbh_gpu_scene_batch_continues_run(
         BTBH_GPU_SCENE_RUN_SAME(emission_texture) &&
         BTBH_GPU_SCENE_RUN_SAME(world_detail) &&
         BTBH_GPU_SCENE_RUN_SAME(world_detail_table) &&
+        BTBH_GPU_SCENE_RUN_SAME(height_lift) &&
         BTBH_GPU_SCENE_RUN_SAME(dug_by) &&
         BTBH_GPU_SCENE_RUN_SAME(albedo_red) &&
         BTBH_GPU_SCENE_RUN_SAME(albedo_green) &&
@@ -5062,8 +5222,9 @@ static bool btbh_gpu_scene_batch_movable(
 }
 
 /* The view depth a batch sorts by: of its geometry's bounds' centre, through each of its transient instances,
-   averaged (depth is affine in the position, so this is the depth of the instances' mean centre). False when
-   it can't be known cheaply: instances in a persistent buffer, a custom mesh without valid bounds. */
+   averaged (depth is affine in the position, so this is the depth of the instances' mean centre). A lifted batch's
+   centres are lifted by its heightfield's CPU heights where they stand (RFC 0012). False when it can't be known
+   cheaply: instances in a persistent buffer, a custom mesh without valid bounds. */
 static bool btbh_gpu_scene_batch_view_depth(
     const BTBHGPUSceneGeometryBatch *batch,
     const float *instances,
@@ -5093,14 +5254,19 @@ static bool btbh_gpu_scene_batch_view_depth(
     /* The instance transform is column-major (translation in 12-14), as the vertex shader reads it. */
     const float *record =
         instances + (size_t)batch->first_instance * BTBH_GPU_SCENE_INSTANCE_FLOATS;
+    const BTBHGPUSceneHeightLift *lift = btbh_gpu_height_lift_active(batch) ? batch->height_lift : NULL;
     double sum = 0.0;
     for (uint32_t index = 0u; index < batch->instance_count; ++index) {
         const float x = record[0] * centre[0] + record[4] * centre[1] +
             record[8] * centre[2] + record[12];
-        const float y = record[1] * centre[0] + record[5] * centre[1] +
+        float y = record[1] * centre[0] + record[5] * centre[1] +
             record[9] * centre[2] + record[13];
         const float z = record[2] * centre[0] + record[6] * centre[1] +
             record[10] * centre[2] + record[14];
+        if (lift != NULL) {
+            y += btbh_gpu_height_lift_height(lift, lift->heightfield->heights, lift->heightfield->width,
+                lift->heightfield->height, x, z);
+        }
         sum += (double)(depth_row[0] * x + depth_row[1] * y +
             depth_row[2] * z + depth_row[3]);
         record += BTBH_GPU_SCENE_INSTANCE_FLOATS;
@@ -5936,6 +6102,7 @@ static bool btbh_gpu_scene_post_valid(
         (post->lut_enabled == 0u ||
          post->lut_texture != NULL) &&
         !btbh_gpu_texture_is_array(post->lut_texture) &&
+        !btbh_gpu_texture_is_heightfield(post->lut_texture) &&
         post->fog_enabled <= 1u &&
         post->bloom_enabled <= 1u &&
         post->vignette_enabled <= 1u &&
@@ -7677,7 +7844,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, batch_count, report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, directional_shadow_visibility, batch_count,
+            report)) {
         return report->result;
     }
     /* The scene renders with this view-projection: the requested one, plus a sub-pixel jitter
@@ -8035,7 +8203,28 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    const uint32_t transfer_bytes = instance_bytes + bone_bytes + motion_bytes;
+    /* BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED (since 0.11.0): the window's queued mesh updates go in the same transfer,
+       after the instances, bones and motions (at a multiple of 16), and in the same copy pass. Without any, the
+       transfer is as before. */
+    const uint32_t mesh_queue_bytes = btbh_gpu_custom_mesh_queue_size(window);
+    const uint32_t scene_upload_bytes = instance_bytes + bone_bytes + motion_bytes;
+    const uint32_t mesh_queue_offset = mesh_queue_bytes > 0u
+        ? (scene_upload_bytes + 15u) & ~15u
+        : scene_upload_bytes;
+    if (mesh_queue_bytes > 0u &&
+        (scene_upload_bytes > UINT32_MAX - 15u || mesh_queue_bytes > UINT32_MAX - mesh_queue_offset)) {
+        free(bone_matrices);
+        free(bone_offsets);
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "GPU scene upload exceeds buffer limits"
+        );
+        return report->result;
+    }
+    const uint32_t transfer_bytes = mesh_queue_bytes > 0u
+        ? mesh_queue_offset + mesh_queue_bytes
+        : scene_upload_bytes;
     if (!btbh_gpu_scene_ensure_upload_buffers(
             window,
             instance_bytes,
@@ -8116,6 +8305,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 motion_bytes
             );
         }
+        if (mesh_queue_bytes > 0u) {
+            btbh_gpu_custom_mesh_queue_write(window, (uint8_t *)mapped + mesh_queue_offset);
+        }
         SDL_UnmapGPUTransferBuffer(device, transfer);
     }
     free(bone_matrices);
@@ -8172,6 +8364,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             destination.buffer = motion_buffer;
             destination.size = motion_bytes;
             SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+        }
+        if (mesh_queue_bytes > 0u) {
+            /* Before anything draws: every pass of this scene sees the queued data. */
+            (void)btbh_gpu_custom_mesh_queue_record(window, copy, transfer, mesh_queue_offset);
         }
         SDL_EndGPUCopyPass(copy);
     }
@@ -8852,6 +9048,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
            stays for the command buffer's later draws, and only table batches read the slot, so a run of batches
            sharing a table pushes its 400 bytes once. */
         const BTBHGPUSceneWorldDetailTable *pushed_table = NULL;
+        /* RFC 0012: the height lift whose block the vertex uniform slot 1 holds in this pass, pushed as the table's
+           is: once per run of lifted batches sharing it. */
+        const BTBHGPUSceneHeightLift *pushed_lift = NULL;
         /* RFC 0011: the batch whose state the pass holds (phase 1b; NULL before the first draw and after a skinned
            geometry), the vertex buffer bound last, and the frame's part of both uniform blocks, filled once a pass
            (phase 1c): each batch writes its own fields over it before it pushes them. */
@@ -9492,6 +9691,27 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         storage_buffers,
                         2u
                     );
+                    if (btbh_gpu_height_lift_active(batch)) {
+                        /* RFC 0012: the lifted vertex shader's heightfield and block (an unlifted batch binds
+                           neither; its shader reads neither). */
+                        const BTBHGPUTexture *field = batch->height_lift->heightfield;
+                        SDL_GPUTextureSamplerBinding field_binding;
+                        SDL_zero(field_binding);
+                        field_binding.texture = field->texture;
+                        field_binding.sampler = field->sampler;
+                        SDL_BindGPUVertexSamplers(pass, 0u, &field_binding, 1u);
+                        if (batch->height_lift != pushed_lift) {
+                            BTBHGPUHeightLiftUniforms lift_uniforms;
+                            btbh_gpu_height_lift_pack(batch->height_lift, field->width, field->height, &lift_uniforms);
+                            SDL_PushGPUVertexUniformData(
+                                command,
+                                1u,
+                                &lift_uniforms,
+                                (uint32_t)sizeof(lift_uniforms)
+                            );
+                            pushed_lift = batch->height_lift;
+                        }
+                    }
                 }
                 BTBHGPUTexture *texture = batch->albedo_texture != NULL
                     ? batch->albedo_texture
@@ -10448,6 +10668,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     }
     window->pending_command = command;
     window->pending_scene_ready = true;
+    /* The queued mesh updates this scene copied are done with (a scene for the window waits for the canvas; one for a
+       target is submitted by the caller). */
+    btbh_gpu_custom_mesh_queue_commit(window, output_width == 0u);
     free(bone_offsets);
 
     report->result = BTBH_GPU_OK;
@@ -10703,7 +10926,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, batch_count, report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, NULL, batch_count, report)) {
         return report->result;
     }
     BTBHGPUSceneFrameSetup setup;
@@ -10894,6 +11117,7 @@ static bool btbh_gpu_scene_render_target_usable(
         target->texture != NULL &&
         target->color_target &&
         !btbh_gpu_texture_is_array(target) &&
+        !btbh_gpu_texture_is_heightfield(target) &&
         target->width != 0u &&
         target->height != 0u;
 }
@@ -11370,6 +11594,7 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         destination->owner != window ||
         destination->texture == NULL ||
         btbh_gpu_texture_is_array(destination) ||
+        btbh_gpu_texture_is_heightfield(destination) ||
         destination->width != window->scene_runtime->composite_width ||
         destination->height != window->scene_runtime->composite_height ||
         destination->format != SDL_GetGPUSwapchainTextureFormat(
@@ -11925,7 +12150,20 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                     [0][0][0][0][0][0][0],
             pipeline_count
         );
+        if (window->scene_runtime->lift_pipelines != NULL) {
+            for (uint32_t table = 0u; table < 2u; ++table) {
+                for (uint32_t shadow_set = 0u; shadow_set < 3u; ++shadow_set) {
+                    btbh_gpu_scene_release_pipeline_array(
+                        device,
+                        &window->scene_runtime->lift_pipelines->sets[table][shadow_set][0][0][0][0][0][0][0],
+                        pipeline_count
+                    );
+                }
+            }
+        }
     }
+    free(window->scene_runtime->lift_pipelines);
+    window->scene_runtime->lift_pipelines = NULL;
     if (window->scene_runtime->fallback_texture != NULL) {
         btbh_gpu_texture_destroy(
             window->scene_runtime->fallback_texture

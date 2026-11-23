@@ -960,6 +960,34 @@ typedef struct BTBHGPUSceneWorldDetailTable {
     uint8_t reserved[2];       /* 0 */
 } BTBHGPUSceneWorldDetailTable;
 
+/* A static batch drawn on a heightfield (BTBHGPUSceneGeometryBatch.height_lift, RFC 0012, since 0.11.0). After its
+ * instance's matrix and the wind, every vertex rises by height_scale * h(u, v) + height_offset, h read bilinearly
+ * from the heightfield (btbh_gpu_window_heightfield_create) at u = x * world_to_uv[0] + world_to_uv[2] and
+ * v = z * world_to_uv[1] + world_to_uv[3], x and z the vertex's flat world position. Its normal and tangent tilt with
+ * the heightfield's slope there, unless BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS. The fragment shaders see the lifted
+ * world position (lighting, the world detail, the procedural detail's height terms, the fog). FSR 3's previous
+ * position is lifted at its own xz: a static instance on a fixed field gets no motion from the lift. The host owns
+ * it; the renderer reads it during the present call only, so one lift can serve any number of batches. 40 bytes on
+ * 64-bit. A lift with heightfield NULL draws as no lift (only its flags and reserved are checked then). */
+typedef struct BTBHGPUSceneHeightLift {
+    BTBHGPUTexture *heightfield;     /* btbh_gpu_window_heightfield_create, of the present's window */
+    float world_to_uv[4];            /* u scale, v scale, u offset, v offset; finite, the scales not 0 */
+    float height_scale;              /* world units per unit of h; finite; 0 means 1 */
+    float height_offset;             /* world units added; finite */
+    uint32_t flags;                  /* BTBH_GPU_SCENE_HEIGHT_LIFT_* bits */
+    uint32_t reserved;               /* 0 */
+} BTBHGPUSceneHeightLift;
+
+/* BTBHGPUSceneHeightLift.flags (since 0.11.0). */
+enum {
+    /* The normals and tangents stay as the instance's matrix gives them: a lifted batch that keeps its shading (an
+     * unlit overlay, a decal). Positions lift as without it. */
+    BTBH_GPU_SCENE_HEIGHT_LIFT_KEEP_NORMALS = 1u << 0
+};
+
+/* The widest and tallest heightfield (btbh_gpu_window_heightfield_create, since 0.11.0); the smallest is 2 x 2. */
+#define BTBH_GPU_HEIGHTFIELD_MAX_SIZE 4096u
+
 typedef struct BTBHGPUSceneGeometryBatch {
     BTBHGPUSceneGeometryKind kind;
     BTBHGPUModel *model;
@@ -1051,6 +1079,18 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * unlit pipeline, and needs the scene shaders from 0.8.0: with SPIR-V shaders that don't sample it, the
      * present fails with the shader's path. */
     const BTBHGPUSceneWorldDetailTable *world_detail_table;
+    /* NULL: drawn as before. Otherwise the batch's vertices are lifted by a heightfield (BTBHGPUSceneHeightLift,
+     * RFC 0012, since 0.11.0), in every pass that draws it: opaque, transparent, unlit (the fast unlit pipeline too),
+     * additive, soft particles and refraction. Several batches may point at one. A lift that isn't valid fails the
+     * present with BTBH_GPU_INVALID_ARGUMENT, naming the batch; so does, with its heightfield set, a batch that is
+     * animated (animation_library or animation_pose set), a billboard, one with dug_by, or one that would cast a
+     * shadow: in 0.11.0 a lifted batch casts none, so it must be transparent (transparency_enabled), or set
+     * BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW (or have its directional_shadow_visibility byte 0) and leave
+     * spot_shadow_visible 0. The radiance cascades' material sources take it unlifted (they project straight down).
+     * A lifted batch draws with production_model_lift.vert (production_model_detail_table_lift.vert with a
+     * world-detail table) from the directory of the static vertex shader the present is given; a present without
+     * that file fails, naming it. 288 bytes on 64-bit with it (280 in 0.8.0 to 0.10.0). */
+    const BTBHGPUSceneHeightLift *height_lift;
 } BTBHGPUSceneGeometryBatch;
 
 /* BTBHGPUSceneGeometryBatch.flags (since 0.5.0). */
@@ -1128,6 +1168,9 @@ enum {
 /* Defined when BTBHGPUSceneGeometryBatch.world_detail_table, BTBHGPUSceneWorldDetailTable,
    BTBHGPUSceneWorldDetailTableEntry and the BTBH_GPU_CUSTOM_MESH_* vertex macros exist (since 0.8.0). */
 #define BTBH_GPU_SCENE_HAS_WORLD_DETAIL_TABLE 1
+/* Defined when btbh_gpu_window_heightfield_create, BTBHGPUSceneHeightLift and BTBHGPUSceneGeometryBatch.height_lift
+   exist (since 0.11.0). */
+#define BTBH_GPU_SCENE_HAS_HEIGHT_LIFT 1
 
 #define BTBH_GPU_SCENE_POINT_LIGHTS 32
 
@@ -1956,6 +1999,47 @@ BTBHGPUResult btbh_gpu_custom_mesh_update(
     uint32_t index_count,
     BTBHGPUCustomMeshReport *report
 );
+/* btbh_gpu_custom_mesh_update_ex's flags (since 0.11.0). */
+enum {
+    /* The update is queued into the window's next scene instead of submitted on its own (btbh_gpu_custom_mesh_update
+     * acquires and submits a command buffer per call, about 0.17 ms whatever its size). The data is copied at the
+     * call, as without the flag, into a staging area of the window that grows as needed; the mesh's counts and
+     * bounds change at once. The next btbh_gpu_window_scene_present_instances(_with_visibility) or
+     * btbh_gpu_window_scene_render_to_target of the mesh's window copies every queued update into the GPU at the
+     * start of its own command buffer, in one transfer and one copy pass with the scene's instances, before it draws
+     * anything: so the new data shows in the next scene that draws, whichever of the two comes first, and in every
+     * one after it. Rules:
+     * - A later update of the same mesh, queued or not, replaces a queued one that no scene has copied yet. A plain
+     *   update made after a queued one always lands after it: on a mesh in the shared buffers whose queued update a
+     *   scene presented but not yet submitted by the canvas has copied, the plain update is recorded into that
+     *   frame's command buffer after its draws, which keep the queued data.
+     * - btbh_gpu_custom_mesh_destroy drops the mesh's queued update; one already copied into a frame that isn't
+     *   submitted yet still runs (SDL frees the buffers after it).
+     * - A mesh in the shared buffers (BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS): as without the flag, the update must fit
+     *   the mesh's ranges and is written in place; a mesh with buffers of its own grows them at the call when the
+     *   update needs more, and its frames in flight keep their data (SDL's cycling).
+     * - A scene that fails before it is submitted leaves the queue as it was, for the next one. A window closed with
+     *   updates queued drops them.
+     * - The queue holds at most BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES of vertex and index data at a time (replaced
+     *   updates count until the next scene): past that the call fails with BTBH_GPU_INVALID_ARGUMENT and queues
+     *   nothing. One update's limits are btbh_gpu_custom_mesh_update's.
+     * A window that queues nothing draws as before. */
+    BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED = 1u << 0
+};
+#define BTBH_GPU_CUSTOM_MESH_QUEUE_MAX_BYTES (256u * 1024u * 1024u)
+/* btbh_gpu_custom_mesh_update with BTBH_GPU_CUSTOM_MESH_UPDATE_* flags; 0 is btbh_gpu_custom_mesh_update. An unknown
+ * bit fails with BTBH_GPU_INVALID_ARGUMENT. The report is filled as by btbh_gpu_custom_mesh_update. */
+BTBHGPUResult btbh_gpu_custom_mesh_update_ex(
+    BTBHGPUCustomMesh *mesh,
+    const void *vertices,
+    uint32_t vertex_byte_count,
+    const uint32_t *indices,
+    uint32_t index_count,
+    uint32_t flags,
+    BTBHGPUCustomMeshReport *report
+);
+/* Defined when btbh_gpu_custom_mesh_update_ex and BTBH_GPU_CUSTOM_MESH_UPDATE_QUEUED exist (since 0.11.0). */
+#define BTBH_GPU_HAS_QUEUED_MESH_UPDATES 1
 void btbh_gpu_custom_mesh_destroy(BTBHGPUCustomMesh *mesh);
 /* Same-material runs (since 0.10.0, RFC 0011). In every pass that draws batches (opaque, transparent, refraction, the
  * shadow maps, the radiance cascades' sources), a batch equal to the one the pass drew before it in every field but
@@ -2285,9 +2369,32 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_load_ex(
 );
 /* Defined when the two functions above and BTBH_GPU_TEXTURE_ARRAY_MAX_LAYERS exist (since 0.8.0). */
 #define BTBH_GPU_HAS_TEXTURE_ARRAYS 1
+/* A heightfield for BTBHGPUSceneHeightLift (RFC 0012, since 0.11.0): width x height samples, row by row along u
+ * (heights[j * width + i]), rows along v; sample (i, j) sits at the texel centre ((i + 0.5) / width,
+ * (j + 0.5) / height), so a host whose lattice is (x0 + i * step, z0 + j * step) maps it with
+ * world_to_uv = { 1 / (width * step), 1 / (height * step), 0.5 / width - x0 / (width * step),
+ * 0.5 / height - z0 / (height * step) }. Kept on the GPU as RGBA16F: the height and its slope along u and v (central
+ * differences in heights per sample, one-sided at the edges), filtered bilinearly and clamped at the edges, one mip.
+ * The renderer keeps the heights on the CPU too (the opaque sort lifts a lifted batch's depth with them). Heights
+ * are stored as half floats: within 8 to 16 units they are rounded to 1/128, so give values within a few hundred
+ * units, or normalise them and use height_scale. Only BTBHGPUSceneHeightLift.heightfield takes one: every other
+ * texture slot refuses it with BTBH_GPU_INVALID_ARGUMENT (as an array texture), and so does
+ * btbh_gpu_texture_update_rgba8. btbh_gpu_texture_destroy frees it. width and height: 2..BTBH_GPU_HEIGHTFIELD_MAX_SIZE.
+ * A NULL or out-of-range argument, or a height that isn't finite or lies past +-32768 (halves hold the heights and
+ * their differences; the message names the sample): NULL with BTBH_GPU_INVALID_ARGUMENT; a device that can't sample
+ * RGBA16F: BTBH_GPU_MISSING_CAPABILITY. report must not be NULL; its width and height are the field's, its mip_count
+ * 1. */
+BTBHGPUTexture *btbh_gpu_window_heightfield_create(
+    BTBHGPUWindow *window,
+    const float *heights,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureReport *report
+);
 /* Replaces a region of a raw-pixel texture. Submits its own upload, so call it
  * before the scene or canvas present that samples the texture. A one-channel font atlas
- * (BTBH_GPU_FONT_FLAG_R8_ATLAS) isn't RGBA, and an array texture has layers: BTBH_GPU_INVALID_ARGUMENT. */
+ * (BTBH_GPU_FONT_FLAG_R8_ATLAS) isn't RGBA, an array texture has layers and a heightfield holds halves:
+ * BTBH_GPU_INVALID_ARGUMENT. */
 BTBHGPUResult btbh_gpu_texture_update_rgba8(
     BTBHGPUTexture *texture,
     const uint8_t *pixels,
