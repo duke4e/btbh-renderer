@@ -68,15 +68,16 @@ FragmentOutput main(FragmentInput input)
         raw_albedo.rgb * input.color.rgb,
         raw_albedo.a * input.color.a
     );
-    if (albedo.a < alpha_cutoff || dug)
-    {
-        discard;
-    }
+    // Sampled before the discard: after one (OpKill) the quad's implicit derivatives are undefined.
     const float3 emission = emission_texture.Sample(
         emission_sampler,
         input.texture_coordinate
     ).rgb * emission_color_energy.rgb *
         (emission_color_energy.w * btbh_instance_light_factor(unlit_enabled, input.instance_custom));
+    if (albedo.a < alpha_cutoff || dug)
+    {
+        discard;
+    }
     FragmentOutput output;
     output.color = float4(albedo.rgb + emission, albedo.a);
     output.ambient = 0.0f;

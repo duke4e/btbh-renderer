@@ -636,7 +636,7 @@ final class GPUWindowProbeTests: XCTestCase {
             "Texture2D<float2> brdf_lut_texture"
         ))
         XCTAssertTrue(shader.contains(
-            "brdf_lut_texture.Sample("
+            "brdf_lut_texture.SampleLevel("
         ))
         XCTAssertTrue(scene.contains(
             "SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT"

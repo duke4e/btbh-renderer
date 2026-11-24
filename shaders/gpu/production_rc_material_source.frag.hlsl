@@ -54,16 +54,17 @@ FragmentOutput main(FragmentInput input)
         raw_albedo.rgb * input.color.rgb,
         raw_albedo.a * input.color.a
     );
-    if (albedo.a < alpha_cutoff ||
-        btbh_dig_mask_hidden(dig_mask_texture, dig_mask_sampler, dig_mask_origin, dig_mask_scale, input.world_position))
-    {
-        discard;
-    }
+    // Sampled before the discard: after one (OpKill) the quad's implicit derivatives are undefined.
     float3 radiance = emission_texture.Sample(
         emission_sampler,
         input.texture_coordinate
     ).rgb * emission_color_energy.rgb *
         (emission_color_energy.w * btbh_instance_light_factor(unlit_enabled, input.instance_custom));
+    if (albedo.a < alpha_cutoff ||
+        btbh_dig_mask_hidden(dig_mask_texture, dig_mask_sampler, dig_mask_origin, dig_mask_scale, input.world_position))
+    {
+        discard;
+    }
     // Unlit surfaces are sources (their colour), unless they receive (bit 4, rc_receiver).
     if ((unlit_enabled & 3u) != 0u && (unlit_enabled & 4u) == 0u)
     {

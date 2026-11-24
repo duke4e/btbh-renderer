@@ -6,6 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **No derivative after a discard in the scene's model shaders.** HLSL's `discard` compiles to SPIR-V `OpKill` (DXC,
+  through shadercross). Vulkan leaves the derivatives of a 2x2 quad that a kill has left undefined, and so are those taken
+  inside a branch that some of the quad's lanes skip. `production_model.frag` and the five variants built from it had 19
+  to 37 derivative or implicit-LOD instructions after their first `OpKill`, and `production_model_unlit.frag` and
+  `production_rc_material_source.frag` one each. Now none has any:
+  - the surface-variant-4 coverage cut is no longer a discard of its own: it goes with the alpha cut-off's, after the
+    surface detail and the rain ripples, which took derivatives after it;
+  - the pixel water's two `fwidth` are taken before its per-pixel `if (mask > 0)`, with the waves they read;
+  - the surface detail takes its bump's derivatives before its per-pixel early return;
+  - the wetness reads the position's derivatives taken near the top of the shading, before the cut-off, and the unlit
+    relief's four albedo taps are sampled there;
+  - the omni shadow cube and the BRDF table, one mip level each, are read at an explicit level 0;
+  - the unlit and radiance-cascades material shaders sample their emission before the cut-off.
+
+  Those values are undefined, so on other GPUs (AMD, the Steam Deck) such quads could differ from run to run or from
+  vendor to vendor. `discard` stays `OpKill`: the device SDL makes doesn't enable demote.
+  - **What changes:** nothing on the NVIDIA GPU it was tested on (an RTX 3070 Ti). In each of the four identity modes
+    (plain, shared meshes, no runs, runs verified), all 421 images are byte for byte 0.14.1's, run twice. Be The
+    Bullet Hell v2's smoky day fight is 0.14.1's usual image too.
+  - **What it doesn't fix:** the run-to-run variance of that capture. It is unchanged: 5 of 20 captures off the usual
+    image with the fix, 8 of 20 without, with the same few alternative lighting results in both. It is about one
+    float16 step of the opaque pass's lighting at scattered pixels. It comes with the pipelines NVIDIA's driver loads
+    from its disk shader cache, not with any input the renderer gives it.
+
 ## [0.14.1] — 2026-11-24
 
 0.14.1: one fix, the last mip levels of textures whose sides differ, which SDL 3.4.2's Vulkan backend left unwritten.

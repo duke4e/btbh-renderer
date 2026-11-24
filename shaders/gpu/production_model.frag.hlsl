@@ -284,6 +284,13 @@ float smooth_water_mask(float2 texture_coordinate)
 // (ssao_normal_scale).
 static float ssao_water = 0.0f;
 
+// Taken at the top of shade_fragment, in uniform control flow and before any discard: a discard (OpKill) leaves its
+// quad's derivatives undefined, as a per-pixel branch's inactive lanes do, so nothing after one takes its own.
+static float3 btbh_position_dx = float3(0.0f, 0.0f, 0.0f);
+static float3 btbh_position_dy = float3(0.0f, 0.0f, 0.0f);
+// The surface-variant-4 coverage cut (apply_surface): discarded with the alpha cut-off, after the last derivative.
+static bool btbh_coverage_cut = false;
+
 void apply_surface(
     FragmentInput input,
     inout float4 albedo,
@@ -421,7 +428,7 @@ void apply_surface(
     {
         if (!btbh_surface_coverage_visible(input.surface_data.y, input.pixel_position.xy))
         {
-            discard;
+            btbh_coverage_cut = true;
         }
         const float t = input.surface_data.z;
         emission +=
@@ -537,32 +544,36 @@ void apply_surface(
         // is how much of the texture shows through (its detail).
         const float mask = smooth_water_mask(input.texture_coordinate);
         ssao_water = mask;
+        // The waves, and the two derivatives the water takes of them, before the per-pixel branch: inside it a
+        // quad's lanes without water would be inactive and their values undefined.
+        const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 1.0f;
+        const float2 position = input.world_position.xz / scale;
+        const float time = surface_time;
+        // Long swell and shorter chop; the chop alone makes the fine foam.
+        float swell = 0.0f, chop = 0.0f;
+        float2 gradient = float2(0.0f, 0.0f), chop_gradient = float2(0.0f, 0.0f);
+        add_wave(position, normalize(float2(0.62f, 0.78f)), 1.00f, 74.0f, 1.10f, time, swell, gradient);
+        add_wave(position, normalize(float2(-0.71f, 0.70f)), 0.60f, 47.0f, 1.45f, time, swell, gradient);
+        add_wave(position, normalize(float2(0.20f, -0.98f)), 0.40f, 29.0f, 1.90f, time, swell, gradient);
+        add_wave(position, normalize(float2(-0.94f, -0.33f)), 0.30f, 13.0f, 2.80f, time, chop, chop_gradient);
+        add_wave(position, normalize(float2(0.85f, -0.52f)), 0.22f, 8.5f, 3.60f, time, chop, chop_gradient);
+        add_wave(position, normalize(float2(0.10f, 0.99f)), 0.16f, 6.0f, 4.40f, time, chop, chop_gradient);
+        // Far away (more water per screen pixel) the fine detail would alias into stripes and
+        // a haze of sparkles: it fades out, and the highlights soften.
+        const float footprint = length(fwidth(position));
+        const float fine = saturate(1.6f - footprint * 0.9f);
+        const float2 slope = gradient * 0.16f + chop_gradient * (0.09f * fine);
+        // The swell and chop alone (smooth), for the sun's glints, and how much it changes from one screen pixel
+        // to the next.
+        const float3 glint_normal = stable_normalize(float3(-slope.x, 1.0f, -slope.y), float3(0.0f, 1.0f, 0.0f));
+        const float3 normal_change = fwidth(glint_normal);
         if (mask > 0.0f)
         {
-            const float scale = surface_parameters0.x > 0.0f ? surface_parameters0.x : 1.0f;
-            const float2 position = input.world_position.xz / scale;
-            const float time = surface_time;
-            // Long swell and shorter chop; the chop alone makes the fine foam.
-            float swell = 0.0f, chop = 0.0f;
-            float2 gradient = float2(0.0f, 0.0f), chop_gradient = float2(0.0f, 0.0f);
-            add_wave(position, normalize(float2(0.62f, 0.78f)), 1.00f, 74.0f, 1.10f, time, swell, gradient);
-            add_wave(position, normalize(float2(-0.71f, 0.70f)), 0.60f, 47.0f, 1.45f, time, swell, gradient);
-            add_wave(position, normalize(float2(0.20f, -0.98f)), 0.40f, 29.0f, 1.90f, time, swell, gradient);
-            add_wave(position, normalize(float2(-0.94f, -0.33f)), 0.30f, 13.0f, 2.80f, time, chop, chop_gradient);
-            add_wave(position, normalize(float2(0.85f, -0.52f)), 0.22f, 8.5f, 3.60f, time, chop, chop_gradient);
-            add_wave(position, normalize(float2(0.10f, 0.99f)), 0.16f, 6.0f, 4.40f, time, chop, chop_gradient);
             const float3 ripple = btbh_surface_wave_normal(position * 0.45f, 0.02f, 0.6f, time);
-            // Far away (more water per screen pixel) the fine detail would alias into stripes and
-            // a haze of sparkles: it fades out, and the highlights soften.
-            const float footprint = length(fwidth(position));
-            const float fine = saturate(1.6f - footprint * 0.9f);
-            const float2 slope = gradient * 0.16f + chop_gradient * (0.09f * fine);
             const float3 normal = stable_normalize(
                 float3(-slope.x + ripple.x * 0.5f * fine, 1.0f, -slope.y + ripple.z * 0.5f * fine),
                 float3(0.0f, 1.0f, 0.0f)
             );
-            // The swell and chop alone (smooth), for the sun's glints.
-            const float3 glint_normal = stable_normalize(float3(-slope.x, 1.0f, -slope.y), float3(0.0f, 1.0f, 0.0f));
             const float3 light = stable_normalize(-directional_direction_energy.xyz, float3(0.0f, 1.0f, 0.0f));
             const float3 view = stable_normalize(camera_position.xyz - input.world_position, float3(0.0f, 1.0f, 0.0f));
             const float3 half_vector = stable_normalize(light + view, float3(0.0f, 1.0f, 0.0f));
@@ -582,7 +593,6 @@ void apply_surface(
             // The sun's reflection: glints on the waves. A sharp highlight aliases into stripes where the
             // normal changes much from one screen pixel to the next, so the highlight widens (and
             // dims) by how much it does there (Toksvig), and fades where a pixel covers many waves.
-            const float3 normal_change = fwidth(glint_normal);
             const float variance = dot(normal_change, normal_change);
             const float effective = sharpness / (1.0f + sharpness * variance * 6.0f);
             const float near = saturate(1.3f - footprint * 2.5f);
@@ -1447,9 +1457,11 @@ float omni_visibility(
                 tangent * ((float)x * texel_radius) +
                 bitangent * ((float)y * texel_radius)
             );
-            const float stored_depth = omni_shadow_texture.Sample(
+            // (One mip level: an explicit level takes no derivative, valid after the discard.)
+            const float stored_depth = omni_shadow_texture.SampleLevel(
                 omni_shadow_sampler,
-                direction
+                direction,
+                0.0f
             );
             visibility += reference_depth <= stored_depth ? 1.0f : 0.0f;
         }
@@ -1724,9 +1736,11 @@ void evaluate_ambient_multiscattering(
     out float3 ambient_specular_lighting
 )
 {
-    const float2 brdf = brdf_lut_texture.Sample(
+    // (One mip level: an explicit level takes no derivative, valid after the discard.)
+    const float2 brdf = brdf_lut_texture.SampleLevel(
         brdf_lut_sampler,
-        float2(normal_dot_view, roughness)
+        float2(normal_dot_view, roughness),
+        0.0f
     );
     const float3 single_scattering =
         f0 * brdf.x + brdf.y;
@@ -2110,11 +2124,14 @@ float3 apply_surface_detail(FragmentInput input, inout float4 albedo, inout floa
     // With the face normal the determinant is the pixel footprint area itself.
     const float3 r1 = cross(position_dy, face_normal);
     const float3 r2 = cross(face_normal, position_dx);
+    // (Before the per-pixel return below, so every lane of the quad takes part.)
+    const float bump_dx = ddx(bump);
+    const float bump_dy = ddy(bump);
     if (face_area < 0.000000000001f)
     {
         return float3(0.0f, 0.0f, 0.0f);
     }
-    return (ddx(bump) * r1 + ddy(bump) * r2) / face_area;
+    return (bump_dx * r1 + bump_dy * r2) / face_area;
 }
 
 // Rain (surface_wetness.z, 0 dry ... 1 a downpour) on wet level ground (the ground and paving details): in each
@@ -2197,7 +2214,8 @@ float apply_surface_wetness(
     {
         return roughness;
     }
-    const float3 face = cross(ddx(input.world_position), ddy(input.world_position));
+    // (Runs after the alpha cut-off: the position's derivatives were taken at the top of shade_fragment.)
+    const float3 face = cross(btbh_position_dx, btbh_position_dy);
     const float face_area = length(face);
     const float level = face_area > 0.0f ? abs(face.y) / face_area : 0.0f;
     if (pattern == 3u || pattern == 7u)
@@ -2331,6 +2349,10 @@ FragmentOutput shade_fragment(FragmentInput input)
         dig_mask_scale,
         input.world_position
     );
+    // The position's derivatives for the shading after the discard below (apply_surface_wetness), taken here in
+    // uniform control flow.
+    btbh_position_dx = ddx(input.world_position);
+    btbh_position_dy = ddy(input.world_position);
 #if BTBH_DIRECTIONAL_SHADOWS
     // The face's own normal, turned towards the camera (from the position's screen derivatives, taken
     // before anything can be discarded): the soft sun shadow takes its receiver plane from it.
@@ -2344,6 +2366,23 @@ FragmentOutput shade_fragment(FragmentInput input)
     }
 #endif
     const float lod_bias = procedural_controls.w;
+    // The unlit relief's four albedo taps (used after the discard below), sampled here where their implicit
+    // derivatives are valid; the same uniform conditions as there.
+    float relief_left = 0.0f, relief_right = 0.0f, relief_up = 0.0f, relief_down = 0.0f;
+    if ((unlit_enabled & 3u) != 0u && material_factors.x < 0.0f)
+    {
+        float texture_width;
+        float texture_height;
+        albedo_texture.GetDimensions(texture_width, texture_height);
+        const float2 texel = float2(1.0f / texture_width, 1.0f / texture_height);
+        const float3 luma = float3(0.299f, 0.587f, 0.114f);
+        const float2 uv = input.texture_coordinate;
+        // With the albedo's own mip bias (FSR 3's), so the relief reads the mip the albedo shows.
+        relief_left = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(texel.x, 0.0f), lod_bias).rgb, luma);
+        relief_right = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(texel.x, 0.0f), lod_bias).rgb, luma);
+        relief_up = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(0.0f, texel.y), lod_bias).rgb, luma);
+        relief_down = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(0.0f, texel.y), lod_bias).rgb, luma);
+    }
     const float4 raw_albedo_sample = albedo_texture.SampleBias(
         albedo_sampler,
         input.texture_coordinate,
@@ -2390,7 +2429,8 @@ FragmentOutput shade_fragment(FragmentInput input)
     );
     const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)
         + btbh_rain_ripples(input);
-    if (albedo_sample.a < alpha_cutoff || dug)
+    // The only discard: the alpha cut-off, the dig mask and the coverage cut, after the last derivative.
+    if (albedo_sample.a < alpha_cutoff || dug || btbh_coverage_cut)
     {
         discard;
     }
@@ -2473,22 +2513,12 @@ FragmentOutput shade_fragment(FragmentInput input)
         float3 lit_normal = normal;
         if (material_factors.x < 0.0f)
         {
-            float texture_width;
-            float texture_height;
-            albedo_texture.GetDimensions(texture_width, texture_height);
-            const float2 texel = float2(1.0f / texture_width, 1.0f / texture_height);
-            const float3 luma = float3(0.299f, 0.587f, 0.114f);
-            const float2 uv = input.texture_coordinate;
-            // With the albedo's own mip bias (FSR 3's), so the relief reads the mip the albedo shows.
-            const float height_left = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(texel.x, 0.0f), lod_bias).rgb, luma);
-            const float height_right = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(texel.x, 0.0f), lod_bias).rgb, luma);
-            const float height_up = dot(albedo_texture.SampleBias(albedo_sampler, uv - float2(0.0f, texel.y), lod_bias).rgb, luma);
-            const float height_down = dot(albedo_texture.SampleBias(albedo_sampler, uv + float2(0.0f, texel.y), lod_bias).rgb, luma);
+            // (The taps were sampled at the top of shade_fragment, before the discard.)
             const float strength = -material_factors.x;
             lit_normal = normalize(float3(
-                -(height_right - height_left) * strength,
+                -(relief_right - relief_left) * strength,
                 1.0f,
-                -(height_down - height_up) * strength
+                -(relief_down - relief_up) * strength
             ));
         }
         // A dark scene (point_light_count.y, how dark): unlit surfaces keep that much less of
