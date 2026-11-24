@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The last mip levels of textures whose sides differ are written.** SDL 3.4's Vulkan `GenerateMipmaps`
+  (release-3.4.2, and SDL's main so far) sizes each level as the base extent shifted right without clamping it to one
+  texel, as its D3D12 backend does. In a texture that isn't square, the levels past the short side's last texel got
+  blits of zero height (or width) and kept whatever the memory held: the 1x1 level of a 2048x1024, levels 5-8 of a
+  256x16. A sampler reached them on far or steep surfaces and in 2x2 quads across thin edges, and read bytes that could
+  differ from one run to the next. `btbh_gpu_texture.c` now blits those levels again after SDL's pass, each from the
+  one above with both extents at least one texel: what SDL's clamped blit gives. All four places that make mips go
+  through it (created, loaded and updated textures, and texture arrays, every layer). Vulkan only (Metal generates
+  its mips natively), and square textures are left as SDL made them.
+  - **What changes:** only images that sample those levels. In Be The Bullet Hell v2's night heat-ray capture,
+    2,523 pixels (`284bdc` becomes `516d85`); in its smoky day fight, 1,085 (`83cb63` becomes `b0eb75`). Both are byte
+    for byte what an SDL patched with the clamp renders. This isn't the run-to-run variance those captures still show
+    (the open race).
+  - **The test:** `btbh_gpu_texture_mips_smoke` (GPU). It makes one-colour 2048x1024, 64x256 and 256x16 textures, a
+    square 256x256 and a 2-layer 128x32 array with the full chain, reads back every level from the one where a side
+    runs out, and checks every texel is the colour. Built without the fix, 11 levels come back wrong: zeros, and in the
+    array the bytes of a texture destroyed before it.
+  - **Tested** on Windows (Vulkan, RTX 3070 Ti):
+    - `check.ps1` passes 42/42 (0.14.0's 41 and the new smoke). All 78 shaders build, and the public headers
+      compile clean.
+    - The Swift build is clean, and the suite runs 301 tests: 2 skipped, 0 failures. The source check
+      `testImportedModelTexturesUseLegacyTrilinearMipChain` now looks for the new helper.
+    - **Identity:** the eleven smokes in four modes (nothing set; `BTBH_SMOKE_SHARED_MESHES=1`;
+      `BTBH_GPU_SCENE_RUNS=0`; `BTBH_GPU_SCENE_RUNS=verify`) write 421 images and 19,113,856 pixels a mode. Against
+      v0.14.0's build, 0 differ in each mode, and 0 against v0.14.0 with SDL patched to clamp. No smoke reaches those
+      levels.
+    - **v2's captures** match the SDL-clamped build byte for byte.
+
 ## [0.14.0] — 2026-11-23
 
 0.14.0: RFC 0013 phase 2, the particle transmittance map, asked for by Be The Bullet Hell v2 once its owner

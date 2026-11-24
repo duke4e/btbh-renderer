@@ -676,8 +676,15 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(textureLoader.contains(
             "btbh_gpu_window_texture_create_rgba8_mipmapped("
         ))
+        // SDL generates the chain; since 0.14.1 btbh_gpu_texture_generate_mipmaps also writes the levels SDL's Vulkan
+        // backend leaves unwritten in a texture whose sides differ.
         XCTAssertTrue(textureLoader.contains(
-            "SDL_GenerateMipmapsForGPUTexture(command, resource->texture);"
+            "SDL_GenerateMipmapsForGPUTexture(command, texture);"
+        ))
+        XCTAssertTrue(textureLoader.contains(
+            "btbh_gpu_texture_generate_mipmaps(\n            window->device->gpu, command, resource->texture"
+        ) || textureLoader.contains(
+            "btbh_gpu_texture_generate_mipmaps(\r\n            window->device->gpu, command, resource->texture"
         ))
     }
 

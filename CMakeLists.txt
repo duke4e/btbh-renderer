@@ -1029,6 +1029,32 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_model_texture_share_smoke COMMAND btbh_gpu_model_texture_share_smoke)
         set_tests_properties(btbh_gpu_model_texture_share_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # Every mip level of a texture whose sides differ is written (since 0.14.1: SDL 3.4's Vulkan GenerateMipmaps
+        # leaves the last ones unwritten), one hidden window.
+        add_executable(btbh_gpu_texture_mips_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_texture_mips_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_texture_mips_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_texture_mips_smoke PRIVATE SDL_MAIN_HANDLED)
+        target_link_libraries(
+            btbh_gpu_texture_mips_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_texture_mips_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_texture_mips_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(NAME btbh_gpu_texture_mips_smoke COMMAND btbh_gpu_texture_mips_smoke)
+        set_tests_properties(btbh_gpu_texture_mips_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).
         add_executable(btbh_gpu_font_smoke

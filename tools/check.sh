@@ -46,7 +46,7 @@ echo "$count shaders present"
 
 echo "== native tests"
 if [ "${SKIP_GPU_TESTS:-0}" = "1" ]; then
-    ctest --test-dir "$build" --output-on-failure -E "btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lit_particle_smoke|btbh_gpu_lazy_creation_smoke"
+    ctest --test-dir "$build" --output-on-failure -E "btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_texture_mips_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lit_particle_smoke|btbh_gpu_lazy_creation_smoke"
 else
     ctest --test-dir "$build" --output-on-failure
 fi

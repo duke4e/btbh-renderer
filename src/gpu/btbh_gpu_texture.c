@@ -96,6 +96,55 @@ static uint32_t btbh_gpu_texture_levels(
     return generate_mipmaps;
 }
 
+/* Fills a texture's mip chain from its level 0 (every layer). SDL 3.4's Vulkan GenerateMipmaps (release-3.4.2, and
+   SDL's main so far) sizes each level as the base extent shifted right without clamping it to one texel, as its D3D12
+   backend does: in a texture whose sides differ, the levels past the short side's last texel get blits of zero height
+   or width and keep whatever the memory held (the 1x1 level of a 2048x1024, levels 7 and 8 of a 256x64). A sampler
+   reaches them on far or steep surfaces and in 2x2 quads across thin edges, and reads bytes that differ from run to
+   run. Those levels are blitted again here, each from the one above, both extents at least one texel: what SDL's
+   clamped blit gives (since 0.14.1). Square textures and the other backends (Metal generates natively) are left as
+   SDL made them. */
+static void btbh_gpu_texture_generate_mipmaps(
+    SDL_GPUDevice *device,
+    SDL_GPUCommandBuffer *command,
+    SDL_GPUTexture *texture,
+    uint32_t width,
+    uint32_t height,
+    uint32_t layer_count,
+    uint32_t level_count
+) {
+    SDL_GenerateMipmapsForGPUTexture(command, texture);
+    if (width == height) {
+        return;
+    }
+    const char *driver = SDL_GetGPUDeviceDriver(device);
+    if (driver == NULL || SDL_strcmp(driver, "vulkan") != 0) {
+        return;
+    }
+    for (uint32_t layer = 0u; layer < layer_count; ++layer) {
+        for (uint32_t level = 1u; level < level_count; ++level) {
+            if ((width >> level) != 0u && (height >> level) != 0u) {
+                continue;
+            }
+            SDL_GPUBlitInfo blit;
+            SDL_zero(blit);
+            blit.source.texture = texture;
+            blit.source.mip_level = level - 1u;
+            blit.source.layer_or_depth_plane = layer;
+            blit.source.w = SDL_max(width >> (level - 1u), 1u);
+            blit.source.h = SDL_max(height >> (level - 1u), 1u);
+            blit.destination.texture = texture;
+            blit.destination.mip_level = level;
+            blit.destination.layer_or_depth_plane = layer;
+            blit.destination.w = SDL_max(width >> level, 1u);
+            blit.destination.h = SDL_max(height >> level, 1u);
+            blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+            blit.filter = SDL_GPU_FILTER_LINEAR;
+            SDL_BlitGPUTexture(command, &blit);
+        }
+    }
+}
+
 static bool btbh_gpu_read_file(
     const char *path,
     uint8_t **bytes,
@@ -425,7 +474,8 @@ static BTBHGPUTexture *btbh_gpu_window_texture_create_rgba8_format(
     SDL_UploadToGPUTexture(copy, &source, &destination, false);
     SDL_EndGPUCopyPass(copy);
     if (resource->mip_count > 1u) {
-        SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
+        btbh_gpu_texture_generate_mipmaps(
+            window->device->gpu, command, resource->texture, width, height, 1u, resource->mip_count);
     }
     const bool submitted = btbh_gpu_staging_submit(window->device->gpu, command, transfer);
     if (!submitted) {
@@ -567,7 +617,8 @@ BTBHGPUResult btbh_gpu_texture_update_rgba8(
     SDL_UploadToGPUTexture(copy_pass, &source, &destination, full_overwrite);
     SDL_EndGPUCopyPass(copy_pass);
     if (texture->mip_count > 1u) {
-        SDL_GenerateMipmapsForGPUTexture(command, texture->texture);
+        btbh_gpu_texture_generate_mipmaps(
+            device, command, texture->texture, texture->width, texture->height, 1u, texture->mip_count);
     }
     const bool submitted = btbh_gpu_staging_submit(device, command, transfer);
     return submitted ? BTBH_GPU_OK : BTBH_GPU_DEVICE_FAILURE;
@@ -903,7 +954,9 @@ BTBHGPUTexture *btbh_gpu_window_texture_load_format(
     SDL_UploadToGPUTexture(copy, &source, &destination, false);
     SDL_EndGPUCopyPass(copy);
     if (resource->mip_count > 1u) {
-        SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
+        btbh_gpu_texture_generate_mipmaps(
+            window->device->gpu, command, resource->texture, resource->width, resource->height, 1u,
+            resource->mip_count);
     }
     const bool submitted = btbh_gpu_staging_submit(window->device->gpu, command, transfer);
     if (!submitted) {
@@ -1142,7 +1195,7 @@ BTBHGPUTexture *btbh_gpu_window_texture_array_create_rgba8_ex(
     }
     SDL_EndGPUCopyPass(copy);
     if (mip_count > 1u) {
-        SDL_GenerateMipmapsForGPUTexture(command, resource->texture);
+        btbh_gpu_texture_generate_mipmaps(device, command, resource->texture, width, height, layer_count, mip_count);
     }
     const bool submitted = btbh_gpu_staging_submit(device, command, transfer);
     if (!submitted) {
