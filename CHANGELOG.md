@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.2] — 2026-11-24
+
+0.14.2: one fix, no derivative after a discard in the scene's model shaders, which Vulkan leaves undefined. The API
+and the header are unchanged, and there's nothing to set. Rebuild the shaders: 8 of the 78 built ones differ (the
+model shader and its five variants, the unlit one and the radiance-cascades material source). On the NVIDIA GPU it was
+tested on, everything draws byte for byte as 0.14.1's.
+
+Be The Bullet Hell v2 tested the candidate (`f07fac64`) against 0.14.1 on its main at `ca8decab`:
+- Its shader build gives exactly those 8 files changed. It builds clean, with no warnings, and makes no pipeline
+  after frame 1 on its Deck preset or at High.
+- Six scenes, 6 captures a build, interleaved: every scene has the same most common image on both builds, and no
+  pixel differs in every run. Its reference hashes are unchanged.
+- GPU time a fight frame is within noise but in one place: its night sandbox fight at 1080p High is 0.032 ms
+  (0.8 %) slower, in all 6 paired rounds. The rain day fight is 0.039 ms faster in all 6, and the Deck preset is
+  within ±0.001 ms. v2 has no alpha-masked materials, so cut-out scenes (foliage, fences) weren't measured. Load time
+  is within noise.
+
 ### Fixed
 - **No derivative after a discard in the scene's model shaders.** HLSL's `discard` compiles to SPIR-V `OpKill` (DXC,
   through shadercross). Vulkan leaves the derivatives of a 2x2 quad that a kill has left undefined, and so are those taken
@@ -26,10 +43,17 @@ All notable changes to this project are documented here. The format follows
   - **What changes:** nothing on the NVIDIA GPU it was tested on (an RTX 3070 Ti). In each of the four identity modes
     (plain, shared meshes, no runs, runs verified), all 421 images are byte for byte 0.14.1's, run twice. Be The
     Bullet Hell v2's smoky day fight is 0.14.1's usual image too.
-  - **What it doesn't fix:** the run-to-run variance of that capture. It is unchanged: 5 of 20 captures off the usual
-    image with the fix, 8 of 20 without, with the same few alternative lighting results in both. It is about one
-    float16 step of the opaque pass's lighting at scattered pixels. It comes with the pipelines NVIDIA's driver loads
-    from its disk shader cache, not with any input the renderer gives it.
+  - **What it doesn't fix:** the run-to-run variance of that capture (see Known). It is unchanged: in two blocks of 20
+    captures a build, 5 and 3 were off the usual image with the fix, 8 and 5 without, with the same few alternative
+    lighting results in both.
+
+### Known
+- **Some captures vary from run to run on NVIDIA.** Be The Bullet Hell v2's smoky day fight and heat-ray night capture
+  sometimes differ by about one float16 step of the opaque pass's lighting at scattered pixels, mostly on thin
+  geometry, which the screen-space reflections spread. Everything the renderer hands the GPU is identical at GPU time,
+  and a replay of the same commands repeats the odd result until time passes. The cause is most likely in the driver
+  or the GPU's state, and is unproven. Compare such captures with a tolerance (seen on an RTX 3070 Ti).
+- **macOS (Metal) and a real Steam Deck** aren't verified, so what the fix changes on AMD's GPUs isn't measured.
 
 ## [0.14.1] — 2026-11-24
 
