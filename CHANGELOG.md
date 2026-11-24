@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.14.1] — 2026-11-24
+
+0.14.1: one fix, the last mip levels of textures whose sides differ, which SDL 3.4.2's Vulkan backend left unwritten.
+The API, the header and the shaders (78) are unchanged, and there's nothing to set. Only images that sample those levels
+change; everything else draws byte for byte as 0.14.0's.
+
+Be The Bullet Hell v2 tested the candidate (`0737d879`) against 0.14.0 on its main at `90d47096`:
+- It builds clean and its 914 workspace tests pass. Its logs of pipelines made after frame 1 are identical on both
+  builds, at Deck and at High.
+- The pixels that change are all on the kaiju, whose skin, normal and ORM maps are 2048x1024. Near-black holes in its
+  silhouette, from the unwritten levels, are filled. Nothing else moves by more than 1 level, and every change is the
+  same from run to run.
+- GPU time a fight frame is within ±0.01 ms, while runs of one build spread up to 0.055 ms. The 500-enemy night fight
+  at 1080p High takes 4.033 and 4.042 ms on the two builds, and 1.515 and 1.520 ms on the Deck. Load time is within
+  noise.
+- The run-to-run variance is unchanged: 21 of 62 captures are off their build's usual image, against 22 of 62 on 0.14.0.
+
 ### Fixed
 - **The last mip levels of textures whose sides differ are written.** SDL 3.4's Vulkan `GenerateMipmaps`
   (release-3.4.2, and SDL's main so far) sizes each level as the base extent shifted right without clamping it to one
@@ -34,6 +51,13 @@ All notable changes to this project are documented here. The format follows
       v0.14.0's build, 0 differ in each mode, and 0 against v0.14.0 with SDL patched to clamp. No smoke reaches those
       levels.
     - **v2's captures** match the SDL-clamped build byte for byte.
+
+### Known
+- **The run-to-run variance** (v2's captures differ between runs with identical input; 0.13.0's "queued-upload race",
+  though it varies with queued uploads off too) is still open. It is narrowed to what the opaque pass reads at the
+  moment it runs: every binding, pipeline and texture is identical between runs, and a replay of the pass comes out as
+  the usual image.
+- **macOS (Metal) and a real Steam Deck** aren't verified. Metal makes its mips natively, so the fix doesn't run there.
 
 ## [0.14.0] — 2026-11-23
 
