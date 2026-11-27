@@ -1415,6 +1415,18 @@ static void test_pose_keys(const char *path) {
     assert(btbh_gpu_animation_pose_set_samples(pose, &clip, &time, &weight, 1u));
     assert(btbh_gpu_bone_palette_key(other, pose, 0u, 9.0f, 0u, 5u, &pose_key));
     assert(memcmp(&pose_key, &library_key, sizeof(pose_key)) == 0);
+    /* And the palettes the key shares are the same to the bit, for every skin that can be sampled. */
+    for (uint32_t skin = 0u; skin < 2u; ++skin) {
+        float from_pose[5u * 16u];
+        float from_library[5u * 16u];
+        const uint32_t joint_count = btbh_gpu_animation_library_skin_joint_count(library, skin);
+        assert(joint_count > 0u && joint_count <= 5u);
+        fill_sentinel(from_pose, 5u * 16u);
+        fill_sentinel(from_library, 5u * 16u);
+        assert(btbh_gpu_animation_pose_sample_skin(pose, skin, from_pose, joint_count));
+        assert(btbh_gpu_animation_library_sample_skin(library, clip, time, skin, from_library, joint_count));
+        assert(memcmp(from_pose, from_library, sizeof(from_pose)) == 0);
+    }
     const uint32_t clips[2] = {0u, 1u};
     float times[2] = {0.1f, 0.6f};
     const float weights[2] = {0.25f, 0.75f};
@@ -1442,6 +1454,108 @@ static void test_pose_keys(const char *path) {
     btbh_gpu_animation_library_destroy(library);
 }
 
+/* The scene's bone palettes (btbh_gpu_scene_prepare_bones) with the window's kept palettes and without, over frames
+   whose poses come back, change or both: the same offsets and palettes to the bit, and the kept ones used. A model of
+   three primitives (skins 0 and 1 and none), batches by library, clip and time (twins in a frame, -0 and +0, one
+   material slot each), a pose of one sample (whose key a library batch shares) and a blend (twice). */
+static void test_prepare_bones(const char *path) {
+    BTBHGPUAnimationLibraryReport report;
+    memset(&report, 0, sizeof(report));
+    BTBHGPUAnimationLibrary *library = btbh_gpu_animation_library_load(path, &report);
+    assert(library != NULL && report.animation_count >= 5u);
+    BTBHGPUModelPrimitive primitives[3];
+    memset(primitives, 0, sizeof(primitives));
+    for (int32_t index = 0; index < 3; ++index) {
+        primitives[index].material_slot = index;
+        primitives[index].skin_index = index < 2 ? index : -1;
+    }
+    BTBHGPUModel model;
+    memset(&model, 0, sizeof(model));
+    model.primitives = primitives;
+    model.primitive_count = 3u;
+    BTBHGPUAnimationPose *single = btbh_gpu_animation_pose_create(library);
+    BTBHGPUAnimationPose *blend = btbh_gpu_animation_pose_create(library);
+    assert(single != NULL && blend != NULL);
+    enum { BATCHES = 11 };
+    static const uint32_t clips[BATCHES] = {0u, 0u, 1u, 2u, 0u, 0u, 0u, 3u, 4u, 0u, 0u};
+    static const int32_t slots[BATCHES] = {-1, -1, 1, -1, -1, -1, -1, -1, 0, -1, -1};
+    BTBHGPUBonePaletteCache *cache = NULL;
+    for (int frame = 0; frame < 8; ++frame) {
+        /* Frames 0-1 the same poses, 2-3 two of them moved, 4-7 three moved. */
+        const float moved = frame < 2 ? 0.0f : frame < 4 ? 0.125f : 0.375f;
+        const float times[BATCHES] = {
+            0.25f, 0.25f, 0.31f + moved, 0.7f, 0.0f, 0.0f, 0.0f, 1.0f + moved, 0.6f, -0.0f, 0.0f
+        };
+        const uint32_t single_clip = 2u;
+        const float single_time = 0.7f;
+        const float single_weight = 2.0f;
+        assert(btbh_gpu_animation_pose_set_samples(single, &single_clip, &single_time, &single_weight, 1u));
+        const uint32_t blend_clips[2] = {0u, 4u};
+        const float blend_times[2] = {0.3f + (frame >= 4 ? moved : 0.0f), 0.9f};
+        const float blend_weights[2] = {1.0f, 3.0f};
+        assert(btbh_gpu_animation_pose_set_samples(blend, blend_clips, blend_times, blend_weights, 2u));
+        BTBHGPUSceneGeometryBatch batches[BATCHES];
+        memset(batches, 0, sizeof(batches));
+        for (uint32_t index = 0u; index < BATCHES; ++index) {
+            batches[index].kind = BTBH_GPU_SCENE_GEOMETRY_MODEL;
+            batches[index].model = &model;
+            batches[index].material_slot = slots[index];
+            batches[index].animation_library = library;
+            batches[index].animation_index = clips[index];
+            batches[index].animation_time = times[index];
+        }
+        batches[4].animation_pose = single;
+        batches[5].animation_pose = blend;
+        batches[6].animation_pose = blend;
+
+        uint32_t *expected_offsets = NULL;
+        uint32_t *actual_offsets = NULL;
+        float *expected_matrices = NULL;
+        float *actual_matrices = NULL;
+        uint32_t expected_geometries = 0u;
+        uint32_t actual_geometries = 0u;
+        uint32_t expected_bones = 0u;
+        uint32_t actual_bones = 0u;
+        uint32_t hits = 0u;
+        assert(btbh_gpu_scene_prepare_bones_for_test(batches, BATCHES, NULL, &expected_offsets,
+            &expected_geometries, &expected_matrices, &expected_bones, NULL));
+        assert(btbh_gpu_scene_prepare_bones_for_test(batches, BATCHES, &cache, &actual_offsets,
+            &actual_geometries, &actual_matrices, &actual_bones, &hits));
+        assert(cache != NULL);
+        assert(expected_geometries == actual_geometries && expected_bones == actual_bones);
+        assert(memcmp(expected_offsets, actual_offsets, (size_t)expected_geometries * 2u * sizeof(uint32_t)) == 0);
+        assert(memcmp(expected_matrices, actual_matrices, (size_t)expected_bones * 16u * sizeof(float)) == 0);
+        /* The palettes a frame samples, one a distinct offset. Kept ones: in frame 0 only those whose key an earlier
+           sample of the frame shares (the pose of one sample and the clip-2 batch, both skins); from frame 1 on, all
+           but what moved (all in frames 1, 3 and 5-7). */
+        uint32_t samples = 0u;
+        for (uint32_t geometry = 0u; geometry < expected_geometries; ++geometry) {
+            bool first = expected_offsets[geometry] != UINT32_MAX;
+            for (uint32_t other = 0u; first && other < geometry; ++other) {
+                first = expected_offsets[other] != expected_offsets[geometry];
+            }
+            samples += first ? 1u : 0u;
+        }
+        if (frame == 0) {
+            assert(hits == 2u);
+        } else if (frame == 2 || frame == 4) {
+            assert(hits > 0u && hits < samples);
+        } else {
+            assert(hits == samples);
+        }
+        free(actual_matrices);
+        free(actual_offsets);
+        free(expected_matrices);
+        free(expected_offsets);
+        /* The window finishes the frame. */
+        (void)btbh_gpu_bone_palette_cache_begin(&cache, true, false);
+    }
+    btbh_gpu_bone_palette_cache_destroy(cache);
+    btbh_gpu_animation_pose_destroy(blend);
+    btbh_gpu_animation_pose_destroy(single);
+    btbh_gpu_animation_library_destroy(library);
+}
+
 int main(int argc, char **argv) {
     static const char *const fixtures[] = {
         "blended-animation.gltf",
@@ -1460,6 +1574,7 @@ int main(int argc, char **argv) {
     test_palette_cache();
     (void)snprintf(path, sizeof(path), "%s/%s", BTBH_GPU_FIXTURE_DIR, "animation-samplers.gltf");
     test_pose_keys(path);
+    test_prepare_bones(path);
     printf("btbh_gpu_animation_sampler: ok\n");
     return 0;
 }

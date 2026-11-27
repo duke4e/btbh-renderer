@@ -6781,6 +6781,36 @@ static bool btbh_gpu_scene_prepare_bones(
     return true;
 }
 
+bool btbh_gpu_scene_prepare_bones_for_test(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUBonePaletteCache **palette_cache,
+    uint32_t **bone_offsets,
+    uint32_t *geometry_count,
+    float **bone_matrices,
+    uint32_t *bone_count,
+    uint32_t *palette_hit_count
+) {
+    BTBHGPUSceneTelemetryReport telemetry;
+    SDL_zero(telemetry);
+    const bool prepared = btbh_gpu_scene_prepare_bones(
+        batches,
+        batch_count,
+        bone_offsets,
+        geometry_count,
+        bone_matrices,
+        bone_count,
+        false,
+        &telemetry,
+        NULL,
+        palette_cache
+    );
+    if (palette_hit_count != NULL) {
+        *palette_hit_count = telemetry.animation_palette_cache_hit_count;
+    }
+    return prepared;
+}
+
 bool btbh_gpu_scene_lighting_valid(
     const BTBHGPUSceneLighting *lighting
 ) {

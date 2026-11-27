@@ -446,6 +446,21 @@ uint32_t btbh_gpu_scene_opaque_order(
     uint64_t *scratch
 );
 
+/* For the tests (since 0.16.0): the scene's bone palettes for `batches`, as a frame prepares them outside the temporal
+   path (btbh_gpu_scene.c's btbh_gpu_scene_prepare_bones): each geometry's palette offset (UINT32_MAX unskinned), then
+   the previous offsets (the same), and the palettes, freed by the caller. palette_cache is the window's kept palettes
+   or NULL; *palette_hit_count the palettes copied from it. */
+bool btbh_gpu_scene_prepare_bones_for_test(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUBonePaletteCache **palette_cache,
+    uint32_t **bone_offsets,
+    uint32_t *geometry_count,
+    float **bone_matrices,
+    uint32_t *bone_count,
+    uint32_t *palette_hit_count
+);
+
 /* RFC 0011 phase 1b, the run key (btbh_gpu_scene.c): whether `batch` continues the run of `previous`, the batch the
    pass drew before it, so that it binds and pushes nothing but its vertex and index buffers. True when the two are
    equal, byte for byte, in every field but kind, model, custom_mesh, material_slot, first_instance and
