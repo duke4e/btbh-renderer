@@ -839,7 +839,10 @@ typedef enum BTBHGPUSceneRadianceCascadesFallbackReason {
     BTBH_GPU_SCENE_RC_FALLBACK_PIPELINE_CREATION_FAILED = 4,
     BTBH_GPU_SCENE_RC_FALLBACK_RESOURCE_ALLOCATION_FAILED = 5,
     BTBH_GPU_SCENE_RC_FALLBACK_DISPATCH_FAILED = 6,
-    BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION = 7
+    BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION = 7,
+    /* Since 0.16.0 (RFC 0014): a frame of two scene views (btbh_gpu_window_scene_present_views), or of one clipped to a
+     * part of the frame, draws without the cascades. Their history starts afresh on the next frame that runs them. */
+    BTBH_GPU_SCENE_RC_FALLBACK_VIEWS = 8
 } BTBHGPUSceneRadianceCascadesFallbackReason;
 
 #define BTBH_GPU_RC_MAX_OCCLUSION_CASCADES 3u
@@ -2886,6 +2889,187 @@ BTBHGPUResult btbh_gpu_window_scene_release_target_view(
 );
 /* Defined when BTBHGPUSceneTargetView and its three functions exist (since 0.15.0). */
 #define BTBH_GPU_SCENE_HAS_TARGET_VIEWS 1
+
+/* Scene views (since 0.16.0, RFC 0014, asked for by Be The Bullet Hell v2 for its local co-op split screen, which drew
+   its second player's view into a target and laid it over the frame): one present that draws up to
+   BTBH_GPU_SCENE_MAX_VIEWS cameras of the same batches and instances into the window's frame, each clipped to its half
+   of it. The preparation, the upload and the post chain run once; each view draws its own geometry and its own
+   screen-space passes. */
+#define BTBH_GPU_SCENE_MAX_VIEWS 2u
+
+/* BTBHGPUSceneView.flags. */
+enum {
+    /* A cut in this view alone (a player put elsewhere). Reserved for FSR 3 over two views (RFC 0014 phase 2): in this
+     * release a frame of two views never runs FSR 3, so the flag changes nothing; it is accepted. */
+    BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET = 1u << 0
+};
+
+/* One view of a scene presented by btbh_gpu_window_scene_present_views: a camera and the part of the frame it covers.
+   144 bytes on 64-bit: view_projection 0, right 64, up 76, position 88, clip 100, visibility 112, shadow_visibility 120,
+   lighting 128, flags 136, reserved 140. A zeroed view with a valid camera is the whole frame, every batch the call lets
+   in and the call's lighting. */
+typedef struct BTBHGPUSceneView {
+    /* The camera, as btbh_gpu_window_scene_present_instances' view_projection, camera_right, camera_up and
+       camera_position. */
+    float view_projection[16];
+    float right[3];
+    float up[3];
+    float position[3];
+    /* The view's half of the frame, in the window's drawable pixels (x right, y down from the top-left corner, before
+       post->mirror_horizontal mirrors the frame): a pixel centre (x, y) is the view's where
+       clip[0] * x + clip[1] * y + clip[2] >= 0. All zero: the whole frame (one view only). With two views the halves
+       should cover the frame once (the second view's clip the first's negated): each is widened by a quarter of a
+       render pixel, so that no pixel is drawn by neither; a pixel whose centre lies within a quarter pixel of the line
+       is drawn by both (the nearer surface shows, and the screen-space passes take the second view's). */
+    float clip[3];
+    /* Per batch, 0 or 1: drawn in this view (the call's scene_visibility must let it in too). NULL: every batch the
+       call's scene_visibility lets in. */
+    const uint8_t *visibility;
+    /* Per batch, 0 or 1: cast into this view's own sun and spot maps (below). NULL: the call's
+       directional_shadow_visibility for the sun map, every batch with spot_shadow_visible for the spot map. A map two
+       views share takes the call's (directional_shadow_visibility, and spot_shadow_visible alone). A batch with
+       BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW still casts into no sun map. */
+    const uint8_t *shadow_visibility;
+    /* NULL: the call's lighting. Otherwise it is read only for:
+       - directional_shadow_view_projection: the sun map's matrix. A view whose matrix equals view 0's byte for byte
+         reads view 0's map; else it has a map of its own (with the sun map's size, and its own particle transmittance
+         map), drawn from its own camera and shadow_visibility;
+       - the spot light: spot_position_*, spot_range, spot_direction_*, spot_energy, spot_red, _green, _blue,
+         spot_falloff, spot_inner_cutoff, spot_outer_cutoff, spot_occluder_shadow_strength, spot_occluder_shadow_reach,
+         spot_occluder_flags, spot_shadow_softness, spot_shadow_near and spot_shadow_view_projection, whose map is shared
+         or the view's own by the same rule. Whether the spot casts a shadow, and whether it is omni, are the call's
+         (spot_shadow_enabled, spot_shadow_is_omni). An omni map is always the call's: drawn from the call's
+         omni_shadow_view_projection and spot position, and shared by the views;
+       - lamp_count, lamp_core_radius, lamp_position_reach and lamp_color_energy;
+       - point_light_count and point_lights.
+       Every other field is the call's (the sky, the sun's direction and colour, the fill, the clouds, the fog, the
+       shadows' settings): the view's isn't read. It must still be a valid lighting. */
+    const BTBHGPUSceneLighting *lighting;
+    uint32_t flags;      /* BTBH_GPU_SCENE_VIEW_* bits; 0 as before */
+    uint32_t reserved;   /* 0 */
+} BTBHGPUSceneView;
+
+/* What one view drew (btbh_gpu_window_scene_present_views' view_reports). 32 bytes. */
+typedef struct BTBHGPUSceneViewReport {
+    /* Its draws in the opaque, transparent and refraction passes. */
+    uint32_t primitive_draw_count;
+    /* The instances of the batches it drew (each batch's instance_count, once a batch, after the host's culling and
+       visibility). */
+    uint32_t instance_count;
+    /* The view whose sun map it read: itself, or view 0 when its matrix is view 0's. UINT32_MAX without the sun's
+       shadow. */
+    uint32_t sun_map;
+    /* The same for the spot (or omni) map: 0 for an omni map. UINT32_MAX without the spot's shadow. */
+    uint32_t spot_map;
+    /* Its opaque order's sort (BTBHGPUScenePost.opaque_sort; 0 without one) and its draws' encoding, on the CPU. */
+    double cpu_opaque_order_milliseconds;
+    double cpu_geometry_encode_milliseconds;
+} BTBHGPUSceneViewReport;
+
+/* Presents one frame of up to BTBH_GPU_SCENE_MAX_VIEWS views of the same batches and instances, each clipped to its half
+   of the frame. Arguments as btbh_gpu_window_scene_present_instances_with_visibility, with the camera replaced by views
+   (view_count of them); the frame then waits for its canvas as a present's does. One view whose clip is zero and whose
+   visibility, shadow_visibility and lighting are NULL draws that call's frame with the view's camera, byte for byte.
+   - Once for the frame: the preparation, the upload, the shadow maps the views share, bloom, the LUT, CAS, tilt-shift
+     and the output pass, SMAA or FXAA, the mirror and the upscaling. Bloom reaches a little across the line between
+     the views (up to 1/64 of the frame at its widest level), and the anti-aliasing and FSR 1 a few pixels.
+   - Per view, clipped to its half (each geometry pass and screen-space pass holds every view in turn): the opaque
+     sort, the opaque, transparent and refraction passes, and the passes that read the camera, each keeping its
+     samples to its own half: the SSAO or HBAO with their denoise and resolve (taps across the line count for nothing),
+     the reflections (a ray stops at the line, as at the screen's edge, and fades near it), the distance pass and the
+     HDR composite (the distance fog and the world-edge fade at each view's depth; the vignette stays centred on the
+     frame). A refracting surface near the line may sample the other view's pixels as far as it displaces them.
+   - Shadow maps: the secondary (fill) map is the call's, shared. A sun or spot map is shared by views whose matrices
+     are equal, else each view has its own. Maps take turns under btbh_gpu_window_scene_set_shadow_update_periods: a
+     view's own sun map counts right after view 0's in the order the periods use (primary, the views' own primary,
+     secondary, spot, the views' own spot), so at a sun period of 2 the two sun maps are redrawn on alternate frames.
+     Billboard casters face view 0's camera in a shared map and their own view's in an own map. A second view's own
+     maps cost 16 MiB (a 2048 sun map), 4 MiB (the spot map) and its transmittance map.
+   - With two views (or one whose clip isn't zero) the frame runs no radiance cascades (report.radiance_cascades:
+     active_tier BTBH_GPU_SCENE_RC_OFF, fallback_reason BTBH_GPU_SCENE_RC_FALLBACK_VIEWS) and never FSR 3: FSR 1 runs
+     instead (report.upscale_mode says BTBH_GPU_SCENE_UPSCALE_FSR1), and the next FSR 3 frame starts a new history.
+   - Needs this release's scene vertex shaders (production_model.vert and its siblings, production_animated_model.vert:
+     they write the clip distance) and production_post_view.vert beside the host's post vertex shader. With two views
+     (or a clip), SPIR-V vertex shaders that don't write a clip distance are refused with BTBH_GPU_INVALID_ARGUMENT
+     naming the path, as is a missing production_post_view.vert; Metal libraries aren't checked. One view with a zero
+     clip draws exactly as the present does and needs neither.
+   - report: the whole frame's, as the present's: its primitive_draw_count is every view's. view_reports, when not
+     NULL, takes view_count entries: what each view drew.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, naming the view, the window left as it was: views NULL, view_count 0 or
+     above BTBH_GPU_SCENE_MAX_VIEWS; a view's view_projection, right, up or position not finite, or its view_projection
+     not invertible; its clip not finite, or clip[0] and clip[1] both 0 with two views; a visibility or
+     shadow_visibility byte above 1; an unknown flag, or reserved not 0; a lighting the present would refuse; and every
+     refusal of btbh_gpu_window_scene_present_instances_with_visibility.
+   - The window's frame only: a picture in a target stays one view (btbh_gpu_window_scene_render_to_target_view). */
+BTBHGPUResult btbh_gpu_window_scene_present_views(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneViewReport *view_reports,
+    BTBHGPUSceneReport *report
+);
+
+/* btbh_gpu_window_scene_prewarm for btbh_gpu_window_scene_present_views with these views: its steps with the settings a
+   frame of these views runs (no cascades and FSR 1 for two views), and besides, for two views (or a clip), the clipped
+   screen-space passes' pipelines (production_post_view.vert with the SSAO's, HBAO's, distance and composite fragment
+   shaders, those the settings use) and the views' own shadow maps and transmittance maps, as the present decides them
+   from the views' lighting (the matrices are read only to tell which maps the views share). One view with a zero clip
+   is exactly btbh_gpu_window_scene_prewarm. Refusals: btbh_gpu_window_scene_prewarm's, and the views' as
+   btbh_gpu_window_scene_present_views refuses them (their visibility isn't read). */
+BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+);
+/* Defined when btbh_gpu_window_scene_present_views, btbh_gpu_window_scene_prewarm_views and their structs exist (since
+   0.16.0). */
+#define BTBH_GPU_SCENE_HAS_VIEWS 1
 
 /* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
    a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls
