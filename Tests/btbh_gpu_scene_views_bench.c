@@ -25,7 +25,11 @@
  * is the calls' wall time with the GPU idle before each (median of 12 frames). BTBH_VIEWS_BENCH_SIZE=WxH,
  * BTBH_VIEWS_BENCH_DETAIL=<n> (default 8: 768 triangles a box, 1.8 million in the scene). BTBH_VIEWS_BENCH_BAND=1 first
  * measures the seam's band: the vertical split against its two cameras' one-view frames joined at the line, read back,
- * with the whole chain, without bloom, and without bloom and SSR.
+ * with the whole chain, without bloom, and without bloom and SSR. With it, BTBH_VIEWS_BENCH_DUMP=<dir> (0.16.1) writes
+ * each variant's three frames there as PNGs (band_<variant>_first, _second and _split). BTBH_VIEWS_BENCH_SSR=<n> (0.16.1)
+ * shows the reflections, to see them by the line: intensity n (default 0.5) and Be The Bullet Hell v2's flags,
+ * SSR_SURFACE_REFLECTIVITY and SSR_FACING_HITS, in every frame. (Without the first the scene's targets mark every
+ * surface unlit, and the reflections the bench times by default reflect nothing.)
  *
  * Variants (0.16.0, for the cost log's 4K sample): BTBH_VIEWS_BENCH_UPSCALE=fsr3 runs FSR 3 at the frame's size (render
  * scale 1) in place of SMAA, as Be The Bullet Hell v2's 4K High does; BTBH_VIEWS_BENCH_CAS=<sharpness> turns CAS on;
@@ -460,6 +464,35 @@ static uint8_t *read_texture(BTBHGPUWindow *window, BTBHGPUTexture *texture) {
     return pixels;
 }
 
+/* BTBH_VIEWS_BENCH_DUMP=<dir>: a band frame read back (the texture's bytes) as <dir>/band_<variant>_<which>.png. */
+static void dump_frame(const BTBHGPUTexture *texture, const uint8_t *pixels, uint32_t variant, const char *which) {
+    const char *directory = SDL_getenv("BTBH_VIEWS_BENCH_DUMP");
+    if (directory == NULL || directory[0] == '\0') {
+        return;
+    }
+    const size_t size = (size_t)texture->width * texture->height * 4u;
+    uint8_t *rgba = malloc(size);
+    if (rgba == NULL) {
+        return;
+    }
+    memcpy(rgba, pixels, size);
+    if (texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+        texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB) {
+        for (size_t index = 0u; index < size; index += 4u) {
+            const uint8_t blue = rgba[index];
+            rgba[index] = rgba[index + 2u];
+            rgba[index + 2u] = blue;
+        }
+    }
+    static const char *const variant_names[3] = {"chain", "nobloom", "nossr"};
+    char path[1200];
+    (void)snprintf(path, sizeof(path), "%s/band_%s_%s.png", directory, variant_names[variant], which);
+    if (btbh_gpu_write_png_rgba8(path, texture->width, texture->height, rgba) != BTBH_GPU_OK) {
+        fprintf(stderr, "dump: can't write %s\n", path);
+    }
+    free(rgba);
+}
+
 static void wait_idle(BenchScene *scene) {
     (void)SDL_WaitForGPUIdle(scene->window->device->gpu);
 }
@@ -751,7 +784,13 @@ int main(void) {
     post->ssao_power = 1.5f;
     post->ssao_bias = 0.05f;
     post->ssao_contact = 1u;
-    post->ssr_intensity = 0.5f;
+    const char *ssr_text = SDL_getenv("BTBH_VIEWS_BENCH_SSR");
+    const bool ssr_shown = ssr_text != NULL && atof(ssr_text) > 0.0;
+    post->ssr_intensity = ssr_shown ? (float)atof(ssr_text) : 0.5f;
+    if (ssr_shown) {
+        /* (Without SSR_SURFACE_REFLECTIVITY the scene's targets mark every surface unlit: they reflect nothing.) */
+        post->flags |= BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY | BTBH_GPU_SCENE_POST_SSR_FACING_HITS;
+    }
     post->ssr_max_roughness = 0.7f;
     post->ssr_max_distance = 30.0f;
     post->ssr_thickness = 0.6f;
@@ -910,6 +949,8 @@ int main(void) {
                     return 1;
                 }
                 frames[which] = read_texture(scene.window, scene.frame);
+                static const char *const which_names[3] = {"first", "second", "split"};
+                dump_frame(scene.frame, frames[which], variant, which_names[which]);
             }
             const float *clip = scene.views[2][1].clip;
             uint32_t widest[4] = {0u, 0u, 0u, 0u};
