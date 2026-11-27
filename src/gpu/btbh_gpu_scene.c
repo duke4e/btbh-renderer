@@ -1309,6 +1309,60 @@ void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
     btbh_gpu_cost_rc_emitters = 0u;
 }
 
+/* The triangles a pass has drawn since the last frame's line, the city's and the rest. */
+static uint64_t btbh_gpu_cost_pass_triangles(BTBHGPUCostPass pass) {
+    return btbh_gpu_cost_triangles[pass][0] + btbh_gpu_cost_triangles[pass][1];
+}
+
+/* With the cost log (since 0.16.0), a scene rendered into a target (btbh_gpu_window_scene_render_to_target and _view,
+   which submit their own command buffer) is submitted with the GPU idle and waited for, and one `BTBH_GPU_COST_TARGET`
+   line a call gives its GPU time (submit to fence, in one piece: never split), the view's id (`none` without a view),
+   the target's and the render's sizes, and the triangles its main and shadow passes drew since `main_triangles` and
+   `shadow_triangles` were read (they also count in the next frame's line, as before; that line's time doesn't hold
+   the render's). Then the GPU is kept warm again. False, with SDL's error set, when the submit failed. */
+static bool btbh_gpu_cost_submit_target(
+    SDL_GPUDevice *device,
+    SDL_GPUCommandBuffer *command,
+    const BTBHGPUSceneTargetView *view,
+    const BTBHGPUTexture *target,
+    uint32_t render_width,
+    uint32_t render_height,
+    uint64_t main_triangles,
+    uint64_t shadow_triangles
+) {
+    btbh_gpu_cost_wait_warm();
+    (void)SDL_WaitForGPUIdle(device);
+    const uint64_t lazy_started_ticks = btbh_gpu_lazy_creation_clock();
+    const uint64_t submit_started_ticks = SDL_GetTicksNS();
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, lazy_started_ticks);
+    if (fence == NULL) {
+        return false;
+    }
+    (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
+    const double gpu_milliseconds = (double)(SDL_GetTicksNS() - submit_started_ticks) / 1000000.0;
+    SDL_ReleaseGPUFence(device, fence);
+    char view_id[16] = "none";
+    if (view != NULL) {
+        (void)snprintf(view_id, sizeof(view_id), "%u", view->view_id);
+    }
+    (void)fprintf(
+        stdout,
+        "BTBH_GPU_COST_TARGET gpu_ms=%.4f view=%s target=%ux%u render=%ux%u main_tris=%llu shadow_tris=%llu\n",
+        gpu_milliseconds,
+        view_id,
+        target->width,
+        target->height,
+        render_width,
+        render_height,
+        (unsigned long long)(btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_MAIN) - main_triangles),
+        (unsigned long long)(btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_SHADOW) - shadow_triangles)
+    );
+    (void)fflush(stdout);
+    btbh_gpu_cost_warm(device);
+    return true;
+}
+
 static uint32_t btbh_gpu_scene_shadow_update_period(
     const BTBHGPUWindow *window,
     uint32_t shadow_index
@@ -11323,8 +11377,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    /* (A scene rendered to a target is no frame of its own in the cost log: it counts in the frame
-       it is drawn for.) */
+    /* (A scene rendered to a target is no frame of its own in the cost log: its triangles count in the frame
+       it is drawn for, its time in a line of its own, btbh_gpu_cost_submit_target.) */
     if (output_width == 0u) {
         btbh_gpu_cost_begin_frame(device);
     }
@@ -15154,6 +15208,9 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
            keeps both, as the window's does from frame to frame. */
         btbh_gpu_window_scene_submission_finished(window, false);
     }
+    /* (The cost log's line for this call counts the triangles drawn from here.) */
+    const uint64_t cost_main_triangles = btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_MAIN);
+    const uint64_t cost_shadow_triangles = btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_SHADOW);
     const BTBHGPUResult result =
         btbh_gpu_window_scene_present_instances_internal(
             window,
@@ -15244,9 +15301,24 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
             (void)snprintf(fill_error, sizeof(fill_error), "GPU scene could not fill outside the rect: %s",
                 SDL_GetError());
         }
-        const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
-        const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
+        bool submitted = false;
+        if (btbh_gpu_cost_log_enabled()) {
+            /* The cost log times it alone (since 0.16.0): BTBH_GPU_COST_TARGET. */
+            submitted = btbh_gpu_cost_submit_target(
+                window->device->gpu,
+                command,
+                view,
+                target,
+                render_width,
+                render_height,
+                cost_main_triangles,
+                cost_shadow_triangles
+            );
+        } else {
+            const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
+            submitted = SDL_SubmitGPUCommandBuffer(command);
+            btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
+        }
         btbh_gpu_window_scene_submission_finished(window, submitted);
         if (!submitted) {
             btbh_gpu_scene_error(
