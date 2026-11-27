@@ -183,13 +183,14 @@ All notable changes to this project are documented here. The format follows
   `BTBH_VIEWS_BENCH_CAS=<sharpness>` and `BTBH_VIEWS_BENCH_CONFIGS=<names>`; with `BTBH_GPU_COST_LOG=1` it ends each
   frame with a canvas present (which the log times) instead of the copy, and marks each sample's lines.
 - **Tested** (Windows, Vulkan, RTX 3070 Ti): `check.ps1` passes 45/45; the Swift suite ran 306 tests (2 skipped, 0
-  failures) before the review's fixes, which change no text it checks. Identity against v0.15.0's build: the ten image-dumping smokes write the same 421 images (19.1 million
-  pixels), 0 pixels different, in four modes (plain, `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`, `=verify`
-  with 0 mismatches), and again in plain mode with `BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`. The render-to-target,
-  target view, views, lit particle and prewarm smokes pass with the log and pass frames on and off. The lazy creation
-  smoke asserts under the log in its frame telemetry test (the log's submit replaces frame telemetry's), as v0.15.0's
-  does. Under the log the mesh queue smoke, which copies frames out between canvas frames, now prints `split=0` lines
-  for its canvas frames where it printed 7 `split=1` and 7 pass lines carried over from the copied frames.
+  failures) before the review's fixes, which change no text it checks. Identity against v0.15.0's build: the ten
+  image-dumping smokes write the same 421 images (19.1 million pixels), 0 pixels different, in four modes (plain,
+  `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`, `=verify` with 0 mismatches), and again in plain mode with
+  `BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`. The render-to-target, target view, views, lit particle and prewarm
+  smokes pass with the log and pass frames on and off. The lazy creation smoke asserts under the log in its frame
+  telemetry test (the log's submit replaces frame telemetry's), as v0.15.0's does. Under the log the mesh queue smoke,
+  which copies frames out between canvas frames, now prints `split=0` lines for its canvas frames where it printed 7
+  `split=1` and 7 pass lines carried over from the copied frames.
 - **Measured** (the same PC, quiet, under the shared perf lock): `btbh_gpu_scene_views_bench`'s city at 3840 x 2160
   rendered at its size (2,304 boxes of 768 triangles, two sun maps at a period of 2, HBAO with contact AO, SSR, bloom,
   fog, vignette, CAS 0.5, ACES), one view through the present, the log with pass frames; medians of 37 rounds of 8
