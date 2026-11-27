@@ -1323,8 +1323,10 @@ static uint64_t btbh_gpu_cost_pass_triangles(BTBHGPUCostPass pass) {
    line a call gives its GPU time (submit to fence, in one piece: never split), the view's id (`none` without a view),
    the target's and the render's sizes, and the triangles its main and shadow passes drew since `main_triangles` and
    `shadow_triangles` were read (they also count in the next frame's line, as before; that line's time doesn't hold
-   the render's). Then the GPU is kept warm again (once a frame made the warming textures). False, with SDL's error
-   set, when the submit failed. */
+   the render's). It waits for the warming the last frame's line left, and warms nothing itself: the host frame's one
+   warming (after its line) covers the host's own gap between frames, and what follows a render here is the next call's
+   encoding, the same short gap as between a split frame's pieces (measured: a frame after a target render costs what
+   one without does). False, with SDL's error set, when the submit failed. */
 static bool btbh_gpu_cost_submit_target(
     SDL_GPUDevice *device,
     SDL_GPUCommandBuffer *command,
@@ -1364,11 +1366,6 @@ static bool btbh_gpu_cost_submit_target(
         (unsigned long long)(btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_SHADOW) - shadow_triangles)
     );
     (void)fflush(stdout);
-    /* Warm again for the frame that follows, once a frame made the warming textures: a render here makes none, so
-       that a host rendering only into targets (or a prewarm that checks the lazy creation log) sees no new texture. */
-    if (btbh_gpu_cost_warm_textures[0] != NULL) {
-        btbh_gpu_cost_warm(device);
-    }
     return true;
 }
 
