@@ -78,11 +78,30 @@ bool view_own_side_by(float2 uv, float2 texel, float margin)
 }
 
 // RFC 0014 (since 0.16.1): how far a point in clip space lies on the view's half past `margin` render pixels inside its
-// line (view_own_side_by's test, negative before it), times clip.w: linear along a ray, for the reflections' march.
+// edge (view_own_side_by's test, negative before it), times clip.w: linear along a ray, for the reflections' march.
 float view_side_in_clip(float4 clip, float margin)
 {
     return dot(ssr_hit_options.yzw, float3(0.5f * (clip.w + clip.x), 0.5f * (clip.w - clip.y), clip.w)) -
         margin * length(ssr_hit_options.yz * inverse_resolution) * clip.w;
+}
+
+// RFC 0014 (since 0.16.1): the length of the view's plane's normal per render pixel, the divisor that turns the plane
+// into render pixels; never below 1e-30, so that a clip normal small enough to flush it to zero divides by no zero.
+float view_plane_scale()
+{
+    return max(length(ssr_hit_options.yz * inverse_resolution), 1.0e-30f);
+}
+
+// RFC 0014 (since 0.16.1): how far inside the view's edge (render pixels; the edge is its line widened a quarter pixel
+// toward the other view) a bilinear read of a render-size target keeps all four texels clear of what the other view
+// drew there. The band both views draw reaches 0.5 inside the edge, and a read's texel centres lie within a pixel of
+// it each way: up to |nx| + |ny| nearer the line, n the line's unit normal in render pixels. So 0.5 + |nx| + |ny|: 1.5
+// for an upright or level line (as 0.16.0's 1.5 texels), 1.87 at 30 degrees, 1.91 at 45. (0.5 with one view, whose
+// zero plane no margin changes.)
+float line_margin()
+{
+    const float2 normal = ssr_hit_options.yz * inverse_resolution;
+    return 0.5f + (abs(normal.x) + abs(normal.y)) / view_plane_scale();
 }
 
 struct FragmentInput
@@ -340,10 +359,10 @@ float3 flat_surface_normal(float3 normal)
 }
 
 // A rough reflection's blur tap: the scene at uv, or (RFC 0014) the hit's own colour where the tap would read the other
-// view's half.
-float3 blurred_reflection(float2 uv, float3 centre)
+// view's half or the band by the line (within `margin`, line_margin, of the view's edge).
+float3 blurred_reflection(float2 uv, float3 centre, float margin)
 {
-    return view_own_side_by(uv, inverse_resolution, 1.5f)
+    return view_own_side_by(uv, inverse_resolution, margin)
         ? scene_texture.SampleLevel(scene_sampler, uv, 0.0f).rgb
         : centre;
 }
@@ -404,6 +423,7 @@ float3 screen_space_reflection(
     float2 hit_uv = float2(0.0f, 0.0f);
     float hit_confidence = 1.0f;
     bool last_step = false;
+    const float margin = line_margin();
     [loop]
     for (uint march = 0u; march < 24u && t < ssr_controls.z && !last_step; ++march)
     {
@@ -413,15 +433,17 @@ float3 screen_space_reflection(
             break;
         }
         float2 sample_uv = clip_to_uv(clip);
-        // RFC 0014: a step that would reach the line between two views ends 1.5 render pixels before it (so that its
-        // filtered reads of the depth, and the hit's of the scene, stay on the view's half) and is the march's last: a
-        // surface the ray passes behind before the line is hit, however long the step. (0.16.0 stopped the march there
-        // as at the screen's edge, losing the hits of a step's length before the line, tens of pixels at 4K.)
-        if (!view_own_side_by(sample_uv, inverse_resolution, 1.5f))
+        // RFC 0014: a step that would reach the line between two views ends `margin` render pixels inside the view's
+        // edge (line_margin: 1.5 for an upright or level line, up to 1.91 on a diagonal; the edge lies a quarter pixel
+        // past the line, so 1.25 to 1.66 from it), where its filtered reads of the depth and the normals, and the hit's
+        // of the scene, take nothing the other view drew; and it is the march's last: a surface the ray passes behind
+        // before the line is hit, however long the step. (0.16.0 stopped the march there as at the screen's edge,
+        // losing the hits of a step's length before the line, tens of pixels at 4K.)
+        if (!view_own_side_by(sample_uv, inverse_resolution, margin))
         {
             const float inside =
-                view_side_in_clip(mul(view_projection, float4(origin + ray * previous_t, 1.0f)), 1.5f);
-            const float outside = view_side_in_clip(clip, 1.5f);
+                view_side_in_clip(mul(view_projection, float4(origin + ray * previous_t, 1.0f)), margin);
+            const float outside = view_side_in_clip(clip, margin);
             if (!(inside > 0.0f && outside <= 0.0f))
             {
                 break;
@@ -508,13 +530,13 @@ float3 screen_space_reflection(
         (1.0f - smoothstep(max_roughness * 0.5f, max_roughness, roughness));
     if (any(ssr_hit_options.yz != 0.0f))
     {
-        // RFC 0014: a hit near the line between two views fades within 24 render pixels of it, to nothing 1.5 from it
-        // where the march stops, so the reflection ends without a cut: a fixed width at any resolution, three times
-        // what Be The Bullet Hell v2's divider covers each side at 4K (8 pixels). (0.16.0 faded it within 1/12 of the
-        // frame, as at the screen's edge: 320 pixels at 4K.) One view's plane is zero: none of this runs.
-        const float line_pixels =
-            dot(ssr_hit_options.yzw, float3(hit_uv, 1.0f)) / length(ssr_hit_options.yz * inverse_resolution);
-        fade *= saturate((line_pixels - 1.5f) / 22.5f);
+        // RFC 0014: a hit near the line between two views fades within 24 render pixels of the view's edge (23.75 of
+        // the line), to nothing at the margin where the march stops (1.5 for an upright or level line), so the
+        // reflection ends without a cut: a fixed width at any resolution, three times what Be The Bullet Hell v2's
+        // divider covers each side at 4K (8 pixels). (0.16.0 faded it within 1/12 of the frame, as at the screen's
+        // edge: 320 pixels at 4K.) One view's plane is zero: none of this runs.
+        const float line_pixels = dot(ssr_hit_options.yzw, float3(hit_uv, 1.0f)) / view_plane_scale();
+        fade *= saturate((line_pixels - margin) / (24.0f - margin));
     }
     // Rough surfaces blur what they reflect, the more the farther the hit.
     const float blur = min(roughness * t * 0.004f, 0.012f);
@@ -524,10 +546,10 @@ float3 screen_space_reflection(
         const float3 centre_reflection = reflected;
         reflected = (
             centre_reflection * 2.0f +
-            blurred_reflection(hit_uv + float2(blur, 0.0f), centre_reflection) +
-            blurred_reflection(hit_uv - float2(blur, 0.0f), centre_reflection) +
-            blurred_reflection(hit_uv + float2(0.0f, blur), centre_reflection) +
-            blurred_reflection(hit_uv - float2(0.0f, blur), centre_reflection)
+            blurred_reflection(hit_uv + float2(blur, 0.0f), centre_reflection, margin) +
+            blurred_reflection(hit_uv - float2(blur, 0.0f), centre_reflection, margin) +
+            blurred_reflection(hit_uv + float2(0.0f, blur), centre_reflection, margin) +
+            blurred_reflection(hit_uv - float2(0.0f, blur), centre_reflection, margin)
         ) / 6.0f;
     }
     float3 f0 = float3(0.04f, 0.04f, 0.04f);
