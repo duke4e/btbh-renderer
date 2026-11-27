@@ -92,16 +92,23 @@ int2 representative_pixel(int2 half_pixel, int2 full_resolution, float2 texel, o
     const int2 base = half_pixel * 2;
     int2 selected = min(base, full_resolution - 1);
     depth = depth_at(selected, texel);
+    // RFC 0014: one of the view's own half (the first such when the first pixel lies across the line).
+    bool own = hbao_own_side((float2(selected) + 0.5f) * texel, texel);
     const bool farthest = ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
     for (int index = 1; index < 4; ++index)
     {
         const int2 candidate = min(base + int2(index & 1, index >> 1), full_resolution - 1);
+        if (!hbao_own_side((float2(candidate) + 0.5f) * texel, texel))
+        {
+            continue;
+        }
         const float candidate_depth = depth_at(candidate, texel);
-        if (farthest ? candidate_depth > depth : candidate_depth < depth)
+        if (!own || (farthest ? candidate_depth > depth : candidate_depth < depth))
         {
             selected = candidate;
             depth = candidate_depth;
+            own = true;
         }
     }
     return selected;
@@ -173,6 +180,11 @@ float2 main(FragmentInput input) : SV_Target0
         {
             const float t = pow((float(i) + offset) / float(SSAO_STEPS), SSAO_SPREAD);
             const int2 sample_pixel = clamp(int2(centre + direction * (screen_radius * t)), int2(0, 0), full_resolution - 1);
+            // (RFC 0014: nor does one on the other view's half.)
+            if (!hbao_own_side((float2(sample_pixel) + 0.5f) * texel, texel))
+            {
+                continue;
+            }
             const float sample_depth = depth_at(sample_pixel, texel);
             if (sample_depth >= 0.99999f)
             {
@@ -211,6 +223,10 @@ float2 main(FragmentInput input) : SV_Target0
         const float angle = turn + float(i) * 2.3999632f;
         const float2 at = centre + float2(cos(angle), sin(angle)) * (screen_radius * t);
         const int2 sample_pixel = clamp(int2(at), int2(0, 0), full_resolution - 1);
+        if (!hbao_own_side((float2(sample_pixel) + 0.5f) * texel, texel))
+        {
+            continue;
+        }
         const float sample_depth = depth_at(sample_pixel, texel);
         if (sample_depth >= 0.99999f)
         {

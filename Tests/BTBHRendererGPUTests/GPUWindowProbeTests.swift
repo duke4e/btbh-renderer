@@ -1064,7 +1064,8 @@ final class GPUWindowProbeTests: XCTestCase {
             "    float ssr_options[2];\n    float view_projection[16];\n    float ssr_controls[4];\n"
         ))
         XCTAssertTrue(nativeScene.contains("ambient_occlusion_active || ssr_active;"))
-        XCTAssertTrue(nativeScene.contains("ssao_ok = !ambient_occlusion_active || btbh_gpu_scene_render_fullscreen("))
+        // (Since 0.16.0, RFC 0014: a frame of scene views draws it clipped to each view's half.)
+        XCTAssertTrue(nativeScene.contains("ssao_ok = !ambient_occlusion_active || (views_clipped"))
         XCTAssertTrue(nativeScene.contains("if (ssao_ok && ambient_occlusion_active) {"))
         XCTAssertTrue(nativeScene.contains("post_uniforms.ssr_controls[0] = post->ssr_intensity;"))
         XCTAssertTrue(modelShader.contains("static const float btbh_rc_directness_scale = 0.45f;"))
@@ -3515,7 +3516,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("const float3 lamp_lighting = evaluate_lamps("))
         // With the cascades on, the lamps add to their light (the emission target) instead of losing to it.
         XCTAssertTrue(shader.contains("emission + lamp_lighting,"))
-        XCTAssertTrue(scene.contains("fragment_uniforms.lamp_controls[0] = (float)lamp_count;"))
+        XCTAssertTrue(scene.contains("fragment_uniforms->lamp_controls[0] = (float)lamp_count;"))
         XCTAssertTrue(shader.contains(
             "const float3 detail_gradient = apply_surface_detail(input, albedo_sample, emission)\n"
         ))
@@ -3524,7 +3525,7 @@ final class GPUWindowProbeTests: XCTestCase {
         XCTAssertTrue(shader.contains("const float roughness = apply_surface_wetness("))
         XCTAssertTrue(shader.contains("(pattern != 1u && pattern != 3u && pattern != 4u && pattern != 7u)"))
         XCTAssertTrue(shader.contains("1.0f + 2.5f * saturate(surface_wetness.x)"))
-        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[0] ="))
+        XCTAssertTrue(scene.contains("fragment_uniforms->surface_wetness[0] ="))
         // The clouds sit right after the wetness and shade the sun in both shadow variants.
         XCTAssertTrue(shader.contains("    float4 cloud_controls;\n    float4 cloud_shape;\n"))
         XCTAssertTrue(scene.contains("    float cloud_controls[4];\n    float cloud_shape[4];\n"))
@@ -3534,13 +3535,13 @@ final class GPUWindowProbeTests: XCTestCase {
             "#if BTBH_DIRECTIONAL_SHADOWS\n        sun_visibility * btbh_cloud_light(input.world_position)\n" +
                 "#else\n        btbh_cloud_light(input.world_position)\n#endif"
         ))
-        XCTAssertTrue(scene.contains("fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;"))
+        XCTAssertTrue(scene.contains("fragment_uniforms->cloud_controls[3] = lighting->cloud_strength;"))
         // The rain rides the wetness's third component and bends the ground's normal with the detail's.
-        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[2] ="))
+        XCTAssertTrue(scene.contains("fragment_uniforms->surface_wetness[2] ="))
         XCTAssertTrue(shader.contains("+ btbh_rain_ripples(input);"))
         // The lit windows' energy rides the wetness's second component; glass panes add their light to the
         // emission and reflect like coated glass.
-        XCTAssertTrue(scene.contains("fragment_uniforms.surface_wetness[1] ="))
+        XCTAssertTrue(scene.contains("fragment_uniforms->surface_wetness[1] ="))
         XCTAssertTrue(shader.contains("emission += btbh_window_light(cell) * inside;"))
         XCTAssertTrue(shader.contains("? btbh_glass_reflectance : 0.0f"))
         func environment(wetness: Float) -> EnvironmentDescriptor {

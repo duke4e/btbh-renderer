@@ -61,6 +61,9 @@ typedef struct BTBHGPUSceneShaderCheck {
     /* RFC 0013 phase 2: a lit particle or scene fragment shader reads the particle transmittance map
        (btbh_gpu_scene_check_particle_shadow_shaders). */
     bool has_particle_transmittance;
+    /* RFC 0014: a vertex shader writes a clip distance (its SPIR-V declares the ClipDistance capability;
+       btbh_gpu_scene_check_view_shaders). */
+    bool has_clip_distance;
 } BTBHGPUSceneShaderCheck;
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -284,6 +287,20 @@ typedef struct BTBHGPUSceneLiftPipelines {
 } BTBHGPUSceneLiftPipelines;
 
 typedef struct BTBHGPUSceneRunVerify BTBHGPUSceneRunVerify;
+
+/* RFC 0014 (scene views, since 0.16.0): the screen-space passes that read a view's camera, drawn clipped to each view's
+   half (production_post_view.vert with the pass's own fragment shader). */
+typedef enum BTBHGPUSceneViewPipeline {
+    BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO = 0,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO_DENOISE = 1,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO_RESOLVE = 2,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO = 3,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO_DENOISE = 4,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO_RESOLVE = 5,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_DISTANCE = 6,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_COMPOSITE = 7,
+    BTBH_GPU_SCENE_VIEW_PIPELINE_COUNT = 8
+} BTBHGPUSceneViewPipeline;
 
 struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *model_pipelines[
@@ -568,6 +585,24 @@ struct BTBHGPUSceneRuntime {
        prewarm) with a rect into a target of that format. */
     SDL_GPUTexture *target_clear_texture;
     SDL_GPUTextureFormat target_clear_format;
+    /* RFC 0014 (scene views, since 0.16.0), made by the first frame of views that needs them (or
+       btbh_gpu_window_scene_prewarm_views): the clipped screen-space passes' pipelines; the second view's own sun map
+       ([0], at the sun map's size) and spot map ([1]), with their retained matrices and state as retained_shadow_*
+       keeps view 0's, and its own particle transmittance map; the second view's opaque order, and the scene's and each
+       view's visibility combined for the sorts (2 x view_order_capacity bytes). */
+    SDL_GPUGraphicsPipeline *view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_COUNT];
+    SDL_GPUTexture *view_shadow_textures[2];
+    uint32_t view_shadow_width;
+    uint32_t view_shadow_height;
+    float view_retained_shadow_view_projection[2][16];
+    uint8_t view_retained_shadow_ready[2];
+    uint8_t view_retained_shadow_active[2];
+    SDL_GPUTexture *view_particle_transmittance_texture;
+    uint32_t view_particle_transmittance_width;
+    uint32_t view_particle_transmittance_height;
+    uint32_t *view_opaque_order;
+    uint8_t *view_visibility;
+    uint32_t view_order_capacity;
 };
 
 /* A target view's rect (BTBHGPUSceneTargetView, since 0.15.0): the part of the target a scene rendered into it shades,
@@ -905,7 +940,8 @@ static void btbh_gpu_cost_emit_models(void) {
 
 /* The per-pass split (see `BTBHGPUCostGroup`): the device is set while the current frame is split. */
 static const char *const btbh_gpu_cost_group_names[BTBH_GPU_COST_GROUP_COUNT] = {
-    "upload", "shadow", "main", "rc_src", "rc_field", "rc_screen", "ssao", "transparent", "post", "ui"
+    "upload", "shadow", "main", "rc_src", "rc_field", "rc_screen", "ssao", "transparent", "post", "ui",
+    "view1_main", "view1_transparent"
 };
 static SDL_GPUDevice *btbh_gpu_cost_split_device;
 static uint64_t btbh_gpu_cost_frame_serial;
@@ -1087,6 +1123,10 @@ void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
         int length = snprintf(groups, sizeof(groups), "split=1");
         for (uint32_t group = 0u; group < BTBH_GPU_COST_GROUP_COUNT; ++group) {
             gpu_milliseconds += btbh_gpu_cost_group_milliseconds[group];
+            if (group >= BTBH_GPU_COST_GROUP_VIEW1_MAIN && btbh_gpu_cost_group_milliseconds[group] == 0.0) {
+                /* (RFC 0014's second view's groups: only on frames that drew one.) */
+                continue;
+            }
             if (length > 0 && (size_t)length < sizeof(groups)) {
                 length += snprintf(
                     groups + length,
@@ -1158,6 +1198,9 @@ void btbh_gpu_window_scene_submission_finished(
         0,
         sizeof(runtime->retained_shadow_active)
     );
+    /* (RFC 0014: and a second view's own maps.) */
+    (void)memset(runtime->view_retained_shadow_ready, 0, sizeof(runtime->view_retained_shadow_ready));
+    (void)memset(runtime->view_retained_shadow_active, 0, sizeof(runtime->view_retained_shadow_active));
 }
 
 static void btbh_gpu_scene_cancel_submission(
@@ -1856,8 +1899,9 @@ static bool btbh_gpu_scene_sibling_path(
     return true;
 }
 
-/* blend: how the pass's output is blended into its target (NULL: it replaces it). */
-static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
+/* blend: how the pass's output is blended into its target (NULL: it replaces it). vertex_uniform_count: the vertex
+   shader's uniform blocks (0 for production_post.vert; 1 for RFC 0014's production_post_view.vert). */
+static bool btbh_gpu_scene_create_fullscreen_pipeline_staged(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
@@ -1865,6 +1909,7 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
     SDL_GPUTextureFormat target_format,
     uint32_t fragment_sampler_count,
     const SDL_GPUColorTargetBlendState *blend,
+    uint32_t vertex_uniform_count,
     SDL_GPUGraphicsPipeline **pipeline,
     BTBHGPUSceneReport *report
 ) {
@@ -1883,7 +1928,7 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
         SDL_GPU_SHADERSTAGE_VERTEX,
         0u,
         0u,
-        0u,
+        vertex_uniform_count,
         report
     );
     if (vertex_shader == NULL) {
@@ -1936,6 +1981,31 @@ static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
         return false;
     }
     return true;
+}
+
+static bool btbh_gpu_scene_create_fullscreen_pipeline_blended(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *fragment_shader_path,
+    BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat target_format,
+    uint32_t fragment_sampler_count,
+    const SDL_GPUColorTargetBlendState *blend,
+    SDL_GPUGraphicsPipeline **pipeline,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_create_fullscreen_pipeline_staged(
+        window,
+        vertex_shader_path,
+        fragment_shader_path,
+        project_format,
+        target_format,
+        fragment_sampler_count,
+        blend,
+        0u,
+        pipeline,
+        report
+    );
 }
 
 static bool btbh_gpu_scene_create_fullscreen_pipeline(
@@ -2282,6 +2352,25 @@ static void btbh_gpu_scene_release_hbao_pipelines(
     }
 }
 
+/* The HBAO resolve's blend: target = src.rgb + target * src.a, its alpha kept. */
+static SDL_GPUColorTargetBlendState btbh_gpu_scene_hbao_over_blend(void) {
+    SDL_GPUColorTargetBlendState over;
+    SDL_zero(over);
+    over.enable_blend = true;
+    over.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+    over.color_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+    over.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+    over.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+    over.color_write_mask =
+        SDL_GPU_COLORCOMPONENT_R |
+        SDL_GPU_COLORCOMPONENT_G |
+        SDL_GPU_COLORCOMPONENT_B;
+    over.enable_color_write_mask = true;
+    return over;
+}
+
 /* The horizon-based ambient occlusion's three passes (ssao_enabled 2): the occlusion and its denoise at half
    the resolution, and the resolve laid over the opaque scene (target = src.rgb + target * src.a, its alpha
    kept). */
@@ -2300,20 +2389,7 @@ static bool btbh_gpu_scene_ensure_hbao_pipelines(
     }
     SDL_GPUDevice *device = window->device->gpu;
     btbh_gpu_scene_release_hbao_pipelines(runtime, device);
-    SDL_GPUColorTargetBlendState over;
-    SDL_zero(over);
-    over.enable_blend = true;
-    over.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    over.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-    over.color_blend_op = SDL_GPU_BLENDOP_ADD;
-    over.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
-    over.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
-    over.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
-    over.color_write_mask =
-        SDL_GPU_COLORCOMPONENT_R |
-        SDL_GPU_COLORCOMPONENT_G |
-        SDL_GPU_COLORCOMPONENT_B;
-    over.enable_color_write_mask = true;
+    const SDL_GPUColorTargetBlendState over = btbh_gpu_scene_hbao_over_blend();
     const char *const names[3] = {
         "production_hbao.frag",
         "production_hbao_denoise.frag",
@@ -5196,12 +5272,15 @@ static void btbh_gpu_scene_refuse_batch(
    RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
    UV rect may be; and (0.11.0) one with the light factor; and (phase 2, 0.14.0) one with the particle shadow. Batches
    often share a detail, a table or a lift, so a run of batches pointing at the same one checks it once.
-   directional_shadow_visibility: the _with_visibility calls' array, or NULL. False with the report naming the batch and
-   the fault. */
+   directional_shadow_visibility: the _with_visibility calls' array, or NULL. views (RFC 0014, view_count of them; NULL
+   with 0): a lifted batch's byte in a view's shadow_visibility, which picks the casters of that view's sun map, follows
+   the rule directional_shadow_visibility's does. False with the report naming the batch and the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *directional_shadow_visibility,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
@@ -5339,8 +5418,17 @@ static bool btbh_gpu_scene_validate_world_details(
                 batch,
                 directional_shadow_visibility != NULL ? directional_shadow_visibility[index] : 1u
             );
+            const char *what = "height_lift";
+            for (uint32_t view = 0u; problem == NULL && view < view_count; ++view) {
+                if (views[view].shadow_visibility != NULL) {
+                    problem = btbh_gpu_height_lift_batch_problem(batch, views[view].shadow_visibility[index]);
+                    what = view == 0u
+                        ? "height_lift (view 0's shadow_visibility)"
+                        : "height_lift (view 1's shadow_visibility)";
+                }
+            }
             if (problem != NULL) {
-                btbh_gpu_scene_refuse_batch(report, index, "height_lift", problem);
+                btbh_gpu_scene_refuse_batch(report, index, what, problem);
                 return false;
             }
         }
@@ -7046,6 +7134,35 @@ static bool btbh_gpu_scene_bytes_name(const uint8_t *bytes, size_t byte_count, c
     return false;
 }
 
+/* RFC 0014: whether a SPIR-V module declares the ClipDistance capability (OpCapability, opcode 17, two words, operand
+   32). The capabilities come first, after the five-word header. */
+static bool btbh_gpu_scene_spirv_has_clip_distance(const uint8_t *bytes, size_t byte_count) {
+    const size_t word_count = byte_count / 4u;
+    uint32_t word = 0u;
+    if (word_count < 5u) {
+        return false;
+    }
+    (void)memcpy(&word, bytes, sizeof(word));
+    if (word != 0x07230203u) {
+        return false;
+    }
+    size_t index = 5u;
+    while (index < word_count) {
+        (void)memcpy(&word, bytes + index * 4u, sizeof(word));
+        const uint32_t length = word >> 16u;
+        if ((word & 0xffffu) != 17u || length < 2u || index + 1u >= word_count) {
+            return false;
+        }
+        uint32_t capability = 0u;
+        (void)memcpy(&capability, bytes + (index + 1u) * 4u, sizeof(capability));
+        if (capability == 32u) {
+            return true;
+        }
+        index += length;
+    }
+    return false;
+}
+
 /* What a scene fragment shader file names (btbh_gpu_scene_check_scene_shader): read once per path and kept in
    runtime->scene_shader_checks. NULL when the file can't be read (the shader load then reports it). */
 static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRuntime *runtime, const char *path) {
@@ -7067,6 +7184,7 @@ static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRu
     fresh.has_source_top = btbh_gpu_scene_bytes_name(bytes, byte_count, "source_top_texture");
     fresh.has_instance_uv_rect = btbh_gpu_scene_bytes_name(bytes, byte_count, "instance_uv_rect");
     fresh.has_particle_transmittance = btbh_gpu_scene_bytes_name(bytes, byte_count, "particle_transmittance_texture");
+    fresh.has_clip_distance = btbh_gpu_scene_spirv_has_clip_distance(bytes, byte_count);
     SDL_free(bytes);
     const size_t path_length = strlen(path);
     fresh.path = (char *)malloc(path_length + 1u);
@@ -7501,7 +7619,9 @@ static void btbh_gpu_scene_particle_frame(
    thickness (b), the scene's distance (a fallback never read without it), the emission, the cascades' quadrant atlas
    (a fallback never read when they didn't light this frame), then the variant's shadow maps: the sun's through the
    comparison sampler, the fill's and the spot's, and the omni cube; then (RFC 0013 phase 2) the particle
-   transmittance map, or a fallback never read when the frame draws none. */
+   transmittance map, or a fallback never read when the frame draws none. sun_map, spot_map and transmittance_map: the
+   view's (RFC 0014: view 0's, runtime->directional_shadow_textures[0] and [2] and particle_transmittance_texture, or a
+   second view's own). */
 static void btbh_gpu_scene_bind_lit_particle(
     BTBHGPUSceneRunVerify *verify,
     SDL_GPURenderPass *pass,
@@ -7513,7 +7633,10 @@ static void btbh_gpu_scene_bind_lit_particle(
     bool radiance_cascades_lit,
     bool shadows_active,
     bool omni_shadows_active,
-    bool particle_shadow_active
+    bool particle_shadow_active,
+    SDL_GPUTexture *sun_map,
+    SDL_GPUTexture *spot_map,
+    SDL_GPUTexture *transmittance_map
 ) {
     SDL_GPUTextureSamplerBinding samplers[10];
     SDL_zeroa(samplers);
@@ -7541,11 +7664,11 @@ static void btbh_gpu_scene_bind_lit_particle(
     samplers[4].sampler = cascade_light ? cascades->sampler : runtime->scene_color_sampler;
     uint32_t count = 5u;
     if (shadows_active) {
-        samplers[5].texture = runtime->directional_shadow_textures[0];
+        samplers[5].texture = sun_map;
         samplers[5].sampler = runtime->directional_shadow_compare_sampler;
         samplers[6].texture = runtime->directional_shadow_textures[1];
         samplers[6].sampler = runtime->directional_shadow_sampler;
-        samplers[7].texture = runtime->directional_shadow_textures[2];
+        samplers[7].texture = spot_map;
         samplers[7].sampler = runtime->directional_shadow_sampler;
         count = 8u;
         if (omni_shadows_active) {
@@ -7554,7 +7677,7 @@ static void btbh_gpu_scene_bind_lit_particle(
             count = 9u;
         }
         samplers[count].texture = particle_shadow_active
-            ? runtime->particle_transmittance_texture
+            ? transmittance_map
             : runtime->fallback_texture->texture;
         samplers[count].sampler = particle_shadow_active
             ? runtime->directional_shadow_sampler
@@ -7747,10 +7870,12 @@ static bool btbh_gpu_scene_ensure_particle_shadow(
 /* RFC 0013 phase 2: the particle transmittance map, drawn after the shadow maps with the sun map's matrix (the one the
    receivers read). Cleared to (0, 0, 0, 1); each batch with BTBH_GPU_SCENE_BATCH_PARTICLE_SHADOW (that its
    directional_shadow_visibility byte lets in) draws its instances there, with its albedo, colour, UV transform and
-   rect, as production_particle_transmittance.vert lays them out. False, with SDL's error set, when the pass failed. */
+   rect, as production_particle_transmittance.vert lays them out. False, with SDL's error set, when the pass failed.
+   map: runtime->particle_transmittance_texture, or (RFC 0014) a second view's own. */
 static bool btbh_gpu_scene_render_particle_transmittance(
     SDL_GPUCommandBuffer *command,
     BTBHGPUSceneRuntime *runtime,
+    SDL_GPUTexture *map,
     const float light_view_projection[16],
     SDL_GPUBuffer *transient_instance_buffer,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -7759,7 +7884,7 @@ static bool btbh_gpu_scene_render_particle_transmittance(
 ) {
     SDL_GPUColorTargetInfo target;
     SDL_zero(target);
-    target.texture = runtime->particle_transmittance_texture;
+    target.texture = map;
     target.clear_color.r = 0.0f;
     target.clear_color.g = 0.0f;
     target.clear_color.b = 0.0f;
@@ -7866,6 +7991,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
     const uint32_t *bone_offsets,
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *directional_shadow_visibility,
+    /* RFC 0014: in the spot map, the batches a view's own map takes besides spot_shadow_visible (NULL: every one). */
+    const uint8_t *spot_visibility,
     uint32_t batch_count,
     uint8_t shadow_layer,
     bool cycle_texture,
@@ -7951,7 +8078,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
                directional ones those the visibility bytes and BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW let in. */
             if (batch->transparency_enabled != 0u ||
                 (shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT
-                    ? batch->spot_shadow_visible == 0u
+                    ? batch->spot_shadow_visible == 0u ||
+                        (spot_visibility != NULL && spot_visibility[batch_index] == 0u)
                     : ((directional_shadow_visibility != NULL &&
                         directional_shadow_visibility[batch_index] == 0u) ||
                        (batch->flags & BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW) != 0u))) {
@@ -8679,6 +8807,9 @@ typedef struct BTBHGPUSceneFrameSetup {
        opaque pass writes the reflectivity to the ambient target's alpha and marks unlit surfaces in the emission
        target's (unlit_enabled bit 6), and the SSR reads them. */
     bool ssr_surface_reflectivity;
+    /* RFC 0014: a clipped frame of scene views asked for the radiance cascades, and runs without them
+       (BTBH_GPU_SCENE_RC_FALLBACK_VIEWS). */
+    bool radiance_cascades_held_for_views;
 } BTBHGPUSceneFrameSetup;
 
 /* The horizon-based occlusion's passes (BTBHGPUScenePost.ssao_enabled 2): the HBAO at half resolution, its denoise,
@@ -8781,11 +8912,913 @@ static bool btbh_gpu_scene_encode_hbao(
         );
 }
 
+/* ---- RFC 0014: scene views (btbh_gpu_window_scene_present_views, since 0.16.0) ---- */
+
+/* One view of a frame as the present draws it: its camera with the frame's jitter, the lighting and visibility it
+   reads, its half of the frame as the passes test it, the shadow maps it reads, its opaque order and what it drew. */
+typedef struct BTBHGPUSceneViewFrame {
+    const BTBHGPUSceneView *view;
+    float view_projection[16];
+    float inverse_view_projection[16];
+    float projection_scale_y;
+    float previous_view_projection[16];
+    /* The view's lighting (its spot, lamps and point lights), or the call's. */
+    const BTBHGPUSceneLighting *lighting;
+    /* The view's own visibility (NULL: every batch the call's lets in); for its sort, the two combined. */
+    const uint8_t *visibility;
+    const uint8_t *order_visibility;
+    /* btbh_gpu_scene_view_planes: zero for the whole frame. */
+    float clip_plane[4];
+    float uv_plane[4];
+    /* The maps it reads: view 0's (slot 0) or its own (slot 1), and their matrices as the receivers read them. */
+    uint32_t sun_slot;
+    uint32_t spot_slot;
+    SDL_GPUTexture *sun_map;
+    SDL_GPUTexture *spot_map;
+    SDL_GPUTexture *transmittance_map;
+    const float *sun_matrix;
+    const float *spot_matrix;
+    uint32_t *opaque_order;
+    uint32_t opaque_order_count;
+    /* What it drew (BTBHGPUSceneViewReport). */
+    uint32_t draw_count;
+    uint32_t instance_count;
+    double order_milliseconds;
+    uint64_t encode_nanoseconds;
+} BTBHGPUSceneViewFrame;
+
+void btbh_gpu_scene_view_planes(
+    const float clip[3],
+    uint32_t output_width,
+    uint32_t output_height,
+    uint32_t render_width,
+    uint32_t render_height,
+    float clip_plane[4],
+    float uv_plane[4]
+) {
+    SDL_memset(clip_plane, 0, sizeof(float) * 4u);
+    SDL_memset(uv_plane, 0, sizeof(float) * 4u);
+    if ((clip[0] == 0.0f && clip[1] == 0.0f && clip[2] == 0.0f) ||
+        output_width == 0u || output_height == 0u || render_width == 0u || render_height == 0u) {
+        return;
+    }
+    const double width = (double)output_width;
+    const double height = (double)output_height;
+    /* A quarter of a render pixel: the plane's normal measured in render pixels (output pixels scaled by output / render
+       each way), so a line at any angle and any render scale grows by a quarter of a pixel of the frame the passes draw.
+       Two complementary halves then overlap in a band half a pixel wide: a pixel centre within a quarter pixel of the
+       line is drawn by both views (at most one pixel a row across a vertical line, none for a line on a pixel
+       boundary), and none is drawn by neither, with room for the float error of the two views' clip distances
+       (about 1e-4 pixel at 4K). (RFC 0014 widened by half a pixel: a line on a pixel boundary, as a vertical split
+       at the frame's middle, then gave a band two pixels wide.) */
+    const double normal_x = (double)clip[0] * width / (double)render_width;
+    const double normal_y = (double)clip[1] * height / (double)render_height;
+    const double widened = (double)clip[2] + 0.25 * sqrt(normal_x * normal_x + normal_y * normal_y);
+    /* x = (x_ndc + 1) W / 2 and y = (1 - y_ndc) H / 2 (SDL's NDC: +y up, pixel rows down): times clip w. */
+    clip_plane[0] = (float)((double)clip[0] * width * 0.5);
+    clip_plane[1] = (float)(-(double)clip[1] * height * 0.5);
+    clip_plane[2] = (float)((double)clip[0] * width * 0.5 + (double)clip[1] * height * 0.5 + widened);
+    /* x = u W, y = v H. */
+    uv_plane[1] = (float)((double)clip[0] * width);
+    uv_plane[2] = (float)((double)clip[1] * height);
+    uv_plane[3] = (float)widened;
+}
+
+/* Whether a frame of these views (valid) is drawn clipped: two views, or one whose clip isn't zero. One unclipped view
+   is the present's frame. */
+static bool btbh_gpu_scene_views_clipped(const BTBHGPUSceneView *views, uint32_t view_count) {
+    return view_count > 1u ||
+        (view_count == 1u && (views[0].clip[0] != 0.0f || views[0].clip[1] != 0.0f || views[0].clip[2] != 0.0f));
+}
+
+/* btbh_gpu_window_scene_present_views' (and its prewarm's) refusals of its views (btbh_gpu.h). visibility_count: the
+   batches their visibility bytes cover (0: not read). False, with the report set (BTBH_GPU_INVALID_ARGUMENT, naming the
+   view), when one is refused. */
+static bool btbh_gpu_scene_views_valid(
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    uint32_t visibility_count,
+    BTBHGPUSceneReport *report
+) {
+    char message[sizeof(report->message)];
+    if (views == NULL || view_count == 0u || view_count > BTBH_GPU_SCENE_MAX_VIEWS) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "Invalid GPU scene views: views NULL, or a count of 0 or above %u",
+            (unsigned)BTBH_GPU_SCENE_MAX_VIEWS
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    for (uint32_t index = 0u; index < view_count; ++index) {
+        const BTBHGPUSceneView *view = &views[index];
+        const char *fault = NULL;
+        bool finite = true;
+        for (uint32_t element = 0u; element < 16u; ++element) {
+            finite = finite && isfinite(view->view_projection[element]);
+        }
+        for (uint32_t axis = 0u; axis < 3u; ++axis) {
+            finite = finite && isfinite(view->right[axis]) && isfinite(view->up[axis]) && isfinite(view->position[axis]);
+        }
+        float inverse[16];
+        const float projection_scale_y = sqrtf(
+            view->view_projection[1] * view->view_projection[1] +
+            view->view_projection[5] * view->view_projection[5] +
+            view->view_projection[9] * view->view_projection[9]
+        );
+        if (!finite) {
+            fault = "its view_projection, right, up or position isn't finite";
+        } else if (!btbh_gpu_scene_invert_matrix4(view->view_projection, inverse) ||
+                   !isfinite(projection_scale_y) ||
+                   projection_scale_y <= 0.0f) {
+            fault = "its view-projection matrix is not invertible";
+        } else if (!isfinite(view->clip[0]) || !isfinite(view->clip[1]) || !isfinite(view->clip[2])) {
+            fault = "its clip isn't finite";
+        } else if (view->clip[0] == 0.0f && view->clip[1] == 0.0f && (view_count > 1u || view->clip[2] != 0.0f)) {
+            /* (clip[0] and clip[1] 0 with clip[2] not: no line, the whole frame or none of it.) */
+            fault = view_count > 1u
+                ? "two views need each a clip line (clip[0] or clip[1] not 0)"
+                : "its clip has no line (clip[0] and clip[1] 0) but clip[2] isn't 0: all zero for the whole frame";
+        } else if ((view->flags & ~(uint32_t)BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET) != 0u || view->reserved != 0u) {
+            fault = "an unknown flag, or reserved isn't 0";
+        } else if (view->lighting != NULL && !btbh_gpu_scene_lighting_valid(view->lighting)) {
+            fault = "its lighting is invalid";
+        } else {
+            for (uint32_t batch = 0u; batch < visibility_count && fault == NULL; ++batch) {
+                if ((view->visibility != NULL && view->visibility[batch] > 1u) ||
+                    (view->shadow_visibility != NULL && view->shadow_visibility[batch] > 1u)) {
+                    fault = "a visibility or shadow_visibility byte is above 1";
+                }
+            }
+        }
+        if (fault != NULL) {
+            (void)snprintf(message, sizeof(message), "GPU scene view %u: %s", (unsigned)index, fault);
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The second view's own sun and spot maps for a frame of these views: a view whose matrix differs from view 0's (byte
+   for byte) has its own, when the frame draws that map (the call's sun or spot shadow on; never for an omni spot,
+   whose map is the call's). */
+static void btbh_gpu_scene_view_own_maps(
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    const BTBHGPUSceneLighting *lighting,
+    const uint32_t shadow_enabled[3],
+    bool *own_sun,
+    bool *own_spot
+) {
+    *own_sun = false;
+    *own_spot = false;
+    if (view_count < 2u) {
+        return;
+    }
+    const BTBHGPUSceneLighting *first = views[0].lighting != NULL ? views[0].lighting : lighting;
+    const BTBHGPUSceneLighting *second = views[1].lighting != NULL ? views[1].lighting : lighting;
+    *own_sun =
+        shadow_enabled[0] != 0u &&
+        memcmp(
+            first->directional_shadow_view_projection,
+            second->directional_shadow_view_projection,
+            sizeof(first->directional_shadow_view_projection)
+        ) != 0;
+    *own_spot =
+        shadow_enabled[2] != 0u &&
+        lighting->spot_shadow_is_omni == 0u &&
+        memcmp(
+            first->spot_shadow_view_projection,
+            second->spot_shadow_view_projection,
+            sizeof(first->spot_shadow_view_projection)
+        ) != 0;
+}
+
+/* A clipped frame's vertex shaders must write the clip distance (this release's production_model.vert, its table and
+   lifted siblings, production_animated_model.vert): SPIR-V that doesn't would draw every view over the whole frame. Each
+   one a geometry of the frame draws with is read once (bone_offsets: btbh_gpu_scene_prepare_bones'), and
+   production_post_view.vert beside the post vertex shader must exist (and, in SPIR-V, clip): read once too, in either
+   format (a split frame stats no file). Metal libraries aren't otherwise read. False, with the report set
+   (BTBH_GPU_INVALID_ARGUMENT, the path), when one doesn't. */
+static bool btbh_gpu_scene_check_view_shaders(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const uint32_t *bone_offsets,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *post_vertex_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    BTBHGPUSceneReport *report
+) {
+    char message[sizeof(report->message)];
+    char post_view_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (!btbh_gpu_scene_sibling_path(
+            post_vertex_shader_path,
+            shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+                ? "production_post_view.vert.metallib"
+                : "production_post_view.vert.spv",
+            post_view_path
+        )) {
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Scene views' post vertex shader path is too long");
+        return false;
+    }
+    /* (Kept by path in runtime->scene_shader_checks, as the clip distance's test: only a missing file is looked for
+       again.) */
+    if (btbh_gpu_scene_shader_check(runtime, post_view_path) == NULL) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "Scene views need production_post_view.vert beside the post vertex shader (build the shaders from 0.16.0 "
+            "or later): %s",
+            post_view_path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    if (shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV) {
+        return true;
+    }
+    /* Bit 0 production_model.vert, 1 the table's, 2 the lifted, 3 the lifted table's, 4 the skinned, 5 the post view. */
+    uint32_t wanted = 1u << 5u;
+    uint32_t cursor = 0u;
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        const BTBHGPUSceneGeometryBatch *batch = &batches[index];
+        const uint32_t geometry_count =
+            batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL ? batch->model->primitive_count : 1u;
+        for (uint32_t geometry = 0u; geometry < geometry_count; ++geometry) {
+            if (!btbh_gpu_scene_batch_uses_geometry(batch, geometry)) {
+                continue;
+            }
+            if (bone_offsets[cursor++] != UINT32_MAX) {
+                wanted |= 1u << 4u;
+            } else {
+                wanted |= 1u << ((btbh_gpu_height_lift_active(batch) ? 2u : 0u) +
+                    (btbh_gpu_world_detail_table_active(batch) ? 1u : 0u));
+            }
+        }
+    }
+    static const char *const names[4] = {
+        NULL,
+        "production_model_detail_table.vert.spv",
+        "production_model_lift.vert.spv",
+        "production_model_detail_table_lift.vert.spv",
+    };
+    for (uint32_t which = 0u; which < 6u; ++which) {
+        if ((wanted & (1u << which)) == 0u) {
+            continue;
+        }
+        char path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        const char *given = which == 0u ? vertex_shader_path : (which == 4u ? animated_vertex_shader_path : NULL);
+        if (which == 5u) {
+            (void)memcpy(path, post_view_path, strlen(post_view_path) + 1u);
+        } else if (given != NULL) {
+            const size_t length = strlen(given);
+            if (length + 1u > sizeof(path)) {
+                continue;
+            }
+            (void)memcpy(path, given, length + 1u);
+        } else if (!btbh_gpu_scene_sibling_path(vertex_shader_path, names[which], path)) {
+            continue;
+        }
+        const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, path);
+        if (checked == NULL || checked->has_clip_distance) {
+            continue;
+        }
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "Scene views need vertex shaders that write the clip distance (build the shaders from 0.16.0 or later): %s",
+            path
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
+/* The clipped screen-space passes' pipelines a clipped frame with these settings draws with, made where missing:
+   production_post_view.vert with the SSAO's three (with the SSAO resolve), the HBAO's three, the distance pass's (when
+   a batch needs it: a missing one only leaves distance_ready false, as the present's own) and the HDR composite's.
+   False, with the report set, when one can't be made. */
+static bool btbh_gpu_scene_ensure_view_pipelines(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneFrameSetup *setup,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    bool *distance_ready,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    const char *extension = shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "metallib" : "spv";
+    char vertex_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    char filename[128];
+    (void)snprintf(filename, sizeof(filename), "production_post_view.vert.%s", extension);
+    if (!btbh_gpu_scene_sibling_path(post_vertex_shader_path, filename, vertex_path)) {
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Scene views' post vertex shader path is too long");
+        return false;
+    }
+    const SDL_GPUColorTargetBlendState over = btbh_gpu_scene_hbao_over_blend();
+    const struct {
+        const char *name;
+        SDL_GPUTextureFormat format;
+        uint32_t sampler_count;
+        bool over;
+        bool wanted;
+    } passes[BTBH_GPU_SCENE_VIEW_PIPELINE_COUNT] = {
+        {"production_ssao.frag", SDL_GPU_TEXTUREFORMAT_R8_UNORM, 2u, false, setup->ssao_resolve_active},
+        {"production_ssao_denoise.frag", SDL_GPU_TEXTUREFORMAT_R8_UNORM, 3u, false, setup->ssao_resolve_active},
+        {"production_ssao_resolve.frag", runtime->scene_color_format, 7u, false, setup->ssao_resolve_active},
+        {"production_hbao.frag", SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, 2u, false, setup->hbao_active},
+        {"production_hbao_denoise.frag", SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, 1u, false, setup->hbao_active},
+        {"production_hbao_resolve.frag", runtime->scene_color_format, 6u, true, setup->hbao_active},
+        {"production_scene_distance.frag", SDL_GPU_TEXTUREFORMAT_R32_FLOAT, 1u, false,
+            setup->soft_particles_active || setup->refraction_active || setup->lit_particles_active},
+        {"production_hdr_composite.frag", SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 3u, false,
+            setup->hdr_composite_active},
+    };
+    for (uint32_t index = 0u; index < BTBH_GPU_SCENE_VIEW_PIPELINE_COUNT; ++index) {
+        if (!passes[index].wanted || runtime->view_pipelines[index] != NULL) {
+            continue;
+        }
+        char fragment_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+        (void)snprintf(filename, sizeof(filename), "%s.%s", passes[index].name, extension);
+        BTBHGPUSceneReport pass_report;
+        SDL_zero(pass_report);
+        const bool made =
+            btbh_gpu_scene_sibling_path(post_fragment_shader_path, filename, fragment_path) &&
+            btbh_gpu_scene_create_fullscreen_pipeline_staged(
+                window,
+                vertex_path,
+                fragment_path,
+                shader_format,
+                passes[index].format,
+                passes[index].sampler_count,
+                passes[index].over ? &over : NULL,
+                1u,
+                &runtime->view_pipelines[index],
+                &pass_report
+            );
+        if (made) {
+            continue;
+        }
+        if (index == BTBH_GPU_SCENE_VIEW_PIPELINE_DISTANCE) {
+            /* (As the present's own distance pass: soft particles then draw unfaded.) */
+            continue;
+        }
+        if (pass_report.result != BTBH_GPU_OK) {
+            btbh_gpu_scene_error(report, pass_report.result, pass_report.message);
+        } else {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Scene views' post shader path is too long");
+        }
+        return false;
+    }
+    if (distance_ready != NULL) {
+        *distance_ready = runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_DISTANCE] != NULL;
+    }
+    return true;
+}
+
+/* The second view's own maps, made where missing (own_sun, own_spot), and its particle transmittance map with its own
+   sun map on a frame that draws the map: the sun map at the primary map's size and the transmittance map at its share
+   of it, made anew when that changes (their retained state then starts afresh). The shadow resources exist
+   (btbh_gpu_scene_prepare_frame). False, with the report set, when one can't be made. */
+static bool btbh_gpu_scene_ensure_view_shadow_maps(
+    BTBHGPUWindow *window,
+    bool own_sun,
+    bool own_spot,
+    bool particle_shadow_active,
+    uint8_t particle_shadow,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    if (runtime->view_shadow_textures[0] != NULL &&
+        (runtime->view_shadow_width != runtime->directional_shadow_width ||
+         runtime->view_shadow_height != runtime->directional_shadow_height)) {
+        SDL_ReleaseGPUTexture(device, runtime->view_shadow_textures[0]);
+        runtime->view_shadow_textures[0] = NULL;
+        runtime->view_retained_shadow_ready[0] = 0u;
+    }
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    if (own_sun && runtime->view_shadow_textures[0] == NULL) {
+        info.width = runtime->directional_shadow_width;
+        info.height = runtime->directional_shadow_height;
+        runtime->view_shadow_textures[0] = SDL_CreateGPUTexture(device, &info);
+        if (runtime->view_shadow_textures[0] == NULL) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+        runtime->view_shadow_width = info.width;
+        runtime->view_shadow_height = info.height;
+        runtime->view_retained_shadow_ready[0] = 0u;
+    }
+    if (own_spot && runtime->view_shadow_textures[1] == NULL) {
+        info.width = BTBH_GPU_SPOT_SHADOW_MAP_SIZE;
+        info.height = BTBH_GPU_SPOT_SHADOW_MAP_SIZE;
+        runtime->view_shadow_textures[1] = SDL_CreateGPUTexture(device, &info);
+        if (runtime->view_shadow_textures[1] == NULL) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+        runtime->view_retained_shadow_ready[1] = 0u;
+    }
+    if (!own_sun || !particle_shadow_active) {
+        return true;
+    }
+    const uint32_t width = btbh_gpu_particle_shadow_size(runtime->directional_shadow_width, particle_shadow);
+    const uint32_t height = btbh_gpu_particle_shadow_size(runtime->directional_shadow_height, particle_shadow);
+    if (runtime->view_particle_transmittance_texture != NULL &&
+        (runtime->view_particle_transmittance_width != width ||
+         runtime->view_particle_transmittance_height != height)) {
+        SDL_ReleaseGPUTexture(device, runtime->view_particle_transmittance_texture);
+        runtime->view_particle_transmittance_texture = NULL;
+    }
+    if (runtime->view_particle_transmittance_texture == NULL) {
+        SDL_GPUTextureCreateInfo map_info;
+        SDL_zero(map_info);
+        map_info.type = SDL_GPU_TEXTURETYPE_2D;
+        map_info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        map_info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        map_info.width = width;
+        map_info.height = height;
+        map_info.layer_count_or_depth = 1u;
+        map_info.num_levels = 1u;
+        map_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        runtime->view_particle_transmittance_texture = SDL_CreateGPUTexture(device, &map_info);
+        if (runtime->view_particle_transmittance_texture == NULL) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+        runtime->view_particle_transmittance_width = width;
+        runtime->view_particle_transmittance_height = height;
+    }
+    return true;
+}
+
+/* Room for the second view's opaque order and the views' combined visibility (batch_count each). */
+static bool btbh_gpu_scene_ensure_view_order(BTBHGPUSceneRuntime *runtime, uint32_t batch_count) {
+    if (batch_count <= runtime->view_order_capacity) {
+        return true;
+    }
+    uint32_t *order = (uint32_t *)realloc(runtime->view_opaque_order, sizeof(uint32_t) * batch_count);
+    if (order == NULL) {
+        return false;
+    }
+    runtime->view_opaque_order = order;
+    uint8_t *visibility = (uint8_t *)realloc(runtime->view_visibility, 2u * (size_t)batch_count);
+    if (visibility == NULL) {
+        return false;
+    }
+    runtime->view_visibility = visibility;
+    runtime->view_order_capacity = batch_count;
+    return true;
+}
+
+/* btbh_gpu_scene_render_fullscreen for a clipped frame: one pass into `target` (cleared first, or loaded for a blended
+   pipeline: over), where each view draws its full-screen triangle clipped to its half (production_post_view.vert's block,
+   its clip_plane) with its own fragment block (blocks + view * block_stride, block_size bytes). */
+static bool btbh_gpu_scene_render_fullscreen_views(
+    SDL_GPUCommandBuffer *command,
+    const char *debug_label,
+    SDL_GPUGraphicsPipeline *pipeline,
+    SDL_GPUTexture *target,
+    bool over,
+    const void *blocks,
+    uint32_t block_size,
+    size_t block_stride,
+    SDL_GPUTextureSamplerBinding *samplers,
+    uint32_t sampler_count,
+    const BTBHGPUSceneViewFrame *views,
+    uint32_t view_count
+) {
+    SDL_InsertGPUDebugLabel(command, debug_label);
+    SDL_GPUColorTargetInfo color_target;
+    SDL_zero(color_target);
+    color_target.texture = target;
+    color_target.clear_color.a = 1.0f;
+    color_target.load_op = over ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &color_target, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    if (samplers != NULL && sampler_count > 0u) {
+        SDL_BindGPUFragmentSamplers(pass, 0u, samplers, sampler_count);
+    }
+    for (uint32_t index = 0u; index < view_count; ++index) {
+        SDL_PushGPUVertexUniformData(command, 0u, views[index].clip_plane, (uint32_t)sizeof(views[index].clip_plane));
+        SDL_PushGPUFragmentUniformData(
+            command,
+            0u,
+            (const uint8_t *)blocks + block_stride * index,
+            block_size
+        );
+        SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    }
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+/* btbh_gpu_scene_encode_hbao for a clipped frame: each pass draws every view clipped to its half, with its own
+   matrices and its half's plane (BTBHGPUSceneHBAOUniforms.view yzw), so that no tap crosses the line. */
+static bool btbh_gpu_scene_encode_hbao_views(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneViewFrame *views,
+    uint32_t view_count,
+    uint32_t mode,
+    SDL_GPUTexture *kept_emission,
+    SDL_GPUTexture *target
+) {
+    BTBHGPUSceneHBAOUniforms blocks[BTBH_GPU_SCENE_MAX_VIEWS];
+    SDL_zeroa(blocks);
+    for (uint32_t index = 0u; index < view_count; ++index) {
+        BTBHGPUSceneHBAOUniforms *block = &blocks[index];
+        (void)memcpy(
+            block->inverse_view_projection,
+            views[index].inverse_view_projection,
+            sizeof(block->inverse_view_projection)
+        );
+        block->controls[0] = post->ssao_radius;
+        block->controls[1] = post->ssao_intensity;
+        block->controls[2] = post->ssao_power;
+        block->controls[3] = post->ssao_bias;
+        block->options[0] = mode;
+        block->options[1] = post->ssao_debug_view != 0u ? 1u : 0u;
+        block->view[0] = views[index].projection_scale_y;
+        block->view[1] = views[index].uv_plane[1];
+        block->view[2] = views[index].uv_plane[2];
+        block->view[3] = views[index].uv_plane[3];
+    }
+    SDL_GPUTextureSamplerBinding hbao_samplers[2];
+    SDL_zeroa(hbao_samplers);
+    hbao_samplers[0].texture = runtime->depth_texture;
+    hbao_samplers[1].texture = runtime->normal_texture;
+    SDL_GPUTextureSamplerBinding denoise_sampler;
+    SDL_zero(denoise_sampler);
+    denoise_sampler.texture = runtime->hbao_texture;
+    SDL_GPUTextureSamplerBinding resolve_samplers[6];
+    SDL_zeroa(resolve_samplers);
+    resolve_samplers[0].texture = runtime->depth_texture;
+    resolve_samplers[1].texture = runtime->ambient_texture;
+    resolve_samplers[2].texture = runtime->normal_texture;
+    resolve_samplers[3].texture = runtime->ambient_specular_texture;
+    resolve_samplers[4].texture = runtime->hbao_denoised_texture;
+    resolve_samplers[5].texture = kept_emission;
+    hbao_samplers[0].sampler = runtime->scene_color_sampler;
+    hbao_samplers[1].sampler = runtime->scene_color_sampler;
+    denoise_sampler.sampler = runtime->scene_color_sampler;
+    for (uint32_t index = 0u; index < 6u; ++index) {
+        resolve_samplers[index].sampler = runtime->scene_color_sampler;
+    }
+    return btbh_gpu_scene_render_fullscreen_views(
+            command,
+            "BTBH HBAO Views",
+            runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO],
+            runtime->hbao_texture,
+            false,
+            blocks,
+            (uint32_t)sizeof(blocks[0]),
+            sizeof(blocks[0]),
+            hbao_samplers,
+            2u,
+            views,
+            view_count
+        ) &&
+        btbh_gpu_scene_render_fullscreen_views(
+            command,
+            "BTBH HBAO Denoise Views",
+            runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO_DENOISE],
+            runtime->hbao_denoised_texture,
+            false,
+            blocks,
+            (uint32_t)sizeof(blocks[0]),
+            sizeof(blocks[0]),
+            &denoise_sampler,
+            1u,
+            views,
+            view_count
+        ) &&
+        btbh_gpu_scene_render_fullscreen_views(
+            command,
+            "BTBH HBAO Resolve Views",
+            runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_HBAO_RESOLVE],
+            target,
+            true,
+            blocks,
+            (uint32_t)sizeof(blocks[0]),
+            sizeof(blocks[0]),
+            resolve_samplers,
+            6u,
+            views,
+            view_count
+        );
+}
+
+/* The frame's part of the geometry passes' two uniform blocks for one view (RFC 0011 phase 1c: filled once a pass, each
+   batch writes its own fields over it; RFC 0014: once a view): its camera and its half (surface_controls.yzw), the
+   call's light and shadows' settings, the view's spot light, lamps and point lights (view_lighting), and the shadow
+   matrices it reads (sun_matrix, spot_matrix: its maps' as the receivers read them). */
+static void btbh_gpu_scene_frame_uniforms(
+    const BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUSceneLighting *view_lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneFrameSetup *setup,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const float previous_view_projection[16],
+    const float previous_world_curvature[4],
+    const float temporal_controls[4],
+    float temporal_lod_bias,
+    const float clip_plane[4],
+    const float *sun_matrix,
+    const float *spot_matrix,
+    BTBHGPUSceneUniforms *uniforms,
+    BTBHGPUSceneFragmentUniforms *fragment_uniforms
+) {
+    const uint32_t *shadow_enabled = setup->shadow_enabled;
+    (void)memset(uniforms, 0, sizeof(*uniforms));
+    (void)memcpy(
+        uniforms->view_projection,
+        view_projection,
+        sizeof(uniforms->view_projection)
+    );
+    (void)memcpy(
+        uniforms->camera_right,
+        camera_right,
+        sizeof(float) * 3u
+    );
+    (void)memcpy(
+        uniforms->camera_up,
+        camera_up,
+        sizeof(float) * 3u
+    );
+    (void)memcpy(
+        uniforms->camera_position,
+        camera_position,
+        sizeof(float) * 3u
+    );
+    uniforms->ambient_color_energy[0] = lighting->ambient_red;
+    uniforms->ambient_color_energy[1] = lighting->ambient_green;
+    uniforms->ambient_color_energy[2] = lighting->ambient_blue;
+    uniforms->ambient_color_energy[3] = lighting->ambient_energy;
+    uniforms->directional_direction_energy[0] = lighting->directional_x;
+    uniforms->directional_direction_energy[1] = lighting->directional_y;
+    uniforms->directional_direction_energy[2] = lighting->directional_z;
+    uniforms->directional_direction_energy[3] = lighting->directional_energy;
+    uniforms->directional_color[0] = lighting->directional_red;
+    uniforms->directional_color[1] = lighting->directional_green;
+    uniforms->directional_color[2] = lighting->directional_blue;
+    uniforms->directional_color[3] = 1.0f;
+    uniforms->secondary_directional_direction_energy[0] = lighting->secondary_directional_x;
+    uniforms->secondary_directional_direction_energy[1] = lighting->secondary_directional_y;
+    uniforms->secondary_directional_direction_energy[2] = lighting->secondary_directional_z;
+    uniforms->secondary_directional_direction_energy[3] = lighting->secondary_directional_energy;
+    uniforms->secondary_directional_color[0] = lighting->secondary_directional_red;
+    uniforms->secondary_directional_color[1] = lighting->secondary_directional_green;
+    uniforms->secondary_directional_color[2] = lighting->secondary_directional_blue;
+    uniforms->secondary_directional_color[3] = 1.0f;
+    /* RFC 0014: the view's half (all zero for the whole frame: the vertex shaders then clip nothing). */
+    uniforms->surface_controls[1] = clip_plane[0];
+    uniforms->surface_controls[2] = clip_plane[1];
+    uniforms->surface_controls[3] = clip_plane[2];
+    (void)memcpy(
+        uniforms->previous_view_projection,
+        previous_view_projection,
+        sizeof(uniforms->previous_view_projection)
+    );
+    (void)memcpy(
+        uniforms->world_curvature,
+        post->world_curvature,
+        sizeof(uniforms->world_curvature)
+    );
+    (void)memcpy(
+        uniforms->previous_world_curvature,
+        previous_world_curvature,
+        sizeof(uniforms->previous_world_curvature)
+    );
+    (void)memcpy(
+        uniforms->temporal_controls,
+        temporal_controls,
+        sizeof(uniforms->temporal_controls)
+    );
+    (void)memset(fragment_uniforms, 0, sizeof(*fragment_uniforms));
+    (void)memcpy(
+        fragment_uniforms->camera_position,
+        camera_position,
+        sizeof(float) * 3u
+    );
+    (void)memcpy(
+        fragment_uniforms->ambient_color_energy,
+        uniforms->ambient_color_energy,
+        sizeof(fragment_uniforms->ambient_color_energy)
+    );
+    (void)memcpy(
+        fragment_uniforms->directional_direction_energy,
+        uniforms->directional_direction_energy,
+        sizeof(fragment_uniforms->directional_direction_energy)
+    );
+    (void)memcpy(
+        fragment_uniforms->directional_color,
+        uniforms->directional_color,
+        sizeof(fragment_uniforms->directional_color)
+    );
+    (void)memcpy(
+        fragment_uniforms->secondary_directional_direction_energy,
+        uniforms->secondary_directional_direction_energy,
+        sizeof(fragment_uniforms->secondary_directional_direction_energy)
+    );
+    (void)memcpy(
+        fragment_uniforms->secondary_directional_color,
+        uniforms->secondary_directional_color,
+        sizeof(fragment_uniforms->secondary_directional_color)
+    );
+    fragment_uniforms->spot_position_range[0] = view_lighting->spot_position_x;
+    fragment_uniforms->spot_position_range[1] = view_lighting->spot_position_y;
+    fragment_uniforms->spot_position_range[2] = view_lighting->spot_position_z;
+    fragment_uniforms->spot_position_range[3] = view_lighting->spot_range;
+    fragment_uniforms->spot_direction_energy[0] = view_lighting->spot_direction_x;
+    fragment_uniforms->spot_direction_energy[1] = view_lighting->spot_direction_y;
+    fragment_uniforms->spot_direction_energy[2] = view_lighting->spot_direction_z;
+    fragment_uniforms->spot_direction_energy[3] = view_lighting->spot_energy;
+    fragment_uniforms->spot_color_falloff[0] = view_lighting->spot_red;
+    fragment_uniforms->spot_color_falloff[1] = view_lighting->spot_green;
+    fragment_uniforms->spot_color_falloff[2] = view_lighting->spot_blue;
+    fragment_uniforms->spot_color_falloff[3] = view_lighting->spot_falloff;
+    fragment_uniforms->spot_cutoffs[0] = view_lighting->spot_inner_cutoff;
+    fragment_uniforms->spot_cutoffs[1] = view_lighting->spot_outer_cutoff;
+    fragment_uniforms->spot_cutoffs[2] = view_lighting->spot_occluder_shadow_strength;
+    fragment_uniforms->spot_cutoffs[3] = view_lighting->spot_occluder_shadow_reach;
+    {
+        const uint32_t point_count = SDL_min(
+            view_lighting->point_light_count,
+            (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
+        );
+        fragment_uniforms->point_light_count[0] = (float)point_count;
+        for (uint32_t light = 0u; light < point_count; ++light) {
+            (void)memcpy(
+                fragment_uniforms->point_lights[light * 2u],
+                &view_lighting->point_lights[light][0],
+                4u * sizeof(float)
+            );
+            (void)memcpy(
+                fragment_uniforms->point_lights[light * 2u + 1u],
+                &view_lighting->point_lights[light][4],
+                4u * sizeof(float)
+            );
+        }
+    }
+    for (size_t coefficient = 0u; coefficient < 9u; coefficient += 1u) {
+        for (size_t channel = 0u; channel < 3u; channel += 1u) {
+            fragment_uniforms->irradiance_sh[coefficient][channel] =
+                lighting->irradiance_sh[coefficient * 3u + channel];
+        }
+    }
+    fragment_uniforms->ground_bottom_energy[0] = lighting->ground_bottom_red;
+    fragment_uniforms->ground_bottom_energy[1] = lighting->ground_bottom_green;
+    fragment_uniforms->ground_bottom_energy[2] = lighting->ground_bottom_blue;
+    fragment_uniforms->ground_bottom_energy[3] = lighting->ground_energy;
+    fragment_uniforms->ground_horizon_curve[0] = lighting->ground_horizon_red;
+    fragment_uniforms->ground_horizon_curve[1] = lighting->ground_horizon_green;
+    fragment_uniforms->ground_horizon_curve[2] = lighting->ground_horizon_blue;
+    fragment_uniforms->ground_horizon_curve[3] = lighting->ground_horizon_curve;
+    fragment_uniforms->sky_top_energy[0] = lighting->sky_top_red;
+    fragment_uniforms->sky_top_energy[1] = lighting->sky_top_green;
+    fragment_uniforms->sky_top_energy[2] = lighting->sky_top_blue;
+    fragment_uniforms->sky_top_energy[3] = lighting->sky_energy;
+    fragment_uniforms->sky_horizon_curve[0] = lighting->sky_horizon_red;
+    fragment_uniforms->sky_horizon_curve[1] = lighting->sky_horizon_green;
+    fragment_uniforms->sky_horizon_curve[2] = lighting->sky_horizon_blue;
+    fragment_uniforms->sky_horizon_curve[3] = lighting->sky_horizon_curve;
+    fragment_uniforms->sun_color_energy[0] = lighting->sun_red;
+    fragment_uniforms->sun_color_energy[1] = lighting->sun_green;
+    fragment_uniforms->sun_color_energy[2] = lighting->sun_blue;
+    fragment_uniforms->sun_color_energy[3] = lighting->sun_energy;
+    fragment_uniforms->sun_direction_size[0] = lighting->sun_direction_x;
+    fragment_uniforms->sun_direction_size[1] = lighting->sun_direction_y;
+    fragment_uniforms->sun_direction_size[2] = lighting->sun_direction_z;
+    fragment_uniforms->sun_direction_size[3] = lighting->sun_size_radians;
+    fragment_uniforms->procedural_controls[0] = lighting->sun_curve;
+    fragment_uniforms->procedural_controls[1] = (float)lighting->ibl_enabled;
+    fragment_uniforms->procedural_controls[3] = temporal_lod_bias;
+    fragment_uniforms->surface_wetness[0] =
+        isfinite(lighting->surface_wetness)
+            ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
+            : 0.0f;
+    fragment_uniforms->surface_wetness[1] =
+        isfinite(lighting->window_glow)
+            ? fmaxf(lighting->window_glow, 0.0f)
+            : 0.0f;
+    fragment_uniforms->surface_wetness[2] =
+        isfinite(lighting->rain)
+            ? fminf(fmaxf(lighting->rain, 0.0f), 1.0f)
+            : 0.0f;
+    fragment_uniforms->cloud_controls[0] = lighting->cloud_offset[0];
+    fragment_uniforms->cloud_controls[1] = lighting->cloud_offset[1];
+    fragment_uniforms->cloud_controls[2] = lighting->cloud_frequency;
+    fragment_uniforms->cloud_controls[3] = lighting->cloud_strength;
+    fragment_uniforms->cloud_shape[0] = lighting->cloud_coverage;
+    fragment_uniforms->cloud_shape[1] = lighting->cloud_softness;
+    fragment_uniforms->cloud_shape[2] = lighting->cloud_height;
+    {
+        const uint32_t lamp_count =
+            view_lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS
+                ? view_lighting->lamp_count
+                : BTBH_GPU_SCENE_MAX_LAMPS;
+        fragment_uniforms->lamp_controls[0] = (float)lamp_count;
+        fragment_uniforms->lamp_controls[1] = view_lighting->lamp_core_radius;
+        if (lamp_count > 0u) {
+            (void)memcpy(
+                fragment_uniforms->lamp_position_reach,
+                view_lighting->lamp_position_reach,
+                sizeof(float) * 4u * lamp_count
+            );
+            (void)memcpy(
+                fragment_uniforms->lamp_color_energy,
+                view_lighting->lamp_color_energy,
+                sizeof(float) * 4u * lamp_count
+            );
+        }
+    }
+    /* The dark scene's controls ride in the point lights' header. */
+    fragment_uniforms->point_light_count[1] = lighting->unlit_darkness;
+    fragment_uniforms->point_light_count[2] = lighting->unlit_glow_threshold;
+    fragment_uniforms->point_light_count[3] = SDL_max(lighting->point_light_ceiling, 0.0f);
+    const float *secondary_shadow_matrix =
+        runtime->retained_shadow_ready[1] != 0u
+            ? runtime->retained_shadow_view_projection[1]
+            : lighting->secondary_directional_shadow_view_projection;
+    (void)memcpy(
+        fragment_uniforms->directional_shadow_view_projection,
+        sun_matrix,
+        sizeof(fragment_uniforms->directional_shadow_view_projection)
+    );
+    (void)memcpy(
+        fragment_uniforms->secondary_directional_shadow_view_projection,
+        secondary_shadow_matrix,
+        sizeof(fragment_uniforms->secondary_directional_shadow_view_projection)
+    );
+    (void)memcpy(
+        fragment_uniforms->spot_shadow_view_projection,
+        spot_matrix,
+        sizeof(fragment_uniforms->spot_shadow_view_projection)
+    );
+    fragment_uniforms->directional_shadow_controls[0] = (float)shadow_enabled[0];
+    fragment_uniforms->directional_shadow_controls[1] = lighting->directional_shadow_softness;
+    fragment_uniforms->directional_shadow_controls[2] =
+        lighting->directional_shadow_filter == BTBH_GPU_SCENE_SHADOW_FILTER_SOFT ? 1.0f : 0.0f;
+    /* RFC 0013 phase 2: the surfaces the sun shadows read the particle transmittance map (particle_shadow 2). */
+    fragment_uniforms->directional_shadow_controls[3] =
+        setup->particle_shadow_active &&
+                (setup->particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) ==
+                    BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND
+            ? 1.0f
+            : 0.0f;
+    fragment_uniforms->secondary_directional_shadow_controls[0] = (float)shadow_enabled[1];
+    fragment_uniforms->secondary_directional_shadow_controls[1] = lighting->secondary_directional_shadow_softness;
+    /* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0), as a whole number. */
+    fragment_uniforms->secondary_directional_shadow_controls[2] = (float)view_lighting->spot_occluder_flags;
+    fragment_uniforms->spot_shadow_controls[0] = (float)shadow_enabled[2];
+    fragment_uniforms->spot_shadow_controls[1] = view_lighting->spot_shadow_softness;
+    fragment_uniforms->spot_shadow_controls[2] = (float)runtime->retained_spot_shadow_is_omni;
+    fragment_uniforms->spot_shadow_controls[3] = view_lighting->spot_shadow_near;
+    if (runtime->retained_shadow_ready[2] != 0u &&
+        runtime->retained_spot_shadow_is_omni != 0u) {
+        (void)memcpy(
+            fragment_uniforms->omni_shadow_position_range,
+            runtime->retained_omni_shadow_position_range,
+            sizeof(fragment_uniforms->omni_shadow_position_range)
+        );
+    } else {
+        fragment_uniforms->omni_shadow_position_range[0] = lighting->spot_position_x;
+        fragment_uniforms->omni_shadow_position_range[1] = lighting->spot_position_y;
+        fragment_uniforms->omni_shadow_position_range[2] = lighting->spot_position_z;
+        fragment_uniforms->omni_shadow_position_range[3] = lighting->spot_range;
+    }
+}
+
 /* The first part of a scene frame, shared by the present and btbh_gpu_window_scene_prewarm so that the two make
    the same things: the window's scene runtime and BRDF lookup, the radiance cascades' and FSR 3's pipelines and
    resources, the shadow maps and their pipelines, SMAA's or FXAA's, and what the frame turns on (`setup`). It
    draws nothing and leaves a frame's state alone (FSR 3's jitter and history, the retained shadow maps).
-   output_width: 0 for the window's frame, else a render target's width (never temporal). False, with the report
+   output_width: 0 for the window's frame, else a render target's width (never temporal). views_clipped (RFC 0014): a
+   frame of two scene views, or one clipped, which runs neither the radiance cascades nor FSR 3. False, with the report
    set, when it failed (a failed shadow setup releases the window's scene). */
 static bool btbh_gpu_scene_prepare_frame(
     BTBHGPUWindow *window,
@@ -8801,6 +9834,7 @@ static bool btbh_gpu_scene_prepare_frame(
     uint32_t render_width,
     uint32_t render_height,
     uint32_t output_width,
+    bool views_clipped,
     const BTBHGPUSceneLighting *lighting,
     const BTBHGPUScenePost *post,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -8825,7 +9859,13 @@ static bool btbh_gpu_scene_prepare_frame(
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
     char radiance_cascades_message[256];
     radiance_cascades_message[0] = '\0';
+    /* RFC 0014: a clipped frame of views runs no cascades. Their state and resources stay as they were; their history
+       starts afresh on the next frame that runs them (dropped by the present once such a frame is drawn: not here, which
+       a prewarm and a refused present pass through too). */
+    const bool radiance_cascades_held =
+        views_clipped && post->radiance_cascades.tier != BTBH_GPU_SCENE_RC_OFF;
     const bool radiance_cascades_ready =
+        !radiance_cascades_held &&
         btbh_gpu_radiance_cascades_runtime_prepare(
             window->device->gpu,
             &runtime->radiance_cascades,
@@ -8840,6 +9880,7 @@ static bool btbh_gpu_scene_prepare_frame(
             sizeof(radiance_cascades_message)
         );
     if (!radiance_cascades_ready &&
+        !radiance_cascades_held &&
         !runtime->radiance_cascades.logged_failure) {
         SDL_LogWarn(
             SDL_LOG_CATEGORY_RENDER,
@@ -8857,6 +9898,7 @@ static bool btbh_gpu_scene_prepare_frame(
         ) != BTBH_GPU_SCENE_RC_OFF;
     const bool radiance_cascades_fallback_debug =
         !radiance_cascades_ready &&
+        !radiance_cascades_held &&
         post->radiance_cascades.debug_view ==
             BTBH_GPU_SCENE_RC_DEBUG_FALLBACK_REASON &&
         runtime->radiance_cascades.compose_pipeline != NULL &&
@@ -8876,6 +9918,7 @@ static bool btbh_gpu_scene_prepare_frame(
         post->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3 &&
         !radiance_cascades_debug_output &&
         output_width == 0u &&
+        !views_clipped &&
         SDL_GetWindowSizeInPixels(
             window->window,
             &temporal_window_width,
@@ -9063,6 +10106,7 @@ static bool btbh_gpu_scene_prepare_frame(
         ssr_active &&
         !radiance_cascades_active &&
         (post->flags & BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY) != 0u;
+    setup->radiance_cascades_held_for_views = radiance_cascades_held;
     return true;
 }
 
@@ -9359,6 +10403,26 @@ static bool btbh_gpu_scene_ensure_frame_targets(
     return targets_ready;
 }
 
+/* A present's camera arguments as its one view (RFC 0014: the present draws views); false, the view zeroed, when one of
+   them is NULL (the present then refuses the call, as before). */
+static bool btbh_gpu_scene_camera_view(
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    BTBHGPUSceneView *view
+) {
+    SDL_zerop(view);
+    if (view_projection == NULL || camera_right == NULL || camera_up == NULL || camera_position == NULL) {
+        return false;
+    }
+    (void)memcpy(view->view_projection, view_projection, sizeof(view->view_projection));
+    (void)memcpy(view->right, camera_right, sizeof(view->right));
+    (void)memcpy(view->up, camera_up, sizeof(view->up));
+    (void)memcpy(view->position, camera_position, sizeof(view->position));
+    return true;
+}
+
 static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -9375,10 +10439,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     BTBHGPUShaderFormat shader_format,
     uint32_t render_width,
     uint32_t render_height,
-    const float requested_view_projection[16],
-    const float camera_right[3],
-    const float camera_up[3],
-    const float camera_position[3],
+    /* The cameras (RFC 0014, since 0.16.0): one view for the present and a render into a target, built from its camera
+       arguments (NULL when one of them was NULL, which is refused as before); up to BTBH_GPU_SCENE_MAX_VIEWS for
+       btbh_gpu_window_scene_present_views (views_call: its views are refused as that call refuses them, and
+       view_reports, when not NULL, takes view_count entries). */
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    bool views_call,
+    BTBHGPUSceneViewReport *view_reports,
     const BTBHGPUSceneLighting *lighting,
     const BTBHGPUScenePost *post,
     const float *instances,
@@ -9432,6 +10500,14 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    if (views_call) {
+        if (view_reports != NULL && view_count >= 1u && view_count <= BTBH_GPU_SCENE_MAX_VIEWS) {
+            (void)memset(view_reports, 0, sizeof(*view_reports) * view_count);
+        }
+        if (!btbh_gpu_scene_views_valid(views, view_count, batches != NULL ? batch_count : 0u, report)) {
+            return report->result;
+        }
+    }
     if (window == NULL ||
         window->window == NULL ||
         window->device == NULL ||
@@ -9450,13 +10526,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         post_fragment_shader_path == NULL ||
         render_width == 0u ||
         render_height == 0u ||
-        requested_view_projection == NULL ||
-        camera_right == NULL ||
-        camera_up == NULL ||
-        camera_position == NULL ||
-        !isfinite(camera_position[0]) ||
-        !isfinite(camera_position[1]) ||
-        !isfinite(camera_position[2]) ||
+        views == NULL ||
+        view_count == 0u ||
+        !isfinite(views[0].position[0]) ||
+        !isfinite(views[0].position[1]) ||
+        !isfinite(views[0].position[2]) ||
         !btbh_gpu_scene_lighting_valid(lighting) ||
         !btbh_gpu_scene_post_valid(post) ||
         (instances == NULL && transient_instance_count > 0u) ||
@@ -9486,10 +10560,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, directional_shadow_visibility, batch_count,
-            report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, directional_shadow_visibility, views, view_count,
+            batch_count, report)) {
         return report->result;
     }
+    /* View 0's camera (the present's own); RFC 0014: a clipped frame (two views, or one clipped) draws each view clipped
+       to its half, with neither the radiance cascades nor FSR 3. */
+    const float *requested_view_projection = views[0].view_projection;
+    const float *camera_right = views[0].right;
+    const float *camera_up = views[0].up;
+    const bool views_clipped = btbh_gpu_scene_views_clipped(views, view_count);
     /* The scene renders with this view-projection: the requested one, plus a sub-pixel jitter
        while the temporal upscaler runs. */
     float view_projection[16];
@@ -9518,7 +10598,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
     window->radiance_cascades_telemetry_enabled =
-        post->radiance_cascades.tier == BTBH_GPU_SCENE_RC_AUTO;
+        post->radiance_cascades.tier == BTBH_GPU_SCENE_RC_AUTO && !views_clipped;
     BTBHGPUSceneFrameSetup setup;
     /* (The lazy creation log: what the present makes in the steps it shares with the prewarm, a prewarm makes.) */
     btbh_gpu_lazy_creation_prewarm_step(true);
@@ -9536,6 +10616,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             render_width,
             render_height,
             output_width,
+            views_clipped,
             lighting,
             post,
             batches,
@@ -9696,6 +10777,33 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             return report->result;
         }
     }
+    /* RFC 0014: each view as the passes draw it. View 0 is the camera above; another view's matrices were checked with
+       the views (a clipped frame is never temporal: no jitter, no previous matrix of its own). */
+    BTBHGPUSceneViewFrame view_frames[BTBH_GPU_SCENE_MAX_VIEWS];
+    SDL_zeroa(view_frames);
+    for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+        BTBHGPUSceneViewFrame *frame = &view_frames[view_index];
+        frame->view = &views[view_index];
+        frame->lighting = views[view_index].lighting != NULL ? views[view_index].lighting : lighting;
+        frame->visibility = views[view_index].visibility;
+        frame->order_visibility = scene_visibility;
+        if (view_index == 0u) {
+            (void)memcpy(frame->view_projection, view_projection, sizeof(frame->view_projection));
+            (void)memcpy(frame->inverse_view_projection, inverse_view_projection, sizeof(frame->inverse_view_projection));
+            frame->projection_scale_y = projection_scale_y;
+            (void)memcpy(
+                frame->previous_view_projection,
+                previous_view_projection,
+                sizeof(frame->previous_view_projection)
+            );
+        } else {
+            const float *matrix = views[view_index].view_projection;
+            (void)memcpy(frame->view_projection, matrix, sizeof(frame->view_projection));
+            (void)btbh_gpu_scene_invert_matrix4(frame->view_projection, frame->inverse_view_projection);
+            frame->projection_scale_y = sqrtf(matrix[1] * matrix[1] + matrix[5] * matrix[5] + matrix[9] * matrix[9]);
+            (void)memcpy(frame->previous_view_projection, matrix, sizeof(frame->previous_view_projection));
+        }
+    }
 
     uint32_t *bone_offsets = NULL;
     uint32_t prepared_geometry_count = 0u;
@@ -9781,7 +10889,19 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             setup.omni_shadows_active,
             setup.radiance_cascades_active,
             report
-        )) {
+        ) ||
+        (views_clipped &&
+         !btbh_gpu_scene_check_view_shaders(
+            runtime,
+            batches,
+            batch_count,
+            bone_offsets,
+            vertex_shader_path,
+            animated_vertex_shader_path,
+            post_vertex_shader_path,
+            shader_format,
+            report
+        ))) {
         free(bone_matrices);
         free(bone_offsets);
         return report->result;
@@ -9798,8 +10918,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
        stay laid out as the batches were given, so it also notes where each batch's geometries start among them. */
     const bool opaque_sorted =
         post->opaque_sort != BTBH_GPU_SCENE_OPAQUE_SORT_SUBMITTED;
+    /* RFC 0014: each view sorts its own batches (the call's visibility and its own), by its own camera. */
+    const bool view_orders = opaque_sorted && (view_count > 1u || views[0].visibility != NULL);
     if (opaque_sorted &&
-        !btbh_gpu_scene_ensure_opaque_order(runtime, batch_count)) {
+        (!btbh_gpu_scene_ensure_opaque_order(runtime, batch_count) ||
+         (view_orders && !btbh_gpu_scene_ensure_view_order(runtime, batch_count)))) {
         free(bone_matrices);
         free(bone_offsets);
         btbh_gpu_scene_error(
@@ -9809,18 +10932,33 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    const uint32_t opaque_order_count = opaque_sorted
-        ? btbh_gpu_scene_opaque_order(
+    for (uint32_t view_index = 0u; opaque_sorted && view_index < view_count; ++view_index) {
+        BTBHGPUSceneViewFrame *frame = &view_frames[view_index];
+        const uint64_t order_started_ticks = SDL_GetTicksNS();
+        const uint8_t *view_visibility = views[view_index].visibility;
+        if (view_visibility != NULL && scene_visibility == NULL) {
+            frame->order_visibility = view_visibility;
+        } else if (view_visibility != NULL) {
+            uint8_t *combined = runtime->view_visibility + (size_t)view_index * runtime->view_order_capacity;
+            for (uint32_t batch_index = 0u; batch_index < batch_count; ++batch_index) {
+                combined[batch_index] =
+                    scene_visibility[batch_index] != 0u && view_visibility[batch_index] != 0u ? 1u : 0u;
+            }
+            frame->order_visibility = combined;
+        }
+        frame->opaque_order = view_index == 0u ? runtime->opaque_order : runtime->view_opaque_order;
+        frame->opaque_order_count = btbh_gpu_scene_opaque_order(
             batches,
-            scene_visibility,
+            frame->order_visibility,
             batch_count,
             instances,
-            requested_view_projection,
+            views[view_index].view_projection,
             post->opaque_sort == BTBH_GPU_SCENE_OPAQUE_SORT_FRONT_TO_BACK_LESS_EQUAL,
-            runtime->opaque_order,
+            frame->opaque_order,
             runtime->opaque_order_keys
-        )
-        : 0u;
+        );
+        frame->order_milliseconds = (double)(SDL_GetTicksNS() - order_started_ticks) / 1000000.0;
+    }
     btbh_gpu_lazy_creation_prewarm_step(true);
     const bool pipelines_ready = btbh_gpu_scene_ensure_model_pipelines(
             window,
@@ -9842,6 +10980,39 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         free(bone_matrices);
         free(bone_offsets);
         return report->result;
+    }
+    /* RFC 0014: which maps a second view has of its own, and for a clipped frame its screen-space passes' pipelines and
+       those maps (made where missing). */
+    bool own_sun = false;
+    bool own_spot = false;
+    btbh_gpu_scene_view_own_maps(views, view_count, lighting, setup.shadow_enabled, &own_sun, &own_spot);
+    bool view_distance_ready = false;
+    if (views_clipped) {
+        btbh_gpu_lazy_creation_prewarm_step(true);
+        const bool views_ready =
+            btbh_gpu_scene_ensure_view_pipelines(
+                window,
+                &setup,
+                post_vertex_shader_path,
+                post_fragment_shader_path,
+                shader_format,
+                &view_distance_ready,
+                report
+            ) &&
+            btbh_gpu_scene_ensure_view_shadow_maps(
+                window,
+                own_sun,
+                own_spot,
+                setup.particle_shadow_active,
+                setup.particle_shadow,
+                report
+            );
+        btbh_gpu_lazy_creation_prewarm_step(false);
+        if (!views_ready) {
+            free(bone_matrices);
+            free(bone_offsets);
+            return report->result;
+        }
     }
     const uint64_t pipelines_finished_ticks = detailed_prepare_telemetry
         ? SDL_GetTicksNS()
@@ -10069,28 +11240,72 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         return report->result;
     }
 
-    const float *shadow_matrices[3] = {
-        lighting->directional_shadow_view_projection,
-        lighting->secondary_directional_shadow_view_projection,
-        lighting->spot_shadow_view_projection
+    /* The maps by slot (RFC 0014): slot 0 is view 0's (the present's, read by every view that shares it), slot 1 a second
+       view's own. View 0's sun and spot matrices are its lighting's (the call's without one); the secondary and omni
+       maps are always the call's. A map's casters: the view's shadow_visibility when the map is its own (NULL: the
+       call's directional_shadow_visibility for the sun, every spot caster for the spot), the call's when it is shared;
+       its billboard casters face its view's camera. */
+    const float *sun_matrices[2] = {
+        view_frames[0].lighting->directional_shadow_view_projection,
+        view_frames[view_count - 1u].lighting->directional_shadow_view_projection
+    };
+    const float *spot_matrices[2] = {
+        view_frames[0].lighting->spot_shadow_view_projection,
+        view_frames[view_count - 1u].lighting->spot_shadow_view_projection
+    };
+    const uint8_t *sun_casters[2] = {
+        (view_count > 1u && !own_sun) || views[0].shadow_visibility == NULL
+            ? directional_shadow_visibility
+            : views[0].shadow_visibility,
+        views[view_count - 1u].shadow_visibility != NULL
+            ? views[view_count - 1u].shadow_visibility
+            : directional_shadow_visibility
+    };
+    const uint8_t *spot_casters[2] = {
+        (view_count > 1u && !own_spot) || lighting->spot_shadow_is_omni != 0u
+            ? NULL
+            : views[0].shadow_visibility,
+        views[view_count - 1u].shadow_visibility
     };
     const uint32_t shadow_update_periods[3] = {
         btbh_gpu_scene_shadow_update_period(window, 0u),
         btbh_gpu_scene_shadow_update_period(window, 1u),
         btbh_gpu_scene_shadow_update_period(window, 2u)
     };
-    static const char *shadow_debug_labels[3] = {
+    /* The maps in the order the update periods count them: a second view's own sun map right after view 0's, its own
+       spot map after view 0's, so that two maps of a kind take turns. Without a second view's maps, as before 0.16.0:
+       primary, secondary, spot. */
+    static const uint32_t shadow_map_kinds[5] = { 0u, 0u, 1u, 2u, 2u };
+    static const uint32_t shadow_map_slots[5] = { 0u, 1u, 0u, 0u, 1u };
+    static const char *shadow_debug_labels[5] = {
         "BTBH Shadow Primary",
+        "BTBH Shadow Primary View 1",
         "BTBH Shadow Secondary",
-        "BTBH Shadow Local"
+        "BTBH Shadow Local",
+        "BTBH Shadow Local View 1"
     };
     uint32_t active_shadow_ordinal = 0u;
     const uint64_t shadow_started_ticks = SDL_GetTicksNS();
-    for (uint32_t shadow_index = 0u;
-         shadow_index < 3u;
-         ++shadow_index) {
-        if (shadow_enabled[shadow_index] == 0u) {
-            runtime->retained_shadow_active[shadow_index] = 0u;
+    for (uint32_t shadow_map = 0u;
+         shadow_map < 5u;
+         ++shadow_map) {
+        const uint32_t shadow_index = shadow_map_kinds[shadow_map];
+        const uint32_t shadow_slot = shadow_map_slots[shadow_map];
+        const uint32_t view_map = shadow_index == 0u ? 0u : 1u;
+        uint8_t *retained_active = shadow_slot == 0u
+            ? &runtime->retained_shadow_active[shadow_index]
+            : &runtime->view_retained_shadow_active[view_map];
+        uint8_t *retained_ready = shadow_slot == 0u
+            ? &runtime->retained_shadow_ready[shadow_index]
+            : &runtime->view_retained_shadow_ready[view_map];
+        float *retained_matrix = shadow_slot == 0u
+            ? runtime->retained_shadow_view_projection[shadow_index]
+            : runtime->view_retained_shadow_view_projection[view_map];
+        const bool map_enabled =
+            shadow_enabled[shadow_index] != 0u &&
+            (shadow_slot == 0u || (shadow_index == 0u ? own_sun : own_spot));
+        if (!map_enabled) {
+            *retained_active = 0u;
             continue;
         }
         const uint32_t shadow_update_period =
@@ -10099,12 +11314,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             active_shadow_ordinal % shadow_update_period;
         active_shadow_ordinal += 1u;
         const bool force_update =
-            runtime->retained_shadow_active[shadow_index] == 0u ||
-            runtime->retained_shadow_ready[shadow_index] == 0u ||
-            (shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT &&
+            *retained_active == 0u ||
+            *retained_ready == 0u ||
+            (shadow_slot == 0u &&
+             shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT &&
              runtime->retained_spot_shadow_is_omni !=
                 (uint8_t)(lighting->spot_shadow_is_omni != 0u));
-        runtime->retained_shadow_active[shadow_index] = 1u;
+        *retained_active = 1u;
         const bool should_update =
             force_update ||
             shadow_update_period == 1u ||
@@ -10115,12 +11331,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         }
         SDL_InsertGPUDebugLabel(
             command,
-            shadow_debug_labels[shadow_index]
+            shadow_debug_labels[shadow_map]
         );
         bool shadow_rendered = true;
         const bool omni_shadow =
+            shadow_slot == 0u &&
             shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT &&
             lighting->spot_shadow_is_omni != 0u;
+        const float *map_camera_right = shadow_slot == 0u ? camera_right : views[view_count - 1u].right;
+        const float *map_camera_up = shadow_slot == 0u ? camera_up : views[view_count - 1u].up;
+        const float *map_matrix = shadow_index == 0u
+            ? sun_matrices[shadow_slot]
+            : (shadow_index == 1u
+                ? lighting->secondary_directional_shadow_view_projection
+                : spot_matrices[shadow_slot]);
         if (omni_shadow) {
             for (uint32_t face = 0u;
                  face < BTBH_GPU_OMNI_SHADOW_FACE_COUNT;
@@ -10139,6 +11363,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         bone_offsets,
                         batches,
                         directional_shadow_visibility,
+                        NULL,
                         batch_count,
                         (uint8_t)face,
                         face == 0u,
@@ -10156,16 +11381,19 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 command,
                 runtime,
                 shadow_index,
-                runtime->directional_shadow_textures[shadow_index],
-                shadow_matrices[shadow_index],
-                camera_right,
-                camera_up,
+                shadow_slot == 0u
+                    ? runtime->directional_shadow_textures[shadow_index]
+                    : runtime->view_shadow_textures[view_map],
+                map_matrix,
+                map_camera_right,
+                map_camera_up,
                 transient_instance_buffer,
                 transient_instance_vertex_buffer,
                 bone_buffer,
                 bone_offsets,
                 batches,
-                directional_shadow_visibility,
+                shadow_index == 0u ? sun_casters[shadow_slot] : directional_shadow_visibility,
+                shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT ? spot_casters[shadow_slot] : NULL,
                 batch_count,
                 0u,
                 true,
@@ -10201,40 +11429,75 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 lighting->spot_range;
         } else {
             (void)memcpy(
-                runtime->retained_shadow_view_projection[shadow_index],
-                shadow_matrices[shadow_index],
-                sizeof(
-                    runtime->retained_shadow_view_projection[shadow_index]
-                )
+                retained_matrix,
+                map_matrix,
+                sizeof(runtime->retained_shadow_view_projection[0])
             );
         }
-        if (shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT) {
+        if (shadow_slot == 0u && shadow_index == BTBH_GPU_SCENE_SHADOW_SPOT) {
             runtime->retained_spot_shadow_is_omni =
                 (uint8_t)omni_shadow;
         }
-        runtime->retained_shadow_ready[shadow_index] = 1u;
+        *retained_ready = 1u;
         runtime->shadow_render_count += 1u;
     }
     runtime->shadow_frame_serial += 1u;
+    /* The maps each view reads (RFC 0014: view 0's, or a second view's own), and their matrices as the receivers read
+       them: the retained one when the map is kept over several frames. */
+    for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+        BTBHGPUSceneViewFrame *frame = &view_frames[view_index];
+        frame->sun_slot = view_index > 0u && own_sun ? 1u : 0u;
+        frame->spot_slot = view_index > 0u && own_spot ? 1u : 0u;
+        frame->sun_map = frame->sun_slot != 0u
+            ? runtime->view_shadow_textures[0]
+            : runtime->directional_shadow_textures[0];
+        frame->spot_map = frame->spot_slot != 0u
+            ? runtime->view_shadow_textures[1]
+            : runtime->directional_shadow_textures[2];
+        frame->transmittance_map = frame->sun_slot != 0u
+            ? runtime->view_particle_transmittance_texture
+            : runtime->particle_transmittance_texture;
+        frame->sun_matrix = frame->sun_slot != 0u
+            ? (runtime->view_retained_shadow_ready[0] != 0u
+                ? runtime->view_retained_shadow_view_projection[0]
+                : sun_matrices[1])
+            : (runtime->retained_shadow_ready[0] != 0u
+                ? runtime->retained_shadow_view_projection[0]
+                : sun_matrices[0]);
+        frame->spot_matrix = frame->spot_slot != 0u
+            ? (runtime->view_retained_shadow_ready[1] != 0u
+                ? runtime->view_retained_shadow_view_projection[1]
+                : spot_matrices[1])
+            : (runtime->retained_shadow_ready[2] != 0u
+                ? runtime->retained_shadow_view_projection[2]
+                : spot_matrices[0]);
+    }
     if (setup.particle_shadow_active) {
         /* RFC 0013 phase 2: the particle transmittance map, with the sun matrix the receivers read (the retained one
-           when the sun's map is kept over several frames), redrawn every frame (the puffs move). */
-        SDL_InsertGPUDebugLabel(command, "BTBH Particle Transmittance");
-        if (!btbh_gpu_scene_render_particle_transmittance(
+           when the sun's map is kept over several frames), redrawn every frame (the puffs move). RFC 0014: a second
+           view with a sun map of its own has its own transmittance map too. */
+        for (uint32_t sun_slot = 0u; sun_slot < (own_sun ? 2u : 1u); ++sun_slot) {
+            SDL_InsertGPUDebugLabel(
                 command,
-                runtime,
-                runtime->retained_shadow_ready[0] != 0u
-                    ? runtime->retained_shadow_view_projection[0]
-                    : lighting->directional_shadow_view_projection,
-                transient_instance_buffer,
-                batches,
-                directional_shadow_visibility,
-                batch_count
-            )) {
-            btbh_gpu_scene_cancel_submission(window, command);
-            free(bone_offsets);
-            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
-            return report->result;
+                sun_slot == 0u ? "BTBH Particle Transmittance" : "BTBH Particle Transmittance View 1"
+            );
+            if (!btbh_gpu_scene_render_particle_transmittance(
+                    command,
+                    runtime,
+                    sun_slot == 0u
+                        ? runtime->particle_transmittance_texture
+                        : runtime->view_particle_transmittance_texture,
+                    view_frames[sun_slot == 0u ? 0u : view_count - 1u].sun_matrix,
+                    transient_instance_buffer,
+                    batches,
+                    sun_casters[sun_slot],
+                    batch_count
+                )) {
+                btbh_gpu_scene_cancel_submission(window, command);
+                free(bone_offsets);
+                btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+                return report->result;
+            }
         }
     }
     if (shadows_active) {
@@ -10289,6 +11552,22 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         btbh_gpu_scene_cancel_submission(window, command);
         free(bone_offsets);
         return report->result;
+    }
+    /* RFC 0014: each view's half as its passes test it, at this drawable size (zero planes: the whole frame). A clipped
+       frame's distance pass draws with its clipped pipeline. */
+    for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+        btbh_gpu_scene_view_planes(
+            views[view_index].clip,
+            drawable_width,
+            drawable_height,
+            render_width,
+            render_height,
+            view_frames[view_index].clip_plane,
+            view_frames[view_index].uv_plane
+        );
+    }
+    if (views_clipped) {
+        scene_distance_ready = scene_distance_ready && view_distance_ready;
     }
     /* A target view's rect (since 0.15.0) for the passes at the render size, at half of it (the SSAO's and the
        HBAO's) and at the output size (the upscalers'); all NULL without one. The shadow maps are never limited. */
@@ -10460,6 +11739,24 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     );
     post_uniforms.projection_scale_y = projection_scale_y;
     post_uniforms.saturation = post->saturation;
+    /* RFC 0014: each view's block for a clipped frame's SSAO passes and reflections: its matrices and its half
+       (ssr_hit_options yzw). The grading and output passes read none of them and take view 0's block. */
+    BTBHGPUPostUniforms view_post_uniforms[BTBH_GPU_SCENE_MAX_VIEWS];
+    for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+        BTBHGPUPostUniforms *block = &view_post_uniforms[view_index];
+        const BTBHGPUSceneViewFrame *frame = &view_frames[view_index];
+        *block = post_uniforms;
+        (void)memcpy(block->view_projection, frame->view_projection, sizeof(block->view_projection));
+        (void)memcpy(
+            block->inverse_view_projection,
+            frame->inverse_view_projection,
+            sizeof(block->inverse_view_projection)
+        );
+        block->projection_scale_y = frame->projection_scale_y;
+        block->ssr_hit_options[1] = frame->uv_plane[1];
+        block->ssr_hit_options[2] = frame->uv_plane[2];
+        block->ssr_hit_options[3] = frame->uv_plane[3];
+    }
     /* Phases: opaque, transparent, and on frames that draw one, refraction (a transparent pass over a copy of
        the scene so far). The radiance cascades' debug views (since 0.10.0) take the opaque pass alone: the
        transparent and refracting batches drew over the view (Be The Bullet Hell v2's additive night overlays read
@@ -10483,21 +11780,37 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             /* The horizon-based occlusion, laid over the opaque scene before the transparent pass (under KEEP_HBAO
                with its contact mode, before the cascades instead: below). Under KEEP_HBAO without contact AO: the
                ambient light, from the scene's own targets. */
-            if (!btbh_gpu_scene_encode_hbao(
-                    command,
-                    runtime,
-                    post,
-                    inverse_view_projection,
-                    projection_scale_y,
-                    post->ssao_contact != 0u
-                        ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
-                        : (radiance_cascades_active && !scene_ambient_targets
-                            ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
-                            : 1u),
-                    scene_contact_targets ? runtime->ambient_texture : runtime->emission_texture,
-                    radiance_cascades_post_input,
-                    scissor
-                )) {
+            const uint32_t hbao_mode =
+                post->ssao_contact != 0u
+                    ? BTBH_GPU_SCENE_HBAO_CONTACT_MODE
+                    : (radiance_cascades_active && !scene_ambient_targets
+                        ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
+                        : 1u);
+            SDL_GPUTexture *hbao_kept_emission =
+                scene_contact_targets ? runtime->ambient_texture : runtime->emission_texture;
+            /* (RFC 0014: a clipped frame's passes draw each view clipped to its half.) */
+            if (!(views_clipped
+                    ? btbh_gpu_scene_encode_hbao_views(
+                        command,
+                        runtime,
+                        post,
+                        view_frames,
+                        view_count,
+                        hbao_mode,
+                        hbao_kept_emission,
+                        radiance_cascades_post_input
+                    )
+                    : btbh_gpu_scene_encode_hbao(
+                        command,
+                        runtime,
+                        post,
+                        inverse_view_projection,
+                        projection_scale_y,
+                        hbao_mode,
+                        hbao_kept_emission,
+                        radiance_cascades_post_input,
+                        scissor
+                    ))) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
                 btbh_gpu_scene_error(
@@ -10531,18 +11844,34 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ssao_samplers[1].texture = runtime->normal_texture;
             ssao_samplers[1].sampler =
                 runtime->scene_color_sampler;
-            /* Reflections alone skip the occlusion passes: the resolve then reads no occlusion. */
-            ssao_ok = !ambient_occlusion_active || btbh_gpu_scene_render_fullscreen(
-                command,
-                "BTBH SSAO",
-                runtime->ssao_pipeline,
-                runtime->ssao_texture,
-                &post_uniforms,
-                (uint32_t)sizeof(post_uniforms),
-                ssao_samplers,
-                2u,
-                half_scissor
-            );
+            /* Reflections alone skip the occlusion passes: the resolve then reads no occlusion. RFC 0014: a clipped
+               frame's passes draw each view clipped to its half, with its own block. */
+            ssao_ok = !ambient_occlusion_active || (views_clipped
+                ? btbh_gpu_scene_render_fullscreen_views(
+                    command,
+                    "BTBH SSAO Views",
+                    runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO],
+                    runtime->ssao_texture,
+                    false,
+                    view_post_uniforms,
+                    (uint32_t)sizeof(view_post_uniforms[0]),
+                    sizeof(view_post_uniforms[0]),
+                    ssao_samplers,
+                    2u,
+                    view_frames,
+                    view_count
+                )
+                : btbh_gpu_scene_render_fullscreen(
+                    command,
+                    "BTBH SSAO",
+                    runtime->ssao_pipeline,
+                    runtime->ssao_texture,
+                    &post_uniforms,
+                    (uint32_t)sizeof(post_uniforms),
+                    ssao_samplers,
+                    2u,
+                    half_scissor
+                ));
             SDL_GPUTextureSamplerBinding denoise_samplers[3];
             SDL_zeroa(denoise_samplers);
             denoise_samplers[0].texture = runtime->depth_texture;
@@ -10555,17 +11884,32 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             denoise_samplers[2].sampler =
                 runtime->scene_color_sampler;
             if (ssao_ok && ambient_occlusion_active) {
-                ssao_ok = btbh_gpu_scene_render_fullscreen(
-                    command,
-                    "BTBH SSAO Denoise",
-                    runtime->ssao_denoise_pipeline,
-                    runtime->ssao_denoised_texture,
-                    &post_uniforms,
-                    (uint32_t)sizeof(post_uniforms),
-                    denoise_samplers,
-                    3u,
-                    half_scissor
-                );
+                ssao_ok = views_clipped
+                    ? btbh_gpu_scene_render_fullscreen_views(
+                        command,
+                        "BTBH SSAO Denoise Views",
+                        runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO_DENOISE],
+                        runtime->ssao_denoised_texture,
+                        false,
+                        view_post_uniforms,
+                        (uint32_t)sizeof(view_post_uniforms[0]),
+                        sizeof(view_post_uniforms[0]),
+                        denoise_samplers,
+                        3u,
+                        view_frames,
+                        view_count
+                    )
+                    : btbh_gpu_scene_render_fullscreen(
+                        command,
+                        "BTBH SSAO Denoise",
+                        runtime->ssao_denoise_pipeline,
+                        runtime->ssao_denoised_texture,
+                        &post_uniforms,
+                        (uint32_t)sizeof(post_uniforms),
+                        denoise_samplers,
+                        3u,
+                        half_scissor
+                    );
             }
             SDL_GPUTextureSamplerBinding resolve_samplers[7];
             SDL_zeroa(resolve_samplers);
@@ -10594,17 +11938,32 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             resolve_samplers[6].sampler =
                 runtime->scene_color_sampler;
             if (ssao_ok) {
-                ssao_ok = btbh_gpu_scene_render_fullscreen(
-                    command,
-                    "BTBH SSAO Resolve",
-                    runtime->ssao_resolve_pipeline,
-                    runtime->ssao_resolved_texture,
-                    &post_uniforms,
-                    (uint32_t)sizeof(post_uniforms),
-                    resolve_samplers,
-                    7u,
-                    render_scissor
-                );
+                ssao_ok = views_clipped
+                    ? btbh_gpu_scene_render_fullscreen_views(
+                        command,
+                        "BTBH SSAO Resolve Views",
+                        runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_SSAO_RESOLVE],
+                        runtime->ssao_resolved_texture,
+                        false,
+                        view_post_uniforms,
+                        (uint32_t)sizeof(view_post_uniforms[0]),
+                        sizeof(view_post_uniforms[0]),
+                        resolve_samplers,
+                        7u,
+                        view_frames,
+                        view_count
+                    )
+                    : btbh_gpu_scene_render_fullscreen(
+                        command,
+                        "BTBH SSAO Resolve",
+                        runtime->ssao_resolve_pipeline,
+                        runtime->ssao_resolved_texture,
+                        &post_uniforms,
+                        (uint32_t)sizeof(post_uniforms),
+                        resolve_samplers,
+                        7u,
+                        render_scissor
+                    );
             }
             if (!ssao_ok) {
                 btbh_gpu_scene_cancel_submission(window, command);
@@ -10628,31 +11987,49 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             }
         }
         if (transparency_phase == 1u && scene_distance_ready) {
-            BTBHGPUSceneDistanceUniforms distance_uniforms;
-            SDL_zero(distance_uniforms);
-            (void)memcpy(
-                distance_uniforms.inverse_view_projection,
-                inverse_view_projection,
-                sizeof(distance_uniforms.inverse_view_projection)
-            );
-            distance_uniforms.camera_position[0] = camera_position[0];
-            distance_uniforms.camera_position[1] = camera_position[1];
-            distance_uniforms.camera_position[2] = camera_position[2];
+            /* (RFC 0014: each view's distance from its own camera.) */
+            BTBHGPUSceneDistanceUniforms distance_uniforms[BTBH_GPU_SCENE_MAX_VIEWS];
+            SDL_zeroa(distance_uniforms);
+            for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+                (void)memcpy(
+                    distance_uniforms[view_index].inverse_view_projection,
+                    view_frames[view_index].inverse_view_projection,
+                    sizeof(distance_uniforms[view_index].inverse_view_projection)
+                );
+                distance_uniforms[view_index].camera_position[0] = views[view_index].position[0];
+                distance_uniforms[view_index].camera_position[1] = views[view_index].position[1];
+                distance_uniforms[view_index].camera_position[2] = views[view_index].position[2];
+            }
             SDL_GPUTextureSamplerBinding distance_sampler;
             SDL_zero(distance_sampler);
             distance_sampler.texture = runtime->depth_texture;
             distance_sampler.sampler = runtime->scene_color_sampler;
-            if (!btbh_gpu_scene_render_fullscreen(
-                    command,
-                    "BTBH Scene Distance",
-                    runtime->scene_distance_pipeline,
-                    runtime->scene_distance_texture,
-                    &distance_uniforms,
-                    (uint32_t)sizeof(distance_uniforms),
-                    &distance_sampler,
-                    1u,
-                    render_scissor
-                )) {
+            if (!(views_clipped
+                    ? btbh_gpu_scene_render_fullscreen_views(
+                        command,
+                        "BTBH Scene Distance Views",
+                        runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_DISTANCE],
+                        runtime->scene_distance_texture,
+                        false,
+                        distance_uniforms,
+                        (uint32_t)sizeof(distance_uniforms[0]),
+                        sizeof(distance_uniforms[0]),
+                        &distance_sampler,
+                        1u,
+                        view_frames,
+                        view_count
+                    )
+                    : btbh_gpu_scene_render_fullscreen(
+                        command,
+                        "BTBH Scene Distance",
+                        runtime->scene_distance_pipeline,
+                        runtime->scene_distance_texture,
+                        &distance_uniforms[0],
+                        (uint32_t)sizeof(distance_uniforms[0]),
+                        &distance_sampler,
+                        1u,
+                        render_scissor
+                    ))) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
                 btbh_gpu_scene_error(
@@ -10724,12 +12101,65 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             /* A target view's rect: the opaque pass cleared every target whole; the draws shade the rect alone. */
             SDL_SetGPUScissor(pass, render_scissor);
         }
-        btbh_gpu_scene_run_verify_begin_pass(
-            run_verify,
-            !transparent_phase ? "opaque" : (refraction_phase ? "refraction" : "transparent")
-        );
+        const char *const pass_name =
+            !transparent_phase ? "opaque" : (refraction_phase ? "refraction" : "transparent");
+        btbh_gpu_scene_run_verify_begin_pass(run_verify, pass_name);
         SDL_GPUGraphicsPipeline *bound_model_pipeline = NULL;
         SDL_GPUBuffer *bound_index_buffer = NULL;
+        /* RFC 0011: the vertex buffer bound last. */
+        SDL_GPUBuffer *bound_vertex_buffer = NULL;
+        /* RFC 0014: the pass holds every view in turn, each clipped to its half, with its own frame block, batches,
+           order and maps; a view's first batch binds and pushes all it needs. Under BTBH_GPU_COST_LOG's split frames a
+           second view draws in a pass of its own (the targets loaded), so that the log times the views apart. */
+        const bool view_cost_split = view_count > 1u && btbh_gpu_cost_split_device != NULL;
+        for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+        BTBHGPUSceneViewFrame *const view_frame = &view_frames[view_index];
+        const uint64_t view_started_ticks = SDL_GetTicksNS();
+        if (view_index > 0u && view_cost_split) {
+            SDL_EndGPURenderPass(pass);
+            if (!btbh_gpu_scene_cost_split(
+                    window,
+                    &command,
+                    transparent_phase
+                        ? BTBH_GPU_COST_GROUP_TRANSPARENT
+                        : BTBH_GPU_COST_GROUP_MAIN,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
+            const SDL_GPUColorTargetInfo *phase_targets = transparent_phase ? transparent_targets : color_targets;
+            const uint32_t phase_target_count = transparent_phase
+                ? (temporal_active ? 2u : 1u)
+                : color_target_count;
+            SDL_GPUColorTargetInfo continued_targets[6];
+            SDL_zeroa(continued_targets);
+            for (uint32_t target = 0u; target < phase_target_count; ++target) {
+                continued_targets[target] = phase_targets[target];
+                continued_targets[target].load_op = SDL_GPU_LOADOP_LOAD;
+                continued_targets[target].cycle = false;
+            }
+            SDL_GPUDepthStencilTargetInfo continued_depth =
+                transparent_phase ? transparent_depth_target : depth_target;
+            continued_depth.load_op = SDL_GPU_LOADOP_LOAD;
+            continued_depth.stencil_load_op = SDL_GPU_LOADOP_LOAD;
+            continued_depth.cycle = false;
+            pass = SDL_BeginGPURenderPass(command, continued_targets, phase_target_count, &continued_depth);
+            if (pass == NULL) {
+                btbh_gpu_scene_cancel_submission(window, command);
+                free(bone_offsets);
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
+                );
+                return report->result;
+            }
+            btbh_gpu_scene_run_verify_begin_pass(run_verify, pass_name);
+            bound_model_pipeline = NULL;
+            bound_index_buffer = NULL;
+            bound_vertex_buffer = NULL;
+        }
         /* RFC 0009: the world-detail table whose block the fragment uniform slot 2 holds in this pass. Pushed data
            stays for the command buffer's later draws, and only table batches read the slot, so a run of batches
            sharing a table pushes its 400 bytes once. */
@@ -10737,8 +12167,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         /* RFC 0012: the height lift whose block the vertex uniform slot 1 holds in this pass, pushed as the table's
            is: once per run of lifted batches sharing it. */
         const BTBHGPUSceneHeightLift *pushed_lift = NULL;
-        /* RFC 0013: the lit particles' block, the same for every one in the pass, and whether fragment uniform slot 1
-           holds it (every other batch pushes its own block there). */
+        /* RFC 0013: the lit particles' block, the same for every one in the pass (RFC 0014: in the view), and whether
+           fragment uniform slot 1 holds it (every other batch pushes its own block there). */
         BTBHGPUSceneParticleFrameUniforms particle_frame;
         SDL_zero(particle_frame);
         bool particle_frame_pushed = false;
@@ -10746,7 +12176,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             btbh_gpu_scene_particle_frame(
                 runtime,
                 post,
-                inverse_view_projection,
+                view_frame->inverse_view_projection,
                 render_width,
                 render_height,
                 scene_distance_ready,
@@ -10757,385 +12187,31 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
         }
         /* RFC 0011: the batch whose state the pass holds (phase 1b; NULL before the first draw and after a skinned
-           geometry), the vertex buffer bound last, and the frame's part of both uniform blocks, filled once a pass
-           (phase 1c): each batch writes its own fields over it before it pushes them. */
+           geometry), and the frame's part of both uniform blocks, filled once a pass (phase 1c; RFC 0014: once a view):
+           each batch writes its own fields over it before it pushes them. */
         const BTBHGPUSceneGeometryBatch *run_batch = NULL;
-        SDL_GPUBuffer *bound_vertex_buffer = NULL;
         BTBHGPUSceneUniforms uniforms;
         BTBHGPUSceneFragmentUniforms fragment_uniforms;
-        (void)memset(&uniforms, 0, sizeof(uniforms));
-        (void)memcpy(
-            uniforms.view_projection,
-            view_projection,
-            sizeof(uniforms.view_projection)
-        );
-        (void)memcpy(
-            uniforms.camera_right,
-            camera_right,
-            sizeof(float) * 3u
-        );
-        (void)memcpy(
-            uniforms.camera_up,
-            camera_up,
-            sizeof(float) * 3u
-        );
-        (void)memcpy(
-            uniforms.camera_position,
-            camera_position,
-            sizeof(float) * 3u
-        );
-        uniforms.ambient_color_energy[0] =
-            lighting->ambient_red;
-        uniforms.ambient_color_energy[1] =
-            lighting->ambient_green;
-        uniforms.ambient_color_energy[2] =
-            lighting->ambient_blue;
-        uniforms.ambient_color_energy[3] =
-            lighting->ambient_energy;
-        uniforms.directional_direction_energy[0] =
-            lighting->directional_x;
-        uniforms.directional_direction_energy[1] =
-            lighting->directional_y;
-        uniforms.directional_direction_energy[2] =
-            lighting->directional_z;
-        uniforms.directional_direction_energy[3] =
-            lighting->directional_energy;
-        uniforms.directional_color[0] =
-            lighting->directional_red;
-        uniforms.directional_color[1] =
-            lighting->directional_green;
-        uniforms.directional_color[2] =
-            lighting->directional_blue;
-        uniforms.directional_color[3] = 1.0f;
-        uniforms.secondary_directional_direction_energy[0] =
-            lighting->secondary_directional_x;
-        uniforms.secondary_directional_direction_energy[1] =
-            lighting->secondary_directional_y;
-        uniforms.secondary_directional_direction_energy[2] =
-            lighting->secondary_directional_z;
-        uniforms.secondary_directional_direction_energy[3] =
-            lighting->secondary_directional_energy;
-        uniforms.secondary_directional_color[0] =
-            lighting->secondary_directional_red;
-        uniforms.secondary_directional_color[1] =
-            lighting->secondary_directional_green;
-        uniforms.secondary_directional_color[2] =
-            lighting->secondary_directional_blue;
-        uniforms.secondary_directional_color[3] = 1.0f;
-        (void)memcpy(
-            uniforms.previous_view_projection,
-            previous_view_projection,
-            sizeof(uniforms.previous_view_projection)
-        );
-        (void)memcpy(
-            uniforms.world_curvature,
-            post->world_curvature,
-            sizeof(uniforms.world_curvature)
-        );
-        (void)memcpy(
-            uniforms.previous_world_curvature,
+        btbh_gpu_scene_frame_uniforms(
+            runtime,
+            lighting,
+            view_frame->lighting,
+            post,
+            &setup,
+            view_frame->view_projection,
+            views[view_index].right,
+            views[view_index].up,
+            views[view_index].position,
+            view_frame->previous_view_projection,
             previous_world_curvature,
-            sizeof(uniforms.previous_world_curvature)
-        );
-        (void)memcpy(
-            uniforms.temporal_controls,
             temporal_controls,
-            sizeof(uniforms.temporal_controls)
+            temporal_lod_bias,
+            view_frame->clip_plane,
+            view_frame->sun_matrix,
+            view_frame->spot_matrix,
+            &uniforms,
+            &fragment_uniforms
         );
-        (void)memset(
-            &fragment_uniforms,
-            0,
-            sizeof(fragment_uniforms)
-        );
-        (void)memcpy(
-            fragment_uniforms.camera_position,
-            camera_position,
-            sizeof(float) * 3u
-        );
-        (void)memcpy(
-            fragment_uniforms.ambient_color_energy,
-            uniforms.ambient_color_energy,
-            sizeof(fragment_uniforms.ambient_color_energy)
-        );
-        (void)memcpy(
-            fragment_uniforms.directional_direction_energy,
-            uniforms.directional_direction_energy,
-            sizeof(fragment_uniforms.directional_direction_energy)
-        );
-        (void)memcpy(
-            fragment_uniforms.directional_color,
-            uniforms.directional_color,
-            sizeof(fragment_uniforms.directional_color)
-        );
-        (void)memcpy(
-            fragment_uniforms
-                .secondary_directional_direction_energy,
-            uniforms.secondary_directional_direction_energy,
-            sizeof(
-                fragment_uniforms
-                    .secondary_directional_direction_energy
-            )
-        );
-        (void)memcpy(
-            fragment_uniforms.secondary_directional_color,
-            uniforms.secondary_directional_color,
-            sizeof(fragment_uniforms.secondary_directional_color)
-        );
-        fragment_uniforms.spot_position_range[0] =
-            lighting->spot_position_x;
-        fragment_uniforms.spot_position_range[1] =
-            lighting->spot_position_y;
-        fragment_uniforms.spot_position_range[2] =
-            lighting->spot_position_z;
-        fragment_uniforms.spot_position_range[3] =
-            lighting->spot_range;
-        fragment_uniforms.spot_direction_energy[0] =
-            lighting->spot_direction_x;
-        fragment_uniforms.spot_direction_energy[1] =
-            lighting->spot_direction_y;
-        fragment_uniforms.spot_direction_energy[2] =
-            lighting->spot_direction_z;
-        fragment_uniforms.spot_direction_energy[3] =
-            lighting->spot_energy;
-        fragment_uniforms.spot_color_falloff[0] =
-            lighting->spot_red;
-        fragment_uniforms.spot_color_falloff[1] =
-            lighting->spot_green;
-        fragment_uniforms.spot_color_falloff[2] =
-            lighting->spot_blue;
-        fragment_uniforms.spot_color_falloff[3] =
-            lighting->spot_falloff;
-        fragment_uniforms.spot_cutoffs[0] =
-            lighting->spot_inner_cutoff;
-        fragment_uniforms.spot_cutoffs[1] =
-            lighting->spot_outer_cutoff;
-        fragment_uniforms.spot_cutoffs[2] =
-            lighting->spot_occluder_shadow_strength;
-        fragment_uniforms.spot_cutoffs[3] =
-            lighting->spot_occluder_shadow_reach;
-        {
-            const uint32_t point_count = SDL_min(
-                lighting->point_light_count,
-                (uint32_t)BTBH_GPU_SCENE_POINT_LIGHTS
-            );
-            fragment_uniforms.point_light_count[0] =
-                (float)point_count;
-            for (uint32_t light = 0u; light < point_count; ++light) {
-                (void)memcpy(
-                    fragment_uniforms.point_lights[light * 2u],
-                    &lighting->point_lights[light][0],
-                    4u * sizeof(float)
-                );
-                (void)memcpy(
-                    fragment_uniforms.point_lights[light * 2u + 1u],
-                    &lighting->point_lights[light][4],
-                    4u * sizeof(float)
-                );
-            }
-        }
-        for (size_t coefficient = 0u;
-             coefficient < 9u;
-             coefficient += 1u) {
-            for (size_t channel = 0u;
-                 channel < 3u;
-                 channel += 1u) {
-                fragment_uniforms
-                    .irradiance_sh[coefficient][channel] =
-                    lighting->irradiance_sh[
-                        coefficient * 3u + channel
-                    ];
-            }
-        }
-        fragment_uniforms.ground_bottom_energy[0] =
-            lighting->ground_bottom_red;
-        fragment_uniforms.ground_bottom_energy[1] =
-            lighting->ground_bottom_green;
-        fragment_uniforms.ground_bottom_energy[2] =
-            lighting->ground_bottom_blue;
-        fragment_uniforms.ground_bottom_energy[3] =
-            lighting->ground_energy;
-        fragment_uniforms.ground_horizon_curve[0] =
-            lighting->ground_horizon_red;
-        fragment_uniforms.ground_horizon_curve[1] =
-            lighting->ground_horizon_green;
-        fragment_uniforms.ground_horizon_curve[2] =
-            lighting->ground_horizon_blue;
-        fragment_uniforms.ground_horizon_curve[3] =
-            lighting->ground_horizon_curve;
-        fragment_uniforms.sky_top_energy[0] =
-            lighting->sky_top_red;
-        fragment_uniforms.sky_top_energy[1] =
-            lighting->sky_top_green;
-        fragment_uniforms.sky_top_energy[2] =
-            lighting->sky_top_blue;
-        fragment_uniforms.sky_top_energy[3] =
-            lighting->sky_energy;
-        fragment_uniforms.sky_horizon_curve[0] =
-            lighting->sky_horizon_red;
-        fragment_uniforms.sky_horizon_curve[1] =
-            lighting->sky_horizon_green;
-        fragment_uniforms.sky_horizon_curve[2] =
-            lighting->sky_horizon_blue;
-        fragment_uniforms.sky_horizon_curve[3] =
-            lighting->sky_horizon_curve;
-        fragment_uniforms.sun_color_energy[0] =
-            lighting->sun_red;
-        fragment_uniforms.sun_color_energy[1] =
-            lighting->sun_green;
-        fragment_uniforms.sun_color_energy[2] =
-            lighting->sun_blue;
-        fragment_uniforms.sun_color_energy[3] =
-            lighting->sun_energy;
-        fragment_uniforms.sun_direction_size[0] =
-            lighting->sun_direction_x;
-        fragment_uniforms.sun_direction_size[1] =
-            lighting->sun_direction_y;
-        fragment_uniforms.sun_direction_size[2] =
-            lighting->sun_direction_z;
-        fragment_uniforms.sun_direction_size[3] =
-            lighting->sun_size_radians;
-        fragment_uniforms.procedural_controls[0] =
-            lighting->sun_curve;
-        fragment_uniforms.procedural_controls[1] =
-            (float)lighting->ibl_enabled;
-        fragment_uniforms.procedural_controls[3] =
-            temporal_lod_bias;
-        fragment_uniforms.surface_wetness[0] =
-            isfinite(lighting->surface_wetness)
-                ? fminf(fmaxf(lighting->surface_wetness, 0.0f), 1.0f)
-                : 0.0f;
-        fragment_uniforms.surface_wetness[1] =
-            isfinite(lighting->window_glow)
-                ? fmaxf(lighting->window_glow, 0.0f)
-                : 0.0f;
-        fragment_uniforms.surface_wetness[2] =
-            isfinite(lighting->rain)
-                ? fminf(fmaxf(lighting->rain, 0.0f), 1.0f)
-                : 0.0f;
-        fragment_uniforms.cloud_controls[0] = lighting->cloud_offset[0];
-        fragment_uniforms.cloud_controls[1] = lighting->cloud_offset[1];
-        fragment_uniforms.cloud_controls[2] = lighting->cloud_frequency;
-        fragment_uniforms.cloud_controls[3] = lighting->cloud_strength;
-        fragment_uniforms.cloud_shape[0] = lighting->cloud_coverage;
-        fragment_uniforms.cloud_shape[1] = lighting->cloud_softness;
-        fragment_uniforms.cloud_shape[2] = lighting->cloud_height;
-        {
-            const uint32_t lamp_count =
-                lighting->lamp_count < BTBH_GPU_SCENE_MAX_LAMPS
-                    ? lighting->lamp_count
-                    : BTBH_GPU_SCENE_MAX_LAMPS;
-            fragment_uniforms.lamp_controls[0] = (float)lamp_count;
-            fragment_uniforms.lamp_controls[1] =
-                lighting->lamp_core_radius;
-            if (lamp_count > 0u) {
-                (void)memcpy(
-                    fragment_uniforms.lamp_position_reach,
-                    lighting->lamp_position_reach,
-                    sizeof(float) * 4u * lamp_count
-                );
-                (void)memcpy(
-                    fragment_uniforms.lamp_color_energy,
-                    lighting->lamp_color_energy,
-                    sizeof(float) * 4u * lamp_count
-                );
-            }
-        }
-        /* The dark scene's controls ride in the point lights' header. */
-        fragment_uniforms.point_light_count[1] =
-            lighting->unlit_darkness;
-        fragment_uniforms.point_light_count[2] =
-            lighting->unlit_glow_threshold;
-        fragment_uniforms.point_light_count[3] =
-            SDL_max(lighting->point_light_ceiling, 0.0f);
-        const float *primary_shadow_matrix =
-            runtime->retained_shadow_ready[0] != 0u
-                ? runtime->retained_shadow_view_projection[0]
-                : lighting->directional_shadow_view_projection;
-        const float *secondary_shadow_matrix =
-            runtime->retained_shadow_ready[1] != 0u
-                ? runtime->retained_shadow_view_projection[1]
-                : lighting
-                    ->secondary_directional_shadow_view_projection;
-        const float *spot_shadow_matrix =
-            runtime->retained_shadow_ready[2] != 0u
-                ? runtime->retained_shadow_view_projection[2]
-                : lighting->spot_shadow_view_projection;
-        (void)memcpy(
-            fragment_uniforms
-                .directional_shadow_view_projection,
-            primary_shadow_matrix,
-            sizeof(
-                fragment_uniforms
-                    .directional_shadow_view_projection
-            )
-        );
-        (void)memcpy(
-            fragment_uniforms
-                .secondary_directional_shadow_view_projection,
-            secondary_shadow_matrix,
-            sizeof(
-                fragment_uniforms
-                    .secondary_directional_shadow_view_projection
-            )
-        );
-        (void)memcpy(
-            fragment_uniforms.spot_shadow_view_projection,
-            spot_shadow_matrix,
-            sizeof(fragment_uniforms.spot_shadow_view_projection)
-        );
-        fragment_uniforms.directional_shadow_controls[0] =
-            (float)shadow_enabled[0];
-        fragment_uniforms.directional_shadow_controls[1] =
-            lighting->directional_shadow_softness;
-        fragment_uniforms.directional_shadow_controls[2] =
-            lighting->directional_shadow_filter ==
-                    BTBH_GPU_SCENE_SHADOW_FILTER_SOFT
-                ? 1.0f
-                : 0.0f;
-        /* RFC 0013 phase 2: the surfaces the sun shadows read the particle transmittance map (particle_shadow 2). */
-        fragment_uniforms.directional_shadow_controls[3] =
-            setup.particle_shadow_active &&
-                    (setup.particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) ==
-                        BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND
-                ? 1.0f
-                : 0.0f;
-        fragment_uniforms
-            .secondary_directional_shadow_controls[0] =
-            (float)shadow_enabled[1];
-        fragment_uniforms
-            .secondary_directional_shadow_controls[1] =
-            lighting->secondary_directional_shadow_softness;
-        /* BTBHGPUSceneLighting.spot_occluder_flags (since 0.10.0), as a whole number. */
-        fragment_uniforms
-            .secondary_directional_shadow_controls[2] =
-            (float)lighting->spot_occluder_flags;
-        fragment_uniforms.spot_shadow_controls[0] =
-            (float)shadow_enabled[2];
-        fragment_uniforms.spot_shadow_controls[1] =
-            lighting->spot_shadow_softness;
-        fragment_uniforms.spot_shadow_controls[2] =
-            (float)runtime->retained_spot_shadow_is_omni;
-        fragment_uniforms.spot_shadow_controls[3] =
-            lighting->spot_shadow_near;
-        if (runtime->retained_shadow_ready[2] != 0u &&
-            runtime->retained_spot_shadow_is_omni != 0u) {
-            (void)memcpy(
-                fragment_uniforms.omni_shadow_position_range,
-                runtime->retained_omni_shadow_position_range,
-                sizeof(
-                    fragment_uniforms.omni_shadow_position_range
-                )
-            );
-        } else {
-            fragment_uniforms.omni_shadow_position_range[0] =
-                lighting->spot_position_x;
-            fragment_uniforms.omni_shadow_position_range[1] =
-                lighting->spot_position_y;
-            fragment_uniforms.omni_shadow_position_range[2] =
-                lighting->spot_position_z;
-            fragment_uniforms.omni_shadow_position_range[3] =
-                lighting->spot_range;
-        }
         SDL_InsertGPUDebugLabel(
             command,
             !transparent_phase
@@ -11145,16 +12221,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     : "BTBH Forward Transparent Draws")
         );
         uint32_t geometry_cursor = 0u;
-        /* Sorted, the opaque pass walks its own batches in their order, each from its first geometry's
+        /* Sorted, the opaque pass walks its own batches in their order (the view's), each from its first geometry's
            place among the prepared ones; otherwise every pass walks all batches as given. */
         const bool phase_ordered = opaque_sorted && !transparent_phase;
         const uint32_t phase_batch_count =
-            phase_ordered ? opaque_order_count : batch_count;
+            phase_ordered ? view_frame->opaque_order_count : batch_count;
         for (uint32_t phase_index = 0u;
              phase_index < phase_batch_count;
              ++phase_index) {
         const uint32_t batch_index = phase_ordered
-            ? runtime->opaque_order[phase_index]
+            ? view_frame->opaque_order[phase_index]
             : phase_index;
         if (phase_ordered) {
             geometry_cursor = runtime->opaque_geometry_base[batch_index];
@@ -11168,6 +12244,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             batch->kind == BTBH_GPU_SCENE_GEOMETRY_MODEL
                 ? batch->model->primitive_count
                 : 1u;
+        /* (RFC 0014: the view's instances count each batch it draws once.) */
+        bool batch_drawn_in_view = false;
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
             ++geometry_index) {
@@ -11193,6 +12271,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                       ) ? 1u : 0u);
             if ((scene_visibility != NULL &&
                  scene_visibility[batch_index] == 0u) ||
+                (view_frame->visibility != NULL &&
+                 view_frame->visibility[batch_index] == 0u) ||
                 batch_transparency_phase != transparency_phase) {
                 continue;
             }
@@ -11480,7 +12560,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         radiance_cascades_lit,
                         shadows_active,
                         omni_shadows_active,
-                        setup.particle_shadow_active
+                        setup.particle_shadow_active,
+                        view_frame->sun_map,
+                        view_frame->spot_map,
+                        view_frame->transmittance_map
                     );
                     if (!particle_frame_pushed) {
                         btbh_gpu_scene_run_push_fragment_uniforms(
@@ -11526,21 +12609,19 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     samplers[3].sampler = orm_texture->sampler;
                     samplers[4].texture = runtime->brdf_lut_texture;
                     samplers[4].sampler = runtime->brdf_lut_sampler;
-                    samplers[5].texture =
-                        runtime->directional_shadow_textures[0];
+                    /* (RFC 0014: the view's sun and spot maps, view 0's or its own.) */
+                    samplers[5].texture = view_frame->sun_map;
                     samplers[5].sampler =
                         runtime->directional_shadow_sampler;
                     samplers[6].texture =
                         runtime->directional_shadow_textures[1];
                     samplers[6].sampler =
                         runtime->directional_shadow_sampler;
-                    samplers[7].texture =
-                        runtime->directional_shadow_textures[2];
+                    samplers[7].texture = view_frame->spot_map;
                     samplers[7].sampler =
                         runtime->directional_shadow_sampler;
                     /* The primary map again, through the comparison sampler (the soft sun shadow filter's taps). */
-                    samplers[8].texture =
-                        runtime->directional_shadow_textures[0];
+                    samplers[8].texture = view_frame->sun_map;
                     samplers[8].sampler =
                         runtime->directional_shadow_compare_sampler;
                     if (omni_shadows_active) {
@@ -11590,7 +12671,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                                 (setup.particle_shadow & BTBH_GPU_SCENE_PARTICLE_SHADOW_READERS) ==
                                     BTBH_GPU_SCENE_PARTICLE_SHADOW_GROUND;
                             samplers[bound_sampler_count].texture = ground_reads_map
-                                ? runtime->particle_transmittance_texture
+                                ? view_frame->transmittance_map
                                 : runtime->fallback_texture->texture;
                             samplers[bound_sampler_count].sampler = ground_reads_map
                                 ? runtime->directional_shadow_sampler
@@ -11714,6 +12795,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     : batch->custom_mesh
             );
             primitive_draw_count += 1u;
+            view_frame->draw_count += 1u;
+            if (!batch_drawn_in_view) {
+                view_frame->instance_count += batch->instance_count;
+                batch_drawn_in_view = true;
+            }
         }
         }
         if (!phase_ordered && geometry_cursor != prepared_geometry_count) {
@@ -11727,15 +12813,21 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
             return report->result;
         }
+        view_frame->encode_nanoseconds += SDL_GetTicksNS() - view_started_ticks;
+        }
         SDL_EndGPURenderPass(pass);
         geometry_encode_nanoseconds +=
             SDL_GetTicksNS() - geometry_phase_started_ticks;
         if (!btbh_gpu_scene_cost_split(
                 window,
                 &command,
-                transparent_phase
-                    ? BTBH_GPU_COST_GROUP_TRANSPARENT
-                    : BTBH_GPU_COST_GROUP_MAIN,
+                view_cost_split
+                    ? (transparent_phase
+                        ? BTBH_GPU_COST_GROUP_VIEW1_TRANSPARENT
+                        : BTBH_GPU_COST_GROUP_VIEW1_MAIN)
+                    : (transparent_phase
+                        ? BTBH_GPU_COST_GROUP_TRANSPARENT
+                        : BTBH_GPU_COST_GROUP_MAIN),
                 report
             )) {
             free(bone_offsets);
@@ -11907,6 +12999,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     );
     report->radiance_cascades.pass_telemetry =
         runtime->radiance_cascades.pass_telemetry;
+    if (setup.radiance_cascades_held_for_views) {
+        /* RFC 0014: asked for, and not run in a clipped frame of views. */
+        report->radiance_cascades.requested_tier = post->radiance_cascades.tier;
+        report->radiance_cascades.active_tier = BTBH_GPU_SCENE_RC_OFF;
+        report->radiance_cascades.pending_tier = BTBH_GPU_SCENE_RC_OFF;
+        report->radiance_cascades.fallback_reason = BTBH_GPU_SCENE_RC_FALLBACK_VIEWS;
+        report->radiance_cascades.internal_width = 0u;
+        report->radiance_cascades.internal_height = 0u;
+        report->radiance_cascades.cpu_encode_milliseconds = 0.0;
+        SDL_zero(report->radiance_cascades.pass_telemetry);
+    }
 
     const uint64_t post_started_ticks = SDL_GetTicksNS();
     SDL_GPUTexture *post_input = radiance_cascades_post_input;
@@ -12037,7 +13140,33 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             : runtime->fallback_texture->texture;
         composite_samplers[2].sampler = runtime->scene_color_sampler;
         /* The LUT stage always writes post_ping, so the composite uses pong. */
-        if (fullscreen_ok) {
+        if (fullscreen_ok && views_clipped) {
+            /* RFC 0014: each view's fog (its distance and the world-edge fade) at its own depth, from its own camera;
+               bloom and the vignette are the frame's. */
+            BTBHGPUSceneCompositeUniforms view_composite_uniforms[BTBH_GPU_SCENE_MAX_VIEWS];
+            for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+                view_composite_uniforms[view_index] = composite_uniforms;
+                (void)memcpy(
+                    view_composite_uniforms[view_index].inverse_view_projection,
+                    view_frames[view_index].inverse_view_projection,
+                    sizeof(view_composite_uniforms[view_index].inverse_view_projection)
+                );
+            }
+            fullscreen_ok = btbh_gpu_scene_render_fullscreen_views(
+                command,
+                "BTBH HDR Composite Views",
+                runtime->view_pipelines[BTBH_GPU_SCENE_VIEW_PIPELINE_COMPOSITE],
+                runtime->post_pong_texture,
+                false,
+                view_composite_uniforms,
+                (uint32_t)sizeof(view_composite_uniforms[0]),
+                sizeof(view_composite_uniforms[0]),
+                composite_samplers,
+                3u,
+                view_frames,
+                view_count
+            );
+        } else if (fullscreen_ok) {
             fullscreen_ok = btbh_gpu_scene_render_fullscreen(
                 command,
                 "BTBH HDR Composite",
@@ -12513,6 +13642,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
 
     /* Only an unbroken run of temporal frames reprojects; any other frame restarts the history. */
     runtime->temporal_previous_valid = temporal_active;
+    /* RFC 0014: a clipped frame of views, drawn, leaves the cascades' history behind (the next frame that runs them
+       starts a new one); a refused one, or a prewarm, keeps it. */
+    if (setup.radiance_cascades_held_for_views) {
+        btbh_gpu_radiance_cascades_runtime_invalidate_history(&runtime->radiance_cascades);
+    }
     if (temporal_active) {
         (void)memcpy(
             runtime->temporal_previous_view_projection,
@@ -12553,6 +13687,23 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->fsr3.unavailable
             ? (uint8_t)BTBH_GPU_SCENE_UPSCALE_FSR1
             : upscale_mode;
+    if (view_reports != NULL) {
+        /* RFC 0014: what each view drew, and the maps it read (UINT32_MAX without the shadow). */
+        for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+            const BTBHGPUSceneViewFrame *frame = &view_frames[view_index];
+            BTBHGPUSceneViewReport *view_report = &view_reports[view_index];
+            view_report->primitive_draw_count = frame->draw_count;
+            view_report->instance_count = frame->instance_count;
+            view_report->sun_map = shadow_enabled[0] != 0u
+                ? (frame->sun_slot != 0u ? view_index : 0u)
+                : UINT32_MAX;
+            view_report->spot_map = shadow_enabled[2] != 0u
+                ? (frame->spot_slot != 0u ? view_index : 0u)
+                : UINT32_MAX;
+            view_report->cpu_opaque_order_milliseconds = frame->order_milliseconds;
+            view_report->cpu_geometry_encode_milliseconds = (double)frame->encode_nanoseconds / 1000000.0;
+        }
+    }
     report->message[0] = '\0';
     return report->result;
 }
@@ -12592,6 +13743,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 ) {
+    BTBHGPUSceneView camera_view;
+    const bool camera_given =
+        btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
@@ -12610,10 +13764,10 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
         shader_format,
         render_width,
         render_height,
-        view_projection,
-        camera_right,
-        camera_up,
-        camera_position,
+        camera_given ? &camera_view : NULL,
+        1u,
+        false,
+        NULL,
         lighting,
         post,
         instances,
@@ -12669,6 +13823,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 ) {
+    BTBHGPUSceneView camera_view;
+    const bool camera_given =
+        btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
@@ -12687,10 +13844,10 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         shader_format,
         render_width,
         render_height,
-        view_projection,
-        camera_right,
-        camera_up,
-        camera_position,
+        camera_given ? &camera_view : NULL,
+        1u,
+        false,
+        NULL,
         lighting,
         post,
         instances,
@@ -12717,7 +13874,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
    through the present's own steps (btbh_gpu_scene_prepare_frame, btbh_gpu_scene_ensure_model_pipelines,
    btbh_gpu_scene_ensure_frame_targets), and draws nothing: for output_width x output_height (0: the window's
    drawable size, as the present's own argument). btbh_gpu_window_scene_prewarm runs it for the window's frames,
-   btbh_gpu_window_scene_prewarm_render_to_target in the window's aside runtime with a render's post settings. */
+   btbh_gpu_window_scene_prewarm_render_to_target in the window's aside runtime with a render's post settings, and
+   (RFC 0014) btbh_gpu_window_scene_prewarm_views with views (NULL for the others; checked): a clipped frame's
+   settings, its pipelines and a second view's own maps. */
 static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -12740,12 +13899,15 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     uint32_t batch_count,
     uint32_t output_width,
     uint32_t output_height,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
         return BTBH_GPU_INVALID_ARGUMENT;
     }
     (void)memset(report, 0, sizeof(*report));
+    const bool views_clipped = views != NULL && btbh_gpu_scene_views_clipped(views, view_count);
     if (window == NULL ||
         window->window == NULL ||
         window->device == NULL ||
@@ -12795,7 +13957,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, NULL, batch_count, report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, NULL, NULL, 0u, batch_count, report)) {
         return report->result;
     }
     BTBHGPUSceneFrameSetup setup;
@@ -12813,6 +13975,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             render_width,
             render_height,
             output_width,
+            views_clipped,
             lighting,
             post,
             batches,
@@ -12912,6 +14075,43 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
         free(bone_offsets);
         return report->result;
     }
+    if (views_clipped) {
+        /* RFC 0014: a clipped frame's shaders, pipelines and the second view's own maps, as the present decides them. */
+        bool own_sun = false;
+        bool own_spot = false;
+        btbh_gpu_scene_view_own_maps(views, view_count, lighting, setup.shadow_enabled, &own_sun, &own_spot);
+        if (!btbh_gpu_scene_check_view_shaders(
+                window->scene_runtime,
+                batches,
+                batch_count,
+                bone_offsets,
+                vertex_shader_path,
+                animated_vertex_shader_path,
+                post_vertex_shader_path,
+                shader_format,
+                report
+            ) ||
+            !btbh_gpu_scene_ensure_view_pipelines(
+                window,
+                &setup,
+                post_vertex_shader_path,
+                post_fragment_shader_path,
+                shader_format,
+                NULL,
+                report
+            ) ||
+            !btbh_gpu_scene_ensure_view_shadow_maps(
+                window,
+                own_sun,
+                own_spot,
+                setup.particle_shadow_active,
+                setup.particle_shadow,
+                report
+            )) {
+            free(bone_offsets);
+            return report->result;
+        }
+    }
     free(bone_offsets);
     uint32_t drawable_width = 0u;
     uint32_t drawable_height = 0u;
@@ -13009,6 +14209,148 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
         batch_count,
         0u,
         0u,
+        NULL,
+        0u,
+        report
+    );
+}
+
+/* RFC 0014 (since 0.16.0): the present with views (btbh_gpu.h). */
+BTBHGPUResult btbh_gpu_window_scene_present_views(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneViewReport *view_reports,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
+        window,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        views,
+        view_count,
+        true,
+        view_reports,
+        lighting,
+        post,
+        instances,
+        transient_instance_count,
+        logical_instance_count,
+        batches,
+        scene_visibility,
+        directional_shadow_visibility,
+        batch_count,
+        clear_red,
+        clear_green,
+        clear_blue,
+        clear_alpha,
+        0u,
+        0u,
+        NULL,
+        report
+    );
+    btbh_gpu_lazy_creation_end(&lazy_scope);
+    return result;
+}
+
+/* RFC 0014 (since 0.16.0): the prewarm for views (btbh_gpu.h): the views refused as the present refuses them, then the
+   window's prewarm with them. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (!btbh_gpu_scene_views_valid(views, view_count, 0u, report)) {
+        return report->result;
+    }
+    return btbh_gpu_scene_prewarm_internal(
+        window,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        lighting,
+        post,
+        batches,
+        batch_count,
+        0u,
+        0u,
+        views,
+        view_count,
         report
     );
 }
@@ -13386,6 +14728,8 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_to_target_internal(
         batch_count,
         target->width,
         target->height,
+        NULL,
+        0u,
         report
     );
     if (result == BTBH_GPU_OK &&
@@ -13610,6 +14954,9 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
             return report->result;
         }
     }
+    BTBHGPUSceneView camera_view;
+    const bool camera_given =
+        btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
     if (!kept) {
         /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
            update periods), no radiance-cascade history (two portraits are two pictures). A kept view's runtime
@@ -13633,10 +14980,10 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
             shader_format,
             render_width,
             render_height,
-            view_projection,
-            camera_right,
-            camera_up,
-            camera_position,
+            camera_given ? &camera_view : NULL,
+            1u,
+            false,
+            NULL,
             lighting,
             &target_post,
             instances,
@@ -14315,6 +15662,20 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
         if (window->scene_runtime->particle_transmittance_texture != NULL) {
             SDL_ReleaseGPUTexture(device, window->scene_runtime->particle_transmittance_texture);
         }
+        /* RFC 0014: the clipped passes' pipelines and a second view's own maps. */
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            window->scene_runtime->view_pipelines,
+            BTBH_GPU_SCENE_VIEW_PIPELINE_COUNT
+        );
+        for (uint32_t map = 0u; map < 2u; ++map) {
+            if (window->scene_runtime->view_shadow_textures[map] != NULL) {
+                SDL_ReleaseGPUTexture(device, window->scene_runtime->view_shadow_textures[map]);
+            }
+        }
+        if (window->scene_runtime->view_particle_transmittance_texture != NULL) {
+            SDL_ReleaseGPUTexture(device, window->scene_runtime->view_particle_transmittance_texture);
+        }
         if (window->scene_runtime->refraction_texture != NULL) {
             SDL_ReleaseGPUTexture(
                 device,
@@ -14696,6 +16057,8 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     free(window->scene_runtime->opaque_order);
     free(window->scene_runtime->opaque_geometry_base);
     free(window->scene_runtime->opaque_order_keys);
+    free(window->scene_runtime->view_opaque_order);
+    free(window->scene_runtime->view_visibility);
     free(window->scene_runtime->run_verify);
     for (uint32_t check = 0u; check < BTBH_GPU_SCENE_SHADER_CHECK_CAPACITY; ++check) {
         free(window->scene_runtime->scene_shader_checks[check].path);

@@ -47,9 +47,35 @@ cbuffer PostUniforms : register(b0, space3)
     // share of the indirect light it occludes, w the share of that direct light keeps
     float4 ao_controls;
     // The reflections' hits (since 0.10.0): x 1 for BTBH_GPU_SCENE_POST_SSR_FACING_HITS (screen_space_reflection);
-    // yzw 0
+    // yzw (RFC 0014, since 0.16.0) the view's half of the frame as a plane in UV units (view_own_side), all zero with
+    // one view
     float4 ssr_hit_options;
 };
+
+// RFC 0014 (scene views, since 0.16.0): whether a pixel's or texel's centre (UV units) lies in the view's half of the
+// frame, ssr_hit_options.yzw as a plane (all zero with one view: always), for a read of what the passes wrote there.
+// They draw each view clipped to its half widened by a quarter of a render pixel (inverse_resolution), so what lies
+// within a quarter pixel of the line was drawn by both views, the second last: a read takes only what lies 3/8 of a
+// render pixel or more inside the view's own line, which the other view never drew (a quarter, and an eighth for the
+// rasterizer's rounding). A sample elsewhere counts for nothing.
+bool view_own_side(float2 uv)
+{
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.625f * length(ssr_hit_options.yz * inverse_resolution);
+}
+
+// RFC 0014: whether a texel's centre lies where the view drew (its half widened, the band by the line too): the
+// occlusion's last resort at a pixel in that band whose four texels all lie within it (depth_aware_upsample).
+bool view_drawn_side(float2 uv)
+{
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.0f;
+}
+
+// RFC 0014: the same for a filtered read at uv (a bilinear tap reaches a texel each way): on the view's half by
+// `margin` texels (texel: one texel in UV units), so that none of its texels lies across the line. Always with one view.
+bool view_own_side_by(float2 uv, float2 texel, float margin)
+{
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= margin * length(ssr_hit_options.yz * texel);
+}
 
 struct FragmentInput
 {
@@ -139,6 +165,8 @@ int2 representative_full_pixel(
         full_resolution - 1
     );
     selected_depth = sample_depth_at(selected_pixel);
+    // RFC 0014: one of the view's own half (the first such when the first pixel lies across the line).
+    bool own = view_own_side((float2(selected_pixel) + 0.5f) * inverse_resolution);
     const bool use_maximum =
         ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
@@ -149,12 +177,18 @@ int2 representative_full_pixel(
             int2(0, 0),
             full_resolution - 1
         );
+        if (!view_own_side((float2(candidate_pixel) + 0.5f) * inverse_resolution))
+        {
+            continue;
+        }
         const float candidate_depth = sample_depth_at(candidate_pixel);
-        if ((use_maximum && candidate_depth > selected_depth) ||
+        if (!own ||
+            (use_maximum && candidate_depth > selected_depth) ||
             (!use_maximum && candidate_depth < selected_depth))
         {
             selected_pixel = candidate_pixel;
             selected_depth = candidate_depth;
+            own = true;
         }
     }
     return selected_pixel;
@@ -219,9 +253,33 @@ float depth_aware_upsample(float2 uv)
         max(normal_dot_view, 0.05f) / depth_edge_tolerance;
     float result = 0.0f;
     float weight_sum = 0.0f;
+    // RFC 0014: a texel of the other view's half counts for nothing, nor one by the line, which both views drew (the
+    // second last). A pixel in that band whose four texels all lie within it takes those its view drew: the second
+    // view's are its own, and such a pixel of the first view's is the second's to draw over.
+    bool own[4];
+    bool any_own = false;
     [unroll]
     for (int index = 0; index < 4; ++index)
     {
+        own[index] = view_own_side((float2(coordinates[index]) + 0.5f) / ssao_resolution);
+        any_own = any_own || own[index];
+    }
+    if (!any_own)
+    {
+        [unroll]
+        for (int index = 0; index < 4; ++index)
+        {
+            own[index] = view_drawn_side((float2(coordinates[index]) + 0.5f) / ssao_resolution);
+            any_own = any_own || own[index];
+        }
+    }
+    [unroll]
+    for (int index = 0; index < 4; ++index)
+    {
+        if (!own[index])
+        {
+            continue;
+        }
         float sample_depth;
         const int2 sample_pixel = representative_full_pixel(
             coordinates[index],
@@ -237,6 +295,10 @@ float depth_aware_upsample(float2 uv)
         result += sample_ssao_at(coordinates[index], ssao_resolution) *
             weights[index];
         weight_sum += weights[index];
+    }
+    if (!any_own)
+    {
+        return 1.0f;
     }
     return saturate(result / max(weight_sum, 0.00001f));
 }
@@ -267,6 +329,15 @@ float3 flat_surface_normal(float3 normal)
         return float3(normal.x / across, 0.0f, normal.z / across);
     }
     return normal;
+}
+
+// A rough reflection's blur tap: the scene at uv, or (RFC 0014) the hit's own colour where the tap would read the other
+// view's half.
+float3 blurred_reflection(float2 uv, float3 centre)
+{
+    return view_own_side_by(uv, inverse_resolution, 1.5f)
+        ? scene_texture.SampleLevel(scene_sampler, uv, 0.0f).rgb
+        : centre;
 }
 
 float2 clip_to_uv(float4 clip)
@@ -333,7 +404,10 @@ float3 screen_space_reflection(
             break;
         }
         const float2 sample_uv = clip_to_uv(clip);
-        if (any(sample_uv <= 0.0f) || any(sample_uv >= 1.0f))
+        // (RFC 0014: and before the line between two views, as at the screen's edge: its filtered reads of the depth,
+        // and the hit's of the scene, stay on the view's half.)
+        if (any(sample_uv <= 0.0f) || any(sample_uv >= 1.0f) ||
+            !view_own_side_by(sample_uv, inverse_resolution, 1.5f))
         {
             break;
         }
@@ -404,21 +478,27 @@ float3 screen_space_reflection(
         return float3(0.0f, 0.0f, 0.0f);
     }
     const float2 edge = min(hit_uv, 1.0f - hit_uv);
-    const float fade =
+    float fade =
         saturate(min(edge.x, edge.y) * 12.0f) *
         (1.0f - smoothstep(0.6f, 1.0f, t / ssr_controls.z)) *
         (1.0f - smoothstep(max_roughness * 0.5f, max_roughness, roughness));
+    if (any(ssr_hit_options.yz != 0.0f))
+    {
+        // RFC 0014: a hit near the line between two views fades as one near the screen's edge does.
+        fade *= saturate(dot(ssr_hit_options.yzw, float3(hit_uv, 1.0f)) / length(ssr_hit_options.yz) * 12.0f);
+    }
     // Rough surfaces blur what they reflect, the more the farther the hit.
     const float blur = min(roughness * t * 0.004f, 0.012f);
     float3 reflected = scene_texture.SampleLevel(scene_sampler, hit_uv, 0.0f).rgb;
     if (blur > 0.0005f)
     {
+        const float3 centre_reflection = reflected;
         reflected = (
-            reflected * 2.0f +
-            scene_texture.SampleLevel(scene_sampler, hit_uv + float2(blur, 0.0f), 0.0f).rgb +
-            scene_texture.SampleLevel(scene_sampler, hit_uv - float2(blur, 0.0f), 0.0f).rgb +
-            scene_texture.SampleLevel(scene_sampler, hit_uv + float2(0.0f, blur), 0.0f).rgb +
-            scene_texture.SampleLevel(scene_sampler, hit_uv - float2(0.0f, blur), 0.0f).rgb
+            centre_reflection * 2.0f +
+            blurred_reflection(hit_uv + float2(blur, 0.0f), centre_reflection) +
+            blurred_reflection(hit_uv - float2(blur, 0.0f), centre_reflection) +
+            blurred_reflection(hit_uv + float2(0.0f, blur), centre_reflection) +
+            blurred_reflection(hit_uv - float2(0.0f, blur), centre_reflection)
         ) / 6.0f;
     }
     float3 f0 = float3(0.04f, 0.04f, 0.04f);

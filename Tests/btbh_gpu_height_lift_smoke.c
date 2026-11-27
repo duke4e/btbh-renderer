@@ -27,6 +27,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_height_lift.h"
 
@@ -1194,7 +1195,7 @@ static void check_refusals(SmokeWindow *smoke, SmokeWindow *other) {
         build_scene(smoke, &sun, MODE_FLAT, &scene);
         BTBHGPUSceneReport report;
         memset(&report, 0, sizeof(report));
-        assert(btbh_gpu_window_scene_present_instances(smoke->window,
+        assert(smoke_present_instances(smoke->window,
             shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
             shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
             shaders.paths[8], shaders.paths[9], shaders.paths[10],

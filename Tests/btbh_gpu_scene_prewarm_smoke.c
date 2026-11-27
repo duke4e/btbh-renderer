@@ -27,6 +27,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
@@ -611,7 +612,7 @@ static BTBHGPUResult present_frame(
     smoke_instances(instances, frame);
     BTBHGPUSceneGeometryBatch batches[ALL_BATCH_COUNT];
     const uint32_t batch_count = smoke_batches(smoke, frame, batches);
-    return btbh_gpu_window_scene_present_instances(
+    return smoke_present_instances(
         smoke->window,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
@@ -1476,7 +1477,7 @@ int main(void) {
         BTBHGPUSceneGeometryBatch batches[ALL_BATCH_COUNT];
         const uint32_t batch_count = smoke_batches(&b, EFFECT_FRAME, batches);
         const BTBHGPUCreationStats before_present = creation_stats();
-        assert(btbh_gpu_window_scene_present_instances(
+        assert(smoke_present_instances(
             b.window,
             shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
             shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],

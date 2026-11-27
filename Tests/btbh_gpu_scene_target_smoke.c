@@ -25,6 +25,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_smoke_meshes.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
@@ -404,7 +405,7 @@ static BTBHGPUResult present_world(
     instance(instances[0], 0.0f, -0.55f, 0.0f, 8.0f, 0.1f, 8.0f, grey);
     instance(instances[1], 0.0f, 0.5f, 0.0f, 1.0f, 1.0f, 1.0f, red);
     const BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube, 0u, 2u);
-    return btbh_gpu_window_scene_present_instances(
+    return smoke_present_instances(
         smoke->window,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
@@ -1400,7 +1401,7 @@ int main(void) {
         batch.reactive_mode = BTBH_GPU_SCENE_REACTIVE_NONE;
         for (uint32_t mode = BTBH_GPU_SCENE_REACTIVE_NONE; mode <= BTBH_GPU_SCENE_REACTIVE_COUNT; ++mode) {
             batch.reactive_mode = (uint8_t)mode;
-            result = btbh_gpu_window_scene_present_instances(
+            result = smoke_present_instances(
                 a.window,
                 shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
                 shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],

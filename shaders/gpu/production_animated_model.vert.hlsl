@@ -70,6 +70,10 @@ struct VertexOutput
     nointerpolation float animated_model : TEXCOORD8;
     float4 motion_clip_xy : TEXCOORD9;
     float2 motion_clip_w : TEXCOORD10;
+#if !BTBH_RC_SOURCE_PROJECTION
+    // RFC 0014: a scene view's half of the frame (production_model.vert.hlsl).
+    float clip_distance : SV_ClipDistance0;
+#endif
 };
 
 // Only a zero vector takes the fallback: a normal through the cofactor of an instance at the city's 0.002 scale
@@ -185,6 +189,10 @@ VertexOutput main(VertexInput input, uint instance_id : SV_InstanceID)
     output.motion_clip_w = float2(0.0f, 0.0f);
 #else
     output.position = mul(view_projection, float4(btbh_world_bend(world_position.xyz, world_curvature), 1.0f));
+    // RFC 0014: the view's half (surface_controls.yzw, production_model.vert.hlsl); all zero draws every point.
+    output.clip_distance = any(surface_controls.yzw != 0.0f)
+        ? dot(surface_controls.yzw, output.position.xyw)
+        : 1.0f;
     float3 previous_world_position = world_position.xyz;
     if (temporal_controls.w > 0.5f)
     {
