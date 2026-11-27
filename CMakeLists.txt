@@ -818,6 +818,30 @@ if(BTBH_BUILD_GPU_SPIKE)
             COMMAND btbh_gpu_animation_math_test
         )
 
+        # The decoded animation sampler (0.16.0) against v0.15.0's cgltf reads, bit for bit, and the kept palettes.
+        add_executable(btbh_gpu_animation_sampler_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_animation_sampler_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_animation_sampler_test
+            PRIVATE
+                "${BTBH_RENDERER_ROOT}/src/gpu"
+                "${BTBH_RENDERER_ROOT}/external/raylib/src/external"
+        )
+        target_compile_definitions(
+            btbh_gpu_animation_sampler_test
+            PRIVATE
+                BTBH_GPU_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_animation_sampler_test
+            PRIVATE btbh_gpu SDL3::SDL3-static
+        )
+        add_test(
+            NAME btbh_gpu_animation_sampler
+            COMMAND btbh_gpu_animation_sampler_test
+        )
+
         add_executable(btbh_gpu_model_orm_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_model_orm_test.c"
         )
@@ -1486,6 +1510,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         add_dependencies(btbh_gpu_target_view_bench btbh_gpu_shaders)
+
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
