@@ -1103,6 +1103,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_target_view_smoke COMMAND btbh_gpu_scene_target_view_smoke)
         set_tests_properties(btbh_gpu_scene_target_view_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # Scene views (btbh_gpu_window_scene_present_views, RFC 0014 phase 1, since 0.16.0): one view byte for byte as the
+        # present, vertical and diagonal splits against their views joined, taps kept to their side, shared and own
+        # shadow maps taking turns, the per-view report, the FSR 3 and cascades fallbacks and the refusals; hidden windows.
+        add_executable(btbh_gpu_scene_views_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_views_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_views_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_views_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_views_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_views_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_views_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_views_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_views_smoke COMMAND btbh_gpu_scene_views_smoke)
+        set_tests_properties(btbh_gpu_scene_views_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).
         add_executable(btbh_gpu_font_smoke
@@ -1487,6 +1519,35 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         add_dependencies(btbh_gpu_target_view_bench btbh_gpu_shaders)
+
+        # A measurement, not a test (0.16.0, RFC 0014): scene views at 4K against one view and against 0.15.0's way of
+        # drawing a split (a present and a target view, composed); see the file.
+        add_executable(btbh_gpu_scene_views_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_views_bench.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_views_bench
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_views_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_views_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_views_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_views_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_views_bench btbh_gpu_shaders)
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.

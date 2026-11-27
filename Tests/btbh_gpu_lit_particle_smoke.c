@@ -51,6 +51,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_particle.h"
 #include "btbh_gpu_smoke_runs_verify.h"
@@ -1983,7 +1984,7 @@ static void check_prewarm(SmokeWindow *fresh) {
             quad->transparency_enabled = 0u;
             quad->surface_parameters0[0] = 0.0f;
             memset(&report, 0, sizeof(report));
-            const BTBHGPUResult plain_result = btbh_gpu_window_scene_present_instances(fresh->window,
+            const BTBHGPUResult plain_result = smoke_present_instances(fresh->window,
                 shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
                 shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
                 shaders.paths[8], shaders.paths[9], shaders.paths[10],
@@ -2013,7 +2014,7 @@ static void check_prewarm(SmokeWindow *fresh) {
         const BTBHGPUCreationStats after_window_prewarm = creation_stats();
         for (int frame = 0; frame < 2; ++frame) {
             memset(&report, 0, sizeof(report));
-            const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(fresh->window,
+            const BTBHGPUResult result = smoke_present_instances(fresh->window,
                 shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
                 shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
                 shaders.paths[8], shaders.paths[9], shaders.paths[10],
@@ -3014,7 +3015,7 @@ static void check_particle_shadow_prewarm(SmokeWindow *fresh) {
         BTBHGPUSceneReport report;
         memset(&report, 0, sizeof(report));
         const Scene *scene = &drawn->scene;
-        const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(fresh->window,
+        const BTBHGPUResult result = smoke_present_instances(fresh->window,
             shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3],
             shaders.paths[4], shaders.paths[5], shaders.paths[6], shaders.paths[7],
             shaders.paths[8], shaders.paths[9], shaders.paths[10],

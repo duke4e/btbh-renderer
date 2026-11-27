@@ -43,6 +43,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
 #include "btbh_gpu_smoke_runs_verify.h"
@@ -836,7 +837,7 @@ static uint8_t *render(SmokeWindow *smoke, const Scene *scene) {
 static BTBHGPUSceneTelemetryReport present(SmokeWindow *smoke, const Scene *scene) {
     BTBHGPUSceneReport report;
     memset(&report, 0, sizeof(report));
-    const BTBHGPUResult presented = btbh_gpu_window_scene_present_instances(smoke->window,
+    const BTBHGPUResult presented = smoke_present_instances(smoke->window,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
         shader_paths[8], shader_paths[9], shader_paths[10],

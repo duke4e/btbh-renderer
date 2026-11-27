@@ -134,6 +134,35 @@ _Static_assert(BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW == 1 && BTBH_GPU_SCENE_BATCH_K
 _Static_assert(BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO == 1 && BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY == 2,
     "the post flags' bits");
 _Static_assert(sizeof(((BTBHGPUScenePost *)0)->flags) == 1u, "the post flags are a byte");
+/* RFC 0014 (0.16.0): the scene views' structs (bindgen and Swift read them), the constant, the flag and the cascades'
+   fallback reason, appended. */
+#if UINTPTR_MAX == UINT64_MAX
+_Static_assert(sizeof(BTBHGPUSceneView) == 144u, "BTBHGPUSceneView is 144 bytes");
+_Static_assert(offsetof(BTBHGPUSceneView, view_projection) == 0u, "view_projection");
+_Static_assert(offsetof(BTBHGPUSceneView, right) == 64u, "right");
+_Static_assert(offsetof(BTBHGPUSceneView, up) == 76u, "up");
+_Static_assert(offsetof(BTBHGPUSceneView, position) == 88u, "position");
+_Static_assert(offsetof(BTBHGPUSceneView, clip) == 100u, "clip");
+_Static_assert(offsetof(BTBHGPUSceneView, visibility) == 112u, "visibility");
+_Static_assert(offsetof(BTBHGPUSceneView, shadow_visibility) == 120u, "shadow_visibility");
+_Static_assert(offsetof(BTBHGPUSceneView, lighting) == 128u, "lighting");
+_Static_assert(offsetof(BTBHGPUSceneView, flags) == 136u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneView, reserved) == 140u, "reserved");
+#endif
+_Static_assert(sizeof(BTBHGPUSceneViewReport) == 32u, "BTBHGPUSceneViewReport is 32 bytes");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, primitive_draw_count) == 0u, "primitive_draw_count");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, instance_count) == 4u, "instance_count");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, sun_map) == 8u, "sun_map");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, spot_map) == 12u, "spot_map");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, cpu_opaque_order_milliseconds) == 16u, "the order's time");
+_Static_assert(offsetof(BTBHGPUSceneViewReport, cpu_geometry_encode_milliseconds) == 24u, "the encode's time");
+_Static_assert(BTBH_GPU_SCENE_MAX_VIEWS == 2u, "two views");
+_Static_assert(BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET == 1u, "the cut is bit 0");
+_Static_assert(BTBH_GPU_SCENE_RC_FALLBACK_VIEWS == 8, "the views' fallback reason is appended after 7");
+_Static_assert(BTBH_GPU_SCENE_RC_FALLBACK_INVALID_CONFIGURATION == 7, "the reasons before it keep their values");
+#if !defined(BTBH_GPU_SCENE_HAS_VIEWS)
+#error "BTBH_GPU_SCENE_HAS_VIEWS is defined with the views"
+#endif
 #if !defined(BTBH_GPU_SCENE_HAS_BATCH_NO_RC_SOURCE) || !defined(BTBH_GPU_SCENE_HAS_ADDITIVE_CASCADES_KEEP_HBAO) ||     !defined(BTBH_GPU_SCENE_HAS_SSR_SURFACE_REFLECTIVITY) || !defined(BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM)
 #error "0.9.0's HAS_ macros are defined with their features"
 #endif
@@ -499,6 +528,76 @@ static void check_run_key(void) {
         breaking, keeping);
 }
 
+/* RFC 0014: a view's clip line, in output pixels, as the planes its passes test (btbh_gpu_scene_view_planes): a point
+   on the view's side of the line in pixels is on its side in clip space and in UV units, at any render size; the line
+   is widened by a quarter of a render pixel; a zero clip gives zero planes. */
+static float clip_side(const float plane[4], float x, float y, float width, float height) {
+    const float x_ndc = 2.0f * x / width - 1.0f;
+    const float y_ndc = 1.0f - 2.0f * y / height;
+    /* (w = 1, and any w > 0 keeps the sign.) */
+    return plane[0] * x_ndc + plane[1] * y_ndc + plane[2];
+}
+
+static float uv_side(const float plane[4], float x, float y, float width, float height) {
+    return plane[1] * (x / width) + plane[2] * (y / height) + plane[3];
+}
+
+static void check_view_planes(void) {
+    float clip_plane[4];
+    float uv_plane[4];
+    const float zero[3] = {0.0f, 0.0f, 0.0f};
+    btbh_gpu_scene_view_planes(zero, 1920u, 1080u, 1920u, 1080u, clip_plane, uv_plane);
+    for (int index = 0; index < 4; ++index) {
+        assert(clip_plane[index] == 0.0f && uv_plane[index] == 0.0f);
+    }
+    /* A vertical split at x = 960 of a 1920 x 1080 frame rendered at 1280 x 720: the right half (1, 0, -960). The
+       widening is a quarter of a render pixel, 0.375 output pixels. */
+    const float right[3] = {1.0f, 0.0f, -960.0f};
+    btbh_gpu_scene_view_planes(right, 1920u, 1080u, 1280u, 720u, clip_plane, uv_plane);
+    assert(clip_plane[3] == 0.0f && uv_plane[0] == 0.0f);
+    assert(fabsf(clip_side(clip_plane, 961.0f, 500.0f, 1920.0f, 1080.0f) - (1.0f + 0.375f)) < 1.0e-3f);
+    assert(clip_side(clip_plane, 959.7f, 10.0f, 1920.0f, 1080.0f) > 0.0f);
+    assert(clip_side(clip_plane, 959.5f, 10.0f, 1920.0f, 1080.0f) < 0.0f);
+    assert(fabsf(uv_side(uv_plane, 961.0f, 500.0f, 1920.0f, 1080.0f) - 1.375f) < 1.0e-3f);
+    /* The complementary half overlaps it by half a render pixel (0.75 output pixels) across the line. */
+    const float left[3] = {-1.0f, 0.0f, 960.0f};
+    float left_clip[4];
+    float left_uv[4];
+    btbh_gpu_scene_view_planes(left, 1920u, 1080u, 1280u, 720u, left_clip, left_uv);
+    for (float x = 950.0f; x < 970.0f; x += 0.0625f) {
+        const bool in_right = clip_side(clip_plane, x, 300.0f, 1920.0f, 1080.0f) >= 0.0f;
+        const bool in_left = clip_side(left_clip, x, 300.0f, 1920.0f, 1080.0f) >= 0.0f;
+        assert(in_right || in_left);
+        if (fabsf(fabsf(x - 960.0f) - 0.375f) < 0.01f) {
+            /* (On the widened edge itself float rounding decides.) */
+            continue;
+        }
+        assert((in_right && in_left) == (fabsf(x - 960.0f) < 0.375f));
+        assert(in_right == (uv_side(uv_plane, x, 300.0f, 1920.0f, 1080.0f) >= 0.0f));
+        assert(in_left == (uv_side(left_uv, x, 300.0f, 1920.0f, 1080.0f) >= 0.0f));
+    }
+    /* A diagonal at 30 degrees through the middle: away from the line, the same side in pixels, clip space and UV
+       units. */
+    const float c = cosf(0.5235988f);
+    const float s = sinf(0.5235988f);
+    const float diagonal[3] = {c, s, -(c * 960.0f + s * 540.0f)};
+    btbh_gpu_scene_view_planes(diagonal, 1920u, 1080u, 1920u, 1080u, clip_plane, uv_plane);
+    for (float y = 0.5f; y < 1080.0f; y += 37.0f) {
+        for (float x = 0.5f; x < 1920.0f; x += 41.0f) {
+            const float pixels = diagonal[0] * x + diagonal[1] * y + diagonal[2];
+            if (fabsf(pixels) < 0.5f) {
+                continue;
+            }
+            assert((pixels >= 0.0f) == (clip_side(clip_plane, x, y, 1920.0f, 1080.0f) >= 0.0f));
+            assert((pixels >= 0.0f) == (uv_side(uv_plane, x, y, 1920.0f, 1080.0f) >= 0.0f));
+        }
+    }
+    /* A fifth of a pixel out across the line (along its normal), still in; a third of a pixel out, not. */
+    assert(clip_side(clip_plane, 960.0f - 0.2f * c, 540.0f - 0.2f * s, 1920.0f, 1080.0f) > 0.0f);
+    assert(clip_side(clip_plane, 960.0f - 0.33f * c, 540.0f - 0.33f * s, 1920.0f, 1080.0f) < 0.0f);
+    printf("scene views: the clip line as planes in clip space and UV units, widened by a quarter render pixel\n");
+}
+
 int main(void) {
     memset(&model, 0, sizeof(model));
     model.minimum[0] = -1.0f;
@@ -778,6 +877,7 @@ int main(void) {
     }
 
     check_run_key();
+    check_view_planes();
 
     printf("scene opaque order test passed\n");
     return 0;

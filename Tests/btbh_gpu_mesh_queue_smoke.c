@@ -34,6 +34,7 @@
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
+#include "btbh_gpu_smoke_present.h"
 #include "btbh_gpu_internal.h"
 
 #include <SDL3/SDL_gpu.h>
@@ -412,7 +413,7 @@ static uint8_t *reference(SmokeWindow *smoke, const MeshData *data) {
 
 static BTBHGPUResult try_present(SmokeWindow *smoke, const Scene *scene, BTBHGPUSceneReport *report) {
     memset(report, 0, sizeof(*report));
-    return btbh_gpu_window_scene_present_instances(smoke->window,
+    return smoke_present_instances(smoke->window,
         shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
         shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
         shader_paths[8], shader_paths[9], shader_paths[10],
@@ -1339,7 +1340,7 @@ static void run_bench(SmokeWindow *smoke) {
                 const uint64_t present_started = SDL_GetTicksNS();
                 BTBHGPUSceneReport report;
                 memset(&report, 0, sizeof(report));
-                const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(smoke->window,
+                const BTBHGPUResult result = smoke_present_instances(smoke->window,
                     shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
                     shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
                     shader_paths[8], shader_paths[9], shader_paths[10],
@@ -1485,7 +1486,7 @@ static void run_upload_bench(SmokeWindow *smoke) {
                 const uint64_t present_started = SDL_GetTicksNS();
                 BTBHGPUSceneReport report;
                 memset(&report, 0, sizeof(report));
-                const BTBHGPUResult result = btbh_gpu_window_scene_present_instances(smoke->window,
+                const BTBHGPUResult result = smoke_present_instances(smoke->window,
                     shader_paths[0], shader_paths[1], shader_paths[2], shader_paths[3],
                     shader_paths[4], shader_paths[5], shader_paths[6], shader_paths[7],
                     shader_paths[8], shader_paths[9], shader_paths[10],
