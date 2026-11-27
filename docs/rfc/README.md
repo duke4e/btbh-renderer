@@ -35,6 +35,7 @@ anything breaking. Small additive changes do not need one; an issue is enough (s
 | [0012](0012-vertex-height-lift.md) | A vertex-stage height lift from a heightfield, per batch, in vertex shader variants of its own (`height_lift`); custom-mesh updates queued into the frame | Phase 1 implemented in v0.11.0; phase 2 only if asked | Be The Bullet Hell v2 |
 | [0013](0013-lit-particles.md) | Lit particles: a see-through surface lit per pixel with a normal and thickness map, soft and near fades, a UV rect per instance (`LIT_PARTICLE`, `INSTANCE_UV_RECT`); a transmittance map in sun space (phase 2) | Phase 1 implemented in v0.11.0; phase 2 in v0.14.0 | Be The Bullet Hell v2 |
 | [0014](0014-scene-views.md) | Scene views: two cameras in one present, each clipped to a half-plane of the frame (`btbh_gpu_window_scene_present_views`), shared shadows and post, one FSR 3 history | Accepted 2026-11-27; phase 1 next (0.15.0's target views are the interim) | Be The Bullet Hell v2 |
+| [0015](0015-frame-thread.md) | A frame thread: the renderer records and submits a frame while the host builds the next (`btbh_gpu_window_frame_thread_start`, `frame_submit`, copies at the call) | Accepted 2026-11-27 (design b); phase 1a after 0.16.0 | Be The Bullet Hell v2 |
 
 CHIMERA's map-look note (`RTS/docs/v2/izgled-mapa.md` §9, branch `v2-izgled`) made six proposals. Three became
 the RFCs above. The other three need none:
