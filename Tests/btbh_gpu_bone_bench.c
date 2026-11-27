@@ -15,8 +15,8 @@
  * Output per mode: the median, 10th and 90th percentiles over the frames of the present's
  * cpu_prepare_bone_sample_milliseconds (the palettes) and cpu_prepare_bones_milliseconds (the bones step as the scene
  * telemetry times it, its shader checks included), and the samples, bone matrices and (0.16.0 on) palettes copied from
- * the kept ones a frame. It builds against 0.15.0's headers too, for a before and after. With no device it is skipped
- * (77). */
+ * the kept ones a frame, and what the window's kept palettes hold at the end. It builds against 0.15.0's headers too,
+ * for a before and after. With no device it is skipped (77). */
 #include "btbh_gpu/btbh_gpu.h"
 #include "btbh_gpu_internal.h"
 #include "btbh_gpu_package_internal.h"
@@ -484,6 +484,14 @@ static int run_mode(BTBHGPUDevice *device, const char *path, const char *mode, u
             bones_p50, bones_p10, bones_p90, count_p50, allocate_p50,
             (double)samples.animation_samples / (double)count, (double)samples.bone_matrices / (double)count,
             (double)samples.palette_hits / (double)count);
+#if defined(BTBH_GPU_HAS_BONE_PALETTE_CACHE)
+        uint32_t kept = 0u;
+        size_t kept_matrices = 0u;
+        size_t kept_bytes = 0u;
+        btbh_gpu_bone_palette_cache_read(bench.window->bone_palette_cache, &kept, &kept_matrices, &kept_bytes);
+        printf("        kept palettes at the end: %u (%zu matrices), %zu bytes held\n", kept, kept_matrices,
+            kept_bytes);
+#endif
     }
     free(samples.allocate_milliseconds);
     free(samples.count_milliseconds);
