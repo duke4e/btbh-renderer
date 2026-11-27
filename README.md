@@ -19,5 +19,15 @@ build with `-DBTBH_BUILD_GPU_SPIKE=ON -DBTBH_BUILD_GPU_NATIVE_TESTS=ON -DR3D_ASS
 (not every test source is committed) and run with `ctest`;
 Swift tests run through `.diagnostics/run-renderer-swift-test.ps1`.
 
+CMake options (all `OFF` by default):
+
+- `BTBH_BUILD_GPU_SPIKE`: the production shaders, the native library (`btbh_gpu`) and SDL.
+- `BTBH_BUILD_GPU_NATIVE_TESTS`: the native tests and benches (with `BTBH_BUILD_GPU_SPIKE`).
+- `BTBH_BUILD_GPU_PACKAGE_RUNTIME`: the native dependencies of the Swift GPU package.
+- `R3D_ASSIMP_VENDORED`: Assimp from `external/assimp` instead of the system's.
+- `BTBH_SDL_DEBUG_INFO` (since 0.16.0): SDL's objects carry their debug info inside them in every configuration
+  (`/Z7` on MSVC, `-g` elsewhere), so a sampling profiler names SDL's functions from `SDL3-static.lib` alone, without a
+  PDB. It changes no code: the objects' code is the same as without it, only larger files.
+
 The repository started as a fork of [r3d](https://github.com/Bigfoot71/r3d) (zlib, see
 `LICENSE`). The raylib/r3d OpenGL renderer has been removed.

@@ -42,6 +42,13 @@ option(
     "Build native dependencies for the production Swift GPU package"
     OFF
 )
+# Since 0.16.0: SDL's objects carry their debug info inside them (/Z7 on MSVC, -g elsewhere) in every configuration,
+# so that a sampling profiler names SDL's functions from SDL3-static.lib alone. The code is the same either way.
+option(
+    BTBH_SDL_DEBUG_INFO
+    "Compile SDL with debug info embedded in its objects (/Z7 on MSVC, -g elsewhere), in every configuration"
+    OFF
+)
 
 if(APPLE AND BTBH_BUILD_GPU_PACKAGE_RUNTIME)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -141,11 +148,36 @@ if(BTBH_BUILD_GPU_SPIKE OR BTBH_BUILD_GPU_PACKAGE_RUNTIME)
     set(SDL_TESTS OFF CACHE BOOL "" FORCE)
     set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
     set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+    if(BTBH_SDL_DEBUG_INFO AND MSVC)
+        # SDL's directory takes its flags from here: without the configurations' own debug info flags (/Zi in Debug
+        # and RelWithDebInfo, which writes a separate PDB), restored below for everything else.
+        set(_btbh_sdl_flag_variables)
+        foreach(_btbh_language C CXX)
+            foreach(_btbh_config DEBUG RELEASE MINSIZEREL RELWITHDEBINFO)
+                list(APPEND _btbh_sdl_flag_variables CMAKE_${_btbh_language}_FLAGS_${_btbh_config})
+            endforeach()
+        endforeach()
+        foreach(_btbh_variable IN LISTS _btbh_sdl_flag_variables)
+            set(_btbh_saved_${_btbh_variable} "${${_btbh_variable}}")
+            string(REGEX REPLACE "(^| )[/-]Z[7iI]( |$)" " " ${_btbh_variable} "${${_btbh_variable}}")
+        endforeach()
+    endif()
     add_subdirectory(
         "${BTBH_RENDERER_ROOT}/external/SDL"
         "${CMAKE_CURRENT_BINARY_DIR}/external/SDL"
         EXCLUDE_FROM_ALL
     )
+    if(BTBH_SDL_DEBUG_INFO)
+        if(MSVC)
+            foreach(_btbh_variable IN LISTS _btbh_sdl_flag_variables)
+                set(${_btbh_variable} "${_btbh_saved_${_btbh_variable}}")
+            endforeach()
+            target_compile_options(SDL3-static PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/Z7>")
+        else()
+            target_compile_options(SDL3-static PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX,OBJC>:-g>")
+        endif()
+        message(STATUS "BTBH_SDL_DEBUG_INFO: SDL3-static's objects carry their debug info")
+    endif()
 endif()
 
 # ========================================
