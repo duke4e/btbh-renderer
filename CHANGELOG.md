@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-27
+
+0.15.0: three additions for Be The Bullet Hell v2's local co-op split screen, all opt-in. A render to a target can now
+keep a runtime of its own between calls and shade only a rect (target views), the window opens every gamepad into a
+roster of slots, and `btbh_gpu_window_scene_set_shadow_update_periods` is declared in `btbh_gpu.h`. No shader changed
+(the 78 built ones are 0.14.2's), and nothing that existed changes what it does: every image of the renderer's
+smokes is byte for byte 0.14.2's. A host that declared the shadow-period setter itself drops its declaration.
+
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on the merged release: `check.ps1` 44/44 (0.14.2's 42, the
+roster test and the target view smoke), the Swift suite 306 tests (2 skipped, 0 failures), and identity against
+0.14.2 in four modes (plain, shared meshes, no runs, runs verified): 421 images a mode, 0 px different, 0 run-verify
+mismatches. A review of the target views found two low defects, fixed before the candidate.
+
+Be The Bullet Hell v2 tested the candidate (`ef581705`) and adopted all three, on its main at `fc850012`. Its
+workspace (1295 tests) and its UI tour, text, pad and replay checks pass.
+- No pipeline is made after frame 1 at High by day and night or on the Deck preset; what is made later is 0.14.2's.
+  Prewarming view 1 with its rect during a two-player stage's load took the first split frame from about 50 pipelines
+  (27 ms with a warm driver cache, 172 ms cold) to 6 (3.5 ms), variants its prewarm doesn't cover yet.
+- Unsplit, six scenes three times each: every capture has 0.14.2's hash.
+- The split at 4K High (one view 10.2-10.4 ms): the second view as 0.14.2 drew it (0.5 into 0.75, whole) gave a
+  12.9-13.2 ms frame. On view 1 with player 2's rect it is 12.0-12.2 ms at the same size, and at full size 15.4 ms,
+  3.2 ms less of the second view's 8.3. v2 now renders it at 0.67 inside the rect, in 13.1 ms: 1.8 times the old
+  pixels for the same cost. Keeping the view saves about 0.01 ms at v2's sun period of 2. The Deck preset is
+  CPU-bound on that PC (3.5-3.8 ms a split frame either way).
+- The rect's band: grown 96 px past the divider at 2160 lines, the AO band is gone and no seam shows by day or night;
+  bloom's tail stays at 1-2 levels to about 350 px.
+- Pads (SDL's virtual ones): identity per slot, presses between frames, rumble per slot, and a pad unplugged and
+  plugged back into its slot all work.
+
 ### Added
 - **A gamepad roster: the window opens every pad, each in a slot** (`BTBH_GPU_WINDOW_HAS_GAMEPAD_ROSTER`), for Be The
   Bullet Hell v2's local co-op split screen. Until now the window opened only the first pad SDL listed, and when that
@@ -118,6 +147,15 @@ All notable changes to this project are documented here. The format follows
   - New smoke `btbh_gpu_scene_target_view_smoke` (43 tests in `check.ps1`), and the measurement
     `btbh_gpu_target_view_bench`. The world detail and height lift smokes' copies of old shaders moved to shorter
     directories: with a long build directory the refusal's 255-character message cut the path they look for.
+
+### Known
+- **Reflections that leave a target view's rect find nothing there.** With SSR on, a few isolated pixels far from the
+  divider, on shiny surfaces, miss a reflection a whole render has (in v2's test up to 45 of 255 levels, on the
+  kaiju's chrome by night). A wider rect doesn't hide them. RFC 0014 (views in one present) is where they go.
+- **`btbh_gpu_window_gamepad_info_at` reads SDL at every call.** Read it when a pad connects and keep it.
+- **The run-to-run variance** of some captures on NVIDIA (0.14.2's Known) is unchanged.
+- **Not verified:** macOS (Metal), a real Steam Deck, and real pads (HID, XInput, Bluetooth, Steam Input's twins):
+  the roster was tested on SDL's virtual pads.
 
 ## [0.14.2] — 2026-11-24
 
