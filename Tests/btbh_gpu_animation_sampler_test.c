@@ -4,9 +4,10 @@
  * The glTFs: the fixtures with clips (blended-animation, root-after-children-skin, skinned-quad, and animation-samplers,
  * which has every sampler the renderer reads: linear, step and cubic spline; translations, slerped rotations and scales;
  * normalised and plain integer outputs; key times shared, repeated and single; an output narrower than its path, one
- * without a buffer view, two channels on one target, a channel without a target node; a skin without inverse binds and
- * one whose can't be read; clips that can't be read: a sparse output, one wider than its path, key times that aren't
- * scalars), then any paths on the command line (a game's models, run by hand).
+ * without a buffer view, two channels on one target, a channel without a target node; a skin without inverse binds, one
+ * whose can't be read and one with fewer than its joints (0.16.0 fails it; 0.15.0 read past the accessor); clips that
+ * can't be read: a sparse output, one wider than its path, key times that aren't scalars), then any paths on the
+ * command line (a game's models, run by hand).
  *
  * For each, at many times a clip (every key time and the floats either side of it, the midpoints, before the first and
  * after the last key, far outside, -0 and +0, and pseudo-random times over the range):
@@ -935,6 +936,11 @@ static cgltf_data *load_reference(const char *path) {
     return data;
 }
 
+/* Fewer inverse binds than joints: 0.15.0 read past the accessor (undefined; never compared), 0.16.0 fails the skin. */
+static bool short_inverse_binds(const cgltf_skin *skin) {
+    return skin->inverse_bind_matrices != NULL && skin->inverse_bind_matrices->count < skin->joints_count;
+}
+
 typedef struct Counts {
     uint64_t channel_samples;
     uint64_t channel_failures;
@@ -1041,9 +1047,14 @@ static void compare_blend(
         const size_t floats = (size_t)joint_count * 16u;
         fill_sentinel(expected, floats);
         fill_sentinel(actual, floats);
+        const bool actual_ok = set && btbh_gpu_animation_pose_sample_skin(pose, (uint32_t)skin, actual, joint_count);
+        if (short_inverse_binds(&reference->data->skins[skin])) {
+            assert(!actual_ok);
+            counts->blends += 1u;
+            continue;
+        }
         const bool expected_ok = reference_library_sample_skin_blended(reference, indices, sample_times, weights,
             count, (uint32_t)skin, expected, joint_count);
-        const bool actual_ok = set && btbh_gpu_animation_pose_sample_skin(pose, (uint32_t)skin, actual, joint_count);
         assert(expected_ok == actual_ok);
         if (expected_ok) {
             assert(memcmp(expected, actual, floats * sizeof(float)) == 0);
@@ -1093,10 +1104,16 @@ static void compare_file(const char *path, bool must_have_clips) {
                 const float time = times->times[index];
                 fill_sentinel(expected, floats);
                 fill_sentinel(actual, floats);
-                const bool expected_ok = reference_library_sample_skin_blended(&reference, &animation, &time, &one,
-                    1u, (uint32_t)skin, expected, joint_count);
                 const bool actual_ok = btbh_gpu_animation_library_sample_skin(library, animation, time,
                     (uint32_t)skin, actual, joint_count);
+                if (short_inverse_binds(&data->skins[skin])) {
+                    assert(!actual_ok);
+                    counts.palettes += 1u;
+                    counts.palette_failures += 1u;
+                    continue;
+                }
+                const bool expected_ok = reference_library_sample_skin_blended(&reference, &animation, &time, &one,
+                    1u, (uint32_t)skin, expected, joint_count);
                 assert(expected_ok == actual_ok);
                 counts.palettes += 1u;
                 if (!expected_ok) {

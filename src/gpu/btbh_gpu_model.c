@@ -251,7 +251,8 @@ typedef struct BTBHGPUAnimationSkin {
     size_t *joint_nodes;
     /* 16 floats a joint, NULL when the skin has none (each joint's is the identity). */
     float *inverse_binds;
-    /* False when a joint isn't a node or its inverse bind matrix can't be read: sampling it fails. */
+    /* False when a joint isn't a node, or its inverse bind matrices can't be read or are fewer than its joints:
+       sampling it fails. */
     bool valid;
 } BTBHGPUAnimationSkin;
 
@@ -3444,6 +3445,13 @@ static bool btbh_gpu_animation_library_decode(BTBHGPUAnimationLibrary *library) 
             } else {
                 decoded->joint_nodes[joint] = (size_t)node_index;
             }
+        }
+        /* Fewer inverse binds than joints (cgltf_validate doesn't check skins): the skin can't be read, rather than
+           read past its accessor (0.15.0 read past it when it sampled the skin). */
+        if (decoded->valid &&
+            skin->inverse_bind_matrices != NULL &&
+            skin->inverse_bind_matrices->count < joint_count) {
+            decoded->valid = false;
         }
         if (decoded->valid && skin->inverse_bind_matrices != NULL) {
             decoded->inverse_binds = calloc(joint_count * 16u, sizeof(float));
