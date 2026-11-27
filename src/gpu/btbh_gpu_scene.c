@@ -1120,10 +1120,14 @@ static double btbh_gpu_cost_measure_floor(SDL_GPUDevice *device) {
     return SDL_max(low, SDL_min(high, samples[2]));
 }
 
-void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
+void btbh_gpu_cost_abandon_frame(void) {
     btbh_gpu_cost_split_device = NULL;
     btbh_gpu_cost_pass_frame = false;
     btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+}
+
+void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
+    btbh_gpu_cost_abandon_frame();
     if (!btbh_gpu_cost_log_enabled()) {
         return;
     }
@@ -1411,9 +1415,7 @@ static void btbh_gpu_scene_cancel_submission(
     if (command != NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
     }
-    btbh_gpu_cost_split_device = NULL;
-    btbh_gpu_cost_pass_frame = false;
-    btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+    btbh_gpu_cost_abandon_frame();
     btbh_gpu_window_scene_submission_finished(window, false);
 }
 
@@ -14650,7 +14652,10 @@ typedef struct BTBHGPUSceneAsideSwap {
     BTBHGPUSceneRuntime **slot;
     BTBHGPUSceneTelemetryReport window_telemetry;
     bool window_radiance_cascades_telemetry;
+    /* The cost log's frame state (a failed render inside the aside cancels, which clears it). */
     SDL_GPUDevice *window_cost_split_device;
+    bool window_cost_pass_frame;
+    int window_cost_current_step;
 } BTBHGPUSceneAsideSwap;
 
 /* The runtime in `slot` in place of the window's own (btbh_gpu_window_scene_render_to_target and its prewarm: the
@@ -14667,7 +14672,9 @@ static void btbh_gpu_scene_enter_aside(
     swap->window_telemetry = window->scene_telemetry;
     swap->window_radiance_cascades_telemetry = window->radiance_cascades_telemetry_enabled;
     swap->window_cost_split_device = btbh_gpu_cost_split_device;
-    btbh_gpu_cost_split_device = NULL;
+    swap->window_cost_pass_frame = btbh_gpu_cost_pass_frame;
+    swap->window_cost_current_step = btbh_gpu_cost_current_step;
+    btbh_gpu_cost_abandon_frame();
     window->scene_runtime = *slot;
 }
 
@@ -14678,6 +14685,8 @@ static void btbh_gpu_scene_leave_aside(BTBHGPUWindow *window, const BTBHGPUScene
     window->scene_telemetry = swap->window_telemetry;
     window->radiance_cascades_telemetry_enabled = swap->window_radiance_cascades_telemetry;
     btbh_gpu_cost_split_device = swap->window_cost_split_device;
+    btbh_gpu_cost_pass_frame = swap->window_cost_pass_frame;
+    btbh_gpu_cost_current_step = swap->window_cost_current_step;
 }
 
 /* Where the runtime a render into a target uses lives (since 0.15.0): render_to_target's, for no view or view_id 0;
@@ -15528,6 +15537,8 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
         SDL_GPUCommandBuffer *scene_command =
             window->pending_command;
         window->pending_command = NULL;
+        /* (Submitted outside the canvas: no cost-log line for this frame.) */
+        btbh_gpu_cost_abandon_frame();
         if (!SDL_SubmitGPUCommandBuffer(scene_command)) {
             window->pending_scene_ready = false;
             btbh_gpu_window_scene_submission_finished(
@@ -15710,6 +15721,8 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
     SDL_GPUDevice *device = window->device->gpu;
     SDL_GPUCommandBuffer *command = window->pending_command;
     window->pending_command = NULL;
+    /* (Submitted outside the canvas: no cost-log line for this frame.) */
+    btbh_gpu_cost_abandon_frame();
     if (command == NULL) {
         command = SDL_AcquireGPUCommandBuffer(device);
     }

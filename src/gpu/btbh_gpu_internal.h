@@ -602,6 +602,9 @@ typedef enum BTBHGPUCostGroup {
 } BTBHGPUCostGroup;
 /* Starts a scene frame; with the cost log about every other one is split. */
 void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device);
+/* Ends a scene frame that prints no line (since 0.16.0): copied or captured out, dropped, cancelled, or its canvas submit
+   failed. Its split or pass state doesn't reach the next frame's line. */
+void btbh_gpu_cost_abandon_frame(void);
 /* In a split frame: submits `*command` (the passes of `finished_group`), waits for it and acquires the next
    command buffer into `*command`. False, with `*command` NULL, when the GPU failed either. Otherwise a no-op. */
 bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group);
