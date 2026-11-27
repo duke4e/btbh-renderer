@@ -939,6 +939,9 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
+    /* What the frame reads from the window (RFC 0015 phase 1a): here, a read-back frame's format. */
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     const bool had_scene = window->pending_scene_ready;
     if (window->pending_command == NULL) {
         window->pending_command =
@@ -995,7 +998,7 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return report->result;
     }
     SDL_GPUTexture *present_target =
-        btbh_gpu_window_present_target(window);
+        btbh_gpu_window_present_target(window, &frame_context);
     if (present_target == NULL) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_set_window_error(

@@ -155,6 +155,7 @@ static bool btbh_gpu_canvas_create_pipelines(
     BTBHGPUWindow *window,
     SDL_GPUShader *vertex_shader,
     SDL_GPUShader *fragment_shader,
+    SDL_GPUTextureFormat swapchain_format,
     SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT]
 );
 
@@ -164,6 +165,7 @@ static bool btbh_gpu_canvas_create_runtime(
     const char *fragment_shader_path,
     const char *textured_fragment_shader_path,
     BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUCanvasReport *report
 ) {
     SDL_GPUDevice *device = window->device->gpu;
@@ -236,12 +238,14 @@ static bool btbh_gpu_canvas_create_runtime(
             window,
             vertex_shader,
             fragment_shader,
+            swapchain_format,
             window->canvas_runtime->solid_pipelines
         ) &&
         btbh_gpu_canvas_create_pipelines(
             window,
             vertex_shader,
             textured_fragment_shader,
+            swapchain_format,
             window->canvas_runtime->textured_pipelines
         );
     SDL_ReleaseGPUShader(device, textured_fragment_shader);
@@ -298,6 +302,7 @@ static bool btbh_gpu_canvas_ensure_coverage_pipelines(
     const char *vertex_shader_path,
     const char *textured_fragment_shader_path,
     BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUCanvasReport *report
 ) {
     BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
@@ -363,6 +368,7 @@ static bool btbh_gpu_canvas_ensure_coverage_pipelines(
         window,
         vertex_shader,
         coverage_shader,
+        swapchain_format,
         runtime->coverage_pipelines
     );
     SDL_ReleaseGPUShader(device, coverage_shader);
@@ -378,12 +384,13 @@ static bool btbh_gpu_canvas_ensure_coverage_pipelines(
     return true;
 }
 
-/* The canvas's pipeline for each blend mode from these shaders; false, with none kept, if one of them
-   can't be made. */
+/* The canvas's pipeline for each blend mode from these shaders, drawing into the swapchain's format; false, with none
+   kept, if one of them can't be made. */
 static bool btbh_gpu_canvas_create_pipelines(
     BTBHGPUWindow *window,
     SDL_GPUShader *vertex_shader,
     SDL_GPUShader *fragment_shader,
+    SDL_GPUTextureFormat swapchain_format,
     SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT]
 ) {
     SDL_GPUDevice *device = window->device->gpu;
@@ -410,10 +417,7 @@ static bool btbh_gpu_canvas_create_pipelines(
     attributes[2].buffer_slot = 0u;
     attributes[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
     attributes[2].offset = 16u;
-    color_target.format = SDL_GetGPUSwapchainTextureFormat(
-        device,
-        window->window
-    );
+    color_target.format = swapchain_format;
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
     info.vertex_input_state.vertex_buffer_descriptions = &vertex_buffer;
@@ -479,6 +483,7 @@ static bool btbh_gpu_canvas_validate_batches(
 
 static bool btbh_gpu_canvas_validate_passes(
     const BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const BTBHGPUCanvasPass *passes,
     uint32_t pass_count,
     uint32_t batch_count
@@ -493,11 +498,7 @@ static bool btbh_gpu_canvas_validate_passes(
              (pass->target->owner != window ||
               btbh_gpu_texture_is_array(pass->target) ||
               btbh_gpu_texture_is_heightfield(pass->target) ||
-              pass->target->format !=
-                SDL_GetGPUSwapchainTextureFormat(
-                    window->device->gpu,
-                    window->window
-                )))
+              pass->target->format != frame_context->swapchain_format))
         ) {
             return false;
         }
@@ -923,8 +924,44 @@ void btbh_gpu_window_request_presented_frame_readback(
     }
 }
 
+void btbh_gpu_window_frame_context_fill(
+    const BTBHGPUWindow *window,
+    BTBHGPUFrameContext *frame_context
+) {
+    SDL_zerop(frame_context);
+    if (
+        window == NULL ||
+        window->window == NULL ||
+        window->device == NULL ||
+        window->device->gpu == NULL ||
+        !window->claimed
+    ) {
+        return;
+    }
+    int drawable_width = 0;
+    int drawable_height = 0;
+    if (SDL_GetWindowSizeInPixels(window->window, &drawable_width, &drawable_height) &&
+        drawable_width > 0 &&
+        drawable_height > 0) {
+        frame_context->drawable_width = (uint32_t)drawable_width;
+        frame_context->drawable_height = (uint32_t)drawable_height;
+    }
+    int logical_width = 0;
+    int logical_height = 0;
+    if (SDL_GetWindowSize(window->window, &logical_width, &logical_height) &&
+        logical_width > 0 &&
+        logical_height > 0) {
+        frame_context->logical_width = (uint32_t)logical_width;
+        frame_context->logical_height = (uint32_t)logical_height;
+    }
+    frame_context->swapchain_format = SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window);
+}
+
+/* The texture the frame's screen passes draw into: the swapchain image, or with a readback requested the presented
+   frame (at the image's size, in the frame's swapchain format), blitted into the image before the submit. */
 SDL_GPUTexture *btbh_gpu_window_present_target(
-    BTBHGPUWindow *window
+    BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context
 ) {
     if (
         window == NULL ||
@@ -941,11 +978,7 @@ SDL_GPUTexture *btbh_gpu_window_present_target(
     if (!window->presented_frame_readback_requested) {
         return window->pending_swapchain;
     }
-    const SDL_GPUTextureFormat format =
-        SDL_GetGPUSwapchainTextureFormat(
-            window->device->gpu,
-            window->window
-        );
+    const SDL_GPUTextureFormat format = frame_context->swapchain_format;
     if (
         window->presented_frame != NULL &&
         (
@@ -1264,6 +1297,7 @@ BTBHGPUResult btbh_gpu_write_png_rgba8(
 
 static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
     const char *textured_fragment_shader_path,
@@ -1276,9 +1310,37 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
 );
+static bool btbh_gpu_window_canvas_acquire_frame(
+    BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
+    SDL_GPUTexture **present_target,
+    BTBHGPUCanvasReport *report
+);
+static bool btbh_gpu_window_canvas_draw(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    const BTBHGPUFrameContext *frame_context,
+    SDL_GPUTexture *screen_target,
+    uint32_t screen_width,
+    uint32_t screen_height,
+    bool had_scene,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    const char **failure
+);
+static BTBHGPUResult btbh_gpu_window_canvas_submit_frame(
+    BTBHGPUWindow *window,
+    uint32_t batch_count,
+    uint32_t vertex_count,
+    BTBHGPUCanvasReport *report
+);
 
-/* The canvas present inside the lazy creation log's scope. Its body, btbh_gpu_window_canvas_present_internal, follows
-   at once (the Swift source probes read the present from here to btbh_gpu_window_release_canvas). */
+/* The canvas present inside the lazy creation log's scope, with what it reads from the window (RFC 0015 phase 1a: the
+   frame context, read here). Its body, btbh_gpu_window_canvas_present_internal, follows at once, then its halves (the
+   Swift source probes read the present from here to btbh_gpu_window_release_canvas). */
 BTBHGPUResult btbh_gpu_window_canvas_present(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -1293,10 +1355,13 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
 ) {
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
         window,
+        &frame_context,
         vertex_shader_path,
         fragment_shader_path,
         textured_fragment_shader_path,
@@ -1313,8 +1378,16 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     return result;
 }
 
+/* RFC 0015 phase 1a (since 0.16.1): the canvas present in two halves, so that phase 1b can record the draw on a thread
+   of its own while the window's thread keeps the swapchain. The draw half (btbh_gpu_window_canvas_draw) records the
+   pending scene's blit, the vertices' upload and the passes into a command buffer and a target. The present half
+   acquires the command buffer and the swapchain image before it (btbh_gpu_window_canvas_acquire_frame), and blits a
+   read-back frame into the image and submits after it (btbh_gpu_window_canvas_submit_frame). Unthreaded the present
+   runs them in that order, the swapchain first as before, and the screen passes draw into the image (or the read-back
+   frame): the same frame, the same GPU work. */
 static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const char *vertex_shader_path,
     const char *fragment_shader_path,
     const char *textured_fragment_shader_path,
@@ -1355,6 +1428,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
         ) ||
         !btbh_gpu_canvas_validate_passes(
             window,
+            frame_context,
             passes,
             pass_count,
             batch_count
@@ -1378,6 +1452,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             fragment_shader_path,
             textured_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             report
         )
     ) {
@@ -1397,6 +1472,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             vertex_shader_path,
             textured_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             report
         )
     ) {
@@ -1406,8 +1482,50 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
         return report->result;
     }
 
-    SDL_GPUDevice *device = window->device->gpu;
     const bool had_scene = window->pending_scene_ready;
+    SDL_GPUTexture *present_target = NULL;
+    if (!btbh_gpu_window_canvas_acquire_frame(window, frame_context, &present_target, report)) {
+        return report->result;
+    }
+    const char *draw_failure = NULL;
+    if (!btbh_gpu_window_canvas_draw(
+            window,
+            window->pending_command,
+            frame_context,
+            present_target,
+            window->pending_drawable_width,
+            window->pending_drawable_height,
+            had_scene,
+            vertices,
+            vertex_count,
+            batches,
+            passes,
+            pass_count,
+            &draw_failure
+        )) {
+        /* (SDL's error is read once the frame is dropped, as before the split.) */
+        (void)btbh_gpu_window_finish_pending_frame(window, false);
+        btbh_gpu_canvas_error(
+            report,
+            BTBH_GPU_DEVICE_FAILURE,
+            draw_failure != NULL ? draw_failure : SDL_GetError()
+        );
+        return report->result;
+    }
+    return btbh_gpu_window_canvas_submit_frame(window, batch_count, vertex_count, report);
+}
+
+/* The present half, before the draw: the frame's command buffer (the pending scene's, else a new one), the swapchain
+   image, and the target the screen passes draw into (btbh_gpu_window_present_target: the image, or the read-back
+   frame; NULL for a window with no image, minimized or hidden, whose offscreen work is still submitted). False, the
+   frame dropped and the report set, when the command buffer, the image or the read-back frame is missing. */
+static bool btbh_gpu_window_canvas_acquire_frame(
+    BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
+    SDL_GPUTexture **present_target,
+    BTBHGPUCanvasReport *report
+) {
+    SDL_GPUDevice *device = window->device->gpu;
     if (window->pending_command == NULL) {
         const uint64_t command_started_ticks = btbh_gpu_lazy_creation_clock();
         window->pending_command = SDL_AcquireGPUCommandBuffer(device);
@@ -1437,7 +1555,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             BTBH_GPU_WINDOW_FAILURE,
             SDL_GetError()
         );
-        return report->result;
+        return false;
     }
     // A minimized or hidden window has no swapchain image. That is not an error: the
     // frame's offscreen work (scene and canvas target passes) still runs and is
@@ -1450,61 +1568,71 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             BTBH_GPU_WINDOW_FAILURE,
             "The window has no swapchain image to read back"
         );
-        return report->result;
+        return false;
     }
-    SDL_GPUTexture *present_target = presentable
-        ? btbh_gpu_window_present_target(window)
+    *present_target = presentable
+        ? btbh_gpu_window_present_target(window, frame_context)
         : NULL;
-    if (presentable && present_target == NULL) {
+    if (presentable && *present_target == NULL) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
         btbh_gpu_canvas_error(
             report,
             BTBH_GPU_DEVICE_FAILURE,
             SDL_GetError()
         );
-        return report->result;
+        return false;
     }
+    return true;
+}
+
+/* The draw half: the pending scene's blit (had_scene), the vertices' upload and the passes, recorded into `command`. The
+   screen passes draw into screen_target (screen_width x screen_height), projected in the frame's logical size, and are
+   skipped when it is NULL (a window with no image); target passes draw into their targets. It queries neither the window
+   nor its swapchain, and submits nothing. False when a step failed, with *failure the reason, or NULL for SDL's error
+   (which the caller reads once it has dropped the frame). */
+static bool btbh_gpu_window_canvas_draw(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    const BTBHGPUFrameContext *frame_context,
+    SDL_GPUTexture *screen_target,
+    uint32_t screen_width,
+    uint32_t screen_height,
+    bool had_scene,
+    const BTBHGPUCanvasVertex *vertices,
+    uint32_t vertex_count,
+    const BTBHGPUCanvasBatch *batches,
+    const BTBHGPUCanvasPass *passes,
+    uint32_t pass_count,
+    const char **failure
+) {
+    *failure = NULL;
+    const bool presentable = screen_target != NULL;
     if (presentable && had_scene &&
         !btbh_gpu_window_blit_pending_scene(
             window,
-            window->pending_command,
-            present_target,
-            window->pending_drawable_width,
-            window->pending_drawable_height
+            command,
+            screen_target,
+            screen_width,
+            screen_height
         )) {
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            "Could not composite submitted GPU scene"
-        );
-        return report->result;
+        *failure = "Could not composite submitted GPU scene";
+        return false;
     }
 
-    int logical_width_value = 0;
-    int logical_height_value = 0;
-    const bool logical_size_available = SDL_GetWindowSize(
-        window->window,
-        &logical_width_value,
-        &logical_height_value
-    ) && logical_width_value > 0 && logical_height_value > 0;
+    /* The window's logical size (the frame context's), else the image's. */
+    const bool logical_size_available = frame_context->logical_width != 0u;
     const uint32_t logical_width = logical_size_available
-        ? (uint32_t)logical_width_value
-        : window->pending_drawable_width;
+        ? frame_context->logical_width
+        : screen_width;
     const uint32_t logical_height = logical_size_available
-        ? (uint32_t)logical_height_value
-        : window->pending_drawable_height;
+        ? frame_context->logical_height
+        : screen_height;
 
+    SDL_GPUDevice *device = window->device->gpu;
     const uint32_t byte_count =
         vertex_count * (uint32_t)sizeof(*vertices);
     if (!btbh_gpu_canvas_ensure_upload_buffers(window, byte_count)) {
-        (void)btbh_gpu_window_finish_pending_frame(window, false);
-        btbh_gpu_canvas_error(
-            report,
-            BTBH_GPU_DEVICE_FAILURE,
-            SDL_GetError()
-        );
-        return report->result;
+        return false;
     }
     BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
     SDL_GPUBuffer *vertex_buffer = runtime->vertex_buffer;
@@ -1518,31 +1646,19 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
         );
         btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_CANVAS_UPLOAD_MAP, map_started_ticks);
         if (mapped == NULL) {
-            (void)btbh_gpu_window_finish_pending_frame(window, false);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return report->result;
+            return false;
         }
         (void)memcpy(mapped, vertices, byte_count);
         SDL_UnmapGPUTransferBuffer(device, transfer);
         SDL_InsertGPUDebugLabel(
-            window->pending_command,
+            command,
             "BTBH Canvas Upload"
         );
         SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(
-            window->pending_command
+            command
         );
         if (copy == NULL) {
-            (void)btbh_gpu_window_finish_pending_frame(window, false);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return report->result;
+            return false;
         }
         SDL_GPUTransferBufferLocation source;
         SDL_GPUBufferRegion destination;
@@ -1565,13 +1681,13 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             continue;
         }
         SDL_GPUTexture *target_texture = is_screen
-            ? present_target
+            ? screen_target
             : canvas_pass->target->texture;
         const uint32_t target_width = is_screen
-            ? window->pending_drawable_width
+            ? screen_width
             : canvas_pass->target->width;
         const uint32_t target_height = is_screen
-            ? window->pending_drawable_height
+            ? screen_height
             : canvas_pass->target->height;
         const uint32_t projection_width =
             is_screen ? logical_width : target_width;
@@ -1595,25 +1711,19 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
         color_target.clear_color.a =
             (float)canvas_pass->clear_alpha / 255.0f;
         SDL_InsertGPUDebugLabel(
-            window->pending_command,
+            command,
             is_screen
                 ? "BTBH Canvas Screen Pass"
                 : "BTBH Canvas Target Pass"
         );
         SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
-            window->pending_command,
+            command,
             &color_target,
             1u,
             NULL
         );
         if (pass == NULL) {
-            (void)btbh_gpu_window_finish_pending_frame(window, false);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return report->result;
+            return false;
         }
         const float uniforms[4] = {
             (float)projection_width,
@@ -1622,7 +1732,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             0.0f
         };
         SDL_PushGPUVertexUniformData(
-            window->pending_command,
+            command,
             0u,
             uniforms,
             sizeof(uniforms)
@@ -1717,32 +1827,38 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
     }
     if (presentable && !screen_touched) {
         SDL_InsertGPUDebugLabel(
-            window->pending_command,
+            command,
             "BTBH Canvas Clear Screen"
         );
-        SDL_GPUColorTargetInfo screen_target;
-        SDL_zero(screen_target);
-        screen_target.texture = present_target;
-        screen_target.load_op = SDL_GPU_LOADOP_CLEAR;
-        screen_target.store_op = SDL_GPU_STOREOP_STORE;
-        screen_target.clear_color.a = 1.0f;
+        SDL_GPUColorTargetInfo screen_clear;
+        SDL_zero(screen_clear);
+        screen_clear.texture = screen_target;
+        screen_clear.load_op = SDL_GPU_LOADOP_CLEAR;
+        screen_clear.store_op = SDL_GPU_STOREOP_STORE;
+        screen_clear.clear_color.a = 1.0f;
         SDL_GPURenderPass *screen_pass = SDL_BeginGPURenderPass(
-            window->pending_command,
-            &screen_target,
+            command,
+            &screen_clear,
             1u,
             NULL
         );
         if (screen_pass == NULL) {
-            (void)btbh_gpu_window_finish_pending_frame(window, false);
-            btbh_gpu_canvas_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
-            return report->result;
+            return false;
         }
         SDL_EndGPURenderPass(screen_pass);
     }
+    return true;
+}
+
+/* The present half, after the draw: a read-back frame blitted into the swapchain image
+   (btbh_gpu_window_record_presented_frame), then the frame submitted, which presents the image it holds, and the
+   report. */
+static BTBHGPUResult btbh_gpu_window_canvas_submit_frame(
+    BTBHGPUWindow *window,
+    uint32_t batch_count,
+    uint32_t vertex_count,
+    BTBHGPUCanvasReport *report
+) {
     const uint32_t drawable_width =
         window->pending_drawable_width;
     const uint32_t drawable_height =

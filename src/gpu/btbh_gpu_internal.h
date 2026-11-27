@@ -137,6 +137,24 @@ typedef struct BTBHGPUFrameTelemetryPending {
     double cpu_submit_milliseconds;
 } BTBHGPUFrameTelemetryPending;
 
+/* What a frame's presents read from its window (RFC 0015 phase 1a, since 0.16.1): read once, by the call that presents
+   (btbh_gpu_window_frame_context_fill), and passed in, so the scene and canvas presents query neither the window nor its
+   swapchain themselves (phase 1b fills it on the window's thread and encodes on another). Unthreaded it is filled by the
+   SDL queries those presents made, so every frame is the same. A window the presents refuse leaves it zeroed. */
+typedef struct BTBHGPUFrameContext {
+    /* SDL_GetWindowSizeInPixels: the window's frame (and FSR 3's output) is drawn at this size; 0 x 0 when SDL gave no
+       positive size. */
+    uint32_t drawable_width;
+    uint32_t drawable_height;
+    /* SDL_GetWindowSize: the canvas projects its screen passes in it; 0 x 0 when SDL gave no positive size (the canvas
+       then projects in the swapchain image's size). */
+    uint32_t logical_width;
+    uint32_t logical_height;
+    /* SDL_GetGPUSwapchainTextureFormat: the format of the scene's last post targets and pipelines, the canvas's
+       pipelines, its target passes and a read-back frame. */
+    SDL_GPUTextureFormat swapchain_format;
+} BTBHGPUFrameContext;
+
 struct BTBHGPUDevice {
     SDL_GPUDevice *gpu;
     bool owns_video_subsystem;
@@ -676,7 +694,14 @@ bool btbh_gpu_window_record_presented_frame(
     BTBHGPUWindow *window
 );
 SDL_GPUTexture *btbh_gpu_window_present_target(
-    BTBHGPUWindow *window
+    BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context
+);
+/* Fills `frame_context` from the window (BTBHGPUFrameContext; btbh_gpu_canvas.c): zeroed, with no query, for a window
+   the presents refuse (NULL, without its device or not claimed). */
+void btbh_gpu_window_frame_context_fill(
+    const BTBHGPUWindow *window,
+    BTBHGPUFrameContext *frame_context
 );
 uint32_t btbh_gpu_animation_library_skin_joint_count(
     const BTBHGPUAnimationLibrary *library,
