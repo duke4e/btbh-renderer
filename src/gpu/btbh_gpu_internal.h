@@ -648,8 +648,10 @@ bool btbh_gpu_animation_library_sample_channel(
    life), clip and time bits, or a blended pose's serial (new whenever its samples change); and the skin and its joint
    count. A pose of one sample takes its library's, clip's and time's key (its weight over itself is 1, so its palette
    is the library's to the bit). btbh_gpu_scene_prepare_bones begins a use of the cache each call. A palette unused for
-   BTBH_GPU_BONE_PALETTE_MAX_AGE uses goes; past BTBH_GPU_BONE_PALETTE_BUDGET matrices the palettes unused the
-   longest go first, and a palette that doesn't fit beside the current use's isn't kept. */
+   BTBH_GPU_BONE_PALETTE_MAX_AGE uses goes. Every block counts against BTBH_GPU_BONE_PALETTE_BUDGET matrices, a hard
+   cap: the kept palettes' and the spare blocks' (evicted palettes' blocks, kept for palettes of their size, about as
+   many as the last use stored). Past it the spares go first, then the palettes unused the longest; a palette that
+   doesn't fit beside the current use's isn't kept, and nothing more is until the next use. */
 #define BTBH_GPU_BONE_PALETTE_MAX_AGE 8u
 #define BTBH_GPU_BONE_PALETTE_BUDGET 32768u
 typedef struct BTBHGPUBonePaletteKey {
@@ -687,11 +689,13 @@ void btbh_gpu_bone_palette_cache_store(
     const BTBHGPUBonePaletteKey *key,
     const float *matrices
 );
-/* The palettes and matrices kept, and every byte the cache holds (its slots and blocks, spares included). */
+/* The palettes kept and their matrices, the matrices every block holds (the palettes' and the spare blocks': never
+   more than BTBH_GPU_BONE_PALETTE_BUDGET), and every byte the cache holds (its slots, spare list and blocks). */
 void btbh_gpu_bone_palette_cache_read(
     const BTBHGPUBonePaletteCache *cache,
     uint32_t *palette_count,
     size_t *matrix_count,
+    size_t *block_matrix_count,
     size_t *bytes
 );
 void btbh_gpu_bone_palette_cache_destroy(BTBHGPUBonePaletteCache *cache);

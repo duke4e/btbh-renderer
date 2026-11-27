@@ -1199,7 +1199,7 @@ static void fill_palette(float *matrices, uint32_t joint_count, float seed) {
 
 static uint32_t kept_palettes(const BTBHGPUBonePaletteCache *cache) {
     uint32_t count = 0u;
-    btbh_gpu_bone_palette_cache_read(cache, &count, NULL, NULL);
+    btbh_gpu_bone_palette_cache_read(cache, &count, NULL, NULL, NULL);
     return count;
 }
 
@@ -1258,16 +1258,24 @@ static void test_palette_cache(void) {
         btbh_gpu_bone_palette_cache_store(cache, &key, big_palette);
     }
     size_t matrices = 0u;
-    btbh_gpu_bone_palette_cache_read(cache, NULL, &matrices, NULL);
+    size_t blocks = 0u;
+    btbh_gpu_bone_palette_cache_read(cache, NULL, &matrices, &blocks, NULL);
     assert(kept_palettes(cache) == fit && matrices == (size_t)fit * big);
+    assert(blocks <= BTBH_GPU_BONE_PALETTE_BUDGET);
     const BTBHGPUBonePaletteKey last = test_key(1000u + fit, 0u, big);
     assert(btbh_gpu_bone_palette_cache_find(cache, &last) == NULL);
+    /* Full for this use: nothing more is kept until the next, even a palette that would fit. */
+    float small_palette[16];
+    fill_palette(small_palette, 1u, 3.0f);
+    const BTBHGPUBonePaletteKey small = test_key(4000u, 0u, 1u);
+    btbh_gpu_bone_palette_cache_store(cache, &small, small_palette);
+    assert(btbh_gpu_bone_palette_cache_find(cache, &small) == NULL);
     (void)btbh_gpu_bone_palette_cache_begin(&slot);
     const BTBHGPUBonePaletteKey newer = test_key(5000u, 0u, big);
     btbh_gpu_bone_palette_cache_store(cache, &newer, big_palette);
     assert(btbh_gpu_bone_palette_cache_find(cache, &newer) != NULL);
-    btbh_gpu_bone_palette_cache_read(cache, NULL, &matrices, NULL);
-    assert(matrices <= BTBH_GPU_BONE_PALETTE_BUDGET);
+    btbh_gpu_bone_palette_cache_read(cache, NULL, &matrices, &blocks, NULL);
+    assert(matrices == big && blocks <= BTBH_GPU_BONE_PALETTE_BUDGET);
     /* Larger than the budget: never kept. */
     float *huge = calloc((size_t)(BTBH_GPU_BONE_PALETTE_BUDGET + 1u) * 16u, sizeof(float));
     assert(huge != NULL);
@@ -1275,6 +1283,29 @@ static void test_palette_cache(void) {
     btbh_gpu_bone_palette_cache_store(cache, &huge_key, huge);
     assert(btbh_gpu_bone_palette_cache_find(cache, &huge_key) == NULL);
     free(huge);
+
+    /* A hard cap: palettes of every size over many uses, the spares (kept for palettes of their size) counted with
+       the kept palettes; whatever is kept is found as stored. */
+    BTBHGPUBonePaletteCache *mixed_slot = NULL;
+    for (int round = 0; round < 60; ++round) {
+        BTBHGPUBonePaletteCache *mixed = btbh_gpu_bone_palette_cache_begin(&mixed_slot);
+        assert(mixed != NULL);
+        const uint32_t stores = 5u + (uint32_t)(random_unit() * 40.0f);
+        for (uint32_t store = 0u; store < stores; ++store) {
+            const uint32_t sizes[5] = {1u, 24u, 41u, 123u, big};
+            const uint32_t joint_count = sizes[(uint32_t)(random_unit() * 5.0f) % 5u];
+            const BTBHGPUBonePaletteKey key = test_key(90000u + (uint64_t)round * 100u + store, 0u, joint_count);
+            fill_palette(big_palette, joint_count, (float)store);
+            btbh_gpu_bone_palette_cache_store(mixed, &key, big_palette);
+            const float *kept = btbh_gpu_bone_palette_cache_find(mixed, &key);
+            if (kept != NULL) {
+                assert(memcmp(kept, big_palette, (size_t)joint_count * 16u * sizeof(float)) == 0);
+            }
+            btbh_gpu_bone_palette_cache_read(mixed, NULL, &matrices, &blocks, NULL);
+            assert(matrices <= blocks && blocks <= BTBH_GPU_BONE_PALETTE_BUDGET);
+        }
+    }
+    btbh_gpu_bone_palette_cache_destroy(mixed_slot);
     free(big_palette);
 
     /* A model of the cache over many uses: random palettes found or stored each use, the rest left alone; whatever
@@ -1315,7 +1346,7 @@ static void test_palette_cache(void) {
         assert(kept_palettes(model) == expected_kept);
     }
     size_t bytes = 0u;
-    btbh_gpu_bone_palette_cache_read(model_slot, NULL, NULL, &bytes);
+    btbh_gpu_bone_palette_cache_read(model_slot, NULL, NULL, NULL, &bytes);
     assert(bytes > 0u);
     btbh_gpu_bone_palette_cache_destroy(model_slot);
     btbh_gpu_bone_palette_cache_destroy(slot);

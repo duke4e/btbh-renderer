@@ -488,7 +488,8 @@ static int run_mode(BTBHGPUDevice *device, const char *path, const char *mode, u
         uint32_t kept = 0u;
         size_t kept_matrices = 0u;
         size_t kept_bytes = 0u;
-        btbh_gpu_bone_palette_cache_read(bench.window->bone_palette_cache, &kept, &kept_matrices, &kept_bytes);
+        btbh_gpu_bone_palette_cache_read(bench.window->bone_palette_cache, &kept, &kept_matrices, NULL,
+            &kept_bytes);
         printf("        kept palettes at the end: %u (%zu matrices), %zu bytes held\n", kept, kept_matrices,
             kept_bytes);
 #endif

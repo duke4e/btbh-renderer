@@ -4572,29 +4572,44 @@ bool btbh_gpu_bone_palette_key(
 
 typedef struct BTBHGPUBonePaletteEntry {
     BTBHGPUBonePaletteKey key;
-    /* key.joint_count matrices; room for matrix_capacity. */
+    /* key.joint_count matrices (a block is always its palette's size). */
     float *matrices;
-    uint32_t matrix_capacity;
     uint32_t hash;
     /* The cache's use that last stored or found it; 0 for an empty slot. */
     uint64_t last_use;
 } BTBHGPUBonePaletteEntry;
 
-/* The blocks of evicted palettes kept for the next ones (most skeletons come back at the same size). */
-#define BTBH_GPU_BONE_PALETTE_SPARE_CAPACITY 32u
+/* An evicted palette's block, kept for the next palette of its size (a skin always comes back at its joint count). */
+typedef struct BTBHGPUBonePaletteSpare {
+    float *matrices;
+    uint32_t joint_count;
+} BTBHGPUBonePaletteSpare;
+
+/* The most spare blocks kept, and how far down the spares a store looks for one of its size. */
+#define BTBH_GPU_BONE_PALETTE_SPARE_LIMIT 256u
+#define BTBH_GPU_BONE_PALETTE_SPARE_SEARCH 32u
+/* The spares a use keeps however few palettes the last one stored. */
+#define BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM 16u
 
 struct BTBHGPUBonePaletteCache {
     /* Open addressing with linear probing, a power of two of slots (0 before the first palette), at most half full. */
     BTBHGPUBonePaletteEntry *slots;
     uint32_t slot_count;
     uint32_t entry_count;
-    /* The prepares so far (btbh_gpu_bone_palette_cache_begin). */
+    /* The uses so far (btbh_gpu_bone_palette_cache_begin). */
     uint64_t use;
-    /* The matrices the entries hold. */
+    /* The use in which a palette found no room beside that use's own: nothing more is kept until the next use. */
+    uint64_t full_use;
+    /* The matrices every block holds, the entries' and the spares': never more than BTBH_GPU_BONE_PALETTE_BUDGET. */
+    size_t held_matrices;
+    /* The matrices the entries' palettes hold. */
     size_t matrix_count;
-    float *spare[BTBH_GPU_BONE_PALETTE_SPARE_CAPACITY];
-    uint32_t spare_capacity[BTBH_GPU_BONE_PALETTE_SPARE_CAPACITY];
+    /* The palettes stored in this use and in the last: the spares the next use keeps (its likely turnover). */
+    uint32_t stored_this_use;
+    uint32_t stored_last_use;
+    BTBHGPUBonePaletteSpare *spares;
     uint32_t spare_count;
+    uint32_t spare_capacity;
 };
 
 static uint32_t btbh_gpu_bone_palette_hash(const BTBHGPUBonePaletteKey *key) {
@@ -4618,6 +4633,62 @@ static bool btbh_gpu_bone_palette_key_equal(
         a->joint_count == b->joint_count;
 }
 
+/* Frees spare `index` (the top one takes its place). */
+static void btbh_gpu_bone_palette_cache_free_spare(
+    BTBHGPUBonePaletteCache *cache,
+    uint32_t index
+) {
+    free(cache->spares[index].matrices);
+    cache->held_matrices -= cache->spares[index].joint_count;
+    cache->spare_count -= 1u;
+    cache->spares[index] = cache->spares[cache->spare_count];
+}
+
+/* Keeps an evicted palette's block as a spare, or frees it past BTBH_GPU_BONE_PALETTE_SPARE_LIMIT. */
+static void btbh_gpu_bone_palette_cache_keep_spare(
+    BTBHGPUBonePaletteCache *cache,
+    float *matrices,
+    uint32_t joint_count
+) {
+    if (cache->spare_count == cache->spare_capacity &&
+        cache->spare_capacity < BTBH_GPU_BONE_PALETTE_SPARE_LIMIT) {
+        const uint32_t capacity = cache->spare_capacity == 0u ? 16u : cache->spare_capacity * 2u;
+        BTBHGPUBonePaletteSpare *spares = realloc(cache->spares, capacity * sizeof(*spares));
+        if (spares != NULL) {
+            cache->spares = spares;
+            cache->spare_capacity = capacity;
+        }
+    }
+    if (cache->spare_count < cache->spare_capacity) {
+        cache->spares[cache->spare_count].matrices = matrices;
+        cache->spares[cache->spare_count].joint_count = joint_count;
+        cache->spare_count += 1u;
+    } else {
+        free(matrices);
+        cache->held_matrices -= joint_count;
+    }
+}
+
+/* A spare block of exactly `joint_count` matrices from the top BTBH_GPU_BONE_PALETTE_SPARE_SEARCH spares, or NULL. */
+static float *btbh_gpu_bone_palette_cache_take_spare(
+    BTBHGPUBonePaletteCache *cache,
+    uint32_t joint_count
+) {
+    const uint32_t lowest = cache->spare_count > BTBH_GPU_BONE_PALETTE_SPARE_SEARCH
+        ? cache->spare_count - BTBH_GPU_BONE_PALETTE_SPARE_SEARCH
+        : 0u;
+    for (uint32_t index = cache->spare_count; index > lowest; index -= 1u) {
+        BTBHGPUBonePaletteSpare *spare = &cache->spares[index - 1u];
+        if (spare->joint_count == joint_count) {
+            float *matrices = spare->matrices;
+            cache->spare_count -= 1u;
+            *spare = cache->spares[cache->spare_count];
+            return matrices;
+        }
+    }
+    return NULL;
+}
+
 /* Empties slot `index`, keeping its block as a spare, and shifts the entries probed past it back (no tombstones). */
 static void btbh_gpu_bone_palette_cache_remove(
     BTBHGPUBonePaletteCache *cache,
@@ -4626,13 +4697,7 @@ static void btbh_gpu_bone_palette_cache_remove(
     BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
     cache->matrix_count -= entry->key.joint_count;
     cache->entry_count -= 1u;
-    if (cache->spare_count < BTBH_GPU_BONE_PALETTE_SPARE_CAPACITY) {
-        cache->spare[cache->spare_count] = entry->matrices;
-        cache->spare_capacity[cache->spare_count] = entry->matrix_capacity;
-        cache->spare_count += 1u;
-    } else {
-        free(entry->matrices);
-    }
+    btbh_gpu_bone_palette_cache_keep_spare(cache, entry->matrices, entry->key.joint_count);
     const uint32_t mask = cache->slot_count - 1u;
     uint32_t hole = index;
     uint32_t next = (hole + 1u) & mask;
@@ -4684,6 +4749,15 @@ BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
             cache,
             cache->use - BTBH_GPU_BONE_PALETTE_MAX_AGE
         );
+    }
+    /* The spares this use is likely to take: as many as the last use stored. */
+    cache->stored_last_use = cache->stored_this_use;
+    cache->stored_this_use = 0u;
+    const uint32_t keep = cache->stored_last_use > BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM
+        ? cache->stored_last_use
+        : BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM;
+    while (cache->spare_count > keep) {
+        btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
     }
     return cache;
 }
@@ -4748,11 +4822,25 @@ void btbh_gpu_bone_palette_cache_store(
         matrices == NULL ||
         key->joint_count == 0u ||
         key->joint_count > BTBH_GPU_BONE_PALETTE_BUDGET ||
+        cache->full_use == cache->use ||
         btbh_gpu_bone_palette_cache_find(cache, key) != NULL) {
         return;
     }
-    /* Over the budget, the palettes unused the longest go first; this prepare's stay, and then this one isn't kept. */
-    while (cache->matrix_count + key->joint_count > BTBH_GPU_BONE_PALETTE_BUDGET) {
+    if (((size_t)cache->entry_count + 1u) * 2u > cache->slot_count &&
+        !btbh_gpu_bone_palette_cache_grow(cache)) {
+        return;
+    }
+    const uint32_t joint_count = key->joint_count;
+    /* A spare of its size, else a new block within the budget: the spares go first, then the palettes unused the
+       longest (their blocks become spares, which may fit). This use's palettes stay: when only they are left, this
+       one isn't kept, and neither is any other until the next use. */
+    float *block = btbh_gpu_bone_palette_cache_take_spare(cache, joint_count);
+    while (block == NULL &&
+           cache->held_matrices + joint_count > BTBH_GPU_BONE_PALETTE_BUDGET) {
+        if (cache->spare_count > 0u) {
+            btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
+            continue;
+        }
         uint64_t oldest = UINT64_MAX;
         for (uint32_t index = 0u; index < cache->slot_count; index += 1u) {
             const uint64_t last_use = cache->slots[index].last_use;
@@ -4761,34 +4849,20 @@ void btbh_gpu_bone_palette_cache_store(
             }
         }
         if (oldest >= cache->use) {
+            cache->full_use = cache->use;
             return;
         }
         btbh_gpu_bone_palette_cache_evict_before(cache, oldest + 1u);
-    }
-    if (((size_t)cache->entry_count + 1u) * 2u > cache->slot_count &&
-        !btbh_gpu_bone_palette_cache_grow(cache)) {
-        return;
-    }
-    float *block = NULL;
-    uint32_t capacity = 0u;
-    for (uint32_t spare = 0u; spare < cache->spare_count; spare += 1u) {
-        if (cache->spare_capacity[spare] >= key->joint_count) {
-            block = cache->spare[spare];
-            capacity = cache->spare_capacity[spare];
-            cache->spare_count -= 1u;
-            cache->spare[spare] = cache->spare[cache->spare_count];
-            cache->spare_capacity[spare] = cache->spare_capacity[cache->spare_count];
-            break;
-        }
+        block = btbh_gpu_bone_palette_cache_take_spare(cache, joint_count);
     }
     if (block == NULL) {
-        block = malloc((size_t)key->joint_count * 16u * sizeof(float));
+        block = malloc((size_t)joint_count * 16u * sizeof(float));
         if (block == NULL) {
             return;
         }
-        capacity = key->joint_count;
+        cache->held_matrices += joint_count;
     }
-    (void)memcpy(block, matrices, (size_t)key->joint_count * 16u * sizeof(float));
+    (void)memcpy(block, matrices, (size_t)joint_count * 16u * sizeof(float));
     const uint32_t hash = btbh_gpu_bone_palette_hash(key);
     const uint32_t mask = cache->slot_count - 1u;
     uint32_t index = hash & mask;
@@ -4798,40 +4872,41 @@ void btbh_gpu_bone_palette_cache_store(
     BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
     entry->key = *key;
     entry->matrices = block;
-    entry->matrix_capacity = capacity;
     entry->hash = hash;
     entry->last_use = cache->use;
     cache->entry_count += 1u;
-    cache->matrix_count += key->joint_count;
+    cache->matrix_count += joint_count;
+    cache->stored_this_use += 1u;
 }
 
 void btbh_gpu_bone_palette_cache_read(
     const BTBHGPUBonePaletteCache *cache,
     uint32_t *palette_count,
     size_t *matrix_count,
+    size_t *block_matrix_count,
     size_t *bytes
 ) {
     uint32_t palettes = 0u;
     size_t matrices = 0u;
+    size_t blocks = 0u;
     size_t total = 0u;
     if (cache != NULL) {
         palettes = cache->entry_count;
         matrices = cache->matrix_count;
-        total = sizeof(*cache) + (size_t)cache->slot_count * sizeof(*cache->slots);
-        for (uint32_t index = 0u; index < cache->slot_count; index += 1u) {
-            if (cache->slots[index].last_use != 0u) {
-                total += (size_t)cache->slots[index].matrix_capacity * 16u * sizeof(float);
-            }
-        }
-        for (uint32_t spare = 0u; spare < cache->spare_count; spare += 1u) {
-            total += (size_t)cache->spare_capacity[spare] * 16u * sizeof(float);
-        }
+        blocks = cache->held_matrices;
+        total = sizeof(*cache) +
+            (size_t)cache->slot_count * sizeof(*cache->slots) +
+            (size_t)cache->spare_capacity * sizeof(*cache->spares) +
+            cache->held_matrices * 16u * sizeof(float);
     }
     if (palette_count != NULL) {
         *palette_count = palettes;
     }
     if (matrix_count != NULL) {
         *matrix_count = matrices;
+    }
+    if (block_matrix_count != NULL) {
+        *block_matrix_count = blocks;
     }
     if (bytes != NULL) {
         *bytes = total;
@@ -4848,8 +4923,9 @@ void btbh_gpu_bone_palette_cache_destroy(BTBHGPUBonePaletteCache *cache) {
         }
     }
     for (uint32_t spare = 0u; spare < cache->spare_count; spare += 1u) {
-        free(cache->spare[spare]);
+        free(cache->spares[spare].matrices);
     }
+    free(cache->spares);
     free(cache->slots);
     free(cache);
 }
