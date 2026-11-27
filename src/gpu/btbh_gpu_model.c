@@ -4575,7 +4575,7 @@ typedef struct BTBHGPUBonePaletteEntry {
     /* key.joint_count matrices (a block is always its palette's size). */
     float *matrices;
     uint32_t hash;
-    /* The cache's use that last stored or found it; 0 for an empty slot. */
+    /* The cache's use (the window's frame) that last stored or found it; 0 for an empty slot. */
     uint64_t last_use;
 } BTBHGPUBonePaletteEntry;
 
@@ -4596,8 +4596,11 @@ struct BTBHGPUBonePaletteCache {
     BTBHGPUBonePaletteEntry *slots;
     uint32_t slot_count;
     uint32_t entry_count;
-    /* The uses so far (btbh_gpu_bone_palette_cache_begin). */
+    /* The uses so far, from 1: the window's frames, and a use every BTBH_GPU_BONE_PALETTE_SCENES_PER_USE scenes
+       rendered without one (btbh_gpu_bone_palette_cache_begin). */
     uint64_t use;
+    /* The scenes begun in this use. */
+    uint32_t scenes_this_use;
     /* The use in which a palette found no room beside that use's own: nothing more is kept until the next use. */
     uint64_t full_use;
     /* The matrices every block holds, the entries' and the spares': never more than BTBH_GPU_BONE_PALETTE_BUDGET. */
@@ -4731,9 +4734,11 @@ static void btbh_gpu_bone_palette_cache_evict_before(
 }
 
 BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
-    BTBHGPUBonePaletteCache **slot
+    BTBHGPUBonePaletteCache **slot,
+    bool frame,
+    bool skinned
 ) {
-    if (slot == NULL) {
+    if (slot == NULL || (*slot == NULL && !skinned)) {
         return NULL;
     }
     if (*slot == NULL) {
@@ -4741,23 +4746,38 @@ BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
         if (*slot == NULL) {
             return NULL;
         }
+        (*slot)->use = 1u;
     }
     BTBHGPUBonePaletteCache *cache = *slot;
-    cache->use += 1u;
-    if (cache->use > BTBH_GPU_BONE_PALETTE_MAX_AGE) {
-        btbh_gpu_bone_palette_cache_evict_before(
-            cache,
-            cache->use - BTBH_GPU_BONE_PALETTE_MAX_AGE
-        );
+    if (frame || cache->scenes_this_use >= BTBH_GPU_BONE_PALETTE_SCENES_PER_USE) {
+        cache->use += 1u;
+        cache->scenes_this_use = 0u;
+        if (cache->use > BTBH_GPU_BONE_PALETTE_MAX_AGE) {
+            btbh_gpu_bone_palette_cache_evict_before(
+                cache,
+                cache->use - BTBH_GPU_BONE_PALETTE_MAX_AGE
+            );
+        }
+        /* The spares this use is likely to take: as many as the last use stored. */
+        cache->stored_last_use = cache->stored_this_use;
+        cache->stored_this_use = 0u;
+        const uint32_t keep = cache->stored_last_use > BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM
+            ? cache->stored_last_use
+            : BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM;
+        while (cache->spare_count > keep) {
+            btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
+        }
     }
-    /* The spares this use is likely to take: as many as the last use stored. */
-    cache->stored_last_use = cache->stored_this_use;
-    cache->stored_this_use = 0u;
-    const uint32_t keep = cache->stored_last_use > BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM
-        ? cache->stored_last_use
-        : BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM;
-    while (cache->spare_count > keep) {
-        btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
+    if (!frame) {
+        cache->scenes_this_use += 1u;
+    }
+    if (!skinned) {
+        /* A frame, or a scene without skins, only ages the palettes; once every one is gone, so is the cache. */
+        if (cache->entry_count == 0u) {
+            btbh_gpu_bone_palette_cache_destroy(cache);
+            *slot = NULL;
+        }
+        return NULL;
     }
     return cache;
 }

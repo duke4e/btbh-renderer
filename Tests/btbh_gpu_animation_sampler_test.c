@@ -1203,9 +1203,19 @@ static uint32_t kept_palettes(const BTBHGPUBonePaletteCache *cache) {
     return count;
 }
 
+/* The window finishes a frame, then a skinned scene begins in the next: the cache as that scene has it (made anew
+   when the frame freed it, empty). */
+static BTBHGPUBonePaletteCache *next_frame(BTBHGPUBonePaletteCache **slot) {
+    assert(btbh_gpu_bone_palette_cache_begin(slot, true, false) == NULL);
+    return btbh_gpu_bone_palette_cache_begin(slot, false, true);
+}
+
 static void test_palette_cache(void) {
     BTBHGPUBonePaletteCache *slot = NULL;
-    BTBHGPUBonePaletteCache *cache = btbh_gpu_bone_palette_cache_begin(&slot);
+    /* Nothing to age, nothing made: a frame, a scene without skins. */
+    assert(btbh_gpu_bone_palette_cache_begin(&slot, true, false) == NULL && slot == NULL);
+    assert(btbh_gpu_bone_palette_cache_begin(&slot, false, false) == NULL && slot == NULL);
+    BTBHGPUBonePaletteCache *cache = btbh_gpu_bone_palette_cache_begin(&slot, false, true);
     assert(cache != NULL && cache == slot);
     float palette[4u * 16u];
     float other[4u * 16u];
@@ -1237,21 +1247,47 @@ static void test_palette_cache(void) {
     assert(memcmp(btbh_gpu_bone_palette_cache_find(cache, &a), palette, sizeof(palette)) == 0);
     assert(kept_palettes(cache) == 1u);
 
-    /* Unused for BTBH_GPU_BONE_PALETTE_MAX_AGE uses it stays; one more and it goes. */
+    /* Unused for BTBH_GPU_BONE_PALETTE_MAX_AGE frames it stays, however many scenes each frame renders into targets
+       (here 9, the window's frame and 8 target views); one more frame and it goes. */
     for (uint32_t use = 0u; use < BTBH_GPU_BONE_PALETTE_MAX_AGE; ++use) {
-        assert(btbh_gpu_bone_palette_cache_begin(&slot) == cache);
+        assert(next_frame(&slot) == cache);
+        for (int scene = 0; scene < 8; ++scene) {
+            assert(btbh_gpu_bone_palette_cache_begin(&slot, false, true) == cache);
+        }
         assert(kept_palettes(cache) == 1u);
     }
-    (void)btbh_gpu_bone_palette_cache_begin(&slot);
+    cache = next_frame(&slot);
     assert(kept_palettes(cache) == 0u);
     assert(btbh_gpu_bone_palette_cache_find(cache, &a) == NULL);
+
+    /* Scenes without a frame (a host that only renders into targets) count a use every
+       BTBH_GPU_BONE_PALETTE_SCENES_PER_USE. */
+    btbh_gpu_bone_palette_cache_store(cache, &a, palette);
+    uint32_t scenes = 0u;
+    while (kept_palettes(cache) == 1u) {
+        assert(btbh_gpu_bone_palette_cache_begin(&slot, false, true) == cache);
+        scenes += 1u;
+        assert(scenes <= BTBH_GPU_BONE_PALETTE_SCENES_PER_USE * (BTBH_GPU_BONE_PALETTE_MAX_AGE + 1u));
+    }
+    assert(scenes > BTBH_GPU_BONE_PALETTE_SCENES_PER_USE * (BTBH_GPU_BONE_PALETTE_MAX_AGE - 1u));
+
+    /* Frames that draw no skin (a menu) still age it, and free it once it is empty. */
+    btbh_gpu_bone_palette_cache_store(cache, &a, palette);
+    for (uint32_t use = 0u; use < BTBH_GPU_BONE_PALETTE_MAX_AGE; ++use) {
+        assert(btbh_gpu_bone_palette_cache_begin(&slot, true, false) == NULL);
+        assert(slot == cache && kept_palettes(cache) == 1u);
+    }
+    assert(btbh_gpu_bone_palette_cache_begin(&slot, true, false) == NULL);
+    assert(slot == NULL);
+    cache = btbh_gpu_bone_palette_cache_begin(&slot, false, true);
+    assert(cache != NULL);
 
     /* The budget: a use keeps what fits; the next use's palettes push out the oldest. */
     const uint32_t big = 1000u;
     float *big_palette = malloc((size_t)big * 16u * sizeof(float));
     assert(big_palette != NULL);
     fill_palette(big_palette, big, 7.0f);
-    (void)btbh_gpu_bone_palette_cache_begin(&slot);
+    cache = next_frame(&slot);
     const uint32_t fit = BTBH_GPU_BONE_PALETTE_BUDGET / big;
     for (uint32_t index = 0u; index <= fit; ++index) {
         const BTBHGPUBonePaletteKey key = test_key(1000u + index, 0u, big);
@@ -1270,7 +1306,7 @@ static void test_palette_cache(void) {
     const BTBHGPUBonePaletteKey small = test_key(4000u, 0u, 1u);
     btbh_gpu_bone_palette_cache_store(cache, &small, small_palette);
     assert(btbh_gpu_bone_palette_cache_find(cache, &small) == NULL);
-    (void)btbh_gpu_bone_palette_cache_begin(&slot);
+    cache = next_frame(&slot);
     const BTBHGPUBonePaletteKey newer = test_key(5000u, 0u, big);
     btbh_gpu_bone_palette_cache_store(cache, &newer, big_palette);
     assert(btbh_gpu_bone_palette_cache_find(cache, &newer) != NULL);
@@ -1288,7 +1324,7 @@ static void test_palette_cache(void) {
        the kept palettes; whatever is kept is found as stored. */
     BTBHGPUBonePaletteCache *mixed_slot = NULL;
     for (int round = 0; round < 60; ++round) {
-        BTBHGPUBonePaletteCache *mixed = btbh_gpu_bone_palette_cache_begin(&mixed_slot);
+        BTBHGPUBonePaletteCache *mixed = next_frame(&mixed_slot);
         assert(mixed != NULL);
         const uint32_t stores = 5u + (uint32_t)(random_unit() * 40.0f);
         for (uint32_t store = 0u; store < stores; ++store) {
@@ -1308,8 +1344,8 @@ static void test_palette_cache(void) {
     btbh_gpu_bone_palette_cache_destroy(mixed_slot);
     free(big_palette);
 
-    /* A model of the cache over many uses: random palettes found or stored each use, the rest left alone; whatever
-       was used within BTBH_GPU_BONE_PALETTE_MAX_AGE uses is found with its matrices, nothing older is. */
+    /* A model of the cache over many frames: random palettes found or stored each frame, the rest left alone;
+       whatever was used within BTBH_GPU_BONE_PALETTE_MAX_AGE frames is found with its matrices, nothing older is. */
     enum { KEYS = 700, USES = 300 };
     static uint64_t last_use[KEYS];
     memset(last_use, 0, sizeof(last_use));
@@ -1317,7 +1353,7 @@ static void test_palette_cache(void) {
     uint64_t use = 0u;
     float matrices_of_key[2u * 16u];
     for (int round = 0; round < USES; ++round) {
-        BTBHGPUBonePaletteCache *model = btbh_gpu_bone_palette_cache_begin(&model_slot);
+        BTBHGPUBonePaletteCache *model = next_frame(&model_slot);
         assert(model != NULL);
         use += 1u;
         uint32_t expected_kept = 0u;

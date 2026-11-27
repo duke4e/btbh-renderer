@@ -647,8 +647,10 @@ bool btbh_gpu_animation_library_sample_channel(
    palette is sampled once and copied while its key comes back: a library's (by its serial, unique for the process's
    life), clip and time bits, or a blended pose's serial (new whenever its samples change); and the skin and its joint
    count. A pose of one sample takes its library's, clip's and time's key (its weight over itself is 1, so its palette
-   is the library's to the bit). btbh_gpu_scene_prepare_bones begins a use of the cache each call. A palette unused for
-   BTBH_GPU_BONE_PALETTE_MAX_AGE uses goes. Every block counts against BTBH_GPU_BONE_PALETTE_BUDGET matrices, a hard
+   is the library's to the bit). The cache counts uses: the window's frames (each one it finishes, its scenes rendered
+   into targets in it), and one every 16 scenes rendered without a frame. A palette unused for
+   BTBH_GPU_BONE_PALETTE_MAX_AGE uses goes, also while nothing skinned is drawn (a menu); once every palette is gone, so
+   is the cache. Every block counts against BTBH_GPU_BONE_PALETTE_BUDGET matrices, a hard
    cap: the kept palettes' and the spare blocks' (evicted palettes' blocks, kept for palettes of their size, about as
    many as the last use stored). Past it the spares go first, then the palettes unused the longest; a palette that
    doesn't fit beside the current use's isn't kept, and nothing more is until the next use. */
@@ -673,10 +675,17 @@ bool btbh_gpu_bone_palette_key(
     uint32_t joint_count,
     BTBHGPUBonePaletteKey *key
 );
-/* Begins a use (a prepare): makes the cache in *slot on the first, drops the palettes unused too long. NULL when it
-   can't be made. */
+/* Begins a use when the window finishes a frame (`frame`; btbh_gpu_window_finish_pending_frame and
+   btbh_gpu_window_copy_pending_scene_texture, with `skinned` false), or a scene (btbh_gpu_scene_prepare_bones,
+   `skinned` when it samples a skin; a new use after BTBH_GPU_BONE_PALETTE_SCENES_PER_USE scenes without a frame).
+   Makes the cache in *slot for the first skinned scene; a new use drops the palettes unused too long. Without
+   `skinned` it only ages the cache (nothing when there is none), frees it once it is empty, and returns NULL, as it
+   does when the cache can't be made. */
+#define BTBH_GPU_BONE_PALETTE_SCENES_PER_USE 16u
 BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
-    BTBHGPUBonePaletteCache **slot
+    BTBHGPUBonePaletteCache **slot,
+    bool frame,
+    bool skinned
 );
 /* The palette kept under `key` (key->joint_count matrices), marked used; NULL when there is none. */
 const float *btbh_gpu_bone_palette_cache_find(

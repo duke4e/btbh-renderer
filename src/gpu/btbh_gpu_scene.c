@@ -6580,7 +6580,10 @@ static bool btbh_gpu_scene_prepare_bones(
     BTBHGPUBonePaletteCache *palette_cache = NULL;
     if (total_animated_geometry_count > 0u) {
         (void)memset(sample_table, 0xff, sample_table_size * sizeof(*sample_table));
-        palette_cache = btbh_gpu_bone_palette_cache_begin(palette_cache_slot);
+        palette_cache = btbh_gpu_bone_palette_cache_begin(palette_cache_slot, false, true);
+    } else if (palette_cache_slot != NULL && *palette_cache_slot != NULL) {
+        /* No skin: the kept palettes still age (a target-only host's scenes count uses too). */
+        (void)btbh_gpu_bone_palette_cache_begin(palette_cache_slot, false, false);
     }
     const uint64_t allocation_finished_ticks = detailed_telemetry
         ? SDL_GetTicksNS()
@@ -14223,6 +14226,10 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
     const bool submitted = SDL_SubmitGPUCommandBuffer(command);
     if (submitted) {
         window->submitted_frame_count += 1u;
+    }
+    /* A frame of the window's: a new use of its kept palettes (since 0.16.0). */
+    if (window->bone_palette_cache != NULL) {
+        (void)btbh_gpu_bone_palette_cache_begin(&window->bone_palette_cache, true, false);
     }
     btbh_gpu_window_scene_submission_finished(window, submitted);
     if (copy == NULL || !submitted) {
