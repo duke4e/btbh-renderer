@@ -1233,8 +1233,9 @@ typedef struct BTBHGPUSceneGeometryBatch {
      * present with BTBH_GPU_INVALID_ARGUMENT, naming the batch; so does, with its heightfield set, a batch that is
      * animated (animation_library or animation_pose set), a billboard, one with dug_by, or one that would cast a
      * shadow: in 0.11.0 a lifted batch casts none, so it must be transparent (transparency_enabled), or set
-     * BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW (or have its directional_shadow_visibility byte 0) and leave
-     * spot_shadow_visible 0. The radiance cascades' material sources take it unlifted (they project straight down).
+     * BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW (or have its directional_shadow_visibility byte 0, and its byte 0 in every
+     * scene view's shadow_visibility: BTBHGPUSceneView, since 0.16.0) and leave spot_shadow_visible 0. The radiance
+     * cascades' material sources take it unlifted (they project straight down).
      * A lifted batch draws with production_model_lift.vert (production_model_detail_table_lift.vert with a
      * world-detail table) from the directory of the static vertex shader the present is given; a present without
      * that file fails, naming it. 288 bytes on 64-bit with it (280 in 0.8.0 to 0.10.0). */
@@ -2919,10 +2920,15 @@ typedef struct BTBHGPUSceneView {
     float position[3];
     /* The view's half of the frame, in the window's drawable pixels (x right, y down from the top-left corner, before
        post->mirror_horizontal mirrors the frame): a pixel centre (x, y) is the view's where
-       clip[0] * x + clip[1] * y + clip[2] >= 0. All zero: the whole frame (one view only). With two views the halves
-       should cover the frame once (the second view's clip the first's negated): each is widened by a quarter of a
-       render pixel, so that no pixel is drawn by neither; a pixel whose centre lies within a quarter pixel of the line
-       is drawn by both (the nearer surface shows, and the screen-space passes take the second view's). */
+       clip[0] * x + clip[1] * y + clip[2] >= 0. All zero: the whole frame (one view only); clip[0] and clip[1] 0 with
+       clip[2] not is refused. With two views the halves should cover the frame once (the second view's clip the
+       first's negated): each is widened by a quarter of a render pixel, so that no pixel is drawn by neither. A pixel
+       whose centre lies within a quarter pixel of the line is drawn by both, the band by the line: none on a line
+       along pixel edges, a column or row on one through pixel centres, about one pixel a row (or column) on a
+       diagonal. There the nearer opaque surface shows, and the screen-space passes that write a pixel take the second
+       view's; but both views' transparent and additive surfaces blend into it, and the HBAO's occlusion (which
+       darkens by blending) can darken it twice. The screen-space passes' reads leave the band out: each view's
+       samples come from pixels and texels it alone drew. */
     float clip[3];
     /* Per batch, 0 or 1: drawn in this view (the call's scene_visibility must let it in too). NULL: every batch the
        call's scene_visibility lets in. */
@@ -2977,7 +2983,8 @@ typedef struct BTBHGPUSceneViewReport {
      the views (up to 1/64 of the frame at its widest level), and the anti-aliasing and FSR 1 a few pixels.
    - Per view, clipped to its half (each geometry pass and screen-space pass holds every view in turn): the opaque
      sort, the opaque, transparent and refraction passes, and the passes that read the camera, each keeping its
-     samples to its own half: the SSAO or HBAO with their denoise and resolve (taps across the line count for nothing),
+     samples to its own half: the SSAO or HBAO with their denoise and resolve (taps across the line, or in the band
+     by it that both views draw, count for nothing),
      the reflections (a ray stops at the line, as at the screen's edge, and fades near it), the distance pass and the
      HDR composite (the distance fog and the world-edge fade at each view's depth; the vignette stays centred on the
      frame). A refracting surface near the line may sample the other view's pixels as far as it displaces them.
@@ -2989,7 +2996,8 @@ typedef struct BTBHGPUSceneViewReport {
      maps cost 16 MiB (a 2048 sun map), 4 MiB (the spot map) and its transmittance map.
    - With two views (or one whose clip isn't zero) the frame runs no radiance cascades (report.radiance_cascades:
      active_tier BTBH_GPU_SCENE_RC_OFF, fallback_reason BTBH_GPU_SCENE_RC_FALLBACK_VIEWS) and never FSR 3: FSR 1 runs
-     instead (report.upscale_mode says BTBH_GPU_SCENE_UPSCALE_FSR1), and the next FSR 3 frame starts a new history.
+     instead (report.upscale_mode says BTBH_GPU_SCENE_UPSCALE_FSR1); the next frame that runs the cascades or FSR 3
+     starts a new history (a refused present, or a prewarm, leaves the histories as they were).
    - Needs this release's scene vertex shaders (production_model.vert and its siblings, production_animated_model.vert:
      they write the clip distance) and production_post_view.vert beside the host's post vertex shader. With two views
      (or a clip), SPIR-V vertex shaders that don't write a clip distance are refused with BTBH_GPU_INVALID_ARGUMENT
@@ -2999,9 +3007,11 @@ typedef struct BTBHGPUSceneViewReport {
      NULL, takes view_count entries: what each view drew.
    - Refused with BTBH_GPU_INVALID_ARGUMENT, naming the view, the window left as it was: views NULL, view_count 0 or
      above BTBH_GPU_SCENE_MAX_VIEWS; a view's view_projection, right, up or position not finite, or its view_projection
-     not invertible; its clip not finite, or clip[0] and clip[1] both 0 with two views; a visibility or
-     shadow_visibility byte above 1; an unknown flag, or reserved not 0; a lighting the present would refuse; and every
-     refusal of btbh_gpu_window_scene_present_instances_with_visibility.
+     not invertible; its clip not finite, or clip[0] and clip[1] both 0 with two views, or with clip[2] not 0 (one
+     view); a visibility or shadow_visibility byte above 1; an unknown flag, or reserved not 0; a lighting the present
+     would refuse; a lifted batch (height_lift with a heightfield) that would cast into a view's own sun map by its
+     shadow_visibility byte, as by directional_shadow_visibility's; and every refusal of
+     btbh_gpu_window_scene_present_instances_with_visibility.
    - The window's frame only: a picture in a target stays one view (btbh_gpu_window_scene_render_to_target_view). */
 BTBHGPUResult btbh_gpu_window_scene_present_views(
     BTBHGPUWindow *window,
@@ -3043,8 +3053,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_views(
    screen-space passes' pipelines (production_post_view.vert with the SSAO's, HBAO's, distance and composite fragment
    shaders, those the settings use) and the views' own shadow maps and transmittance maps, as the present decides them
    from the views' lighting (the matrices are read only to tell which maps the views share). One view with a zero clip
-   is exactly btbh_gpu_window_scene_prewarm. Refusals: btbh_gpu_window_scene_prewarm's, and the views' as
-   btbh_gpu_window_scene_present_views refuses them (their visibility isn't read). */
+   is exactly btbh_gpu_window_scene_prewarm. It draws nothing and leaves the frames' state alone (the radiance
+   cascades' and FSR 3's histories, the retained shadow maps). Refusals: btbh_gpu_window_scene_prewarm's, and the views'
+   as btbh_gpu_window_scene_present_views refuses them (their visibility isn't read). */
 BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
