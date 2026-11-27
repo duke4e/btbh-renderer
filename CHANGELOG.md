@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Skinned palettes cost less CPU: each animation sampler is decoded at load, and palettes are kept across presents**
+  (no API change; Be The Bullet Hell v2's perf round of 2026-11-27, renderer item 3, where
+  `btbh_gpu_scene_prepare_bones` took 5–11 % of its one busy thread at the Deck preset). Every key time and value was
+  read through cgltf's generic accessor reader inside a binary search, per channel, per pose, per frame.
+  - `btbh_gpu_animation_library_load` decodes what sampling reads, once: each channel's key times and values as flat
+    floats (read through `cgltf_accessor_read_float`, so normalised and integer outputs convert as they did; channels
+    whose times are the same floats share them), each skin's joints and inverse bind matrices, and the nodes' rest
+    transforms. A sample finds where its time falls once for each set of key times, with the same comparisons and
+    binary search, and computes every channel from it with the same arithmetic in the same order (step, the cubic
+    spline with its tangents, the shortest slerp, the linear blend): palettes are the same to the bit. A clip or skin
+    whose accessor can't be read fails as before. The decoded arrays are about the size of the clips' own data
+    (0.9–1.25 times): 1 KB for the smokes' skinned quad, 104 KiB for v2's rocket spider (24 joints, 3 clips), 415 KiB
+    for its bruiser (41 joints, 4 clips), 870 KiB for its kaiju (123 joints, 10 clips).
+  - **Each window keeps the palettes its scenes sampled** (its frame and its renders into targets alike), under the
+    library, clip, time (its bits), skin and joint count, or a blended pose's samples; a pose of one sample shares its
+    library's. A pose that comes back (a paused game, frozen bodies, corpses on a time grid, a second view of the same
+    frame) is copied, not sampled. A palette unused for 8 scenes goes, and past 32,768 matrices (2 MiB) the oldest go
+    first. A frame's batches with the same pose still share one palette in the bone buffer, found by a hash lookup now
+    instead of a scan of every earlier pose.
+- Tests: `btbh_gpu_animation_sampler` compares the decoded sampler with 0.15.0's cgltf reads, value by value and
+  palette by palette, on every fixture with clips (the new `Tests/Fixtures/animation-samplers.gltf` has every kind of
+  sampler: step, linear and cubic spline, normalised and integer outputs, repeated and single keys, clips that can't be
+  read) at every key time, either side of it, outside the range and at random times, and blends through a pose; and the
+  kept palettes against a model of them. `btbh_gpu_bone_bench` (a measurement): an army of skinned bodies in v2's
+  buckets of clip, rate and phase.
+
+### Measured
+Under the machine's perf lock (19:23:19 to 19:26:20), on an RTX 3070 Ti (Vulkan): `btbh_gpu_bone_bench`, 300 bodies
+of one v2 model in 72 buckets (its first 3 clips, 8 rates, 3 phases: 72 poses a frame), the median over 300 frames of
+the present's `cpu_prepare_bone_sample_milliseconds`, in two rounds, v0.15.0 (the release built out of tree, the bench
+built against it) then 0.16.0 each round.
+
+| Model (joints, nodes) | moving: every pose new | held: every pose back | split: the present after a render to a target |
+| --- | --- | --- | --- |
+| v2's rocket spider (24, 30) | 1.11 / 1.29 → 0.33 / 0.46 ms | 1.07 / 1.28 → 0.080 / 0.075 ms | 0.70 / 1.18 → 0.062 / 0.062 ms |
+| v2's bruiser (41, 54) | 2.31 / 1.95 → 0.78 / 0.41 ms | 2.19 / 1.85 → 0.042 / 0.013 ms | 1.98 / 1.99 → 0.025 / 0.019 ms |
+| v2's kaiju (123, 125) | 2.52 / 3.68 → 0.98 / 1.12 ms | 2.50 / 2.80 → 0.109 / 0.112 ms | 2.40 / 2.74 → 0.106 / 0.101 ms |
+
+A new pose costs 2.6 to 4.7 times less (5–6 µs for the spider, 6–11 for the bruiser, 14–16 for the kaiju, against 15–18,
+27–32 and 35–51); a pose that comes back is a copy. Kept palettes held at most 1.8 MB (the kaiju's moving army, at the
+budget). Every image of the renderer's smokes is byte for byte 0.15.0's in four modes (plain, shared meshes, no runs,
+runs verified): 421 images a mode, 0 px different, 331 of them from the smokes that draw a skinned model (flags,
+height lift, prewarm, runs, world detail, lit particle).
+
 ## [0.15.0] — 2026-11-27
 
 0.15.0: three additions for Be The Bullet Hell v2's local co-op split screen, all opt-in. A render to a target can now
