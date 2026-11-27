@@ -3245,7 +3245,8 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     float field_origin_x,
     float field_origin_z,
     float field_cell_size,
-    SDL_GPUTexture **composed_texture
+    SDL_GPUTexture **composed_texture,
+    const SDL_Rect *compose_scissor
 ) {
     SDL_GPUCommandBuffer *command = *command_slot;
     const BTBHGPUHolographicRadianceCascadesLayout *layout =
@@ -3794,7 +3795,11 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
     SDL_GPUColorTargetInfo target;
     SDL_zero(target);
     target.texture = runtime->composed_texture;
-    target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    /* A target view's rect (since 0.15.0): the compose shades the rect alone, and what lies outside is cleared, so
+       that the post chain's passes that read their neighbours read defined values there. */
+    target.load_op = compose_scissor != NULL
+        ? SDL_GPU_LOADOP_CLEAR
+        : SDL_GPU_LOADOP_DONT_CARE;
     target.store_op = SDL_GPU_STOREOP_STORE;
     target.cycle = true;
     SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(
@@ -3809,6 +3814,9 @@ static bool btbh_gpu_radiance_cascades_encode_hrc(
             (double)(SDL_GetTicksNS() - compose_started_ticks) /
             1000000.0;
         return false;
+    }
+    if (compose_scissor != NULL) {
+        SDL_SetGPUScissor(pass, compose_scissor);
     }
     SDL_BindGPUGraphicsPipeline(pass, runtime->compose_pipeline);
     SDL_GPUTextureSamplerBinding compose_samplers[8];
@@ -3928,7 +3936,8 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     const float hero_omni_shadow_position_range[4],
     float hero_omni_shadow_near,
     float hero_omni_shadow_softness,
-    SDL_GPUTexture **composed_texture
+    SDL_GPUTexture **composed_texture,
+    const SDL_Rect *compose_scissor
 ) {
     if (command == NULL || *command == NULL ||
         runtime == NULL || config == NULL ||
@@ -3980,7 +3989,8 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
         field_origin_x,
         field_origin_z,
         field_cell_size,
-        composed_texture
+        composed_texture,
+        compose_scissor
     );
 }
 

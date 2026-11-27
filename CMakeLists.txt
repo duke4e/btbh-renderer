@@ -1070,6 +1070,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_texture_mips_smoke COMMAND btbh_gpu_texture_mips_smoke)
         set_tests_properties(btbh_gpu_texture_mips_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # Target views (btbh_gpu_window_scene_render_to_target_view, since 0.15.0): view_id 0 as render_to_target, kept
+        # views' shadow maps, two views beside a window's FSR 3 frames, a rect's clear outside and border band inside,
+        # release, prewarm and refusals; hidden windows.
+        add_executable(btbh_gpu_scene_target_view_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_target_view_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_target_view_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_target_view_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_target_view_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_target_view_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_target_view_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_target_view_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_target_view_smoke COMMAND btbh_gpu_scene_target_view_smoke)
+        set_tests_properties(btbh_gpu_scene_target_view_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).
         add_executable(btbh_gpu_font_smoke
@@ -1425,6 +1457,35 @@ if(BTBH_BUILD_GPU_SPIKE)
             )
         endif()
         add_dependencies(btbh_gpu_stage_bench btbh_gpu_shaders)
+
+        # A measurement, not a test (0.15.0): a target view's rect and kept runtime on a 4K render to a target (Be The
+        # Bullet Hell v2's second co-op view); see the file.
+        add_executable(btbh_gpu_target_view_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_target_view_bench.c"
+        )
+        target_include_directories(
+            btbh_gpu_target_view_bench
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_target_view_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_target_view_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_target_view_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_target_view_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_target_view_bench btbh_gpu_shaders)
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.

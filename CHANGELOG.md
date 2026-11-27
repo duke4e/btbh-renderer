@@ -64,6 +64,60 @@ All notable changes to this project are documented here. The format follows
   behaviour; the header now says how the maps take turns, which matrix a kept map is read with, when a map is redrawn
   whatever its period, and how renders into a target follow it. A host that declared it itself drops its declaration
   (or gates it on the macro), or its bindings declare it twice.
+- **Target views: `btbh_gpu_window_scene_render_to_target_view`**, with `BTBHGPUSceneTargetView`,
+  `BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY` (8), `btbh_gpu_window_scene_prewarm_render_to_target_view`,
+  `btbh_gpu_window_scene_release_target_view` and `BTBH_GPU_SCENE_HAS_TARGET_VIEWS`. Asked for by Be The Bullet Hell
+  v2 for its local co-op split screen, which draws the second player's view into a 4K target every frame with
+  `render_to_target`: that view cost 82 % of a frame on top (RTX 3070 Ti, High), its shadow pass 0.7 ms, its SSR 1.0,
+  its HBAO 2.0, and half its pixels 5.5 ms. The call takes `render_to_target`'s arguments and a view:
+  - **A kept runtime** (`view_id` 1 to 8). `render_to_target` swaps in one runtime for every target and starts each
+    call afresh, so the second view drew every shadow map every frame, whatever the update periods. A view of its own
+    keeps its runtime between calls: its retained shadow maps and its own shadow frame count, so it follows
+    `btbh_gpu_window_scene_set_shadow_update_periods` as the window's frames do, and its radiance cascades' history (a
+    world-space field, reprojected from the view's last call: from the second call on it traces 2 of its 4 quadrants,
+    as the window's frames do). It is made by its first call or its prewarm and freed by
+    `btbh_gpu_window_scene_release_target_view` or the window's destroy. It stays non-temporal (FSR 3 runs as FSR 1;
+    per-view FSR 3 is RFC 0014's), a failed submit drops what it kept as one does the window's, and it never reads or
+    writes the window's runtime or another view's.
+  - **A scissor rect** (`scissor_x`, `_y`, `_width`, `_height`, in the target's pixels). Only the rect is shaded: it is
+    mapped to the render size (scaled, rounded outward) and to each pass's own size, and limits the opaque,
+    transparent and refraction passes, the SSAO and HBAO with their denoise and resolve (the contact AO and the
+    reflections with them), the distance pass, the radiance cascades' compose, bloom's levels, the HDR composite, LUT,
+    CAS, tilt-shift, the output pass, SMAA or FXAA, and FSR 1's EASU and RCAS or Lanczos. The shadow maps and the
+    cascades' field are never limited; the cascades' per-pixel compute passes run whole but stop at once on the
+    cleared depth outside. With `mirror_horizontal` the rect is the target's after the mirror.
+  - **Outside the rect** the target holds the clear colour, as a clear of the target stores it (an 8-bit UNORM target
+    holds `clear_red` and so on, byte for byte; an sRGB one their sRGB encoding): the finished scene is blitted in
+    whole, as before, and a 1x1 texture cleared to the colour is blitted over the four bands round the rect. The
+    texture is made before the scene is recorded (a prewarm with a rect makes it too), so nothing after the present
+    cancels a command buffer that carries the window's queued uploads. Every pass clears its own target first, so what the neighbour-reading passes read
+    outside is defined, and the band inside the border differs from a whole render: in the smoke, a seam of 3 pixels
+    (the anti-aliasing, CAS, FSR 1 reading the clear; 19 target pixels when FSR 1 doubles a half-size render) inside a
+    softer band of 24-34 (the SSAO's and HBAO's reach; bloom's 51). At 4K in the bench: the HBAO's within 80 pixels
+    (more than 8 of 255 steps within 57), bloom's within 300 (152), the seam 1 pixel without bloom. Grow the rect past
+    what is shown to keep the band out of sight.
+  - **What stays as before:** `render_to_target`, its prewarm and every other call are unchanged. A NULL view, or
+    `view_id` 0 without a rect, is exactly `render_to_target`. No shader changes. Against a build of v0.14.2, the ten
+    image-dumping smokes write the same 421 images (19.1 million pixels), 0 pixels different, with nothing set, with
+    `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0` and `=verify` (0 mismatches). Refused with
+    `BTBH_GPU_INVALID_ARGUMENT`, nothing made: a `view_id` over 8, a reserved field set, a rect outside the target.
+  - **Measured** (RTX 3070 Ti, Vulkan, `btbh_gpu_target_view_bench`). A 4K target rendered at 4K: 2,304 boxes of 768
+    triangles (1.8 million, about v2's city), two 2048 sun maps under periods of 3 frames, HBAO with contact AO, SSR,
+    bloom, fog, vignette and FXAA. GPU time a render, median of 22 rounds of 12 renders [10th-90th percentile]:
+
+    | Rect | Afresh (`render_to_target`) | Kept view |
+    | --- | --- | --- |
+    | none | 7.395 ms [7.355-7.415] | 7.121 [7.082-7.137] |
+    | right half (50 % of the pixels) | 4.107 [4.086-4.114] | 3.844 [3.817-3.868] |
+    | a 30-degree diagonal's half, its box (66 %) | 5.256 [5.236-5.281] | 5.018 [4.994-5.060] |
+
+    The half saves 3.29 ms (44 %) and the diagonal's box 2.14 ms (29 %); keeping the runtime saves 0.24-0.27 ms more
+    (the sun maps drawn on a third of the calls), 0.36-0.41 ms with a 4096 sun map, 0.22 ms under periods of 2. Kept and
+    halved, the view costs 48 % less than now. With 12-triangle boxes (a light shadow pass) the rect saves the same
+    share (5.298 to 2.896 and 3.725 ms) and keeping the runtime 0.03-0.05 ms.
+  - New smoke `btbh_gpu_scene_target_view_smoke` (43 tests in `check.ps1`), and the measurement
+    `btbh_gpu_target_view_bench`. The world detail and height lift smokes' copies of old shaders moved to shorter
+    directories: with a long build directory the refusal's 255-character message cut the path they look for.
 
 ## [0.14.2] — 2026-11-24
 
