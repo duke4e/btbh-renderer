@@ -3398,7 +3398,9 @@ static void check_table_refusals(SmokeWindow *smoke, SmokeWindow *other) {
             ShaderCopy copy;
             memset(&copy, 0, sizeof(copy));
             (void)snprintf(copy.from, sizeof(copy.from), "%s", BTBH_GPU_SMOKE_SHADER_DIR);
-            (void)snprintf(copy.to, sizeof(copy.to), "%s/../world_detail_table_old_shaders", BTBH_GPU_SMOKE_SHADER_DIR);
+            /* A short name: the refusal names the file by its whole path in the report's 255 characters, which a long
+               build directory's path filled. */
+            (void)snprintf(copy.to, sizeof(copy.to), "%s/../table_old", BTBH_GPU_SMOKE_SHADER_DIR);
             (void)SDL_CreateDirectory(copy.to);
             SDL_PathInfo directory_info;
             assert(SDL_GetPathInfo(copy.to, &directory_info) && directory_info.type == SDL_PATHTYPE_DIRECTORY);
