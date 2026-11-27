@@ -1120,10 +1120,14 @@ static double btbh_gpu_cost_measure_floor(SDL_GPUDevice *device) {
     return SDL_max(low, SDL_min(high, samples[2]));
 }
 
-void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
+void btbh_gpu_cost_abandon_frame(void) {
     btbh_gpu_cost_split_device = NULL;
     btbh_gpu_cost_pass_frame = false;
     btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+}
+
+void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
+    btbh_gpu_cost_abandon_frame();
     if (!btbh_gpu_cost_log_enabled()) {
         return;
     }
@@ -1319,8 +1323,10 @@ static uint64_t btbh_gpu_cost_pass_triangles(BTBHGPUCostPass pass) {
    line a call gives its GPU time (submit to fence, in one piece: never split), the view's id (`none` without a view),
    the target's and the render's sizes, and the triangles its main and shadow passes drew since `main_triangles` and
    `shadow_triangles` were read (they also count in the next frame's line, as before; that line's time doesn't hold
-   the render's). Then the GPU is kept warm again (once a frame made the warming textures). False, with SDL's error
-   set, when the submit failed. */
+   the render's). It waits for the warming the last frame's line left, and warms nothing itself: the host frame's one
+   warming (after its line) covers the host's own gap between frames, and what follows a render here is the next call's
+   encoding, the same short gap as between a split frame's pieces (measured: a frame after a target render costs what
+   one without does). False, with SDL's error set, when the submit failed. */
 static bool btbh_gpu_cost_submit_target(
     SDL_GPUDevice *device,
     SDL_GPUCommandBuffer *command,
@@ -1360,11 +1366,6 @@ static bool btbh_gpu_cost_submit_target(
         (unsigned long long)(btbh_gpu_cost_pass_triangles(BTBH_GPU_COST_PASS_SHADOW) - shadow_triangles)
     );
     (void)fflush(stdout);
-    /* Warm again for the frame that follows, once a frame made the warming textures: a render here makes none, so
-       that a host rendering only into targets (or a prewarm that checks the lazy creation log) sees no new texture. */
-    if (btbh_gpu_cost_warm_textures[0] != NULL) {
-        btbh_gpu_cost_warm(device);
-    }
     return true;
 }
 
@@ -1411,9 +1412,7 @@ static void btbh_gpu_scene_cancel_submission(
     if (command != NULL) {
         (void)SDL_CancelGPUCommandBuffer(command);
     }
-    btbh_gpu_cost_split_device = NULL;
-    btbh_gpu_cost_pass_frame = false;
-    btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+    btbh_gpu_cost_abandon_frame();
     btbh_gpu_window_scene_submission_finished(window, false);
 }
 
@@ -14671,7 +14670,10 @@ typedef struct BTBHGPUSceneAsideSwap {
     BTBHGPUSceneRuntime **slot;
     BTBHGPUSceneTelemetryReport window_telemetry;
     bool window_radiance_cascades_telemetry;
+    /* The cost log's frame state (a failed render inside the aside cancels, which clears it). */
     SDL_GPUDevice *window_cost_split_device;
+    bool window_cost_pass_frame;
+    int window_cost_current_step;
 } BTBHGPUSceneAsideSwap;
 
 /* The runtime in `slot` in place of the window's own (btbh_gpu_window_scene_render_to_target and its prewarm: the
@@ -14688,7 +14690,9 @@ static void btbh_gpu_scene_enter_aside(
     swap->window_telemetry = window->scene_telemetry;
     swap->window_radiance_cascades_telemetry = window->radiance_cascades_telemetry_enabled;
     swap->window_cost_split_device = btbh_gpu_cost_split_device;
-    btbh_gpu_cost_split_device = NULL;
+    swap->window_cost_pass_frame = btbh_gpu_cost_pass_frame;
+    swap->window_cost_current_step = btbh_gpu_cost_current_step;
+    btbh_gpu_cost_abandon_frame();
     window->scene_runtime = *slot;
 }
 
@@ -14699,6 +14703,8 @@ static void btbh_gpu_scene_leave_aside(BTBHGPUWindow *window, const BTBHGPUScene
     window->scene_telemetry = swap->window_telemetry;
     window->radiance_cascades_telemetry_enabled = swap->window_radiance_cascades_telemetry;
     btbh_gpu_cost_split_device = swap->window_cost_split_device;
+    btbh_gpu_cost_pass_frame = swap->window_cost_pass_frame;
+    btbh_gpu_cost_current_step = swap->window_cost_current_step;
 }
 
 /* Where the runtime a render into a target uses lives (since 0.15.0): render_to_target's, for no view or view_id 0;
@@ -15549,6 +15555,8 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
         SDL_GPUCommandBuffer *scene_command =
             window->pending_command;
         window->pending_command = NULL;
+        /* (Submitted outside the canvas: no cost-log line for this frame.) */
+        btbh_gpu_cost_abandon_frame();
         if (!SDL_SubmitGPUCommandBuffer(scene_command)) {
             window->pending_scene_ready = false;
             btbh_gpu_window_scene_submission_finished(
@@ -15731,6 +15739,8 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
     SDL_GPUDevice *device = window->device->gpu;
     SDL_GPUCommandBuffer *command = window->pending_command;
     window->pending_command = NULL;
+    /* (Submitted outside the canvas: no cost-log line for this frame.) */
+    btbh_gpu_cost_abandon_frame();
     if (command == NULL) {
         command = SDL_AcquireGPUCommandBuffer(device);
     }

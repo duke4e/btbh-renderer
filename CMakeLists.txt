@@ -173,6 +173,10 @@ if(BTBH_BUILD_GPU_SPIKE OR BTBH_BUILD_GPU_PACKAGE_RUNTIME)
                 set(${_btbh_variable} "${_btbh_saved_${_btbh_variable}}")
             endforeach()
             target_compile_options(SDL3-static PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/Z7>")
+            # CMP0141 is set after project() above, so today the format comes from the flags (stripped above) and the
+            # target property is ignored. Should it ever take effect, the property makes CMake's own flag /Z7 too
+            # (instead of the /ZI or /Zi of CMAKE_MSVC_DEBUG_INFORMATION_FORMAT), never two formats at once.
+            set_property(TARGET SDL3-static PROPERTY MSVC_DEBUG_INFORMATION_FORMAT Embedded)
         else()
             target_compile_options(SDL3-static PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX,OBJC>:-g>")
         endif()

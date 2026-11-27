@@ -627,6 +627,9 @@ bool btbh_gpu_window_finish_pending_frame(
        so that they land (since 0.11.0; a host that never queues drops such frames as before). */
     const bool holds_uploads = btbh_gpu_upload_queue_finish_pending(window);
     const bool must_submit = submit || acquired_swapchain || holds_uploads;
+    /* (A scene frame that prints no cost-log line here leaves no split or pass state to the next frame's.) */
+    const bool scene_frame = window->pending_scene_ready;
+    bool cost_emitted = false;
     window->pending_command = NULL;
     window->pending_swapchain = NULL;
     window->pending_scene_ready = false;
@@ -658,6 +661,7 @@ bool btbh_gpu_window_finish_pending_frame(
                 (double)(SDL_GetTicksNS() - submit_started_ticks) /
                 1000000.0
             );
+            cost_emitted = true;
             SDL_ReleaseGPUFence(window->device->gpu, fence);
             btbh_gpu_cost_warm(window->device->gpu);
         }
@@ -705,6 +709,9 @@ bool btbh_gpu_window_finish_pending_frame(
             : SDL_CancelGPUCommandBuffer(command);
     }
     btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_FRAME_SUBMIT, lazy_submit_started_ticks);
+    if (scene_frame && !cost_emitted) {
+        btbh_gpu_cost_abandon_frame();
+    }
     if (must_submit && result) {
         window->submitted_frame_count += 1u;
         if (acquired_swapchain) {

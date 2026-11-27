@@ -602,11 +602,14 @@ typedef enum BTBHGPUCostGroup {
 } BTBHGPUCostGroup;
 /* Starts a scene frame; with the cost log about every other one is split. */
 void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device);
+/* Ends a scene frame that prints no line (since 0.16.0): copied or captured out, dropped, cancelled, or its canvas submit
+   failed. Its split or pass state doesn't reach the next frame's line. */
+void btbh_gpu_cost_abandon_frame(void);
 /* In a split frame: submits `*command` (the passes of `finished_group`), waits for it and acquires the next
    command buffer into `*command`. False, with `*command` NULL, when the GPU failed either. Otherwise a no-op. */
 bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group);
 /* The cost log's pass frames (since 0.16.0, `BTBH_GPU_COST_PASSES=1` with the log): about every other split frame (the
-   golden-ratio sequence again, over the split frames) also cuts the ssao and post groups at each pass, a piece a step
+   sequence {k sqrt 2} >= 0.5 over the split frames) also cuts the ssao and post groups at each pass, a piece a step
    below, and prints a `BTBH_GPU_COST_PASSES` line instead of its `BTBH_GPU_COST` line: each step's submit-to-fence time
    less the frame's submission floor (`floor_ms`, an empty command buffer's submit-to-fence time), so the steps of a
    group add up to about its time less one floor. The other split frames and the whole ones print as before. */

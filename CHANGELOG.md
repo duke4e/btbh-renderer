@@ -148,29 +148,46 @@ All notable changes to this project are documented here. The format follows
     A step is its piece's submit-to-fence time less `floor_ms`, that frame's submission floor (an empty command buffer's
     submit-to-fence time, the median of three, the GPU idle as before every piece), so a pass that costs nothing reads
     about 0 (a hair below is possible). A group's steps add up to its time less one floor: at 4K the medians of the
-    `split=1` frames' `post_ms` and of the pass frames' `post` steps plus `floor_ms` agree to 0.01 ms (3.807 against
-    3.796 with FSR 3, 1.117 against 1.110 with SMAA), and `ssao_ms` with `ao` + `ssr` + the floor (1.222 against 1.228).
+    `split=1` frames' `post_ms` and of the pass frames' `post` steps plus `floor_ms` agree to 0.01-0.05 ms (3.807
+    against 3.796 with FSR 3, 1.117 against 1.110 with SMAA; a second run 3.820 against 3.772 and 1.145 against 1.121),
+    and `ssao_ms` with `ao` + `ssr` + the floor (1.222 against 1.228; 1.177 against 1.164).
     What each step holds: `ao` the HBAO's three passes or the SSAO and its denoise (and the SSAO's resolve without
     reflections); `ssr` the lighting resolve with the reflections (with HBAO it runs for the reflections alone; with
     the SSAO it also lays the occlusion); `bloom` its downsample and upsample levels; `composite` the HDR composite (fog,
     bloom, vignette); `lut` the LUT pass, which then grades; `output` the output pass (tone map, the grading without a
-    LUT, dither), or tilt-shift with it; `smaa` its edges, weights and blend (and Mirror Curse's blit after the
-    anti-aliasing); FSR 3's seven dispatches as `btbh_gpu_fsr3_encode` issues them (`fsr3_prepare_inputs` with its
-    clears; `fsr3_prepare_reactivity` is the one that reads the transparent pass's reactive mask, which has no pass of
-    its own); `fsr3_rcas` the RCAS after it (and its mirror); FSR 1's EASU and RCAS, or Lanczos.
+    LUT, dither), or tilt-shift with it; `smaa` its edges, weights and blend; FSR 3's seven dispatches as
+    `btbh_gpu_fsr3_encode` issues them (`fsr3_prepare_inputs` with its clears; `fsr3_prepare_reactivity` is the one
+    that reads the transparent pass's reactive mask, which has no pass of its own); `fsr3_rcas` the RCAS after it (and
+    its mirror); FSR 1's EASU and RCAS, or Lanczos. Mirror Curse's blit without FSR 3 has no step of its own: it counts
+    in the step that ran before it, `smaa`, `fxaa`, or `output` without anti-aliasing.
   - **Renders into a target are timed:** `btbh_gpu_window_scene_render_to_target` and `_view` (which submit their own
     command buffer) are, with the log on, submitted with the GPU idle and waited for, one line a call:
     `BTBH_GPU_COST_TARGET gpu_ms=<t> view=<id, or none without a view> target=<w>x<h> render=<w>x<h> main_tris=<n>
     shadow_tris=<n>`. One piece, never split. Its triangles also still count in the next frame's line (as before),
-    whose time doesn't hold the render's. The GPU is kept warm again afterwards.
+    whose time doesn't hold the render's. It waits for the warming the last frame's line left, and warms nothing
+    itself: the log still warms once a host frame, after the frame's line, for the host's own gap between frames,
+    while what follows a render into a target is the next call's encoding, the same short gap as between a split
+    frame's pieces. Measured at 4K: the frame after a target view costs what one without does (11.426 against 11.423
+    ms whole with FSR 3, 7.989 against 7.984 with SMAA), and the target view itself 4.04 and 3.97 ms, as with a warming
+    after every render (an earlier state of this branch, which added 12 ms of waiting a render).
+  - **A frame consumed outside the canvas prints no line and leaves nothing behind:** a scene frame copied or captured
+    out (`btbh_gpu_window_copy_pending_scene_texture`, `btbh_gpu_window_capture_pending_scene_texture`), dropped, or
+    whose canvas submit failed now clears the log's split and pass state (`btbh_gpu_cost_abandon_frame`, internal).
+    Before, a split frame captured as a pause backdrop left its state to the next canvas-only frame, which printed a
+    `split=1` line of the old frame's pieces (with pass frames it would have printed a pass line). A render into a
+    target saves and restores all of the frame's state around it, not only the split.
   - **How:** `btbh_gpu_cost_step` (internal) begins a step and is a no-op outside pass frames; a group's split ends its
-    last step. `btbh_gpu_fsr3_encode` (internal) takes the command buffer by pointer, as the cascades' encode does, and
-    pushes its uniforms again into a new one. One check of the scene's source text in the Swift suite follows the call.
+    last step. `btbh_gpu_fsr3_encode` (internal) takes the command buffer by pointer, as the cascades' encode does,
+    pushes its uniforms again into a new one, and makes its first cut before it changes any state (a failed cut leaves
+    its first frame's clear for the next frame). One check of the scene's source text in the Swift suite follows the
+    call.
 - **`BTBH_SDL_DEBUG_INFO`** (CMake option, `OFF` by default): SDL's objects carry their debug info inside them in every
   configuration (`/Z7` on MSVC, `-g` elsewhere), so a sampling profiler names SDL's functions from `SDL3-static.lib`
   alone; v2's sampler couldn't see inside SDL's Vulkan backend (its `tools/stage_prebuilt.py` copies the lib from a
   build of this CMake). On MSVC the configurations' own `/Zi` is taken out of SDL's directory's flags so that Debug and
-  RelWithDebInfo don't warn about the override. The code doesn't change: `SDL3-static.lib` built with and without it
+  RelWithDebInfo don't warn about the override, and SDL3-static's `MSVC_DEBUG_INFORMATION_FORMAT` is `Embedded` (ignored
+  today, as CMP0141 is set after `project()`; should it take effect, CMake's own flag is `/Z7` too). The code doesn't
+  change: `SDL3-static.lib` built with and without it
   (Release) has the same `.text$mn`, `.rdata`, `.data`, `.pdata` and `.xdata` sizes and the same instruction bytes at
   the same offsets (577,618 lines of `dumpbin /disasm` compared; only the local jump targets get names from the debug
   info). With it the lib carries `.debug$S` (9.6 MB) and `.debug$T` (7.3 MB), a `.debug$S` per function
@@ -178,13 +195,15 @@ All notable changes to this project are documented here. The format follows
 - **`btbh_gpu_scene_views_bench`** takes `BTBH_VIEWS_BENCH_UPSCALE=fsr3` (FSR 3 at the frame's size in place of SMAA),
   `BTBH_VIEWS_BENCH_CAS=<sharpness>` and `BTBH_VIEWS_BENCH_CONFIGS=<names>`; with `BTBH_GPU_COST_LOG=1` it ends each
   frame with a canvas present (which the log times) instead of the copy, and marks each sample's lines.
-- **Tested** (Windows, Vulkan, RTX 3070 Ti): `check.ps1` passes 45/45, the Swift suite runs 306 tests (2 skipped, 0
-  failures). Identity against a build of `cf0d9d35` (the scene views' tip): the ten image-dumping smokes write the same
-  421 images (19.1 million pixels), 0 pixels different, with the log off, and again with `BTBH_GPU_COST_LOG=1
-  BTBH_GPU_COST_PASSES=1`; the views, target view and render-to-target smokes pass under the log with pass frames too
-  (their frames are copied out, not presented, so they print no pass lines). A first run under the log caught the
-  target line's warming making the warming textures in the lit particle smoke's prewarm check: a render into a target
-  now warms only once a frame made them.
+- **Tested** (Windows, Vulkan, RTX 3070 Ti): `check.ps1` passes 45/45; the Swift suite ran 306 tests (2 skipped, 0
+  failures) before the review's fixes, which change no text it checks. Identity against v0.15.0's build: the ten
+  image-dumping smokes write the same 421 images (19.1 million pixels), 0 pixels different, in four modes (plain,
+  `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`, `=verify` with 0 mismatches), and again in plain mode with
+  `BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`. The render-to-target, target view, views, lit particle and prewarm
+  smokes pass with the log and pass frames on and off. The lazy creation smoke asserts under the log in its frame
+  telemetry test (the log's submit replaces frame telemetry's), as v0.15.0's does. Under the log the mesh queue smoke,
+  which copies frames out between canvas frames, now prints `split=0` lines for its canvas frames where it printed 7
+  `split=1` and 7 pass lines carried over from the copied frames.
 - **Measured** (the same PC, quiet, under the shared perf lock): `btbh_gpu_scene_views_bench`'s city at 3840 x 2160
   rendered at its size (2,304 boxes of 768 triangles, two sun maps at a period of 2, HBAO with contact AO, SSR, bloom,
   fog, vignette, CAS 0.5, ACES), one view through the present, the log with pass frames; medians of 37 rounds of 8
