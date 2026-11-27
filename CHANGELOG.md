@@ -100,6 +100,104 @@ All notable changes to this project are documented here. The format follows
     whole frames' HBAO reaching across), more than 32 steps only within 7 px (1 px without bloom); elsewhere at most 2
     steps (the clipping's rounding).
 
+- **The cost log in more detail: `post` and `ssao` per pass, an `ssr` step, renders into a target timed** (asked for by
+  Be The Bullet Hell v2's perf round of 2026-11-27: at 4K its `post` group takes 4.0-4.6 ms with FSR 3 at render scale
+  1 against about 1.5 ms with SMAA, and SSR and HBAO 1.2-1.4 ms each inside `ssao`). `BTBH_GPU_COST_LOG` stays a
+  measurement mode: with it off nothing changes (the same command buffers, the same images), and with it on the
+  `BTBH_GPU_COST` lines (`split=0`, `split=1`) keep their fields, their meaning and their frames.
+  - **Pass frames, opt-in: `BTBH_GPU_COST_PASSES=1`** with the log. Of the split frames about every other one (the
+    sequence {k sqrt 2} >= 0.5 over them) is also cut at each pass of the `ssao` and `post` groups, and prints a
+    `BTBH_GPU_COST_PASSES` line instead of its `BTBH_GPU_COST` line, so `ssao_ms` and `post_ms` stay totals measured in
+    one piece each, as before: each extra cut adds a submission's latency to its piece (about 0.06 ms on the RTX 3070
+    Ti; at 4K with FSR 3 a pass frame's 19 pieces add up to 0.75 ms more than a split frame's 7), which would have read
+    as FSR 3's own cost. With the variable set, a quarter of the frames are pass frames, a quarter `split=1` and half
+    `split=0`. The line, every field always printed (0 for a pass that didn't run):
+
+    ```
+    BTBH_GPU_COST_PASSES gpu_ms=<the frame's pieces> pieces=<n> floor_ms=<f> ao_ms ssr_ms bloom_ms composite_ms lut_ms
+      cas_ms output_ms fxaa_ms smaa_ms fsr3_prepare_inputs_ms fsr3_luma_pyramid_ms fsr3_shading_change_pyramid_ms
+      fsr3_shading_change_ms fsr3_prepare_reactivity_ms fsr3_luma_instability_ms fsr3_accumulate_ms fsr3_rcas_ms
+      fsr1_easu_ms fsr1_rcas_ms lanczos_ms
+    ```
+
+    For example (4K, FSR 3 at render scale 1, HBAO, SSR, CAS):
+
+    ```
+    BTBH_GPU_COST_PASSES gpu_ms=12.5636 pieces=19 floor_ms=0.0583 ao_ms=0.9535 ssr_ms=0.2060 bloom_ms=0.2562
+      composite_ms=0.1605 lut_ms=0.0000 cas_ms=0.1530 output_ms=0.1224 fxaa_ms=0.0000 smaa_ms=0.0000
+      fsr3_prepare_inputs_ms=0.4139 fsr3_luma_pyramid_ms=0.0616 fsr3_shading_change_pyramid_ms=0.3559
+      fsr3_shading_change_ms=0.0363 fsr3_prepare_reactivity_ms=0.4715 fsr3_luma_instability_ms=0.3356
+      fsr3_accumulate_ms=1.3072 fsr3_rcas_ms=0.1243 fsr1_easu_ms=0.0000 fsr1_rcas_ms=0.0000 lanczos_ms=0.0000
+    ```
+
+    (one line in the log; wrapped here).
+
+    A step is its piece's submit-to-fence time less `floor_ms`, that frame's submission floor (an empty command buffer's
+    submit-to-fence time, the median of three, the GPU idle as before every piece), so a pass that costs nothing reads
+    about 0 (a hair below is possible). A group's steps add up to its time less one floor: at 4K the medians of the
+    `split=1` frames' `post_ms` and of the pass frames' `post` steps plus `floor_ms` agree to 0.01 ms (3.807 against
+    3.796 with FSR 3, 1.117 against 1.110 with SMAA), and `ssao_ms` with `ao` + `ssr` + the floor (1.222 against 1.228).
+    What each step holds: `ao` the HBAO's three passes or the SSAO and its denoise (and the SSAO's resolve without
+    reflections); `ssr` the lighting resolve with the reflections (with HBAO it runs for the reflections alone; with
+    the SSAO it also lays the occlusion); `bloom` its downsample and upsample levels; `composite` the HDR composite (fog,
+    bloom, vignette); `lut` the LUT pass, which then grades; `output` the output pass (tone map, the grading without a
+    LUT, dither), or tilt-shift with it; `smaa` its edges, weights and blend (and Mirror Curse's blit after the
+    anti-aliasing); FSR 3's seven dispatches as `btbh_gpu_fsr3_encode` issues them (`fsr3_prepare_inputs` with its
+    clears; `fsr3_prepare_reactivity` is the one that reads the transparent pass's reactive mask, which has no pass of
+    its own); `fsr3_rcas` the RCAS after it (and its mirror); FSR 1's EASU and RCAS, or Lanczos.
+  - **Renders into a target are timed:** `btbh_gpu_window_scene_render_to_target` and `_view` (which submit their own
+    command buffer) are, with the log on, submitted with the GPU idle and waited for, one line a call:
+    `BTBH_GPU_COST_TARGET gpu_ms=<t> view=<id, or none without a view> target=<w>x<h> render=<w>x<h> main_tris=<n>
+    shadow_tris=<n>`. One piece, never split. Its triangles also still count in the next frame's line (as before),
+    whose time doesn't hold the render's. The GPU is kept warm again afterwards.
+  - **How:** `btbh_gpu_cost_step` (internal) begins a step and is a no-op outside pass frames; a group's split ends its
+    last step. `btbh_gpu_fsr3_encode` (internal) takes the command buffer by pointer, as the cascades' encode does, and
+    pushes its uniforms again into a new one. One check of the scene's source text in the Swift suite follows the call.
+- **`BTBH_SDL_DEBUG_INFO`** (CMake option, `OFF` by default): SDL's objects carry their debug info inside them in every
+  configuration (`/Z7` on MSVC, `-g` elsewhere), so a sampling profiler names SDL's functions from `SDL3-static.lib`
+  alone; v2's sampler couldn't see inside SDL's Vulkan backend (its `tools/stage_prebuilt.py` copies the lib from a
+  build of this CMake). On MSVC the configurations' own `/Zi` is taken out of SDL's directory's flags so that Debug and
+  RelWithDebInfo don't warn about the override. The code doesn't change: `SDL3-static.lib` built with and without it
+  (Release) has the same `.text$mn`, `.rdata`, `.data`, `.pdata` and `.xdata` sizes and the same instruction bytes at
+  the same offsets (577,618 lines of `dumpbin /disasm` compared; only the local jump targets get names from the debug
+  info). With it the lib carries `.debug$S` (9.6 MB) and `.debug$T` (7.3 MB), a `.debug$S` per function
+  (`SDL_gpu_vulkan.c.obj`: 245 for its 244), and weighs 35.0 MB against 13.7. The README now lists the CMake options.
+- **`btbh_gpu_scene_views_bench`** takes `BTBH_VIEWS_BENCH_UPSCALE=fsr3` (FSR 3 at the frame's size in place of SMAA),
+  `BTBH_VIEWS_BENCH_CAS=<sharpness>` and `BTBH_VIEWS_BENCH_CONFIGS=<names>`; with `BTBH_GPU_COST_LOG=1` it ends each
+  frame with a canvas present (which the log times) instead of the copy, and marks each sample's lines.
+- **Tested** (Windows, Vulkan, RTX 3070 Ti): `check.ps1` passes 45/45, the Swift suite runs 306 tests (2 skipped, 0
+  failures). Identity against a build of `cf0d9d35` (the scene views' tip): the ten image-dumping smokes write the same
+  421 images (19.1 million pixels), 0 pixels different, with the log off, and again with `BTBH_GPU_COST_LOG=1
+  BTBH_GPU_COST_PASSES=1`; the views, target view and render-to-target smokes pass under the log with pass frames too
+  (their frames are copied out, not presented, so they print no pass lines). A first run under the log caught the
+  target line's warming making the warming textures in the lit particle smoke's prewarm check: a render into a target
+  now warms only once a frame made them.
+- **Measured** (the same PC, quiet, under the shared perf lock): `btbh_gpu_scene_views_bench`'s city at 3840 x 2160
+  rendered at its size (2,304 boxes of 768 triangles, two sun maps at a period of 2, HBAO with contact AO, SSR, bloom,
+  fog, vignette, CAS 0.5, ACES), one view through the present, the log with pass frames; medians of 37 rounds of 8
+  frames (149 whole, 71 split, 76 pass frames), in ms:
+
+  | | SMAA medium | FSR 3 at render scale 1 |
+  | --- | --- | --- |
+  | whole frame (`split=0` `gpu_ms`) | 7.93 | 11.41 |
+  | `post_ms` (`split=1`) | 1.117 | 3.807 |
+  | bloom / composite / CAS / output | 0.241 / 0.160 / 0.148 / 0.123 | 0.251 / 0.165 / 0.152 / 0.125 |
+  | SMAA | 0.382 | |
+  | FSR 3's dispatches | | 2.924 |
+  | - prepare inputs (with the clears) / luma pyramid | | 0.408 / 0.058 |
+  | - shading change pyramid / shading change | | 0.342 / 0.033 |
+  | - prepare reactivity / luma instability | | 0.467 / 0.323 |
+  | - accumulate (at the output size) | | 1.293 |
+  | RCAS after FSR 3 | | 0.117 |
+  | `ssao_ms` (`split=1`): `ao` (HBAO) + `ssr` | 1.180: 0.922 + 0.205 | 1.222: 0.955 + 0.211 |
+  | `floor_ms` | 0.056 | 0.062 |
+
+  FSR 3 at render scale 1 is 3.04 ms of the post chain's 3.81 (its dispatches 2.92, a third of that accumulate, and its
+  RCAS), against SMAA's 0.38: the 2.69 ms between the two chains. The 0.15.0 way's target view (view 1, the right half
+  grown 96 px, at 4K) takes 3.92-4.04 ms a call (`BTBH_GPU_COST_TARGET`, 296 calls a run). This city's reflections
+  are cheap (0.21 ms: matte boxes, a ground of roughness 0.25); Be The Bullet Hell v2's 1.4 ms comes from its kit's
+  facades.
+
 ### Known
 - **Metal: the clip distance was never run on a GPU.** The MSL carries `[[clip_distance]]` (and SPIRV-Cross's
   `user(clip0)` copy) in the five scene vertex shaders, which every present now draws with (writing 1 with one view),
