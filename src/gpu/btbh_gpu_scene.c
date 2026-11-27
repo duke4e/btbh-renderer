@@ -6309,6 +6309,30 @@ static bool btbh_gpu_scene_animation_sample_matches(
             btbh_gpu_scene_float_bits(batch->animation_time);
 }
 
+/* Where the frame's samples are looked up (since 0.16.0; a scan of every sample before): a hash of what
+   btbh_gpu_scene_animation_sample_matches compares, the pose alone for a batch with one. */
+static uint32_t btbh_gpu_scene_animation_sample_hash(
+    const BTBHGPUSceneGeometryBatch *batch,
+    uint32_t skin_index,
+    uint32_t joint_count
+) {
+    uint64_t hash = 0u;
+    if (batch->animation_pose != NULL) {
+        hash = (uint64_t)(uintptr_t)batch->animation_pose;
+    } else {
+        hash = (uint64_t)(uintptr_t)batch->animation_library ^
+            ((((uint64_t)batch->animation_index << 32u) |
+              btbh_gpu_scene_float_bits(batch->animation_time)) *
+             0x9e3779b97f4a7c15ull);
+    }
+    hash = (hash ^ (((uint64_t)skin_index << 32u) | joint_count)) *
+        0xbf58476d1ce4e5b9ull;
+    hash ^= hash >> 31u;
+    hash *= 0x94d049bb133111ebull;
+    hash ^= hash >> 29u;
+    return (uint32_t)hash;
+}
+
 /* Temporal frames: points each skinned geometry's previous offset at its pose's palette from the previous
    temporal frame, appended after this frame's palettes (matrices has room for twice the current bones),
    then keeps this frame's pose palettes for the next. A pose without one keeps its current palette, so
@@ -6414,7 +6438,9 @@ static void btbh_gpu_scene_apply_temporal_palettes(
 
 /* bone_offsets holds each geometry's palette offset (UINT32_MAX when it is not skinned), then, at
    geometry_count + index, the palette the previous temporal frame drew it with (the same offset outside
-   temporal frames). temporal_runtime is the runtime while the frame renders temporally, NULL otherwise. */
+   temporal frames). temporal_runtime is the runtime while the frame renders temporally, NULL otherwise.
+   palette_cache is the window's kept palettes (since 0.16.0; NULL: every palette is sampled): a sample whose palette
+   is kept copies it, and a sampled palette is kept. */
 static bool btbh_gpu_scene_prepare_bones(
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
@@ -6424,7 +6450,8 @@ static bool btbh_gpu_scene_prepare_bones(
     uint32_t *bone_count,
     bool detailed_telemetry,
     BTBHGPUSceneTelemetryReport *telemetry,
-    BTBHGPUSceneRuntime *temporal_runtime
+    BTBHGPUSceneRuntime *temporal_runtime,
+    BTBHGPUBonePaletteCache **palette_cache_slot
 ) {
     const uint64_t count_started_ticks = detailed_telemetry
         ? SDL_GetTicksNS()
@@ -6523,18 +6550,37 @@ static bool btbh_gpu_scene_prepare_bones(
                 sizeof(*samples)
             )
             : NULL;
+    /* The samples' hash table: a power of two of slots, at least twice the animated geometries, UINT32_MAX empty. */
+    size_t sample_table_size = 16u;
+    while (sample_table_size < (size_t)total_animated_geometry_count * 2u &&
+           sample_table_size <= SIZE_MAX / (2u * sizeof(uint32_t))) {
+        sample_table_size *= 2u;
+    }
+    uint32_t *sample_table =
+        total_animated_geometry_count > 0u &&
+                sample_table_size >= (size_t)total_animated_geometry_count * 2u &&
+                sample_table_size <= UINT32_MAX
+            ? malloc(sample_table_size * sizeof(*sample_table))
+            : NULL;
     if (
         offsets == NULL ||
         (total_bone_count > 0u && matrices == NULL) ||
         (
             total_animated_geometry_count > 0u &&
-            samples == NULL
+            (samples == NULL || sample_table == NULL)
         )
     ) {
+        free(sample_table);
         free(samples);
         free(matrices);
         free(offsets);
         return false;
+    }
+    const uint32_t sample_table_mask = (uint32_t)(sample_table_size - 1u);
+    BTBHGPUBonePaletteCache *palette_cache = NULL;
+    if (total_animated_geometry_count > 0u) {
+        (void)memset(sample_table, 0xff, sample_table_size * sizeof(*sample_table));
+        palette_cache = btbh_gpu_bone_palette_cache_begin(palette_cache_slot);
     }
     const uint64_t allocation_finished_ticks = detailed_telemetry
         ? SDL_GetTicksNS()
@@ -6550,6 +6596,7 @@ static bool btbh_gpu_scene_prepare_bones(
     uint32_t geometry_index = 0u;
     uint32_t bone_index = 0u;
     uint32_t sample_count = 0u;
+    uint32_t palette_hit_count = 0u;
     bool valid = true;
     for (uint32_t batch_index = 0u;
          valid && batch_index < batch_count;
@@ -6586,40 +6633,78 @@ static bool btbh_gpu_scene_prepare_bones(
                                 batch->animation_library,
                                 (uint32_t)skin_index
                             );
+                    /* The frame's sample it shares (at most one matches: a sample is added only when none does), or
+                       the empty slot it takes. */
+                    uint32_t table_slot = btbh_gpu_scene_animation_sample_hash(
+                        batch,
+                        (uint32_t)skin_index,
+                        joint_count
+                    ) & sample_table_mask;
                     uint32_t matching_sample = UINT32_MAX;
-                    for (uint32_t sample_index = 0u;
-                         sample_index < sample_count;
-                         sample_index += 1u) {
+                    while (sample_table[table_slot] != UINT32_MAX) {
                         if (btbh_gpu_scene_animation_sample_matches(
-                                &samples[sample_index],
+                                &samples[sample_table[table_slot]],
                                 batch,
                                 (uint32_t)skin_index,
                                 joint_count
                             )) {
-                            matching_sample = sample_index;
+                            matching_sample = sample_table[table_slot];
                             break;
                         }
+                        table_slot = (table_slot + 1u) & sample_table_mask;
                     }
                     if (matching_sample != UINT32_MAX) {
                         offsets[geometry_index] =
                             samples[matching_sample].bone_offset;
                     } else {
                         offsets[geometry_index] = bone_index;
-                        valid = batch->animation_pose != NULL
-                            ? btbh_gpu_animation_pose_sample_skin(
-                                batch->animation_pose,
-                                (uint32_t)skin_index,
-                                &matrices[(size_t)bone_index * 16u],
-                                joint_count
-                            )
-                            : btbh_gpu_animation_library_sample_skin(
+                        float *palette = &matrices[(size_t)bone_index * 16u];
+                        BTBHGPUBonePaletteKey palette_key;
+                        const bool keyed =
+                            palette_cache != NULL &&
+                            btbh_gpu_bone_palette_key(
                                 batch->animation_library,
+                                batch->animation_pose,
                                 batch->animation_index,
                                 batch->animation_time,
                                 (uint32_t)skin_index,
-                                &matrices[(size_t)bone_index * 16u],
-                                joint_count
+                                joint_count,
+                                &palette_key
                             );
+                        const float *kept = keyed
+                            ? btbh_gpu_bone_palette_cache_find(palette_cache, &palette_key)
+                            : NULL;
+                        if (kept != NULL) {
+                            (void)memcpy(
+                                palette,
+                                kept,
+                                (size_t)joint_count * 16u * sizeof(float)
+                            );
+                            palette_hit_count += 1u;
+                        } else {
+                            valid = batch->animation_pose != NULL
+                                ? btbh_gpu_animation_pose_sample_skin(
+                                    batch->animation_pose,
+                                    (uint32_t)skin_index,
+                                    palette,
+                                    joint_count
+                                )
+                                : btbh_gpu_animation_library_sample_skin(
+                                    batch->animation_library,
+                                    batch->animation_index,
+                                    batch->animation_time,
+                                    (uint32_t)skin_index,
+                                    palette,
+                                    joint_count
+                                );
+                            if (valid && keyed) {
+                                btbh_gpu_bone_palette_cache_store(
+                                    palette_cache,
+                                    &palette_key,
+                                    palette
+                                );
+                            }
+                        }
                         if (valid) {
                             BTBHGPUSceneAnimationSample *sample =
                                 &samples[sample_count];
@@ -6636,6 +6721,7 @@ static bool btbh_gpu_scene_prepare_bones(
                                 (uint32_t)skin_index;
                             sample->joint_count = joint_count;
                             sample->bone_offset = bone_index;
+                            sample_table[table_slot] = sample_count;
                             sample_count += 1u;
                             bone_index += joint_count;
                         }
@@ -6645,6 +6731,7 @@ static bool btbh_gpu_scene_prepare_bones(
             geometry_index += 1u;
         }
     }
+    free(sample_table);
     if (!valid) {
         free(samples);
         free(matrices);
@@ -6686,6 +6773,7 @@ static bool btbh_gpu_scene_prepare_bones(
     *bone_count = bone_index;
     telemetry->animated_geometry_count = total_animated_geometry_count;
     telemetry->animation_sample_count = sample_count;
+    telemetry->animation_palette_cache_hit_count = palette_hit_count;
     telemetry->bone_matrix_count = bone_index;
     return true;
 }
@@ -9724,7 +9812,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &bone_count,
             detailed_prepare_telemetry,
             telemetry,
-            temporal_active ? runtime : NULL
+            temporal_active ? runtime : NULL,
+            window != NULL ? &window->bone_palette_cache : NULL
         ) ||
         bone_count > UINT32_MAX / (sizeof(float) * 16u) ||
         !btbh_gpu_scene_prepare_dig_bindings(window, runtime, batches, batch_count)
@@ -12840,6 +12929,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             &bone_count,
             false,
             &telemetry,
+            NULL,
             NULL
         )) {
         btbh_gpu_scene_error(

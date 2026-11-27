@@ -32,7 +32,12 @@ typedef struct BTBHGPUSceneTelemetryReport {
        compared it with what the pass held, and the differences found (each field of each draw counts once). */
     uint32_t run_verify_draw_count;
     uint32_t run_verify_mismatch_count;
+    /* Since 0.16.0: the animation samples above whose palette the window kept from an earlier present (or an earlier
+       scene of this frame) and copied, rather than sampled (btbh_gpu_bone_palette_cache). */
+    uint32_t animation_palette_cache_hit_count;
 } BTBHGPUSceneTelemetryReport;
+/* Defined when BTBHGPUSceneTelemetryReport.animation_palette_cache_hit_count exists (since 0.16.0). */
+#define BTBH_GPU_HAS_BONE_PALETTE_CACHE 1
 
 /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): the run_verify_* counts over a window's life, its presents and the scenes
    it rendered into a target (whose telemetry the window doesn't keep) alike (btbh_gpu_window_scene_read_run_verify). */
