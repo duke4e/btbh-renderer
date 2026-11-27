@@ -9,7 +9,7 @@ extern "C" {
 
 /* The version of this API (semver, COORDINATION.md); release tags are v<major>.<minor>.<patch>. */
 #define BTBH_GPU_VERSION_MAJOR 0
-#define BTBH_GPU_VERSION_MINOR 15
+#define BTBH_GPU_VERSION_MINOR 16
 #define BTBH_GPU_VERSION_PATCH 0
 
 #define BTBH_GPU_DRIVER_NAME_CAPACITY 32u
@@ -2979,8 +2979,9 @@ typedef struct BTBHGPUSceneViewReport {
    (view_count of them); the frame then waits for its canvas as a present's does. One view whose clip is zero and whose
    visibility, shadow_visibility and lighting are NULL draws that call's frame with the view's camera, byte for byte.
    - Once for the frame: the preparation, the upload, the shadow maps the views share, bloom, the LUT, CAS, tilt-shift
-     and the output pass, SMAA or FXAA, the mirror and the upscaling. Bloom reaches a little across the line between
-     the views (up to 1/64 of the frame at its widest level), and the anti-aliasing and FSR 1 a few pixels.
+     and the output pass, SMAA or FXAA, the mirror and the upscaling. Bloom reaches across the line between the views
+     (a texel of its widest level is 1/64 of the frame; a bright source on the line lifts the other half to about
+     1/32 of the frame from it), and the anti-aliasing and FSR 1 a few pixels.
    - Per view, clipped to its half (each geometry pass and screen-space pass holds every view in turn): the opaque
      sort, the opaque, transparent and refraction passes, and the passes that read the camera, each keeping its
      samples to its own half: the SSAO or HBAO with their denoise and resolve (taps across the line, or in the band

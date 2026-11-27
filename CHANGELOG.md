@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-11-27
+
+0.16.0: Be The Bullet Hell v2's split screen in one present, and three answers to its perf round of 2026-11-27, all
+opt-in or invisible. **Scene views** (RFC 0014 phase 1) draw both players' cameras into the window's frame in one
+present, each clipped to its half; **the cost log** times `ssao` and `post` per pass (`BTBH_GPU_COST_PASSES=1`) and
+every render into a target, and `BTBH_SDL_DEBUG_INFO` puts SDL's debug info in its static lib; **bone palettes** cost
+3-4 times less CPU for a new pose and a copy for one that comes back, with no API change. Nothing that existed changes
+what it draws: every image of the renderer's smokes is byte for byte 0.15.0's. Shaders: rebuild them. 79 are built
+(0.15.0's 78 and the new `production_post_view.vert`, which a game adds to its list); 11 changed (the five scene
+vertex shaders write a clip distance, the six SSAO and HBAO shaders take the half's plane in words that were zero),
+their pictures not.
+
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on the merged release: `check.ps1` 46/46 (0.15.0's 44, the views
+smoke and the animation sampler test), the Swift suite 306 tests (2 skipped, 0 failures), and identity against 0.15.0
+in four modes (plain, shared meshes, no runs, runs verified): 421 images a mode, 0 px different, 0 run-verify
+mismatches, the same through `present_views` with one view (`BTBH_SMOKE_PRESENT_VIEWS=1`) and with the cost log and
+its pass frames on; the views smoke passes in the four modes. Each of the three branches was reviewed; every finding
+was fixed before the candidate. Its 4K bench (the views bench's city, HBAO, SSR, bloom, SMAA, two sun maps at a period
+of 2; quiet, under the machine's perf lock; GPU medians of 40 rounds of 8 frames): one view 8.18 ms through the present
+and through `present_views`; split by `present_views` 7.39 ms vertically and 7.28 on a 30-degree diagonal (7.59 and
+7.50 with the second view's own sun map), against 12.10 and 13.29 for 0.15.0's way (a present, a target view grown
+96 px, composed), 39 and 45 % less, with the calls' CPU from 0.51-0.59 ms to 0.25.
+
+Be The Bullet Hell v2's test of the candidate (`ba14f939`; Windows, Vulkan, RTX 3070 Ti, under the perf lock) found
+nothing broken, and v2 adopts it. A clean build with `shaders-160` (79: 67 as before, 11 changed, and the new one in its
+list) makes no pipeline after frame 1 at High by day and night or on the Deck preset. With no split its pixels are
+0.15.0's within its noise on nine scenes, a two-player replay from 0.15.0 plays the same, and its golden hashes pass.
+Split by `present_views` in place of its target view (frame ms, three interleaved rounds): at 4K High on Auto (render
+scale 0.67 and FSR 3) 11.5-11.7 became 6.2-6.3 (one view 8.6-8.8; part of it is FSR 1 and SMAA in place of FSR 3); at 4K
+High at scale 1 with SMAA, its perf round's case of 13.1 ms, 13.05-13.23 became 9.18-9.46 (one view 9.5-9.6), 29 % less
+with no upscaler either way; on the Deck preset 2.23-2.24 became 1.60-1.63 (one view 1.68). Its per-view culling saves
+0.5 ms at 4K and 0.26 on the Deck. The first split frame after `prewarm_views` at the stage's load creates nothing,
+where 0.15.0 made 6 pipelines and 12 shaders. The line shows no AO band or seam, upright, level or diagonal, by day or
+night; at night bloom reaches past its divider where its heat ray meets the line (above), and the reflections' fade by
+the line looks wide at 4K. In the Deck preset's fights with the army the preparation's CPU fell from 0.136-0.166 ms to
+0.074-0.085, its bone step from 1.6-2.0 % of the main thread to 0.5-0.6 %. Its pass frames in a boss fight at 4K High:
+on Auto `main` 3.51 ms and `post` 2.79, of which FSR 3 2.34 (accumulate 1.29, at output size at either scale), SSR 0.70,
+HBAO 0.52; at scale 1 `main` 5.83, SSR 1.49, HBAO 1.11, and FSR 3 3.36 of `post`'s 4.42. Its facades make SSR about
+three times the bench's.
+
 ### Added
 - **Scene views: two cameras in one present, each clipped to its half of the frame** (RFC 0014 phase 1,
   `BTBH_GPU_SCENE_HAS_VIEWS`): **`btbh_gpu_window_scene_present_views`** with **`BTBHGPUSceneView`** (144 bytes),
@@ -21,26 +61,27 @@ All notable changes to this project are documented here. The format follows
     and the point lights; every other lighting field is the call's.
   - **Once for the frame:** validation, preparation, bones, the upload, the targets, bloom, the LUT, CAS, tilt-shift,
     the output pass, SMAA or FXAA, the mirror and FSR 1.
-  - **Per view, clipped to its half** (`SV_ClipDistance0` from the scene vertex shaders): its opaque sort, its
-    opaque, transparent and refraction draws, in each pass one view after the other; and the passes that read the
-    camera, as one pass with a clipped draw per view through the new **`production_post_view.vert`**: the SSAO or HBAO
-    with their denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the
-    world-edge fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the
-    other half, or in the band by the line (below), count for nothing, a reflection stops short of the line (and fades
-    near it), as at the screen's edge.
+  - **Per view, clipped to its half** (`SV_ClipDistance0` from the scene vertex shaders): its opaque sort, its opaque,
+    transparent and refraction draws, in each pass one view after the other; and the passes that read the camera, as one
+    pass with a clipped draw per view through the new **`production_post_view.vert`**: the SSAO or HBAO with their
+    denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the world-edge
+    fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the other half,
+    or in the band by the line (below), count for nothing, a reflection stops short of the line and fades within 1/12 of
+    the frame of it, as at the screen's edge.
   - **Shadow maps:** the secondary map, and an omni map, are the call's. A sun or spot map is shared by views whose
     matrices are equal byte for byte; else the second view has its own (and its own particle transmittance map), drawn
     with its camera's billboards and its `shadow_visibility`. In the update periods' order a view's own map comes right
     after view 0's, so at v2's sun period of 2 the two sun maps are redrawn on alternate frames: one map a frame.
   - **The line:** each half is widened by a quarter of a render pixel, so no pixel is drawn by neither view. A pixel
-    whose centre lies within that of the line is drawn by both, the band by the line: none on a line along pixel
-    edges, a column on one through pixel centres, about one pixel a row on a diagonal. There the nearer opaque surface
-    shows and the screen-space passes that write a pixel take the second view's, but both views' transparent and
-    additive surfaces blend into it, and the HBAO's occlusion (which darkens by blending) can darken it twice. The
-    screen-space passes' reads leave the band out: each view's taps, at full and half size, come from pixels and
-    texels it alone drew (3/8 of a render pixel or more inside its line). Bloom reaches across (its widest level, 1/64
-    of the frame), the anti-aliasing and FSR 1 a few pixels, and a refracting surface its displacement: v2's divider
-    covers them.
+    whose centre lies within that of the line is drawn by both, the band by the line: none on a line along pixel edges,
+    a column on one through pixel centres, about one pixel a row on a diagonal. There the nearer opaque surface shows
+    and the screen-space passes that write a pixel take the second view's, but both views' transparent and additive
+    surfaces blend into it, and the HBAO's occlusion (which darkens by blending) can darken it twice. The screen-space
+    passes' reads leave the band out: each view's taps, at full and half size, come from pixels and texels it alone drew
+    (3/8 of a render pixel or more inside its line). The anti-aliasing and FSR 1 reach across a few pixels and a
+    refracting surface as far as it displaces, which v2's divider covers. Bloom reaches farther (a texel of its widest
+    level is 1/64 of the frame): at 4K a bright source on the line lifts the other half by 29 steps 20 px from it, 7 at
+    60 px and none by 120 px (v2's test, below), past v2's divider at night.
   - **Not with two views (phase 1):** the radiance cascades (off for the frame, `fallback_reason`
     `BTBH_GPU_SCENE_RC_FALLBACK_VIEWS`; once such a frame is drawn their history starts afresh, while a prewarm or a
     refused present keeps it) and FSR 3 (FSR 1 runs, `report.upscale_mode` says so; the next FSR 3 frame starts a new
@@ -257,8 +298,8 @@ All notable changes to this project are documented here. The format follows
   palette by palette, on every fixture with clips (the new `Tests/Fixtures/animation-samplers.gltf` has every kind of
   sampler: step, linear and cubic spline, normalised and integer outputs, repeated and single keys, clips that can't be
   read) at every key time, either side of it, outside the range and at random times, and blends through a pose; the
-  kept palettes against a model of them; and the scene's palettes with the kept ones against those without. `btbh_gpu_bone_bench` (a measurement): an army of skinned bodies in v2's
-  buckets of clip, rate and phase.
+  kept palettes against a model of them; and the scene's palettes with the kept ones against those without.
+  `btbh_gpu_bone_bench` (a measurement): an army of skinned bodies in v2's buckets of clip, rate and phase.
 
 ### Measured
 Under the machine's perf lock (19:23:19 to 19:26:20), on an RTX 3070 Ti (Vulkan): `btbh_gpu_bone_bench`, 300 bodies
@@ -275,12 +316,12 @@ built against it) then 0.16.0 each round.
 A new pose costs 2.6 to 4.7 times less (5–6 µs for the spider, 6–11 for the bruiser, 14–16 for the kaiju, against 15–18,
 27–32 and 35–51); a pose that comes back is a copy. After the review's fixes (a hard budget, uses counted by frames),
 again under the lock (20:44:50 to 20:46:32, a quieter machine): moving 0.57 / 0.57 → 0.17 / 0.17 ms (spider), 0.91 /
-0.84 → 0.24 / 0.26 (bruiser), 2.00 / 1.93 → 0.65 / 0.61 (kaiju); held 0.57 / 0.56 → 0.027 / 0.027, 0.87 / 0.87 →
-0.006 / 0.007, 1.94 / 1.80 → 0.094 / 0.083: 3.1 to 3.8 times less for a new pose, the same as before. The kaiju's moving
-army holds the cache at its budget: 2.15 MB in all (2 MiB of palette blocks, the rest its table). Every image of the
+0.84 → 0.24 / 0.26 (bruiser), 2.00 / 1.93 → 0.65 / 0.61 (kaiju); held 0.57 / 0.56 → 0.027 / 0.027, 0.87 / 0.87 → 0.006 /
+0.007, 1.94 / 1.80 → 0.094 / 0.083: 3.1 to 3.8 times less for a new pose, the same as before. The kaiju's moving army
+holds the cache at its budget: 2.15 MB in all (2 MiB of palette blocks, the rest its table). Every image of the
 renderer's smokes is byte for byte 0.15.0's in four modes (plain, shared meshes, no runs, runs verified), before and
-after the fixes: 421 images a mode, 0 px different, 331 of them from the smokes that draw a skinned model (flags,
-height lift, prewarm, runs, world detail, lit particle).
+after the fixes: 421 images a mode, 0 px different, 331 of them from the smokes that draw a skinned model (flags, height
+lift, prewarm, runs, world detail, lit particle).
 
 ### Known
 - **Metal: the clip distance was never run on a GPU.** The MSL carries `[[clip_distance]]` (and SPIRV-Cross's
@@ -407,14 +448,14 @@ workspace (1295 tests) and its UI tour, text, pad and replay checks pass.
     cleared depth outside. With `mirror_horizontal` the rect is the target's after the mirror.
   - **Outside the rect** the target holds the clear colour, as a clear of the target stores it (an 8-bit UNORM target
     holds `clear_red` and so on, byte for byte; an sRGB one their sRGB encoding): the finished scene is blitted in
-    whole, as before, and a 1x1 texture cleared to the colour is blitted over the four bands round the rect. The
-    texture is made before the scene is recorded (a prewarm with a rect makes it too), so nothing after the present
-    cancels a command buffer that carries the window's queued uploads. Every pass clears its own target first, so what the neighbour-reading passes read
-    outside is defined, and the band inside the border differs from a whole render: in the smoke, a seam of 3 pixels
-    (the anti-aliasing, CAS, FSR 1 reading the clear; 19 target pixels when FSR 1 doubles a half-size render) inside a
-    softer band of 24-34 (the SSAO's and HBAO's reach; bloom's 51). At 4K in the bench: the HBAO's within 80 pixels
-    (more than 8 of 255 steps within 57), bloom's within 300 (152), the seam 1 pixel without bloom. Grow the rect past
-    what is shown to keep the band out of sight.
+    whole, as before, and a 1x1 texture cleared to the colour is blitted over the four bands round the rect. The texture
+    is made before the scene is recorded (a prewarm with a rect makes it too), so nothing after the present cancels a
+    command buffer that carries the window's queued uploads. Every pass clears its own target first, so what the
+    neighbour-reading passes read outside is defined, and the band inside the border differs from a whole render: in the
+    smoke, a seam of 3 pixels (the anti-aliasing, CAS, FSR 1 reading the clear; 19 target pixels when FSR 1 doubles a
+    half-size render) inside a softer band of 24-34 (the SSAO's and HBAO's reach; bloom's 51). At 4K in the bench: the
+    HBAO's within 80 pixels (more than 8 of 255 steps within 57), bloom's within 300 (152), the seam 1 pixel without
+    bloom. Grow the rect past what is shown to keep the band out of sight.
   - **What stays as before:** `render_to_target`, its prewarm and every other call are unchanged. A NULL view, or
     `view_id` 0 without a rect, is exactly `render_to_target`. No shader changes. Against a build of v0.14.2, the ten
     image-dumping smokes write the same 421 images (19.1 million pixels), 0 pixels different, with nothing set, with
