@@ -133,7 +133,10 @@ bool btbh_gpu_radiance_cascades_runtime_encode(
     const float hero_omni_shadow_position_range[4],
     float hero_omni_shadow_near,
     float hero_omni_shadow_softness,
-    SDL_GPUTexture **composed_texture
+    SDL_GPUTexture **composed_texture,
+    /* A target view's rect at the render size (since 0.15.0): the compose shades it alone and clears the rest; NULL
+       shades every pixel, as before. */
+    const SDL_Rect *compose_scissor
 );
 
 bool btbh_gpu_radiance_cascades_runtime_encode_emitters(

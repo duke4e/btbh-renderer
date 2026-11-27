@@ -560,7 +560,91 @@ struct BTBHGPUSceneRuntime {
     /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0): what the pass encoding batches holds, made by the first present in
        the mode. */
     BTBHGPUSceneRunVerify *run_verify;
+    /* The shadow maps this runtime has drawn, each map a frame updates once (btbh_gpu_window_scene_shadow_render_count,
+       for the smokes; since 0.15.0). Never reset. */
+    uint64_t shadow_render_count;
+    /* A target view's rect (since 0.15.0): a 1x1 texture in the target's format, cleared to the call's clear colour
+       and blitted over the target outside the rect (btbh_gpu_scene_fill_outside_rect). Made by the first render (or
+       prewarm) with a rect into a target of that format. */
+    SDL_GPUTexture *target_clear_texture;
+    SDL_GPUTextureFormat target_clear_format;
 };
+
+/* A target view's rect (BTBHGPUSceneTargetView, since 0.15.0): the part of the target a scene rendered into it shades,
+   in the target's pixels (output) and mapped to the render size (render: scaled, rounded outward, clamped). Each pass
+   limits itself to it at its own target's size (btbh_gpu_scene_scissor_at). Inactive (or NULL): every pixel, as
+   before; a rect that covers the whole target is inactive too. */
+typedef struct BTBHGPUSceneScissor {
+    bool active;
+    uint32_t output_width;
+    uint32_t output_height;
+    uint32_t render_width;
+    uint32_t render_height;
+    SDL_Rect output;
+    SDL_Rect render;
+} BTBHGPUSceneScissor;
+
+/* [start, start + length) of `from` pixels in `to` pixels: scaled, rounded outward and clamped (at least one pixel for
+   a length of 1 or more and a start inside `from`). */
+static void btbh_gpu_scene_scale_span(
+    uint32_t start,
+    uint32_t length,
+    uint32_t from,
+    uint32_t to,
+    int *first,
+    int *count
+) {
+    uint64_t low = ((uint64_t)start * to) / from;
+    uint64_t high = (((uint64_t)start + length) * to + from - 1u) / from;
+    if (high > to) {
+        high = to;
+    }
+    if (low >= high) {
+        low = high > 0u ? high - 1u : 0u;
+    }
+    *first = (int)low;
+    *count = (int)(high - low);
+}
+
+/* The rect a pass into a target of width x height made from the render size limits itself to (SDL_SetGPUScissor): the
+   render-size rect, or that rect scaled to the target's size (the SSAO's and HBAO's half size, bloom's levels), rounded
+   outward. NULL when the scene shades every pixel. */
+static const SDL_Rect *btbh_gpu_scene_scissor_at(
+    const BTBHGPUSceneScissor *scissor,
+    uint32_t width,
+    uint32_t height,
+    SDL_Rect *storage
+) {
+    if (scissor == NULL || !scissor->active || width == 0u || height == 0u) {
+        return NULL;
+    }
+    if (width == scissor->render_width && height == scissor->render_height) {
+        return &scissor->render;
+    }
+    btbh_gpu_scene_scale_span(
+        (uint32_t)scissor->render.x,
+        (uint32_t)scissor->render.w,
+        scissor->render_width,
+        width,
+        &storage->x,
+        &storage->w
+    );
+    btbh_gpu_scene_scale_span(
+        (uint32_t)scissor->render.y,
+        (uint32_t)scissor->render.h,
+        scissor->render_height,
+        height,
+        &storage->y,
+        &storage->h
+    );
+    return storage;
+}
+
+/* The rect a pass at the output size (the upscalers') limits itself to: the view's own, in the target's pixels. NULL
+   when the scene shades every pixel. */
+static const SDL_Rect *btbh_gpu_scene_output_scissor(const BTBHGPUSceneScissor *scissor) {
+    return scissor != NULL && scissor->active ? &scissor->output : NULL;
+}
 
 static bool btbh_gpu_scene_shadow_resources_ready(
     const BTBHGPUSceneRuntime *runtime
@@ -8111,6 +8195,8 @@ static bool btbh_gpu_scene_render_directional_shadow(
     return true;
 }
 
+/* A fullscreen pass into `target`, cleared first. scissor: the rect it shades (a target view's, at the target's
+   size; since 0.15.0), the rest keeping the clear; NULL shades every pixel. */
 static bool btbh_gpu_scene_render_fullscreen(
     SDL_GPUCommandBuffer *command,
     const char *debug_label,
@@ -8119,7 +8205,8 @@ static bool btbh_gpu_scene_render_fullscreen(
     const void *uniforms,
     uint32_t uniform_size,
     SDL_GPUTextureSamplerBinding *samplers,
-    uint32_t sampler_count
+    uint32_t sampler_count,
+    const SDL_Rect *scissor
 ) {
     SDL_InsertGPUDebugLabel(command, debug_label);
     SDL_GPUColorTargetInfo color_target;
@@ -8139,6 +8226,9 @@ static bool btbh_gpu_scene_render_fullscreen(
     );
     if (pass == NULL) {
         return false;
+    }
+    if (scissor != NULL) {
+        SDL_SetGPUScissor(pass, scissor);
     }
     if (uniforms != NULL && uniform_size > 0u) {
         SDL_PushGPUFragmentUniformData(
@@ -8171,7 +8261,8 @@ static bool btbh_gpu_scene_render_fullscreen_over(
     const void *uniforms,
     uint32_t uniform_size,
     SDL_GPUTextureSamplerBinding *samplers,
-    uint32_t sampler_count
+    uint32_t sampler_count,
+    const SDL_Rect *scissor
 ) {
     SDL_InsertGPUDebugLabel(command, debug_label);
     SDL_GPUColorTargetInfo color_target;
@@ -8187,6 +8278,9 @@ static bool btbh_gpu_scene_render_fullscreen_over(
     );
     if (pass == NULL) {
         return false;
+    }
+    if (scissor != NULL) {
+        SDL_SetGPUScissor(pass, scissor);
     }
     if (uniforms != NULL && uniform_size > 0u) {
         SDL_PushGPUFragmentUniformData(
@@ -8591,7 +8685,8 @@ typedef struct BTBHGPUSceneFrameSetup {
    and its resolve laid over `target` (production_hbao_resolve.frag's blend). mode: what it darkens (1 the ambient
    light, BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE with the radiance cascades, BTBH_GPU_SCENE_HBAO_CONTACT_MODE contact);
    kept_emission: the texture whose rgb the contact mode keeps (the emission target, or the ambient target under
-   KEEP_HBAO's contact part, which carries the emission there). False, with SDL's error set, when a pass failed. */
+   KEEP_HBAO's contact part, which carries the emission there). scissor: a target view's rect (since 0.15.0), NULL for
+   every pixel. False, with SDL's error set, when a pass failed. */
 static bool btbh_gpu_scene_encode_hbao(
     SDL_GPUCommandBuffer *command,
     BTBHGPUSceneRuntime *runtime,
@@ -8600,8 +8695,19 @@ static bool btbh_gpu_scene_encode_hbao(
     float projection_scale_y,
     uint32_t mode,
     SDL_GPUTexture *kept_emission,
-    SDL_GPUTexture *target
+    SDL_GPUTexture *target,
+    const BTBHGPUSceneScissor *scissor
 ) {
+    SDL_Rect half_rect;
+    SDL_Rect render_rect;
+    const SDL_Rect *half_scissor =
+        btbh_gpu_scene_scissor_at(scissor, runtime->hbao_width, runtime->hbao_height, &half_rect);
+    const SDL_Rect *render_scissor = btbh_gpu_scene_scissor_at(
+        scissor,
+        runtime->scene_color_width,
+        runtime->scene_color_height,
+        &render_rect
+    );
     BTBHGPUSceneHBAOUniforms hbao_uniforms;
     SDL_zero(hbao_uniforms);
     (void)memcpy(
@@ -8648,7 +8754,8 @@ static bool btbh_gpu_scene_encode_hbao(
             &hbao_uniforms,
             (uint32_t)sizeof(hbao_uniforms),
             hbao_samplers,
-            2u
+            2u,
+            half_scissor
         ) &&
         btbh_gpu_scene_render_fullscreen(
             command,
@@ -8658,7 +8765,8 @@ static bool btbh_gpu_scene_encode_hbao(
             &hbao_uniforms,
             (uint32_t)sizeof(hbao_uniforms),
             &denoise_sampler,
-            1u
+            1u,
+            half_scissor
         ) &&
         btbh_gpu_scene_render_fullscreen_over(
             command,
@@ -8668,7 +8776,8 @@ static bool btbh_gpu_scene_encode_hbao(
             &hbao_uniforms,
             (uint32_t)sizeof(hbao_uniforms),
             hbao_resolve_samplers,
-            6u
+            6u,
+            render_scissor
         );
 }
 
@@ -9287,6 +9396,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
        else a render target's (btbh_gpu_window_scene_render_to_target, never temporal). */
     uint32_t output_width,
     uint32_t output_height,
+    /* A target view's rect (since 0.15.0): the part of a render target the scene shades. NULL for the window's frame
+       and every other present: every pixel. */
+    const BTBHGPUSceneScissor *scissor,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -10101,6 +10213,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 (uint8_t)omni_shadow;
         }
         runtime->retained_shadow_ready[shadow_index] = 1u;
+        runtime->shadow_render_count += 1u;
     }
     runtime->shadow_frame_serial += 1u;
     if (setup.particle_shadow_active) {
@@ -10177,6 +10290,21 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         free(bone_offsets);
         return report->result;
     }
+    /* A target view's rect (since 0.15.0) for the passes at the render size, at half of it (the SSAO's and the
+       HBAO's) and at the output size (the upscalers'); all NULL without one. The shadow maps are never limited. */
+    SDL_Rect render_scissor_rect;
+    SDL_Rect half_scissor_rect;
+    SDL_Rect level_scissor_rect;
+    const SDL_Rect *render_scissor =
+        btbh_gpu_scene_scissor_at(scissor, render_width, render_height, &render_scissor_rect);
+    const SDL_Rect *half_scissor = btbh_gpu_scene_scissor_at(
+        scissor,
+        (render_width + 1u) / 2u,
+        (render_height + 1u) / 2u,
+        &half_scissor_rect
+    );
+    /* (A render into a target has the target's size as its drawable size.) */
+    const SDL_Rect *output_scissor = btbh_gpu_scene_output_scissor(scissor);
 
     SDL_GPUColorTargetInfo color_targets[6];
     SDL_GPUDepthStencilTargetInfo depth_target;
@@ -10367,7 +10495,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                             ? BTBH_GPU_SCENE_SSAO_RC_CONTACT_MODE
                             : 1u),
                     scene_contact_targets ? runtime->ambient_texture : runtime->emission_texture,
-                    radiance_cascades_post_input
+                    radiance_cascades_post_input,
+                    scissor
                 )) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
@@ -10411,7 +10540,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &post_uniforms,
                 (uint32_t)sizeof(post_uniforms),
                 ssao_samplers,
-                2u
+                2u,
+                half_scissor
             );
             SDL_GPUTextureSamplerBinding denoise_samplers[3];
             SDL_zeroa(denoise_samplers);
@@ -10433,7 +10563,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &post_uniforms,
                     (uint32_t)sizeof(post_uniforms),
                     denoise_samplers,
-                    3u
+                    3u,
+                    half_scissor
                 );
             }
             SDL_GPUTextureSamplerBinding resolve_samplers[7];
@@ -10471,7 +10602,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &post_uniforms,
                     (uint32_t)sizeof(post_uniforms),
                     resolve_samplers,
-                    7u
+                    7u,
+                    render_scissor
                 );
             }
             if (!ssao_ok) {
@@ -10518,7 +10650,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &distance_uniforms,
                     (uint32_t)sizeof(distance_uniforms),
                     &distance_sampler,
-                    1u
+                    1u,
+                    render_scissor
                 )) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
@@ -10586,6 +10719,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 SDL_GetError()
             );
             return report->result;
+        }
+        if (render_scissor != NULL) {
+            /* A target view's rect: the opaque pass cleared every target whole; the draws shade the rect alone. */
+            SDL_SetGPUScissor(pass, render_scissor);
         }
         btbh_gpu_scene_run_verify_begin_pass(
             run_verify,
@@ -11617,7 +11754,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     projection_scale_y,
                     BTBH_GPU_SCENE_HBAO_CONTACT_MODE,
                     runtime->ambient_texture,
-                    radiance_cascades_post_input
+                    radiance_cascades_post_input,
+                    scissor
                 )) {
                 btbh_gpu_scene_cancel_submission(window, command);
                 free(bone_offsets);
@@ -11700,7 +11838,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     runtime->retained_omni_shadow_position_range,
                     lighting->spot_shadow_near,
                     lighting->spot_shadow_softness,
-                    &composed_texture
+                    &composed_texture,
+                    render_scissor
                     );
             } else {
                 radiance_cascades_encoded =
@@ -11805,7 +11944,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &bloom_uniforms,
                     (uint32_t)sizeof(bloom_uniforms),
                     &source_sampler,
-                    1u
+                    1u,
+                    btbh_gpu_scene_scissor_at(
+                        scissor,
+                        runtime->bloom_level_width[level],
+                        runtime->bloom_level_height[level],
+                        &level_scissor_rect
+                    )
                 );
                 source = runtime->bloom_down_textures[level];
                 source_width = runtime->bloom_level_width[level];
@@ -11839,7 +11984,13 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     &bloom_uniforms,
                     (uint32_t)sizeof(bloom_uniforms),
                     upsample_samplers,
-                    2u
+                    2u,
+                    btbh_gpu_scene_scissor_at(
+                        scissor,
+                        runtime->bloom_level_width[level],
+                        runtime->bloom_level_height[level],
+                        &level_scissor_rect
+                    )
                 );
                 lower = runtime->bloom_up_textures[level];
                 lower_level = level;
@@ -11895,7 +12046,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &composite_uniforms,
                 (uint32_t)sizeof(composite_uniforms),
                 composite_samplers,
-                3u
+                3u,
+                render_scissor
             );
         }
         post_input = runtime->post_pong_texture;
@@ -11916,7 +12068,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &post_uniforms,
             (uint32_t)sizeof(post_uniforms),
             lut_samplers,
-            2u
+            2u,
+            render_scissor
         );
         post_stage_input = runtime->post_ping_texture;
     }
@@ -11937,7 +12090,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &post_uniforms,
             (uint32_t)sizeof(post_uniforms),
             &cas_sampler,
-            1u
+            1u,
+            render_scissor
         );
         post_stage_input = cas_target;
     }
@@ -11959,7 +12113,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &post_uniforms,
             (uint32_t)sizeof(post_uniforms),
             &tilt_shift_sampler,
-            1u
+            1u,
+            render_scissor
         );
         production_output_rendered = fullscreen_ok;
     }
@@ -11981,7 +12136,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &post_uniforms,
             (uint32_t)sizeof(post_uniforms),
             &post_sampler,
-            1u
+            1u,
+            render_scissor
         );
     }
     if (fullscreen_ok &&
@@ -12003,7 +12159,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &fxaa_uniforms,
             (uint32_t)sizeof(fxaa_uniforms),
             &fxaa_sampler,
-            1u
+            1u,
+            render_scissor
         );
     }
     if (fullscreen_ok &&
@@ -12029,7 +12186,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &smaa_uniforms,
             (uint32_t)sizeof(smaa_uniforms),
             &edge_sampler,
-            1u
+            1u,
+            render_scissor
         );
 
         SDL_GPUTextureSamplerBinding weight_samplers[3];
@@ -12053,7 +12211,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &smaa_uniforms,
                 (uint32_t)sizeof(smaa_uniforms),
                 weight_samplers,
-                3u
+                3u,
+                render_scissor
             );
         }
 
@@ -12072,7 +12231,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &smaa_uniforms,
                 (uint32_t)sizeof(smaa_uniforms),
                 blend_samplers,
-                2u
+                2u,
+                render_scissor
             );
         }
     }
@@ -12166,7 +12326,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 &rcas_uniforms,
                 (uint32_t)sizeof(rcas_uniforms),
                 &rcas_sampler,
-                1u
+                1u,
+                output_scissor
             );
         } else if (fsr3_encoded && fullscreen_ok) {
             SDL_GPUBlitInfo debug_blit;
@@ -12264,7 +12425,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &easu_uniforms,
             (uint32_t)sizeof(easu_uniforms),
             &easu_sampler,
-            1u
+            1u,
+            output_scissor
         );
         BTBHGPUSceneSMAAUniforms rcas_uniforms;
         rcas_uniforms.metrics[0] = 1.0f / (float)drawable_width;
@@ -12283,7 +12445,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &rcas_uniforms,
             (uint32_t)sizeof(rcas_uniforms),
             &rcas_sampler,
-            1u
+            1u,
+            output_scissor
         );
         if (fullscreen_ok) {
             runtime->composite_color_texture =
@@ -12315,7 +12478,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             &upscale_uniforms,
             (uint32_t)sizeof(upscale_uniforms),
             &upscale_sampler,
-            1u
+            1u,
+            output_scissor
         );
         if (fullscreen_ok) {
             runtime->composite_color_texture =
@@ -12465,6 +12629,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
         clear_alpha,
         0u,
         0u,
+        NULL,
         report
     );
     btbh_gpu_lazy_creation_end(&lazy_scope);
@@ -12541,6 +12706,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         clear_alpha,
         0u,
         0u,
+        NULL,
         report
     );
     btbh_gpu_lazy_creation_end(&lazy_scope);
@@ -12889,35 +13055,230 @@ static BTBHGPUScenePost btbh_gpu_scene_render_target_post(
 /* What a scene rendered into a target swaps out of the window while it runs (btbh_gpu_scene_enter_aside). */
 typedef struct BTBHGPUSceneAsideSwap {
     BTBHGPUSceneRuntime *window_runtime;
+    BTBHGPUSceneRuntime **slot;
     BTBHGPUSceneTelemetryReport window_telemetry;
     bool window_radiance_cascades_telemetry;
     SDL_GPUDevice *window_cost_split_device;
 } BTBHGPUSceneAsideSwap;
 
-/* The window's aside runtime in place of its own (btbh_gpu_window_scene_render_to_target, and its prewarm): its own
-   scene targets, shadow maps, pipelines and (never temporal) state, so that the window's are neither read nor
-   written. The cost log's splits are off meanwhile. btbh_gpu_scene_leave_aside puts the window's back. */
-static void btbh_gpu_scene_enter_aside(BTBHGPUWindow *window, BTBHGPUSceneAsideSwap *swap) {
+/* The runtime in `slot` in place of the window's own (btbh_gpu_window_scene_render_to_target and its prewarm: the
+   window's aside runtime; since 0.15.0 a kept target view's, its own): its own scene targets, shadow maps, pipelines
+   and (never temporal) state, so that the window's are neither read nor written. The cost log's splits are off
+   meanwhile. btbh_gpu_scene_leave_aside puts the window's back. */
+static void btbh_gpu_scene_enter_aside(
+    BTBHGPUWindow *window,
+    BTBHGPUSceneRuntime **slot,
+    BTBHGPUSceneAsideSwap *swap
+) {
     swap->window_runtime = window->scene_runtime;
+    swap->slot = slot;
     swap->window_telemetry = window->scene_telemetry;
     swap->window_radiance_cascades_telemetry = window->radiance_cascades_telemetry_enabled;
     swap->window_cost_split_device = btbh_gpu_cost_split_device;
     btbh_gpu_cost_split_device = NULL;
-    window->scene_runtime = window->aside_scene_runtime;
+    window->scene_runtime = *slot;
 }
 
 static void btbh_gpu_scene_leave_aside(BTBHGPUWindow *window, const BTBHGPUSceneAsideSwap *swap) {
-    /* (The aside runtime may have been made, or released by a failure, in the call.) */
-    window->aside_scene_runtime = window->scene_runtime;
+    /* (The runtime may have been made, or released by a failure, in the call.) */
+    *swap->slot = window->scene_runtime;
     window->scene_runtime = swap->window_runtime;
     window->scene_telemetry = swap->window_telemetry;
     window->radiance_cascades_telemetry_enabled = swap->window_radiance_cascades_telemetry;
     btbh_gpu_cost_split_device = swap->window_cost_split_device;
 }
 
-/* btbh_gpu_window_scene_prewarm for btbh_gpu_window_scene_render_to_target: the prewarm's steps, in the window's
-   aside runtime, with the render's post settings and the target's size, as render_to_target runs the present's. */
-BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
+/* Where the runtime a render into a target uses lives (since 0.15.0): render_to_target's, for no view or view_id 0;
+   else the target view's own (the view is valid). */
+static BTBHGPUSceneRuntime **btbh_gpu_scene_target_view_slot(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneTargetView *view
+) {
+    return view == NULL || view->view_id == 0u
+        ? &window->aside_scene_runtime
+        : &window->target_view_runtimes[view->view_id - 1u];
+}
+
+/* Whether a render into `target` takes `view` (since 0.15.0): a view_id up to the capacity, the reserved fields zero
+   and a rect (both sizes nonzero) inside the target. No view is fine. */
+static bool btbh_gpu_scene_target_view_valid(
+    const BTBHGPUSceneTargetView *view,
+    const BTBHGPUTexture *target
+) {
+    if (view == NULL) {
+        return true;
+    }
+    if (view->view_id > BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY) {
+        return false;
+    }
+    for (uint32_t index = 0u; index < 3u; ++index) {
+        if (view->reserved[index] != 0u) {
+            return false;
+        }
+    }
+    if (view->scissor_width != 0u && view->scissor_height != 0u &&
+        ((uint64_t)view->scissor_x + view->scissor_width > target->width ||
+         (uint64_t)view->scissor_y + view->scissor_height > target->height)) {
+        return false;
+    }
+    return true;
+}
+
+/* The scissor of a render at render_width x render_height into `target` with `view`'s rect (since 0.15.0): inactive
+   without a rect, and for one that covers the whole target. mirrored (BTBHGPUScenePost.mirror_horizontal): the render
+   size's passes run before the mirror's blit, so their rect is mirrored too, and lands on the view's once mirrored.
+   The view is valid; a render size of 0 is refused later, before the rect is used. */
+static BTBHGPUSceneScissor btbh_gpu_scene_target_scissor(
+    const BTBHGPUSceneTargetView *view,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUTexture *target,
+    bool mirrored
+) {
+    BTBHGPUSceneScissor scissor;
+    SDL_zero(scissor);
+    if (view == NULL ||
+        view->scissor_width == 0u ||
+        view->scissor_height == 0u ||
+        (view->scissor_x == 0u &&
+         view->scissor_y == 0u &&
+         view->scissor_width == target->width &&
+         view->scissor_height == target->height)) {
+        return scissor;
+    }
+    scissor.active = true;
+    scissor.output_width = target->width;
+    scissor.output_height = target->height;
+    scissor.render_width = render_width;
+    scissor.render_height = render_height;
+    scissor.output.x = (int)view->scissor_x;
+    scissor.output.y = (int)view->scissor_y;
+    scissor.output.w = (int)view->scissor_width;
+    scissor.output.h = (int)view->scissor_height;
+    if (render_width != 0u && render_height != 0u) {
+        btbh_gpu_scene_scale_span(
+            view->scissor_x,
+            view->scissor_width,
+            target->width,
+            render_width,
+            &scissor.render.x,
+            &scissor.render.w
+        );
+        btbh_gpu_scene_scale_span(
+            view->scissor_y,
+            view->scissor_height,
+            target->height,
+            render_height,
+            &scissor.render.y,
+            &scissor.render.h
+        );
+        if (mirrored) {
+            scissor.render.x = (int)render_width - (scissor.render.x + scissor.render.w);
+        }
+    }
+    return scissor;
+}
+
+/* The 1x1 texture a target view's rect fills the target with outside it (since 0.15.0), in the target's format: made
+   where missing or of another format, in the window's current scene runtime. False, with the report set, when it
+   can't be made. */
+static bool btbh_gpu_scene_ensure_target_clear_texture(
+    BTBHGPUWindow *window,
+    SDL_GPUTextureFormat format,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (runtime->target_clear_texture != NULL && runtime->target_clear_format == format) {
+        return true;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    if (runtime->target_clear_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->target_clear_texture);
+        runtime->target_clear_texture = NULL;
+    }
+    SDL_GPUTextureCreateInfo info;
+    SDL_zero(info);
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = format;
+    info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    info.width = 1u;
+    info.height = 1u;
+    info.layer_count_or_depth = 1u;
+    info.num_levels = 1u;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    runtime->target_clear_texture = SDL_CreateGPUTexture(device, &info);
+    if (runtime->target_clear_texture == NULL) {
+        btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+        return false;
+    }
+    runtime->target_clear_format = format;
+    return true;
+}
+
+/* Fills `target` outside `rect` (in its pixels) with the clear colour (since 0.15.0), after the finished scene was
+   blitted into it whole: the 1x1 texture is cleared to the colour and blitted, unfiltered, over each of the four bands
+   round the rect. A clear stores the colour as the target's format does (an 8-bit one: these bytes). False when the
+   clear's pass can't begin. */
+static bool btbh_gpu_scene_fill_outside_rect(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUTexture *target,
+    const SDL_Rect *rect,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha
+) {
+    SDL_GPUColorTargetInfo clear;
+    SDL_zero(clear);
+    clear.texture = runtime->target_clear_texture;
+    clear.clear_color.r = (float)clear_red / 255.0f;
+    clear.clear_color.g = (float)clear_green / 255.0f;
+    clear.clear_color.b = (float)clear_blue / 255.0f;
+    clear.clear_color.a = (float)clear_alpha / 255.0f;
+    clear.load_op = SDL_GPU_LOADOP_CLEAR;
+    clear.store_op = SDL_GPU_STOREOP_STORE;
+    clear.cycle = true;
+    SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target Outside Rect");
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &clear, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    SDL_EndGPURenderPass(pass);
+    const uint32_t right = (uint32_t)rect->x + (uint32_t)rect->w;
+    const uint32_t bottom = (uint32_t)rect->y + (uint32_t)rect->h;
+    /* x, y, w, h: above the rect, below it (full width), left of it and right of it (its height). */
+    const uint32_t bands[4][4] = {
+        {0u, 0u, target->width, (uint32_t)rect->y},
+        {0u, bottom, target->width, target->height - bottom},
+        {0u, (uint32_t)rect->y, (uint32_t)rect->x, (uint32_t)rect->h},
+        {right, (uint32_t)rect->y, target->width - right, (uint32_t)rect->h},
+    };
+    for (uint32_t band = 0u; band < 4u; ++band) {
+        if (bands[band][2] == 0u || bands[band][3] == 0u) {
+            continue;
+        }
+        SDL_GPUBlitInfo blit;
+        SDL_zero(blit);
+        blit.source.texture = runtime->target_clear_texture;
+        blit.source.w = 1u;
+        blit.source.h = 1u;
+        blit.destination.texture = target->texture;
+        blit.destination.x = bands[band][0];
+        blit.destination.y = bands[band][1];
+        blit.destination.w = bands[band][2];
+        blit.destination.h = bands[band][3];
+        blit.load_op = SDL_GPU_LOADOP_LOAD;
+        blit.filter = SDL_GPU_FILTER_NEAREST;
+        SDL_BlitGPUTexture(command, &blit);
+    }
+    return true;
+}
+
+/* btbh_gpu_window_scene_prewarm for a render into `target`: the prewarm's steps in the runtime that render uses (the
+   window's aside runtime, or a kept target view's own since 0.15.0), with the render's post settings and the target's
+   size, as the render runs the present's; and for a view with a rect, its fill texture. */
+static BTBHGPUResult btbh_gpu_scene_prewarm_to_target_internal(
     BTBHGPUWindow *window,
     BTBHGPUTexture *target,
     const char *vertex_shader_path,
@@ -12938,6 +13299,7 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
     const BTBHGPUScenePost *post,
     const BTBHGPUSceneGeometryBatch *batches,
     uint32_t batch_count,
+    const BTBHGPUSceneTargetView *view,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -12958,11 +13320,26 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
         );
         return report->result;
     }
+    if (!btbh_gpu_scene_target_view_valid(view, target)) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU scene target view (its id, a reserved field or its rect)"
+        );
+        return report->result;
+    }
     const BTBHGPUScenePost target_post =
         btbh_gpu_scene_render_target_post(post, render_width, render_height, target);
+    const BTBHGPUSceneScissor scissor = btbh_gpu_scene_target_scissor(
+        view,
+        render_width,
+        render_height,
+        target,
+        target_post.mirror_horizontal != 0u
+    );
     BTBHGPUSceneAsideSwap swap;
-    btbh_gpu_scene_enter_aside(window, &swap);
-    const BTBHGPUResult result = btbh_gpu_scene_prewarm_internal(
+    btbh_gpu_scene_enter_aside(window, btbh_gpu_scene_target_view_slot(window, view), &swap);
+    BTBHGPUResult result = btbh_gpu_scene_prewarm_internal(
         window,
         vertex_shader_path,
         animated_vertex_shader_path,
@@ -12986,18 +13363,126 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
         target->height,
         report
     );
+    if (result == BTBH_GPU_OK &&
+        scissor.active &&
+        !btbh_gpu_scene_ensure_target_clear_texture(window, target->format, report)) {
+        result = report->result;
+    }
     btbh_gpu_scene_leave_aside(window, &swap);
     return result;
 }
 
+BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_prewarm_to_target_internal(
+        window,
+        target,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        lighting,
+        post,
+        batches,
+        batch_count,
+        NULL,
+        report
+    );
+}
+
+BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target_view(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUSceneTargetView *view,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_prewarm_to_target_internal(
+        window,
+        target,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        lighting,
+        post,
+        batches,
+        batch_count,
+        view,
+        report
+    );
+}
+
 /* A scene drawn into a render target apart from the window's frame (a unit's portrait). It renders
-   with the window's aside runtime in place of its own: its own scene targets at this render size, its
+   with another runtime in place of the window's own: its own scene targets at this render size, its
    own shadow maps and its own (never temporal) state. So the window's runtime (the FSR 3 history, the
    previous view-projection and bone palettes, the retained shadow maps, the radiance cascades' history)
    is neither read nor written, and its targets keep the frame's size. Models, meshes, textures and
    instance buffers are the window's, shared. The finished scene, upscaled to the target's size (FSR 1
-   or Lanczos as asked, else bilinear), is blitted into the target and submitted here. */
-BTBHGPUResult btbh_gpu_window_scene_render_to_target(
+   or Lanczos as asked, else bilinear), is blitted into the target and submitted here.
+   view (since 0.15.0, btbh_gpu_window_scene_render_to_target_view; NULL for render_to_target): view_id 0 renders with
+   the window's aside runtime, every call afresh, as render_to_target; 1 and up with the view's own runtime, kept from
+   call to call (its retained shadow maps, its shadow frame count and its cascades' history). Its rect limits the
+   passes (BTBHGPUSceneScissor), and the target is filled with the clear colour outside it. */
+static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
     BTBHGPUWindow *window,
     BTBHGPUTexture *target,
     const char *vertex_shader_path,
@@ -13031,6 +13516,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
     uint8_t clear_green,
     uint8_t clear_blue,
     uint8_t clear_alpha,
+    const BTBHGPUSceneTargetView *view,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -13051,6 +13537,14 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         );
         return report->result;
     }
+    if (!btbh_gpu_scene_target_view_valid(view, target)) {
+        btbh_gpu_scene_error(
+            report,
+            BTBH_GPU_INVALID_ARGUMENT,
+            "Invalid GPU scene target view (its id, a reserved field or its rect)"
+        );
+        return report->result;
+    }
     if (window->pending_scene_ready || window->pending_command != NULL) {
         /* The frame's scene waits for its canvas; rendering now would drop it. */
         btbh_gpu_scene_error(
@@ -13062,13 +13556,24 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
     }
     const BTBHGPUScenePost target_post =
         btbh_gpu_scene_render_target_post(post, render_width, render_height, target);
+    const BTBHGPUSceneScissor scissor = btbh_gpu_scene_target_scissor(
+        view,
+        render_width,
+        render_height,
+        target,
+        target_post.mirror_horizontal != 0u
+    );
+    const bool kept = view != NULL && view->view_id != 0u;
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET, &lazy_scope);
     BTBHGPUSceneAsideSwap swap;
-    btbh_gpu_scene_enter_aside(window, &swap);
-    /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
-       update periods), no radiance-cascade history (two portraits are two pictures). */
-    btbh_gpu_window_scene_submission_finished(window, false);
+    btbh_gpu_scene_enter_aside(window, btbh_gpu_scene_target_view_slot(window, view), &swap);
+    if (!kept) {
+        /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
+           update periods), no radiance-cascade history (two portraits are two pictures). A kept view's runtime
+           keeps both, as the window's does from frame to frame. */
+        btbh_gpu_window_scene_submission_finished(window, false);
+    }
     const BTBHGPUResult result =
         btbh_gpu_window_scene_present_instances_internal(
             window,
@@ -13105,6 +13610,7 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
             clear_alpha,
             target->width,
             target->height,
+            scissor.active ? &scissor : NULL,
             report
         );
     if (result == BTBH_GPU_OK) {
@@ -13112,6 +13618,13 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
         SDL_GPUCommandBuffer *command = window->pending_command;
         window->pending_command = NULL;
         window->pending_scene_ready = false;
+        bool fill_ready = true;
+        if (scissor.active) {
+            /* (What btbh_gpu_window_scene_prewarm_render_to_target_view makes for a view with a rect.) */
+            btbh_gpu_lazy_creation_prewarm_step(true);
+            fill_ready = btbh_gpu_scene_ensure_target_clear_texture(window, target->format, report);
+            btbh_gpu_lazy_creation_prewarm_step(false);
+        }
         /* The composite is at the target's size after an upscale, else at the render size: a blit
            scales it (bilinearly; a render twice the target's size is halved exactly). */
         SDL_GPUBlitInfo blit;
@@ -13127,23 +13640,196 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target(
                 runtime->composite_height == target->height
             ? SDL_GPU_FILTER_NEAREST
             : SDL_GPU_FILTER_LINEAR;
-        SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
-        SDL_BlitGPUTexture(command, &blit);
-        const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
-        const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
-        btbh_gpu_window_scene_submission_finished(window, submitted);
-        if (!submitted) {
-            btbh_gpu_scene_error(
-                report,
-                BTBH_GPU_DEVICE_FAILURE,
-                SDL_GetError()
-            );
+        if (fill_ready) {
+            SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
+            SDL_BlitGPUTexture(command, &blit);
+        }
+        /* A target view's rect: outside it, the clear colour (the blit filtered across its border). */
+        if (fill_ready &&
+            scissor.active &&
+            !btbh_gpu_scene_fill_outside_rect(
+                command,
+                runtime,
+                target,
+                &scissor.output,
+                clear_red,
+                clear_green,
+                clear_blue,
+                clear_alpha
+            )) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            fill_ready = false;
+        }
+        if (!fill_ready) {
+            btbh_gpu_scene_cancel_submission(window, command);
+        } else {
+            const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
+            const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+            btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
+            btbh_gpu_window_scene_submission_finished(window, submitted);
+            if (!submitted) {
+                btbh_gpu_scene_error(
+                    report,
+                    BTBH_GPU_DEVICE_FAILURE,
+                    SDL_GetError()
+                );
+            }
         }
     }
     btbh_gpu_scene_leave_aside(window, &swap);
     btbh_gpu_lazy_creation_end(&lazy_scope);
     return report->result;
+}
+
+BTBHGPUResult btbh_gpu_window_scene_render_to_target(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_render_to_target_internal(
+        window,
+        target,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        view_projection,
+        camera_right,
+        camera_up,
+        camera_position,
+        lighting,
+        post,
+        instances,
+        transient_instance_count,
+        logical_instance_count,
+        batches,
+        scene_visibility,
+        directional_shadow_visibility,
+        batch_count,
+        clear_red,
+        clear_green,
+        clear_blue,
+        clear_alpha,
+        NULL,
+        report
+    );
+}
+
+BTBHGPUResult btbh_gpu_window_scene_render_to_target_view(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    const BTBHGPUSceneTargetView *view,
+    BTBHGPUSceneReport *report
+) {
+    return btbh_gpu_scene_render_to_target_internal(
+        window,
+        target,
+        vertex_shader_path,
+        animated_vertex_shader_path,
+        fast_shadow_vertex_shader_path,
+        fast_shadow_fragment_shader_path,
+        shadow_vertex_shader_path,
+        animated_shadow_vertex_shader_path,
+        shadow_fragment_shader_path,
+        fragment_shader_path,
+        unshadowed_fragment_shader_path,
+        post_vertex_shader_path,
+        post_fragment_shader_path,
+        shader_format,
+        render_width,
+        render_height,
+        view_projection,
+        camera_right,
+        camera_up,
+        camera_position,
+        lighting,
+        post,
+        instances,
+        transient_instance_count,
+        logical_instance_count,
+        batches,
+        scene_visibility,
+        directional_shadow_visibility,
+        batch_count,
+        clear_red,
+        clear_green,
+        clear_blue,
+        clear_alpha,
+        view,
+        report
+    );
 }
 
 BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
@@ -13502,6 +14188,12 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
             SDL_ReleaseGPUTexture(
                 device,
                 window->scene_runtime->brdf_lut_texture
+            );
+        }
+        if (window->scene_runtime->target_clear_texture != NULL) {
+            SDL_ReleaseGPUTexture(
+                device,
+                window->scene_runtime->target_clear_texture
             );
         }
         if (window->scene_runtime->brdf_lut_sampler != NULL) {
@@ -13964,17 +14656,60 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     window->scene_runtime = NULL;
 }
 
-/* Releases the runtime of the scenes rendered to a target (btbh_gpu_window_scene_render_to_target);
-   the window's own runtime and its pending frame stay as they are. */
-void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window) {
-    if (window == NULL || window->aside_scene_runtime == NULL) {
+/* Releases the runtime in `slot`, one a scene rendered to a target uses (render_to_target's, a target view's); the
+   window's own runtime and its pending frame stay as they are. */
+static void btbh_gpu_scene_release_runtime_slot(BTBHGPUWindow *window, BTBHGPUSceneRuntime **slot) {
+    if (*slot == NULL) {
         return;
     }
     BTBHGPUSceneRuntime *window_runtime = window->scene_runtime;
     const bool pending_scene_ready = window->pending_scene_ready;
-    window->scene_runtime = window->aside_scene_runtime;
+    window->scene_runtime = *slot;
     btbh_gpu_window_release_scene(window);
-    window->aside_scene_runtime = NULL;
+    *slot = NULL;
     window->scene_runtime = window_runtime;
     window->pending_scene_ready = pending_scene_ready;
+}
+
+/* Releases the runtimes of the scenes rendered to a target: btbh_gpu_window_scene_render_to_target's and every target
+   view's (since 0.15.0); the window's own runtime and its pending frame stay as they are. */
+void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window) {
+    if (window == NULL) {
+        return;
+    }
+    btbh_gpu_scene_release_runtime_slot(window, &window->aside_scene_runtime);
+    for (uint32_t view = 0u; view < BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY; ++view) {
+        btbh_gpu_scene_release_runtime_slot(window, &window->target_view_runtimes[view]);
+    }
+}
+
+BTBHGPUResult btbh_gpu_window_scene_release_target_view(
+    BTBHGPUWindow *window,
+    uint32_t view_id
+) {
+    if (window == NULL || view_id > BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    btbh_gpu_scene_release_runtime_slot(
+        window,
+        view_id == 0u
+            ? &window->aside_scene_runtime
+            : &window->target_view_runtimes[view_id - 1u]
+    );
+    return BTBH_GPU_OK;
+}
+
+int64_t btbh_gpu_window_scene_shadow_render_count(const BTBHGPUWindow *window, uint32_t view_id) {
+    if (window == NULL) {
+        return -1;
+    }
+    const BTBHGPUSceneRuntime *runtime = NULL;
+    if (view_id == BTBH_GPU_SCENE_WINDOW_RUNTIME) {
+        runtime = window->scene_runtime;
+    } else if (view_id == 0u) {
+        runtime = window->aside_scene_runtime;
+    } else if (view_id <= BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY) {
+        runtime = window->target_view_runtimes[view_id - 1u];
+    }
+    return runtime != NULL ? (int64_t)runtime->shadow_render_count : -1;
 }

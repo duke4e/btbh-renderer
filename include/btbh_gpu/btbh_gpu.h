@@ -2609,6 +2609,126 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
 /* Defined when btbh_gpu_window_scene_prewarm_render_to_target exists (since 0.9.0). */
 #define BTBH_GPU_HAS_SCENE_RENDER_TO_TARGET_PREWARM 1
 
+/* Target views (since 0.15.0, asked for by Be The Bullet Hell v2 for its local co-op split screen, which draws the
+   second player's view into a target every frame): btbh_gpu_window_scene_render_to_target with a view, which can keep
+   a runtime of its own between calls and shade only a rect of the target.
+   - view_id 0: the runtime btbh_gpu_window_scene_render_to_target uses, every call afresh (its portraits).
+   - view_id 1 to BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY: a runtime of the view's own, made by its first call (or its
+     prewarm) and kept until btbh_gpu_window_scene_release_target_view or the window's destroy. It keeps its
+     retained shadow maps and its own shadow frame count, so it follows the window's shadow update periods
+     (btbh_gpu_window_scene_set_shadow_update_periods) as the window's frames do, and its radiance cascades keep their
+     history (the field is reprojected from the view's last call), as the window's do from frame to frame. It is
+     still never temporal: FSR 3 runs as FSR 1, as for every render to a target. A failed submit drops what it kept,
+     as a failed frame does for the window's. It never reads or writes the window's runtime or another view's.
+   - scissor_width and scissor_height both nonzero: only the rect (scissor_x, scissor_y, scissor_width,
+     scissor_height), in the target's pixels (after mirror_horizontal's mirror, where it is set), is shaded. It is
+     mapped to the render size (scaled, rounded outward)
+     and every pass that writes the scene's targets or the post chain's is limited to it: the opaque, transparent and
+     refraction passes, the SSAO and HBAO with their denoise and resolve (with the contact AO and the reflections),
+     the distance pass, the radiance cascades' compose, bloom, the HDR composite, LUT, CAS, tilt-shift, the output
+     pass, SMAA or FXAA, and FSR 1's EASU and RCAS or Lanczos at the target's size. The shadow maps are never limited,
+     nor are the cascades' passes in their field; their per-pixel compute passes run whole, but stop at once where the
+     depth outside the rect is the far plane's.
+   - Outside the rect the target holds the clear colour (clear_red / 255 and so on, as a clear of the target stores
+     it: an 8-bit target, these bytes). The passes that read their neighbours read cleared values there, so a band
+     inside the rect's border differs from a render of the whole target: a seam of a few pixels where the
+     anti-aliasing, CAS and FSR 1 read the clear (in the renderer's smoke 3 pixels at the render size, 19 target
+     pixels when FSR 1 enlarges a half-size render), and a softer band as wide as the SSAO's, HBAO's and bloom's
+     reach on screen (at 4K in the renderer's bench: 80 pixels for the HBAO, 300 for bloom, more than 8 of 255 steps
+     within 57 and 152). Reflections that leave the rect find nothing there. To keep the band out of what is shown,
+     grow the rect beyond it.
+   Either size zero: the whole target (x and y are then ignored). reserved: zero. */
+#define BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY 8u
+typedef struct BTBHGPUSceneTargetView {
+    uint32_t view_id;
+    uint32_t scissor_x;
+    uint32_t scissor_y;
+    uint32_t scissor_width;
+    uint32_t scissor_height;
+    uint32_t reserved[3];
+} BTBHGPUSceneTargetView;
+
+/* btbh_gpu_window_scene_render_to_target into `target` with `view` (above). A NULL view is exactly
+   btbh_gpu_window_scene_render_to_target, and so is view_id 0 with no rect. Arguments, timing (between frames, while
+   no scene waits for its canvas) and refusals are render_to_target's, and with BTBH_GPU_INVALID_ARGUMENT, leaving the
+   window as it was: a view_id over BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY, a reserved field that isn't zero, and a rect
+   that doesn't fit in the target. */
+BTBHGPUResult btbh_gpu_window_scene_render_to_target_view(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const float view_projection[16],
+    const float camera_right[3],
+    const float camera_up[3],
+    const float camera_position[3],
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const float *instances,
+    uint32_t transient_instance_count,
+    uint32_t logical_instance_count,
+    const BTBHGPUSceneGeometryBatch *batches,
+    const uint8_t *scene_visibility,
+    const uint8_t *directional_shadow_visibility,
+    uint32_t batch_count,
+    uint8_t clear_red,
+    uint8_t clear_green,
+    uint8_t clear_blue,
+    uint8_t clear_alpha,
+    const BTBHGPUSceneTargetView *view,
+    BTBHGPUSceneReport *report
+);
+/* btbh_gpu_window_scene_prewarm_render_to_target for renders with `view`: in the view's runtime (view_id 1 and up:
+   made here if it doesn't exist yet), and with what a rect needs besides. A NULL view, or view_id 0, is exactly
+   btbh_gpu_window_scene_prewarm_render_to_target. Refusals: its own, and those of
+   btbh_gpu_window_scene_render_to_target_view for the view. */
+BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target_view(
+    BTBHGPUWindow *window,
+    BTBHGPUTexture *target,
+    const char *vertex_shader_path,
+    const char *animated_vertex_shader_path,
+    const char *fast_shadow_vertex_shader_path,
+    const char *fast_shadow_fragment_shader_path,
+    const char *shadow_vertex_shader_path,
+    const char *animated_shadow_vertex_shader_path,
+    const char *shadow_fragment_shader_path,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    const BTBHGPUSceneLighting *lighting,
+    const BTBHGPUScenePost *post,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    const BTBHGPUSceneTargetView *view,
+    BTBHGPUSceneReport *report
+);
+/* Frees the runtime a target view keeps (its scene targets, shadow maps, pipelines and history); its next render makes
+   it again, afresh. view_id 0 frees the runtime btbh_gpu_window_scene_render_to_target uses. A view without a runtime
+   is left as it is. The window's frame, a scene waiting for its canvas included, isn't touched. A NULL window or a
+   view_id over BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY returns BTBH_GPU_INVALID_ARGUMENT. */
+BTBHGPUResult btbh_gpu_window_scene_release_target_view(
+    BTBHGPUWindow *window,
+    uint32_t view_id
+);
+/* Defined when BTBHGPUSceneTargetView and its three functions exist (since 0.15.0). */
+#define BTBH_GPU_SCENE_HAS_TARGET_VIEWS 1
+
 /* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
    a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls
    in them that took 1 ms or more over their usual time. It names what a prewarm missed. Off by default: turn it on

@@ -186,6 +186,9 @@ struct BTBHGPUWindow {
        shadow maps and history, so they never touch the window's frame (its FSR 3 history above all).
        Made by the first such scene. */
     BTBHGPUSceneRuntime *aside_scene_runtime;
+    /* The target views that keep a runtime of their own (btbh_gpu_window_scene_render_to_target_view, since 0.15.0):
+       view_id 1 in [0] and so on, each made by the view's first call and kept until it is released. */
+    BTBHGPUSceneRuntime *target_view_runtimes[BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY];
     BTBHGPUSceneTelemetryReport scene_telemetry;
     /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0, btbh_gpu_scene.c): the window's counts so far. */
     BTBHGPUSceneRunVerifyReport scene_run_verify;
@@ -498,7 +501,14 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window);
 void btbh_gpu_window_release_instance_buffers(BTBHGPUWindow *window);
 void btbh_gpu_window_release_custom_meshes(BTBHGPUWindow *window);
 void btbh_gpu_window_release_scene(BTBHGPUWindow *window);
+/* Releases the runtimes of the scenes rendered to a target: render_to_target's and every target view's (the window's
+   destroy). */
 void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
+/* The shadow maps one of the window's scene runtimes has drawn (each map a present or a render to a target updates
+   counts once; since 0.15.0, for the smokes): the window's own (BTBH_GPU_SCENE_WINDOW_RUNTIME), render_to_target's (0)
+   or a kept target view's (1 to BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY). -1 when that runtime doesn't exist. */
+#define BTBH_GPU_SCENE_WINDOW_RUNTIME UINT32_MAX
+int64_t btbh_gpu_window_scene_shadow_render_count(const BTBHGPUWindow *window, uint32_t view_id);
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
 uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
 /* The present mode a window takes for `requested` (a BTBHGPUPresentMode), given whether it supports
