@@ -1655,6 +1655,33 @@ public final class GPUWindowProbe {
         _ = btbh_gpu_window_gamepad_rumble(window, low, high, durationMilliseconds)
     }
 
+    /// The roster's slot count (`btbh_gpu_window_gamepad_count`); 0 without a window.
+    func gamepadCount() -> Int {
+        guard let window, !isShutdown else { return 0 }
+        return Int(btbh_gpu_window_gamepad_count(window))
+    }
+
+    /// Slot `index`'s snapshot; disconnected (all zeros) for an empty slot, an index out of range or no window.
+    func gamepadSnapshot(at index: Int) -> BTBHGPUGamepadSnapshot {
+        var snapshot = BTBHGPUGamepadSnapshot()
+        guard let window, !isShutdown, let slot = GPUGamepadRoster.slot(index) else { return snapshot }
+        _ = btbh_gpu_window_gamepad_snapshot_at(window, slot, &snapshot)
+        return snapshot
+    }
+
+    /// Slot `index`'s identity; all zeros for an empty slot, an index out of range or no window.
+    func gamepadInfo(at index: Int) -> BTBHGPUGamepadInfo {
+        var info = BTBHGPUGamepadInfo()
+        guard let window, !isShutdown, let slot = GPUGamepadRoster.slot(index) else { return info }
+        _ = btbh_gpu_window_gamepad_info_at(window, slot, &info)
+        return info
+    }
+
+    func rumbleGamepad(at index: Int, low: UInt16, high: UInt16, durationMilliseconds: UInt32) {
+        guard let window, !isShutdown, let slot = GPUGamepadRoster.slot(index) else { return }
+        _ = btbh_gpu_window_gamepad_rumble_at(window, slot, low, high, durationMilliseconds)
+    }
+
     func isKeyDown(_ key: InputKey) -> Bool {
         guard let window, !isShutdown else { return false }
         return btbh_gpu_window_key_down(window, key.rawValue) != 0

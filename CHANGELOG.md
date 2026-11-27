@@ -6,6 +6,59 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **A gamepad roster: the window opens every pad, each in a slot** (`BTBH_GPU_WINDOW_HAS_GAMEPAD_ROSTER`), for Be The
+  Bullet Hell v2's local co-op split screen. Until now the window opened only the first pad SDL listed, and when that
+  pad left it silently opened the next one, so player 1 took over player 2's pad; v2 read player 2's pad through SDL
+  itself. Now it opens every pad that connects, up to **`BTBH_GPU_GAMEPAD_CAPACITY`** (8):
+  - A pad takes the lowest free slot, in the order SDL reports them connected (the pads present when the window is
+    made, in SDL's order, then each as it arrives), and keeps it while it is connected. A pad that leaves empties its
+    slot and moves no other; the next pad to connect takes the lowest free slot, so a player whose pad drops and comes
+    back gets the seat back. With all 8 slots taken, a ninth pad waits unopened and takes the first slot that frees.
+  - **`btbh_gpu_window_gamepad_count`**: the slots up to the highest occupied one (0 without a pad), so `0..count`
+    visits every pad; empty slots between read as disconnected. It changes only in `btbh_gpu_window_poll_events`.
+  - **`btbh_gpu_window_gamepad_snapshot_at`** and **`btbh_gpu_window_gamepad_rumble_at`**: a slot's
+    `BTBHGPUGamepadSnapshot` and rumble. An empty slot reads as all zeros (`instance_id` 0; SDL never gives a pad 0)
+    and its rumble does nothing, and both return `BTBH_GPU_OK`. An index at or past the capacity returns
+    `BTBH_GPU_INVALID_ARGUMENT` (the snapshot zeroed).
+  - **`btbh_gpu_window_gamepad_info_at`** and **`BTBHGPUGamepadInfo`** (256 bytes, no pointers, for bindgen): the pad's
+    name and serial (UTF-8 in 128- and 64-byte arrays, cut at a character), SDL's 16-byte GUID, the vendor, product,
+    product version and firmware version, **`BTBHGPUGamepadType`** (SDL's kind of pad, value for value, for button
+    glyphs), **`BTBHGPUGamepadConnection`** (wired or wireless), **`BTBHGPUGamepadPower`** with the battery's percent
+    (-1 unknown), and `BTBH_GPU_GAMEPAD_INFO_RUMBLE`. They are read from SDL at the call; an empty slot reads as all
+    zeros. The last 24 bytes are reserved, so the struct never grows. A slot is a seat, not an identity: a game that
+    must give a returning pad its own player when several come and go compares the serial and the GUID.
+  - Each slot has its own `buttons_pressed`: its pad's button-down events (matched by instance id) and the presses its
+    sampling sees, both in `btbh_gpu_window_poll_events`.
+  - **What stays:** `btbh_gpu_window_gamepad_snapshot` and `btbh_gpu_window_gamepad_rumble` (Be The Bullet Hell v1's,
+    rumble included) read and rumble the lowest occupied slot's pad, and fall over to the next pad when it leaves, as
+    before. With one pad nothing changes. With several, two things differ at a hand-over: a pad that connects into a
+    lower slot takes those calls back (before, the pad they had fallen over to kept them), and the pad they fall over
+    to keeps its own edges (before, the buttons it held came in as presses). Use the `_at` calls to hold one pad per
+    player.
+  - **What else changes:** the window opens every pad, not only the first, so whatever SDL does when it opens a pad
+    (some drivers switch its report mode or set its lights) now happens on each. A host that also opens a pad through
+    SDL, as v2 does today for player 2, shares SDL's handle, and both keep working.
+  - Swift: `GPUPlatform.gamepadCount`, `gamepad(at:)`, `isGamepadButtonDown(_:at:)`, `wasGamepadButtonPressed(_:at:)`,
+    `wasGamepadTriggerPressed(left:threshold:at:)`, `wasGamepadNavigationPressed(_:at:)`, `rumbleGamepad(at:...)`,
+    `gamepadInfo(at:)` (`GPUGamepadInfo`, with `GPUGamepadType`, `GPUGamepadConnection` and `GPUGamepadPower`) and
+    `GPUPlatform.gamepadCapacity`. The single-pad members and the `GamePlatform` protocol are unchanged.
+  - **The test:** `btbh_gpu_gamepad_roster` (no GPU and no display: SDL's virtual gamepads on the dummy video driver,
+    as `btbh_gpu_gamepad`, so it runs under `-SkipGpuTests` too), 890 checks. Two pads present when the window is made
+    and a third hot-plugged; each one's name, GUID, vendor, product, type and rumble flag against SDL's own answers; a
+    pad leaving a hole, then the single-pad calls falling over to slot 2 and back to slot 0 when a pad connects; button
+    edges, a tap between polls and axes on one pad that no other sees; rumble reaching only its slot's pad and nothing
+    on an empty slot or a pad without motors; a full roster whose ninth pad takes the slot that frees; the argument
+    checks. `BTBHGPUGamepadInfo`'s size and offsets are static assertions there. Each of four deliberate breaks (button
+    events all to slot 0, the single-pad call stuck on slot 0, no backfill, rumble to the wrong slot) fails it.
+    0.14.2's `btbh_gpu_gamepad` passes unchanged.
+  - **Tested** on Windows (RTX 3070 Ti): `check.ps1` passes 43/43 (0.14.2's 42 and the new test), all 78 shaders
+    build, and the public headers compile clean. The Swift build is clean, and the suite runs 306 tests (301 and 5 new:
+    the info struct's layout and decoding, the roster through `GPUPlatform` with and without a window): 2 skipped, 0
+    failures. Nothing under `src/gpu/btbh_gpu_scene*` or `shaders/` changed, so every image is 0.14.2's.
+  - **Not tested:** real pads (the C test keeps them out; the Swift window test reads whatever is connected and
+    rumbles nothing), macOS and the Steam Deck.
+
 ## [0.14.2] — 2026-11-24
 
 0.14.2: one fix, no derivative after a discard in the scene's model shaders, which Vulkan leaves undefined. The API

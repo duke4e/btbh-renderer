@@ -1,6 +1,109 @@
 import BTBHRenderer
 import BTBHRendererGPUCore
 
+/// The window's gamepad roster (since 0.15.0, `BTBH_GPU_WINDOW_HAS_GAMEPAD_ROSTER`): its slots and their indices.
+enum GPUGamepadRoster {
+    static let capacity = Int(BTBH_GPU_GAMEPAD_CAPACITY)
+
+    /// The C slot for a Swift index, or nil when it is out of range.
+    static func slot(_ index: Int) -> UInt32? {
+        index >= 0 && index < capacity ? UInt32(index) : nil
+    }
+}
+
+/// What kind of pad a roster slot holds (`BTBHGPUGamepadType`, SDL's gamepad type), for button glyphs.
+public enum GPUGamepadType: UInt32, Equatable, Sendable, CaseIterable {
+    case unknown = 0
+    /// A pad SDL knows by its mapping only.
+    case standard
+    case xbox360
+    case xboxOne
+    case ps3
+    case ps4
+    case ps5
+    case switchPro
+    case joyConLeft
+    case joyConRight
+    case joyConPair
+    case gameCube
+}
+
+/// How a pad is connected (`BTBHGPUGamepadConnection`).
+public enum GPUGamepadConnection: UInt8, Equatable, Sendable {
+    case unknown = 0
+    case wired
+    case wireless
+}
+
+/// A pad's power source (`BTBHGPUGamepadPower`), as SDL reports it when read.
+public enum GPUGamepadPower: UInt8, Equatable, Sendable {
+    case unknown = 0
+    case onBattery
+    case noBattery
+    case charging
+    case charged
+}
+
+/// One connected pad's identity and state of charge (`btbh_gpu_window_gamepad_info_at`), from
+/// `GPUPlatform.gamepadInfo(at:)`. A slot is a seat, not an identity: to give a returning pad its own player when
+/// several pads come and go, compare `serial` (where the pad has one), `guid`, `vendorID` and `productID`.
+public struct GPUGamepadInfo: Equatable, Sendable {
+    /// SDL's joystick instance id: never 0, and never reused for another pad while the program runs.
+    public let instanceID: UInt32
+    /// The pad's name as SDL gives it ("Xbox Series X Controller", "PS5 Controller").
+    public let name: String
+    /// The pad's serial number, or "" where its driver reports none.
+    public let serial: String
+    /// SDL's GUID for the pad, 16 bytes: the same for every pad of one model on one driver.
+    public let guid: [UInt8]
+    public let vendorID: UInt16
+    public let productID: UInt16
+    public let productVersion: UInt16
+    public let firmwareVersion: UInt16
+    public let type: GPUGamepadType
+    public let connection: GPUGamepadConnection
+    public let power: GPUGamepadPower
+    /// 0...100, or nil when SDL can't tell.
+    public let batteryPercent: Int?
+    /// The pad has rumble motors.
+    public let canRumble: Bool
+
+    /// The GUID as SDL prints it (`SDL_GUIDToString`): 32 lowercase hex digits.
+    public var guidString: String {
+        guid.map { byte in
+            let digits = String(byte, radix: 16)
+            return digits.count == 1 ? "0" + digits : digits
+        }.joined()
+    }
+
+    /// Nil for an empty slot (instance id 0).
+    init?(_ native: BTBHGPUGamepadInfo) {
+        guard native.instance_id != 0 else { return nil }
+        var native = native
+        instanceID = native.instance_id
+        name = Self.string(from: &native.name)
+        serial = Self.string(from: &native.serial)
+        guid = withUnsafeBytes(of: &native.guid) { Array($0) }
+        vendorID = native.vendor_id
+        productID = native.product_id
+        productVersion = native.product_version
+        firmwareVersion = native.firmware_version
+        type = GPUGamepadType(rawValue: native.type) ?? .unknown
+        connection = GPUGamepadConnection(rawValue: native.connection) ?? .unknown
+        power = GPUGamepadPower(rawValue: native.power) ?? .unknown
+        batteryPercent = (0...100).contains(native.battery_percent) ? Int(native.battery_percent) : nil
+        canRumble = native.flags & UInt32(BTBH_GPU_GAMEPAD_INFO_RUMBLE) != 0
+    }
+
+    /// A NUL-terminated UTF-8 char array, read no further than its size.
+    private static func string<T>(from value: inout T) -> String {
+        withUnsafeBytes(of: &value) { bytes in
+            let end = bytes.firstIndex(of: 0) ?? bytes.count
+            return String(decoding: bytes[..<end], as: UTF8.self)
+        }
+    }
+}
+
 /// One snapshot per event poll; reads never consume an edge or poll SDL again.
 struct GPUGamepadState {
     private var current = BTBHGPUGamepadSnapshot()
