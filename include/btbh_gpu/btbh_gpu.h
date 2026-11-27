@@ -208,6 +208,102 @@ typedef struct BTBHGPUGamepadSnapshot {
     float right_trigger;
 } BTBHGPUGamepadSnapshot;
 
+/* The window's gamepad roster (since 0.15.0), for local co-op: the window opens every gamepad that
+   connects, up to BTBH_GPU_GAMEPAD_CAPACITY, each in a slot.
+   - A pad takes the lowest free slot, in the order SDL reports them connected (pads already
+     connected when the window is made, in SDL's order, then each new one as it arrives).
+   - A slot keeps its pad while it is connected. A pad that leaves empties its slot and moves no
+     other pad; the next pad to connect takes the lowest free slot, so a player whose pad drops and
+     comes back alone gets the slot back. A slot is a seat, not an identity: to give a returning pad
+     its own player when several pads come and go, compare BTBHGPUGamepadInfo (serial, guid, vendor
+     and product).
+   - btbh_gpu_window_gamepad_count is the number of slots up to the highest occupied one, so a
+     loop over 0..count visits every pad; empty slots in between read as disconnected.
+   - With every slot taken, a further pad waits unopened and takes the first slot that frees.
+   - btbh_gpu_window_gamepad_snapshot and btbh_gpu_window_gamepad_rumble keep their meaning: the
+     lowest occupied slot's pad, which falls over to the next pad when it leaves (and back to a pad
+     that connects into a lower slot). Use the _at calls to hold one pad per player.
+   - Each slot's buttons_pressed has its own edges: the button-down events of that pad between two
+     btbh_gpu_window_poll_events calls, and the presses its sampling sees. */
+#define BTBH_GPU_GAMEPAD_CAPACITY 8u
+
+/* BTBHGPUGamepadInfo.type: the kind of pad, for button glyphs (SDL 3's SDL_GamepadType, in its
+   order). STANDARD is a pad SDL knows by mapping only; UNKNOWN one it can't tell. */
+typedef enum BTBHGPUGamepadType {
+    BTBH_GPU_GAMEPAD_TYPE_UNKNOWN = 0,
+    BTBH_GPU_GAMEPAD_TYPE_STANDARD = 1,
+    BTBH_GPU_GAMEPAD_TYPE_XBOX360 = 2,
+    BTBH_GPU_GAMEPAD_TYPE_XBOXONE = 3,
+    BTBH_GPU_GAMEPAD_TYPE_PS3 = 4,
+    BTBH_GPU_GAMEPAD_TYPE_PS4 = 5,
+    BTBH_GPU_GAMEPAD_TYPE_PS5 = 6,
+    BTBH_GPU_GAMEPAD_TYPE_SWITCH_PRO = 7,
+    BTBH_GPU_GAMEPAD_TYPE_JOYCON_LEFT = 8,
+    BTBH_GPU_GAMEPAD_TYPE_JOYCON_RIGHT = 9,
+    BTBH_GPU_GAMEPAD_TYPE_JOYCON_PAIR = 10,
+    BTBH_GPU_GAMEPAD_TYPE_GAMECUBE = 11
+} BTBHGPUGamepadType;
+
+/* BTBHGPUGamepadInfo.connection. */
+typedef enum BTBHGPUGamepadConnection {
+    BTBH_GPU_GAMEPAD_CONNECTION_UNKNOWN = 0,
+    BTBH_GPU_GAMEPAD_CONNECTION_WIRED = 1,
+    BTBH_GPU_GAMEPAD_CONNECTION_WIRELESS = 2
+} BTBHGPUGamepadConnection;
+
+/* BTBHGPUGamepadInfo.power: the pad's battery, as SDL reports it at the call. */
+typedef enum BTBHGPUGamepadPower {
+    BTBH_GPU_GAMEPAD_POWER_UNKNOWN = 0,
+    BTBH_GPU_GAMEPAD_POWER_ON_BATTERY = 1,
+    BTBH_GPU_GAMEPAD_POWER_NO_BATTERY = 2,
+    BTBH_GPU_GAMEPAD_POWER_CHARGING = 3,
+    BTBH_GPU_GAMEPAD_POWER_CHARGED = 4
+} BTBHGPUGamepadPower;
+
+/* BTBHGPUGamepadInfo.flags. */
+enum {
+    /* The pad has rumble motors: btbh_gpu_window_gamepad_rumble_at moves them. */
+    BTBH_GPU_GAMEPAD_INFO_RUMBLE = 1u << 0
+};
+
+/* One roster slot's pad (btbh_gpu_window_gamepad_info_at). An empty slot reads as all zeros
+   (instance_id 0). Strings are UTF-8, NUL-terminated and cut at a character boundary to fit; an
+   empty string means SDL has none. The trailing reserved bytes are zero; a later version may fill
+   them, so the struct never grows. 256 bytes. */
+typedef struct BTBHGPUGamepadInfo {
+    /* SDL's joystick instance id, as BTBHGPUGamepadSnapshot.instance_id: never 0 for a pad, and never
+       reused for another pad while the program runs. */
+    uint32_t instance_id;
+    /* A BTBHGPUGamepadType. */
+    uint32_t type;
+    /* The USB (or Bluetooth) ids, 0 when unknown. */
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t product_version;
+    uint16_t firmware_version;
+    /* SDL's GUID for the pad (the bytes SDL_GUIDToString prints as 32 hex digits): the same for every
+       pad of one model on one driver, so with serial it tells pads apart across reconnections. */
+    uint8_t guid[16];
+    /* BTBH_GPU_GAMEPAD_INFO_* bits. */
+    uint32_t flags;
+    /* A BTBHGPUGamepadConnection. */
+    uint8_t connection;
+    /* A BTBHGPUGamepadPower. */
+    uint8_t power;
+    /* 0 to 100, or -1 when SDL can't tell. */
+    int8_t battery_percent;
+    uint8_t reserved0;
+    /* The pad's name as SDL gives it ("Xbox Series X Controller", "PS5 Controller"). */
+    char name[128];
+    /* The pad's serial number, where its driver reports one (many don't: then empty). */
+    char serial[64];
+    uint8_t reserved[24];
+} BTBHGPUGamepadInfo;
+
+/* Defined when BTBH_GPU_GAMEPAD_CAPACITY, BTBHGPUGamepadInfo and the roster calls
+   (btbh_gpu_window_gamepad_count, _snapshot_at, _info_at, _rumble_at) exist (since 0.15.0). */
+#define BTBH_GPU_WINDOW_HAS_GAMEPAD_ROSTER 1
+
 typedef enum BTBHGPUFileDialogKind {
     BTBH_GPU_FILE_DIALOG_OPEN = 1,
     BTBH_GPU_FILE_DIALOG_SAVE = 2
@@ -1882,15 +1978,50 @@ BTBHGPUResult btbh_gpu_window_poll_events(
     BTBHGPUWindow *window,
     BTBHGPUPlatformSnapshot *snapshot
 );
+/* The single-pad view: the snapshot of the roster's lowest occupied slot (see
+ * BTBH_GPU_GAMEPAD_CAPACITY), all zeros without a pad. It falls over to the next pad when that one
+ * leaves; btbh_gpu_window_gamepad_snapshot_at holds one pad per player. */
 BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
     const BTBHGPUWindow *window,
     BTBHGPUGamepadSnapshot *snapshot
 );
-/* Rumbles the open gamepad's low- and high-frequency motors (0..65535) for
- * duration_ms; a later call replaces the effect and zero stops it. Without a
- * pad, or on one without motors, it does nothing and still succeeds. */
+/* Rumbles the lowest occupied slot's pad (the one btbh_gpu_window_gamepad_snapshot reads): its low-
+ * and high-frequency motors (0..65535) for duration_ms; a later call replaces the effect and zero
+ * stops it. Without a pad, or on one without motors, it does nothing and still succeeds. */
 BTBHGPUResult btbh_gpu_window_gamepad_rumble(
     BTBHGPUWindow *window,
+    uint16_t low_frequency,
+    uint16_t high_frequency,
+    uint32_t duration_ms
+);
+/* The number of roster slots up to the highest occupied one, 0 to BTBH_GPU_GAMEPAD_CAPACITY (0
+ * without a pad, or for a NULL window). Since 0.15.0; it changes only in
+ * btbh_gpu_window_poll_events (and when the window is made). */
+uint32_t btbh_gpu_window_gamepad_count(const BTBHGPUWindow *window);
+/* Slot index's snapshot as of the last btbh_gpu_window_poll_events, as
+ * btbh_gpu_window_gamepad_snapshot gives the lowest slot's. An empty slot reads as all zeros
+ * (instance_id 0) and returns BTBH_GPU_OK. An index at or past BTBH_GPU_GAMEPAD_CAPACITY, a NULL
+ * window or a NULL out returns BTBH_GPU_INVALID_ARGUMENT, with out (when not NULL) zeroed. Since
+ * 0.15.0. */
+BTBHGPUResult btbh_gpu_window_gamepad_snapshot_at(
+    const BTBHGPUWindow *window,
+    uint32_t index,
+    BTBHGPUGamepadSnapshot *out
+);
+/* Slot index's pad: its identity (name, serial, GUID, vendor and product), kind, connection and
+ * battery, read from SDL at the call. An empty slot reads as all zeros and returns BTBH_GPU_OK; the
+ * arguments are checked as btbh_gpu_window_gamepad_snapshot_at's. Since 0.15.0. */
+BTBHGPUResult btbh_gpu_window_gamepad_info_at(
+    const BTBHGPUWindow *window,
+    uint32_t index,
+    BTBHGPUGamepadInfo *out
+);
+/* Rumbles slot index's pad as btbh_gpu_window_gamepad_rumble does the lowest one's. An empty slot,
+ * or a pad without motors, does nothing and returns BTBH_GPU_OK; an index at or past
+ * BTBH_GPU_GAMEPAD_CAPACITY or a NULL window returns BTBH_GPU_INVALID_ARGUMENT. Since 0.15.0. */
+BTBHGPUResult btbh_gpu_window_gamepad_rumble_at(
+    BTBHGPUWindow *window,
+    uint32_t index,
     uint16_t low_frequency,
     uint16_t high_frequency,
     uint32_t duration_ms

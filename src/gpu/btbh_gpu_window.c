@@ -32,25 +32,74 @@ static const SDL_GamepadButton btbh_gpu_gamepad_buttons[] = {
 };
 
 _Static_assert(sizeof(BTBHGPUGamepadSnapshot) == 36, "Gamepad snapshot ABI");
+_Static_assert(sizeof(BTBHGPUGamepadInfo) == 256, "Gamepad info ABI");
+_Static_assert(sizeof(((BTBHGPUGamepadInfo *) 0)->guid) == sizeof(((SDL_GUID *) 0)->data), "Gamepad GUID");
 
-static void btbh_gpu_close_gamepad(BTBHGPUWindow *window) {
-    if (window->gamepad != NULL) {
-        SDL_CloseGamepad(window->gamepad);
-        window->gamepad = NULL;
+/* The gamepad roster (since 0.15.0): window->gamepads[slot] is the pad open in that slot (NULL when it
+   is empty) and window->gamepad_snapshots[slot] its state, whose instance_id is the pad's (0 when
+   empty). Every pad SDL reports takes the lowest free slot and keeps it until it leaves. */
+
+static void btbh_gpu_close_gamepad_slot(BTBHGPUWindow *window, uint32_t slot) {
+    if (window->gamepads[slot] != NULL) {
+        SDL_CloseGamepad(window->gamepads[slot]);
+        window->gamepads[slot] = NULL;
     }
-    memset(&window->gamepad_snapshot, 0, sizeof(window->gamepad_snapshot));
+    memset(&window->gamepad_snapshots[slot], 0, sizeof(window->gamepad_snapshots[slot]));
 }
 
-static void btbh_gpu_discover_gamepad(BTBHGPUWindow *window) {
-    if (window->gamepad != NULL) { return; }
+static void btbh_gpu_close_gamepads(BTBHGPUWindow *window) {
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        btbh_gpu_close_gamepad_slot(window, slot);
+    }
+}
+
+/* The slot holding pad identifier, or -1. */
+static int btbh_gpu_gamepad_slot_of(const BTBHGPUWindow *window, SDL_JoystickID identifier) {
+    if (identifier == 0) { return -1; }
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        if (window->gamepads[slot] != NULL && window->gamepad_snapshots[slot].instance_id == identifier) {
+            return (int) slot;
+        }
+    }
+    return -1;
+}
+
+static int btbh_gpu_gamepad_free_slot(const BTBHGPUWindow *window) {
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        if (window->gamepads[slot] == NULL) { return (int) slot; }
+    }
+    return -1;
+}
+
+/* The lowest occupied slot, the single-pad calls' pad, or -1. */
+static int btbh_gpu_first_gamepad_slot(const BTBHGPUWindow *window) {
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        if (window->gamepads[slot] != NULL) { return (int) slot; }
+    }
+    return -1;
+}
+
+/* Opens pad identifier into the lowest free slot, unless the roster holds it already or is full (it
+   waits then: btbh_gpu_discover_gamepads opens it when a slot frees). */
+static void btbh_gpu_open_gamepad(BTBHGPUWindow *window, SDL_JoystickID identifier) {
+    if (identifier == 0 || btbh_gpu_gamepad_slot_of(window, identifier) >= 0) { return; }
+    const int slot = btbh_gpu_gamepad_free_slot(window);
+    if (slot < 0) { return; }
+    SDL_Gamepad *gamepad = SDL_OpenGamepad(identifier);
+    if (gamepad == NULL) { return; }
+    window->gamepads[slot] = gamepad;
+    memset(&window->gamepad_snapshots[slot], 0, sizeof(window->gamepad_snapshots[slot]));
+    window->gamepad_snapshots[slot].instance_id = identifier;
+}
+
+/* Opens every connected pad the roster lacks, in SDL's order, while a slot is free: the pads present
+   when the window is made, and a waiting pad when a slot frees. */
+static void btbh_gpu_discover_gamepads(BTBHGPUWindow *window) {
     int count = 0;
     SDL_JoystickID *identifiers = SDL_GetGamepads(&count);
-    for (int index = 0; index < count; index += 1) {
-        window->gamepad = SDL_OpenGamepad(identifiers[index]);
-        if (window->gamepad != NULL) {
-            window->gamepad_snapshot.instance_id = identifiers[index];
-            break;
-        }
+    if (identifiers == NULL) { return; }
+    for (int index = 0; index < count && btbh_gpu_gamepad_free_slot(window) >= 0; index += 1) {
+        btbh_gpu_open_gamepad(window, identifiers[index]);
     }
     SDL_free(identifiers);
 }
@@ -60,23 +109,91 @@ static float btbh_gpu_gamepad_axis(SDL_Gamepad *gamepad, SDL_GamepadAxis axis) {
     return value >= 0 ? (float) value / 32767.0f : (float) value / 32768.0f;
 }
 
-static void btbh_gpu_sample_gamepad(BTBHGPUWindow *window) {
-    if (window->gamepad == NULL) { return; }
-    BTBHGPUGamepadSnapshot *state = &window->gamepad_snapshot;
+static void btbh_gpu_sample_gamepad(SDL_Gamepad *gamepad, BTBHGPUGamepadSnapshot *state) {
     uint32_t down = 0;
     for (uint32_t index = 0; index < 15; index += 1) {
-        if (SDL_GetGamepadButton(window->gamepad, btbh_gpu_gamepad_buttons[index])) {
+        if (SDL_GetGamepadButton(gamepad, btbh_gpu_gamepad_buttons[index])) {
             down |= 1u << index;
         }
     }
     state->buttons_pressed |= down & ~state->buttons_down;
     state->buttons_down = down;
-    state->left_x = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFTX);
-    state->left_y = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFTY);
-    state->right_x = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
-    state->right_y = btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
-    state->left_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
-    state->right_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(window->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+    state->left_x = btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_LEFTX);
+    state->left_y = btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_LEFTY);
+    state->right_x = btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_RIGHTX);
+    state->right_y = btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_RIGHTY);
+    state->left_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
+    state->right_trigger = SDL_max(0.0f, btbh_gpu_gamepad_axis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
+}
+
+static void btbh_gpu_sample_gamepads(BTBHGPUWindow *window) {
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        if (window->gamepads[slot] != NULL) {
+            btbh_gpu_sample_gamepad(window->gamepads[slot], &window->gamepad_snapshots[slot]);
+        }
+    }
+}
+
+static uint32_t btbh_gpu_gamepad_type(SDL_GamepadType type) {
+    switch (type) {
+    case SDL_GAMEPAD_TYPE_STANDARD: return BTBH_GPU_GAMEPAD_TYPE_STANDARD;
+    case SDL_GAMEPAD_TYPE_XBOX360: return BTBH_GPU_GAMEPAD_TYPE_XBOX360;
+    case SDL_GAMEPAD_TYPE_XBOXONE: return BTBH_GPU_GAMEPAD_TYPE_XBOXONE;
+    case SDL_GAMEPAD_TYPE_PS3: return BTBH_GPU_GAMEPAD_TYPE_PS3;
+    case SDL_GAMEPAD_TYPE_PS4: return BTBH_GPU_GAMEPAD_TYPE_PS4;
+    case SDL_GAMEPAD_TYPE_PS5: return BTBH_GPU_GAMEPAD_TYPE_PS5;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO: return BTBH_GPU_GAMEPAD_TYPE_SWITCH_PRO;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT: return BTBH_GPU_GAMEPAD_TYPE_JOYCON_LEFT;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT: return BTBH_GPU_GAMEPAD_TYPE_JOYCON_RIGHT;
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR: return BTBH_GPU_GAMEPAD_TYPE_JOYCON_PAIR;
+    case SDL_GAMEPAD_TYPE_GAMECUBE: return BTBH_GPU_GAMEPAD_TYPE_GAMECUBE;
+    default: return BTBH_GPU_GAMEPAD_TYPE_UNKNOWN;
+    }
+}
+
+/* Copies a UTF-8 string into a zeroed char array of capacity bytes, cut at a character boundary. */
+static void btbh_gpu_copy_utf8(char *destination, size_t capacity, const char *source) {
+    if (source == NULL || capacity == 0) { return; }
+    size_t length = strlen(source);
+    if (length >= capacity) {
+        length = capacity - 1;
+        while (length > 0 && ((unsigned char) source[length] & 0xC0u) == 0x80u) {
+            length -= 1;
+        }
+    }
+    memcpy(destination, source, length);
+    destination[length] = '\0';
+}
+
+static void btbh_gpu_gamepad_info(SDL_Gamepad *gamepad, SDL_JoystickID identifier, BTBHGPUGamepadInfo *info) {
+    info->instance_id = identifier;
+    info->type = btbh_gpu_gamepad_type(SDL_GetGamepadType(gamepad));
+    info->vendor_id = SDL_GetGamepadVendor(gamepad);
+    info->product_id = SDL_GetGamepadProduct(gamepad);
+    info->product_version = SDL_GetGamepadProductVersion(gamepad);
+    info->firmware_version = SDL_GetGamepadFirmwareVersion(gamepad);
+    const SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(gamepad));
+    memcpy(info->guid, guid.data, sizeof(info->guid));
+    const SDL_PropertiesID properties = SDL_GetGamepadProperties(gamepad);
+    if (properties != 0 && SDL_GetBooleanProperty(properties, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false)) {
+        info->flags |= BTBH_GPU_GAMEPAD_INFO_RUMBLE;
+    }
+    switch (SDL_GetGamepadConnectionState(gamepad)) {
+    case SDL_JOYSTICK_CONNECTION_WIRED: info->connection = BTBH_GPU_GAMEPAD_CONNECTION_WIRED; break;
+    case SDL_JOYSTICK_CONNECTION_WIRELESS: info->connection = BTBH_GPU_GAMEPAD_CONNECTION_WIRELESS; break;
+    default: info->connection = BTBH_GPU_GAMEPAD_CONNECTION_UNKNOWN; break;
+    }
+    int percent = -1;
+    switch (SDL_GetGamepadPowerInfo(gamepad, &percent)) {
+    case SDL_POWERSTATE_ON_BATTERY: info->power = BTBH_GPU_GAMEPAD_POWER_ON_BATTERY; break;
+    case SDL_POWERSTATE_NO_BATTERY: info->power = BTBH_GPU_GAMEPAD_POWER_NO_BATTERY; break;
+    case SDL_POWERSTATE_CHARGING: info->power = BTBH_GPU_GAMEPAD_POWER_CHARGING; break;
+    case SDL_POWERSTATE_CHARGED: info->power = BTBH_GPU_GAMEPAD_POWER_CHARGED; break;
+    default: info->power = BTBH_GPU_GAMEPAD_POWER_UNKNOWN; break;
+    }
+    info->battery_percent = percent >= 0 && percent <= 100 ? (int8_t) percent : (int8_t) -1;
+    btbh_gpu_copy_utf8(info->name, sizeof(info->name), SDL_GetGamepadName(gamepad));
+    btbh_gpu_copy_utf8(info->serial, sizeof(info->serial), SDL_GetGamepadSerial(gamepad));
 }
 
 static bool btbh_gpu_valid_window_size(uint32_t width, uint32_t height) {
@@ -434,7 +551,7 @@ BTBHGPUWindow *btbh_gpu_window_create(
         return NULL;
     }
     window->owns_gamepad_subsystem = true;
-    btbh_gpu_discover_gamepad(window);
+    btbh_gpu_discover_gamepads(window);
 
     SDL_WindowFlags flags = 0;
     if (descriptor->hidden != 0) {
@@ -1025,7 +1142,9 @@ BTBHGPUResult btbh_gpu_window_poll_events(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
-    window->gamepad_snapshot.buttons_pressed = 0;
+    for (uint32_t slot = 0; slot < BTBH_GPU_GAMEPAD_CAPACITY; slot += 1) {
+        window->gamepad_snapshots[slot].buttons_pressed = 0;
+    }
     window->mouse_delta_x = 0.0f;
     window->mouse_delta_y = 0.0f;
     window->mouse_wheel_x = 0.0f;
@@ -1037,16 +1156,18 @@ BTBHGPUResult btbh_gpu_window_poll_events(
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_GAMEPAD_ADDED) {
-            btbh_gpu_discover_gamepad(window);
-        } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED &&
-                   event.gdevice.which == window->gamepad_snapshot.instance_id) {
-            btbh_gpu_close_gamepad(window);
-            btbh_gpu_discover_gamepad(window);
-        } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
-                   event.gbutton.which == window->gamepad_snapshot.instance_id) {
-            for (uint32_t index = 0; index < 15; index += 1) {
+            btbh_gpu_open_gamepad(window, event.gdevice.which);
+        } else if (event.type == SDL_EVENT_GAMEPAD_REMOVED) {
+            const int slot = btbh_gpu_gamepad_slot_of(window, event.gdevice.which);
+            if (slot >= 0) {
+                btbh_gpu_close_gamepad_slot(window, (uint32_t) slot);
+                btbh_gpu_discover_gamepads(window);
+            }
+        } else if (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+            const int slot = btbh_gpu_gamepad_slot_of(window, event.gbutton.which);
+            for (uint32_t index = 0; slot >= 0 && index < 15; index += 1) {
                 if (event.gbutton.button == btbh_gpu_gamepad_buttons[index]) {
-                    window->gamepad_snapshot.buttons_pressed |= 1u << index;
+                    window->gamepad_snapshots[slot].buttons_pressed |= 1u << index;
                     break;
                 }
             }
@@ -1104,7 +1225,7 @@ BTBHGPUResult btbh_gpu_window_poll_events(
         }
     }
 
-    btbh_gpu_sample_gamepad(window);
+    btbh_gpu_sample_gamepads(window);
     btbh_gpu_platform_snapshot(window, snapshot, 0.0f);
     return BTBH_GPU_OK;
 }
@@ -1114,7 +1235,12 @@ BTBHGPUResult btbh_gpu_window_gamepad_snapshot(
     BTBHGPUGamepadSnapshot *snapshot
 ) {
     if (window == NULL || snapshot == NULL) { return BTBH_GPU_INVALID_ARGUMENT; }
-    *snapshot = window->gamepad_snapshot;
+    const int slot = btbh_gpu_first_gamepad_slot(window);
+    if (slot < 0) {
+        memset(snapshot, 0, sizeof(*snapshot));
+    } else {
+        *snapshot = window->gamepad_snapshots[slot];
+    }
     return BTBH_GPU_OK;
 }
 
@@ -1125,9 +1251,61 @@ BTBHGPUResult btbh_gpu_window_gamepad_rumble(
     uint32_t duration_ms
 ) {
     if (window == NULL) { return BTBH_GPU_INVALID_ARGUMENT; }
+    const int slot = btbh_gpu_first_gamepad_slot(window);
     /* SDL reports a pad without motors as an error: that is no failure here. */
-    if (window->gamepad != NULL) {
-        (void)SDL_RumbleGamepad(window->gamepad, low_frequency, high_frequency, duration_ms);
+    if (slot >= 0) {
+        (void)SDL_RumbleGamepad(window->gamepads[slot], low_frequency, high_frequency, duration_ms);
+    }
+    return BTBH_GPU_OK;
+}
+
+uint32_t btbh_gpu_window_gamepad_count(const BTBHGPUWindow *window) {
+    if (window == NULL) { return 0; }
+    for (uint32_t count = BTBH_GPU_GAMEPAD_CAPACITY; count > 0; count -= 1) {
+        if (window->gamepads[count - 1] != NULL) { return count; }
+    }
+    return 0;
+}
+
+BTBHGPUResult btbh_gpu_window_gamepad_snapshot_at(
+    const BTBHGPUWindow *window,
+    uint32_t index,
+    BTBHGPUGamepadSnapshot *out
+) {
+    if (out != NULL) { memset(out, 0, sizeof(*out)); }
+    if (window == NULL || out == NULL || index >= BTBH_GPU_GAMEPAD_CAPACITY) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (window->gamepads[index] != NULL) { *out = window->gamepad_snapshots[index]; }
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_gamepad_info_at(
+    const BTBHGPUWindow *window,
+    uint32_t index,
+    BTBHGPUGamepadInfo *out
+) {
+    if (out != NULL) { memset(out, 0, sizeof(*out)); }
+    if (window == NULL || out == NULL || index >= BTBH_GPU_GAMEPAD_CAPACITY) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (window->gamepads[index] != NULL) {
+        btbh_gpu_gamepad_info(window->gamepads[index], window->gamepad_snapshots[index].instance_id, out);
+    }
+    return BTBH_GPU_OK;
+}
+
+BTBHGPUResult btbh_gpu_window_gamepad_rumble_at(
+    BTBHGPUWindow *window,
+    uint32_t index,
+    uint16_t low_frequency,
+    uint16_t high_frequency,
+    uint32_t duration_ms
+) {
+    if (window == NULL || index >= BTBH_GPU_GAMEPAD_CAPACITY) { return BTBH_GPU_INVALID_ARGUMENT; }
+    /* As btbh_gpu_window_gamepad_rumble: a pad without motors is no failure, an empty slot does nothing. */
+    if (window->gamepads[index] != NULL) {
+        (void)SDL_RumbleGamepad(window->gamepads[index], low_frequency, high_frequency, duration_ms);
     }
     return BTBH_GPU_OK;
 }
@@ -1616,7 +1794,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
         SDL_DestroyWindow(window->window);
         window->window = NULL;
     }
-    btbh_gpu_close_gamepad(window);
+    btbh_gpu_close_gamepads(window);
     if (window->owns_gamepad_subsystem) {
         SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
         window->owns_gamepad_subsystem = false;

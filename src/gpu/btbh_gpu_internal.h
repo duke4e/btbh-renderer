@@ -162,8 +162,10 @@ struct BTBHGPUWindow {
     float mouse_wheel_x;
     float mouse_wheel_y;
     bool owns_gamepad_subsystem;
-    SDL_Gamepad *gamepad;
-    BTBHGPUGamepadSnapshot gamepad_snapshot;
+    /* The gamepad roster (since 0.15.0, btbh_gpu_window.c): one open pad per slot, NULL when the slot
+       is empty, each with its own snapshot (instance_id 0 when empty). */
+    SDL_Gamepad *gamepads[BTBH_GPU_GAMEPAD_CAPACITY];
+    BTBHGPUGamepadSnapshot gamepad_snapshots[BTBH_GPU_GAMEPAD_CAPACITY];
     bool key_pressed[SDL_SCANCODE_COUNT];
     bool mouse_pressed[4];
     bool mouse_released[4];
