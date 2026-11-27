@@ -6,6 +6,114 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Scene views: two cameras in one present, each clipped to its half of the frame** (RFC 0014 phase 1,
+  `BTBH_GPU_SCENE_HAS_VIEWS`): **`btbh_gpu_window_scene_present_views`** with **`BTBHGPUSceneView`** (144 bytes),
+  **`BTBHGPUSceneViewReport`** (32), **`BTBH_GPU_SCENE_MAX_VIEWS`** (2), `BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET`,
+  **`btbh_gpu_window_scene_prewarm_views`** and **`BTBH_GPU_SCENE_RC_FALLBACK_VIEWS`** (8, appended). Asked for by Be
+  The Bullet Hell v2 for its local co-op split screen: with 0.15.0 its second player's view is a whole second scene
+  (`render_to_target_view` into a target, laid over the frame), which prepares, uploads and encodes the scene twice and
+  runs the post chain twice; at 4K High the split costs v2 13.1 ms against 10.2-10.4 for one view, with the second
+  view at 0.67 of the size. Views draw both cameras into the window's frame in one present:
+  - **What each view gives:** a camera, its half of the frame as a line in the window's pixels (`clip`, before
+    `mirror_horizontal`; all zero for the whole frame with one view), its own `visibility` and `shadow_visibility` (with
+    the call's), and an optional `lighting` read only for the sun map's matrix, the spot light with its map, the lamps
+    and the point lights; every other lighting field is the call's.
+  - **Once for the frame:** validation, preparation, bones, the upload, the targets, bloom, the LUT, CAS, tilt-shift,
+    the output pass, SMAA or FXAA, the mirror and FSR 1.
+  - **Per view, clipped to its half** (`SV_ClipDistance0` from the scene vertex shaders): its opaque sort, its
+    opaque, transparent and refraction draws, in each pass one view after the other; and the passes that read the
+    camera, as one pass with a clipped draw per view through the new **`production_post_view.vert`**: the SSAO or HBAO
+    with their denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the
+    world-edge fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the
+    other half count for nothing, a reflection stops short of the line (and fades near it), as at the screen's edge.
+  - **Shadow maps:** the secondary map, and an omni map, are the call's. A sun or spot map is shared by views whose
+    matrices are equal byte for byte; else the second view has its own (and its own particle transmittance map), drawn
+    with its camera's billboards and its `shadow_visibility`. In the update periods' order a view's own map comes right
+    after view 0's, so at v2's sun period of 2 the two sun maps are redrawn on alternate frames: one map a frame.
+  - **The line:** each half is widened by a quarter of a render pixel, so no pixel is drawn by neither view; a pixel
+    whose centre lies within that of the line is drawn by both (the nearer surface shows, the screen-space passes take
+    the second view's). Bloom reaches across (its widest level, 1/64 of the frame), the anti-aliasing and FSR 1 a few
+    pixels, and a refracting surface its displacement: v2's divider covers them.
+  - **Not with two views (phase 1):** the radiance cascades (off for the frame, `fallback_reason`
+    `BTBH_GPU_SCENE_RC_FALLBACK_VIEWS`; their history starts afresh) and FSR 3 (FSR 1 runs, `report.upscale_mode`
+    says so; the next FSR 3 frame starts a new history). One view with a `clip` counts as a split.
+  - **The report:** the frame's, as the present's (its draws are every view's); `view_reports` gives each view's
+    draws, instances (each drawn batch once), the sun and spot maps it read (itself or view 0; `UINT32_MAX` without the
+    shadow) and its sort's and encode's CPU time. Under `BTBH_GPU_COST_LOG`'s split frames a second view's geometry goes
+    to passes of its own (`view1_main_ms`, `view1_transparent_ms`, printed only on such frames).
+  - **Refused** with `BTBH_GPU_INVALID_ARGUMENT`, naming the view, the window left as it was: `views` NULL, 0 or more
+    than 2 views, a camera not finite or not invertible, a `clip` not finite, two views without a line, a visibility
+    byte above 1, an unknown flag, `reserved` set, an invalid `lighting`; and for a split, SPIR-V scene vertex shaders
+    that don't write the clip distance (older builds) or no `production_post_view.vert`, naming the file.
+  - **What stays as before:** the present, `_with_visibility`, `render_to_target` (with views and rects), the prewarms
+    and every other call. They now go through the same internal function as one view, and one view with a zero clip
+    and no visibility or lighting of its own draws byte for byte as `_with_visibility`. Shaders: the five scene vertex
+    shaders (`production_model.vert`, its table and lifted siblings, `production_animated_model.vert`) write the clip
+    distance (1 for a zero plane), and six screen-space fragment shaders (`production_hbao*`, `production_ssao*`) take
+    the half's plane in words that were zero: their SPIR-V and MSL change, their pictures don't. Rebuild the shaders,
+    and add `production_post_view.vert` to a game's list (CHIMERA's and Tyrian3D's builds read it from
+    `CMakeLists.txt`). The Swift layer doesn't wrap the new calls (Be The Bullet Hell v1 doesn't need them).
+  - **Tested** on Windows (Vulkan, RTX 3070 Ti): `check.ps1` passes 45/45 (0.15.0's 44 and the new smoke), all 79
+    shaders build (the new `production_post_view.vert`), the public headers compile clean, and the Swift suite runs
+    306 tests, 2 skipped, 0 failures (seven of its checks of the scene's source text follow the refactor). Identity
+    against a build of v0.15.0: the ten image-dumping smokes write the same 421 images (19.1 million pixels), 0 pixels
+    different, in four modes (plain, `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`, `=verify` with 0
+    mismatches), and again with `BTBH_SMOKE_PRESENT_VIEWS=1`, which sends the window presents of six of them through
+    `present_views` with one view: 0 pixels different in all four.
+  - **New smoke `btbh_gpu_scene_views_smoke`:** one view byte for byte as `_with_visibility` (six post chains, the
+    call's visibility, the opaque sort, FSR 3 from half the size), in the four modes; a vertical split and a 30-degree
+    diagonal (also from three quarters of the size) against the two cameras' one-view frames joined along the line;
+    no tap crossing it (one view's raised step leaves the other's half byte for byte as it was, where one view of it
+    darkens 608 pixels beside it); no pixel drawn by neither view; shared and own shadow maps (one map a frame with
+    equal matrices, two with different ones, one a frame at a sun period of 2), a view's own sun, spot and point light;
+    the per-view report; the FSR 3 and cascades fallbacks; the prewarm; the refusals, older vertex shaders and a
+    missing `production_post_view.vert`. `btbh_gpu_scene_order_test` asserts the structs' layouts and the planes on
+    the CPU. The joined frames differ from the split's halves by a level or few here and there, and by an edge pixel
+    or two: the rasterizer clips each view's triangles at its line and interpolates from the vertices it makes there,
+    a rounding apart (a split of one camera shows the same).
+  - **Measured** (RTX 3070 Ti, Vulkan, `btbh_gpu_scene_views_bench`, the target view bench's city: 3840 x 2160 rendered
+    at its size, 2,304 boxes of 768 triangles in 97 batches, two sun maps under periods of 2 (v2's while split), HBAO
+    with contact AO, SSR, bloom, fog, vignette and SMAA medium; two cameras with one lens 16 units apart; each view
+    culled by its frustum and, split, its half-plane, as v2 culls; 0.15.0's way draws the two frustums' union in both
+    calls). GPU time a frame, median of 37 rounds of 8 frames [10th-90th percentile]; the CPU of the calls a frame
+    (median of 12, the GPU idle); the draws (each view's or each call's):
+
+    | Frame | GPU | CPU | Draws |
+    | --- | --- | --- | --- |
+    | one view, the present | 8.535 ms [8.296-8.721] | 0.424 ms | 94 |
+    | one view, `present_views` | 8.566 [8.318-8.696] | 0.422 | 94 |
+    | two views, vertical split | 7.837 [7.549-32.6] | 0.523 | 67 + 51 |
+    | two views, 30-degree diagonal | 7.646 [7.421-16.8] | 0.515 | 47 + 48 |
+    | 0.15.0's way, vertical (present, target view grown 96 px, composed) | 12.639 [12.296-12.887] | 0.899 | 94 + 94 |
+    | 0.15.0's way, diagonal | 13.943 [13.519-14.115] | 0.879 | 94 + 94 |
+
+    Two views cost what one does (here a little less: each draws only its half's geometry, and the second camera's half
+    holds less of the city), 4.8 ms (38 %) less than 0.15.0's way split vertically and 6.3 ms (45 %) diagonally, with
+    42 % less CPU and 37 % (vertical) to 49 % (diagonal) fewer draws. With the second view's own sun map (the two maps
+    taking turns): 8.019 [7.938-8.102] and 7.925 [7.831-8.024] against 12.844 and 14.110 for 0.15.0's way, one view
+    8.653. One view through `present_views` costs the present's to within the spread (the new vertex shaders' clip
+    output against 0.15.0's shaders wasn't measured). The machine's CPU was saturated by other work all along (the
+    bench ran at high priority); the splits' 90th percentiles carry a few slow samples (an earlier run at normal
+    priority had medians within 0.7 ms of these and wider spreads everywhere). At 4K the split against the two
+    cameras' whole frames joined: within 263 px of the line more than 2 steps apart with bloom (80 px without: the
+    whole frames' HBAO reaching across), more than 32 steps only within 7 px (1 px without bloom); elsewhere at most 2
+    steps (the clipping's rounding).
+
+### Known
+- **Metal: the clip distance was never run on a GPU.** The MSL carries `[[clip_distance]]` (and SPIRV-Cross's
+  `user(clip0)` copy) in the five scene vertex shaders, which every present now draws with (writing 1 with one view),
+  and in `production_post_view.vert`. Until the Mac's `check.sh` builds the metallibs and runs
+  `btbh_gpu_scene_views_smoke`, Metal is unverified, one view included. Linux and the Steam Deck (RADV has
+  `shaderClipDistance`) are unverified too.
+- **What phase 1 leaves out:** FSR 3 with two views (FSR 1 runs; phase 2's seam pass and per-view history), the
+  radiance cascades with two views (phase 3), bloom's and refraction's reach across the line (phase 3), and both views
+  in one draw (phase 4). `BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET` is accepted and does nothing yet.
+- **The clipping's rounding:** a split's half differs from a whole frame of its camera by up to a few steps here and
+  there, and an edge pixel may fall the other way (the rasterizer clips the triangles that cross the line). A one-view
+  frame is untouched (its plane is zero).
+- **The run-to-run variance** of some captures on NVIDIA (0.14.2's Known) is unchanged.
+
 ## [0.15.0] — 2026-11-27
 
 0.15.0: three additions for Be The Bullet Hell v2's local co-op split screen, all opt-in. A render to a target can now
