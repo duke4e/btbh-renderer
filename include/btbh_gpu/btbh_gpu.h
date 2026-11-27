@@ -2641,6 +2641,31 @@ uint8_t btbh_gpu_window_scene_set_directional_shadow_size(
     uint32_t width,
     uint32_t height
 );
+/* How often the scene redraws each shadow map (public since 0.15.0; the call is older, and the Swift layer's scene
+   uses it): every directional_frames frames for the primary directional (sun) map,
+   secondary_directional_frames for the secondary directional map, and spot_frames for the spot or omni map. Each is
+   1 to 60; 1, the default of a window that never calls this, redraws the map every frame. Returns 1, or 0 and
+   changes nothing for a NULL window or a period outside 1-60. Taken from the next scene presented.
+   - Between redraws a map is kept, and the scene reads it with the matrix it was drawn with, so its shadows stay
+     right for what didn't move and lag a moving caster (or a moved light matrix) by up to period - 1 frames. The
+     particle transmittance map (RFC 0013) is redrawn every frame, with the kept sun matrix.
+   - The maps take turns: the n-th map a frame uses (in the order primary, secondary, spot; 0 for the first) is
+     redrawn on the frames whose count, modulo its period, is n modulo its period. At periods 2, 2 and 1 the two
+     directional maps alternate and the spot map is redrawn every frame.
+   - A map is redrawn whatever its period on the first frame that uses it after one that didn't, when its size
+     changes, when the spot map switches between spot and omni, and after a frame whose submit failed.
+   - Renders into a target: btbh_gpu_window_scene_render_to_target redraws every map each call. A target view of
+     its own (btbh_gpu_window_scene_render_to_target_view, view_id 1 and up) follows these periods with its own frame
+     count. */
+uint8_t btbh_gpu_window_scene_set_shadow_update_periods(
+    BTBHGPUWindow *window,
+    uint32_t directional_frames,
+    uint32_t secondary_directional_frames,
+    uint32_t spot_frames
+);
+/* Defined when btbh_gpu_window_scene_set_shadow_update_periods is declared here (since 0.15.0; before, it was in the
+   renderer's internal package header only, and a host declared it itself). */
+#define BTBH_GPU_SCENE_HAS_SHADOW_UPDATE_PERIODS 1
 /* Renders a scene into `target` (a render target of this window, btbh_gpu_window_render_target_create)
    apart from the window's frame, for a picture inside it (a unit's portrait). Arguments as
    btbh_gpu_window_scene_present_instances_with_visibility; the scene renders at render_width x

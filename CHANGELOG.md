@@ -58,6 +58,12 @@ All notable changes to this project are documented here. The format follows
     failures. Nothing under `src/gpu/btbh_gpu_scene*` or `shaders/` changed, so every image is 0.14.2's.
   - **Not tested:** real pads (the C test keeps them out; the Swift window test reads whatever is connected and
     rumbles nothing), macOS and the Steam Deck.
+- **`btbh_gpu_window_scene_set_shadow_update_periods` is in `btbh_gpu.h`** (`BTBH_GPU_SCENE_HAS_SHADOW_UPDATE_PERIODS`).
+  The call is older, but only the renderer's internal package header declared it, so a host on bindgen had to declare
+  it itself (Be The Bullet Hell v2 did, to redraw its sun map every second frame while split). Same name, signature and
+  behaviour; the header now says how the maps take turns, which matrix a kept map is read with, when a map is redrawn
+  whatever its period, and how renders into a target follow it. A host that declared it itself drops its declaration
+  (or gates it on the macro), or its bindings declare it twice.
 
 ## [0.14.2] — 2026-11-24
 

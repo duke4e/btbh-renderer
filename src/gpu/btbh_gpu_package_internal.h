@@ -47,12 +47,6 @@ void btbh_gpu_delay_precise(uint64_t nanoseconds);
 uint8_t btbh_gpu_window_scene_shadow_resources_ready(
     const BTBHGPUWindow *window
 );
-uint8_t btbh_gpu_window_scene_set_shadow_update_periods(
-    BTBHGPUWindow *window,
-    uint32_t directional_frames,
-    uint32_t secondary_directional_frames,
-    uint32_t spot_frames
-);
 uint8_t btbh_gpu_window_scene_read_telemetry(
     const BTBHGPUWindow *window,
     BTBHGPUSceneTelemetryReport *report
