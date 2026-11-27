@@ -15,7 +15,8 @@
  *     fault. With the HBAO and SSR, or the SSAO and SSR: faults only within TAP_BAND_LIMIT, where the whole frames'
  *     taps reached across the line. That the split's taps don't: the same camera in both views, one seeing a raised
  *     step the other doesn't, leaves the other's half byte for byte as without the step (where one view of the step
- *     darkens the floor beside it).
+ *     darkens the floor beside it). So does a line through a half-size texel's centre, and the diagonal, for view 0's
+ *     pixels beyond the band by the line that both views draw (the second last): no read takes what lies in it.
  *   - A diagonal split at 30 degrees, at the window's size and at three quarters of it (scaled linearly): no fault, and
  *     no pixel drawn by neither view. The control, both views of one camera on the same line, shows the edge flips
  *     the clipping alone makes. BTBH_VIEWS_SMOKE_DIAG=1 prints every pixel that differs by more than TOLERANCE.
@@ -25,12 +26,14 @@
  *   spot_map say which map each view read.
  * - The per-view report: each view's draws and instances, their sum the frame's draws.
  * - Fallbacks: two views with FSR 3 run FSR 1 (report.upscale_mode), with the radiance cascades none
- *   (BTBH_GPU_SCENE_RC_FALLBACK_VIEWS); the next one-view frame runs both again. btbh_gpu_window_scene_prewarm_views
+ *   (BTBH_GPU_SCENE_RC_FALLBACK_VIEWS); the next one-view frame runs both again, the cascades with a new history. A
+ *   prewarm for two views, and a present of two views refused, leave the history. btbh_gpu_window_scene_prewarm_views
  *   says FSR 1 for two views.
  * - Refusals (BTBH_GPU_INVALID_ARGUMENT, naming the view, no frame left waiting): views NULL, 0 or 3 views, a camera
- *   not finite or not invertible, a clip not finite, two views without a clip line, a visibility byte above 1, an
- *   unknown flag, reserved set, an invalid lighting; and (SPIR-V) old vertex shaders without the clip distance, and a
- *   missing production_post_view.vert, for two views but not for one.
+ *   not finite or not invertible, a clip not finite, two views without a clip line, one view's clip (0, 0, c) with c
+ *   not 0, a visibility byte above 1, an unknown flag, reserved set, an invalid lighting, a lifted batch that a view's
+ *   shadow_visibility lets into its sun map; and (SPIR-V) old vertex shaders without the clip distance, and a missing
+ *   production_post_view.vert, for two views but not for one.
  *
  * BTBH_SMOKE_DUMP=<dir> writes the images. It needs a GPU and the production shaders; with no device it is skipped
  * (77). */
@@ -544,6 +547,9 @@ typedef struct Frame {
     /* One view through btbh_gpu_window_scene_present_instances_with_visibility. */
     bool old_entry;
     const uint8_t *scene_visibility;
+    const uint8_t *directional_shadow_visibility;
+    /* The floor (batch 0) lifted by this (refusals). */
+    const BTBHGPUSceneHeightLift *floor_lift;
 } Frame;
 
 static Frame frame_default(void) {
@@ -601,6 +607,9 @@ static BTBHGPUResult present_frame(SmokeWindow *smoke, const Frame *frame, BTBHG
     batches[2].emission_blue = 180u;
     batches[2].emission_energy = 6.0f;
     batches[3] = cube_batch(smoke->cube, 9u, 1u);
+    /* (A lifted batch casts into no spot map: RFC 0012 phase 1.) */
+    batches[0].height_lift = frame->floor_lift;
+    batches[0].spot_shadow_visible = frame->floor_lift != NULL ? 0u : batches[0].spot_shadow_visible;
     BTBHGPUScenePost post = post_chain(frame->chain, frame->upscale_mode);
     post.temporal_reset = frame->temporal_reset;
     post.opaque_sort = frame->opaque_sort;
@@ -615,7 +624,7 @@ static BTBHGPUResult present_frame(SmokeWindow *smoke, const Frame *frame, BTBHG
             SMOKE_SHADER_FORMAT, frame->render_width, frame->render_height,
             camera.view_projection, camera.right, camera.up, camera.position,
             &frame->lighting, &post, &instances[0][0], INSTANCE_COUNT, INSTANCE_COUNT, batches,
-            scene_visibility, NULL, BATCH_COUNT,
+            scene_visibility, frame->directional_shadow_visibility, BATCH_COUNT,
             clear_colour[0], clear_colour[1], clear_colour[2], clear_colour[3], report);
     }
     BTBHGPUSceneView views[2];
@@ -641,7 +650,7 @@ static BTBHGPUResult present_frame(SmokeWindow *smoke, const Frame *frame, BTBHG
         frame->use_override ? frame->views_override : views,
         frame->use_override ? frame->view_count_override : frame->view_count,
         &frame->lighting, &post, &instances[0][0], INSTANCE_COUNT, INSTANCE_COUNT, batches,
-        scene_visibility, NULL, BATCH_COUNT,
+        scene_visibility, frame->directional_shadow_visibility, BATCH_COUNT,
         clear_colour[0], clear_colour[1], clear_colour[2], clear_colour[3], view_reports, report);
 }
 
@@ -1027,6 +1036,73 @@ static void check_taps_stay(SmokeWindow *smoke) {
     free(fog_only);
 }
 
+/* The band by the line: what lies within a quarter of a render pixel of it is drawn by both views, the second last (a
+   screen-space pass's pixels and texels) or the nearer (the depth). A vertical line through a half-size texel's centre
+   (x = 161: texel 80 of the SSAO's and HBAO's targets), and the diagonal, where pixels lie on it too. View 0 the left
+   half, view 1 the right seeing the step or not, one camera: view 0's pixels (those it alone draws, beyond a quarter
+   pixel of the line) are the same either way, for neither view's reads take what lies in the band. */
+static void check_taps_by_the_line(SmokeWindow *smoke) {
+    static const uint32_t chains[2] = {CHAIN_HBAO_SSR, CHAIN_SSAO_SSR};
+    for (uint32_t which = 0u; which < 2u; ++which) {
+        for (uint32_t layout = 0u; layout < 2u; ++layout) {
+            Frame frame = frame_default();
+            frame.chain = chains[which];
+            frame.lighting = lighting_from(0u, false, -1);
+            frame.angle[1] = frame.angle[0];
+            if (layout == 0u) {
+                frame.view_count = 2u;
+                const float left[3] = {-1.0f, 0.0f, 161.0f};
+                const float right[3] = {1.0f, 0.0f, -161.0f};
+                memcpy(frame.clip[0], left, sizeof(left));
+                memcpy(frame.clip[1], right, sizeof(right));
+            } else {
+                /* (View 0 the left half: the step lies on the right.) */
+                set_diagonal_split(&frame);
+                float right[3];
+                memcpy(right, frame.clip[0], sizeof(right));
+                memcpy(frame.clip[0], frame.clip[1], sizeof(right));
+                memcpy(frame.clip[1], right, sizeof(right));
+            }
+            frame.visibility[0] = no_step;
+            frame.visibility[1] = with_step;
+            uint8_t *stepped = frame_pixels(smoke, &frame, NULL, NULL);
+            frame.visibility[1] = no_step;
+            uint8_t *flat = frame_pixels(smoke, &frame, NULL, NULL);
+            /* (The clips are unit normals: d is the distance in pixels.) */
+            uint32_t differing = 0u;
+            uint32_t near_step = 0u;
+            float farthest = 0.0f;
+            for (uint32_t y = 0u; y < HEIGHT; ++y) {
+                for (uint32_t x = 0u; x < WIDTH; ++x) {
+                    const size_t offset = ((size_t)y * WIDTH + x) * 4u;
+                    const float d = frame.clip[0][0] * ((float)x + 0.5f) + frame.clip[0][1] * ((float)y + 0.5f) +
+                        frame.clip[0][2];
+                    const bool differs = memcmp(stepped + offset, flat + offset, 4u) != 0;
+                    if (differs && d >= 0.3f) {
+                        differing += 1u;
+                        farthest = d > farthest ? d : farthest;
+                    }
+                    if (differs && d < -0.3f && d > -8.0f) {
+                        near_step += 1u;
+                    }
+                }
+            }
+            printf("taps by the line, %s, %s: the other view's step changes %u pixels of view 0's half (out to %.1f px; "
+                "%u of its own within 8 px of the line)\n",
+                which == 0u ? "HBAO and SSR" : "SSAO and SSR",
+                layout == 0u ? "through texel 80's centre" : "diagonal", differing, (double)farthest, near_step);
+            char name[64];
+            (void)snprintf(name, sizeof(name), "taps_line_%s_%s", which == 0u ? "hbao" : "ssao",
+                layout == 0u ? "texel" : "diagonal");
+            dump(name, stepped, WIDTH, HEIGHT);
+            assert(differing == 0u);
+            assert(near_step > 0u);
+            free(stepped);
+            free(flat);
+        }
+    }
+}
+
 static void check_diagonal_split(SmokeWindow *smoke) {
     for (uint32_t size = 0u; size < 2u; ++size) {
         const uint32_t width = size == 0u ? WIDTH : SMALL_WIDTH;
@@ -1223,22 +1299,29 @@ static void check_report_and_fallbacks(SmokeWindow *smoke) {
 #if !defined(__APPLE__)
     assert(report.upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR3);
 #endif
-    /* The radiance cascades with two views: off, the views' reason; one view after runs them again. */
+    /* The radiance cascades with two views: off, the views' reason; one view after runs them again, with a new history
+       (one view's frames before keep theirs). */
     frame.upscale_mode = BTBH_GPU_SCENE_UPSCALE_LINEAR;
     frame.render_width = WIDTH;
     frame.render_height = HEIGHT;
     frame.chain = CHAIN_CASCADES;
-    free(frame_pixels(smoke, &frame, NULL, &report));
-    assert(report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_OFF);
-    assert(report.radiance_cascades.requested_tier == BTBH_GPU_SCENE_RC_LOW);
-    assert(report.radiance_cascades.fallback_reason == BTBH_GPU_SCENE_RC_FALLBACK_VIEWS);
     one = frame;
     one.view_count = 1u;
     memset(one.clip, 0, sizeof(one.clip));
     free(frame_pixels(smoke, &one, NULL, &report));
+    free(frame_pixels(smoke, &one, NULL, &report));
+    assert(report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_LOW);
+    assert(report.radiance_cascades.pass_telemetry.temporal_history_valid == 1u);
+    free(frame_pixels(smoke, &frame, NULL, &report));
+    assert(report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_OFF);
+    assert(report.radiance_cascades.requested_tier == BTBH_GPU_SCENE_RC_LOW);
+    assert(report.radiance_cascades.fallback_reason == BTBH_GPU_SCENE_RC_FALLBACK_VIEWS);
+    free(frame_pixels(smoke, &one, NULL, &report));
     assert(report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_LOW);
     assert(report.radiance_cascades.fallback_reason != BTBH_GPU_SCENE_RC_FALLBACK_VIEWS);
-    /* The prewarm for two views says FSR 1. */
+    assert(report.radiance_cascades.pass_telemetry.temporal_history_valid == 0u);
+    free(frame_pixels(smoke, &one, NULL, &report));
+    assert(report.radiance_cascades.pass_telemetry.temporal_history_valid == 1u);
     BTBHGPUSceneView views[2];
     memset(views, 0, sizeof(views));
     for (uint32_t index = 0u; index < 2u; ++index) {
@@ -1247,9 +1330,19 @@ static void check_report_and_fallbacks(SmokeWindow *smoke) {
         memcpy(views[index].clip, frame.clip[index], sizeof(views[index].clip));
     }
     BTBHGPUSceneLighting lighting = lighting_from(0u, true, -1);
-    BTBHGPUScenePost post = post_chain(CHAIN_HBAO_SSR, BTBH_GPU_SCENE_UPSCALE_FSR3);
     BTBHGPUSceneGeometryBatch batch = cube_batch(smoke->cube, 0u, 1u);
     BTBHGPUSceneReport prewarm_report;
+    /* A prewarm for two views with the cascades asked for draws nothing: the next one-view frame keeps their history. */
+    BTBHGPUScenePost post = post_chain(CHAIN_CASCADES, BTBH_GPU_SCENE_UPSCALE_LINEAR);
+    assert(btbh_gpu_window_scene_prewarm_views(smoke->window,
+        shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3], shaders.paths[4], shaders.paths[5],
+        shaders.paths[6], shaders.paths[7], shaders.paths[8], shaders.paths[9], shaders.paths[10],
+        SMOKE_SHADER_FORMAT, WIDTH, HEIGHT, views, 2u, &lighting, &post, &batch, 1u, &prewarm_report) == BTBH_GPU_OK);
+    free(frame_pixels(smoke, &one, NULL, &report));
+    assert(report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_LOW);
+    assert(report.radiance_cascades.pass_telemetry.temporal_history_valid == 1u);
+    /* The prewarm for two views says FSR 1. */
+    post = post_chain(CHAIN_HBAO_SSR, BTBH_GPU_SCENE_UPSCALE_FSR3);
     const BTBHGPUResult prewarmed = btbh_gpu_window_scene_prewarm_views(smoke->window,
         shaders.paths[0], shaders.paths[1], shaders.paths[2], shaders.paths[3], shaders.paths[4], shaders.paths[5],
         shaders.paths[6], shaders.paths[7], shaders.paths[8], shaders.paths[9], shaders.paths[10],
@@ -1264,7 +1357,8 @@ static void check_report_and_fallbacks(SmokeWindow *smoke) {
         shaders.paths[6], shaders.paths[7], shaders.paths[8], shaders.paths[9], shaders.paths[10],
         SMOKE_SHADER_FORMAT, SMALL_WIDTH, SMALL_HEIGHT, views, 3u, &lighting, &post, &batch, 1u, &prewarm_report) ==
         BTBH_GPU_INVALID_ARGUMENT);
-    printf("fallbacks: FSR 3 runs FSR 1 and the cascades are off with two views, both back with one\n");
+    printf("fallbacks: FSR 3 runs FSR 1 and the cascades are off with two views, both back with one (the cascades' "
+        "history new after a frame of two views, kept after a prewarm for them)\n");
 }
 
 /* ---- Refusals ---- */
@@ -1364,6 +1458,13 @@ static void check_refusals(SmokeWindow *smoke) {
     views[0].clip[0] = 0.0f;
     views[0].clip[1] = 0.0f;
     expect_refused(smoke, &frame, "view 0", "two views without a clip line");
+    /* One view: a clip without a line, (0, 0, c) with c not 0 (the whole frame or none of it), either sign. */
+    frame.view_count_override = 1u;
+    views[0].clip[2] = 5.0f;
+    expect_refused(smoke, &frame, "view 0", "one view's clip without a line");
+    views[0].clip[2] = -5.0f;
+    expect_refused(smoke, &frame, "view 0", "one view's clip without a line, negative");
+    frame.view_count_override = 2u;
     views[0].clip[0] = 1.0f;
     views[0].clip[2] = -0.5f * (float)WIDTH;
     static const uint8_t bad_bytes[BATCH_COUNT] = {1u, 2u, 1u, 0u};
@@ -1384,6 +1485,38 @@ static void check_refusals(SmokeWindow *smoke) {
     views[1].lighting = &bad_lighting;
     expect_refused(smoke, &frame, "view 1", "an invalid lighting");
     views[1] = saved;
+    /* A lifted floor (RFC 0012: it casts no shadow yet) kept out of the sun map by the call's byte, but let in by a
+       view's shadow_visibility, which picks the casters of that view's own map: refused, naming the view's array. */
+    const float flat_heights[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    BTBHGPUTextureReport field_report;
+    BTBHGPUTexture *field = btbh_gpu_window_heightfield_create(smoke->window, flat_heights, 2u, 2u, &field_report);
+    if (field == NULL) {
+        fprintf(stderr, "heightfield: %s\n", field_report.message);
+    }
+    assert(field != NULL);
+    BTBHGPUSceneHeightLift lift;
+    memset(&lift, 0, sizeof(lift));
+    lift.heightfield = field;
+    lift.world_to_uv[0] = 1.0f / 60.0f;
+    lift.world_to_uv[1] = 1.0f / 60.0f;
+    lift.world_to_uv[2] = 0.5f;
+    lift.world_to_uv[3] = 0.5f;
+    static const uint8_t floor_out[BATCH_COUNT] = {0u, 1u, 1u, 1u};
+    static const uint8_t floor_in[BATCH_COUNT] = {1u, 1u, 1u, 1u};
+    frame.floor_lift = &lift;
+    frame.directional_shadow_visibility = floor_out;
+    views[0].shadow_visibility = floor_in;
+    expect_refused(smoke, &frame, "view 0's shadow_visibility", "a lifted batch casting by view 0's bytes");
+    views[0].shadow_visibility = floor_out;
+    views[1].shadow_visibility = floor_in;
+    expect_refused(smoke, &frame, "view 1's shadow_visibility", "a lifted batch casting by view 1's bytes");
+    /* Kept out by every array: drawn. */
+    views[1].shadow_visibility = floor_out;
+    free(frame_pixels(smoke, &frame, NULL, NULL));
+    views[0].shadow_visibility = NULL;
+    views[1] = saved;
+    frame.floor_lift = NULL;
+    frame.directional_shadow_visibility = NULL;
     /* After them, the views draw. */
     free(frame_pixels(smoke, &frame, NULL, NULL));
 
@@ -1403,20 +1536,47 @@ static void check_refusals(SmokeWindow *smoke) {
     strip_clip_distance(old.paths[0]);
     frame.shaders = &old;
     expect_refused(smoke, &frame, "production_model.vert.spv", "a vertex shader without the clip distance");
+    /* The window left as it was: a frame of two views with the cascades asked for, refused for its shaders, leaves the
+       cascades' history to the next one-view frame. */
+    Frame cascades = frame_default();
+    cascades.chain = CHAIN_CASCADES;
+    cascades.scene_visibility = no_step;
+    BTBHGPUSceneReport cascades_report;
+    free(frame_pixels(smoke, &cascades, NULL, &cascades_report));
+    free(frame_pixels(smoke, &cascades, NULL, &cascades_report));
+    assert(cascades_report.radiance_cascades.pass_telemetry.temporal_history_valid == 1u);
+    frame.chain = CHAIN_CASCADES;
+    expect_refused(smoke, &frame, "production_model.vert.spv", "old shaders with the cascades asked for");
+    frame.chain = CHAIN_PLAIN;
+    free(frame_pixels(smoke, &cascades, NULL, &cascades_report));
+    assert(cascades_report.radiance_cascades.pass_telemetry.temporal_history_valid == 1u);
     Frame one = frame_default();
     one.shaders = &old;
     one.scene_visibility = no_step;
     free(frame_pixels(smoke, &one, NULL, NULL));
+    /* (Another copy: the window keeps what it found of each shader path, so a file changed under a path it has read
+       isn't looked at again.) */
+    ShaderCopy fresh;
+    memset(&fresh, 0, sizeof(fresh));
+    (void)snprintf(fresh.from, sizeof(fresh.from), "%s", BTBH_GPU_SMOKE_SHADER_DIR);
+    (void)snprintf(fresh.to, sizeof(fresh.to), "%s/../views_npv", BTBH_GPU_SMOKE_SHADER_DIR);
+    (void)SDL_CreateDirectory(fresh.to);
+    assert(SDL_EnumerateDirectory(fresh.from, copy_shader_file, &fresh));
+    static ShaderSet no_post_view;
+    shader_set_in(&no_post_view, fresh.to);
     char post_view[1300];
-    (void)snprintf(post_view, sizeof(post_view), "%s/production_post_view.vert.spv", copy.to);
-    assert(SDL_CopyFile(shaders.paths[0], old.paths[0]));
+    (void)snprintf(post_view, sizeof(post_view), "%s/production_post_view.vert.spv", fresh.to);
     assert(SDL_RemovePath(post_view));
+    frame.shaders = &no_post_view;
     expect_refused(smoke, &frame, "production_post_view.vert", "no production_post_view.vert");
+    one.shaders = &no_post_view;
     free(frame_pixels(smoke, &one, NULL, NULL));
     frame.shaders = &shaders;
     free(frame_pixels(smoke, &frame, NULL, NULL));
 #endif
-    printf("refusals: each with BTBH_GPU_INVALID_ARGUMENT, naming the view or the shader, no frame left waiting\n");
+    btbh_gpu_texture_destroy(field);
+    printf("refusals: each with BTBH_GPU_INVALID_ARGUMENT, naming the view or the shader, no frame left waiting (the "
+        "cascades' history kept)\n");
 }
 
 int main(void) {
@@ -1449,6 +1609,7 @@ int main(void) {
     check_one_view_identity(&a, &b);
     check_vertical_split(&b);
     check_taps_stay(&b);
+    check_taps_by_the_line(&b);
     check_diagonal_split(&b);
     check_shadows(&b);
     check_report_and_fallbacks(&b);
