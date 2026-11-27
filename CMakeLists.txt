@@ -765,6 +765,21 @@ if(BTBH_BUILD_GPU_SPIKE)
         target_link_libraries(btbh_gpu_gamepad_test PRIVATE btbh_gpu SDL3::SDL3-static)
         add_test(NAME btbh_gpu_gamepad COMMAND btbh_gpu_gamepad_test)
 
+        # The window's gamepad roster (since 0.15.0): slots, hot-plug, identity, per-pad edges and rumble, with SDL's
+        # virtual gamepads on the dummy video driver (no GPU, no display), as btbh_gpu_gamepad.
+        add_executable(btbh_gpu_gamepad_roster_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_gamepad_roster_test.c"
+        )
+        target_link_libraries(btbh_gpu_gamepad_roster_test PRIVATE btbh_gpu SDL3::SDL3-static)
+        if(MSVC)
+            target_compile_options(btbh_gpu_gamepad_roster_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_gamepad_roster_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(NAME btbh_gpu_gamepad_roster COMMAND btbh_gpu_gamepad_roster_test)
+
         add_executable(btbh_gpu_window_config_test
             "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_window_config_test.c"
         )
