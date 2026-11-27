@@ -1511,6 +1511,35 @@ if(BTBH_BUILD_GPU_SPIKE)
         endif()
         add_dependencies(btbh_gpu_target_view_bench btbh_gpu_shaders)
 
+        # A measurement, not a test (0.16.0): the bone palettes' CPU for an army of skinned bodies (Be The Bullet Hell
+        # v2's enemies); see the file.
+        add_executable(btbh_gpu_bone_bench
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_bone_bench.c"
+        )
+        target_include_directories(
+            btbh_gpu_bone_bench
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_bone_bench
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+                BTBH_GPU_SMOKE_FIXTURE_DIR="${BTBH_RENDERER_ROOT}/Tests/Fixtures"
+        )
+        target_link_libraries(
+            btbh_gpu_bone_bench
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_bone_bench PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_bone_bench PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_bone_bench btbh_gpu_shaders)
 
         # The tests check with assert(): keep it in optimised builds, where NDEBUG would
         # compile every check away.
