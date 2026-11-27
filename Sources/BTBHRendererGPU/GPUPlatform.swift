@@ -144,6 +144,9 @@ public final class GPUPlatform: GamePlatform {
     var isFrameTelemetryEnabled: Bool { frameTelemetryEnabled }
     private var window: GPUWindowProbe?
     private var gamepadState = GPUGamepadState()
+    /// The roster's slots (since 0.15.0), advanced with `gamepadState` on every poll.
+    private var gamepadStates = [GPUGamepadState](repeating: .init(), count: GPUGamepadRoster.capacity)
+    private var rosterCount = 0
     private var state = GPUPlatformState.empty
     private var forcedClose = false
     private var targetFramesPerSecond = 0
@@ -276,6 +279,8 @@ public final class GPUPlatform: GamePlatform {
         window?.shutdown()
         window = nil
         gamepadState = GPUGamepadState()
+        gamepadStates = [GPUGamepadState](repeating: .init(), count: GPUGamepadRoster.capacity)
+        rosterCount = 0
         state = .empty
         targetFramesPerSecond = 0
         frameRatePolicy = .uncapped
@@ -333,6 +338,10 @@ public final class GPUPlatform: GamePlatform {
         do {
             state = try window.pollPlatform()
             gamepadState.advance(window.gamepadSnapshot())
+            rosterCount = window.gamepadCount()
+            for index in gamepadStates.indices {
+                gamepadStates[index].advance(window.gamepadSnapshot(at: index))
+            }
         } catch {
             closeWindow()
         }
@@ -457,9 +466,68 @@ public final class GPUPlatform: GamePlatform {
     }
 
     public func rumbleGamepad(lowFrequency: Float, highFrequency: Float, durationSeconds: Float) {
-        func motor(_ value: Float) -> UInt16 { UInt16(max(0, min(1, value)) * 65_535) }
-        window?.rumbleGamepad(low: motor(lowFrequency), high: motor(highFrequency),
-                              durationMilliseconds: UInt32(max(0, min(10, durationSeconds)) * 1_000))
+        window?.rumbleGamepad(low: Self.motor(lowFrequency), high: Self.motor(highFrequency),
+                              durationMilliseconds: Self.rumbleMilliseconds(durationSeconds))
+    }
+
+    private static func motor(_ value: Float) -> UInt16 { UInt16(max(0, min(1, value)) * 65_535) }
+
+    private static func rumbleMilliseconds(_ seconds: Float) -> UInt32 { UInt32(max(0, min(10, seconds)) * 1_000) }
+
+    // MARK: Gamepad roster (since 0.15.0)
+    //
+    // The window opens every gamepad that connects, each in a slot, for local co-op. A pad takes the lowest free
+    // slot and keeps it while it is connected; one that leaves empties its slot and moves no other. The single-pad
+    // calls above (`gamepad`, `isGamepadButtonDown`, `rumbleGamepad` ...) read the lowest occupied slot, as before,
+    // and fall over to the next pad when it leaves: hold one pad per player with the `at:` calls instead. Every read
+    // is of the last `pollEvents`.
+
+    /// The number of slots in `gamepad(at:)` and its siblings.
+    public static let gamepadCapacity = GPUGamepadRoster.capacity
+
+    /// The number of slots up to the highest occupied one (0 without a pad or a window), as of the last
+    /// `pollEvents`: indices `0..<gamepadCount` visit every pad; empty slots between read as disconnected.
+    public var gamepadCount: Int { rosterCount }
+
+    /// Slot `index`'s pad; disconnected for an empty slot or an index outside `0..<gamepadCapacity`.
+    public func gamepad(at index: Int) -> GamepadSnapshot {
+        rosterState(index).snapshot
+    }
+
+    public func isGamepadButtonDown(_ button: GamepadButton, at index: Int) -> Bool {
+        rosterState(index).isDown(button)
+    }
+
+    /// The button went down on slot `index`'s pad between the last two polls: that pad's presses only.
+    public func wasGamepadButtonPressed(_ button: GamepadButton, at index: Int) -> Bool {
+        rosterState(index).wasPressed(button)
+    }
+
+    public func wasGamepadTriggerPressed(left: Bool, threshold: Float, at index: Int) -> Bool {
+        rosterState(index).triggerPressed(left: left, threshold: threshold)
+    }
+
+    /// A menu step on slot `index`'s pad: its d-pad, or a stick crossing half way (no keys).
+    public func wasGamepadNavigationPressed(_ direction: NavigationDirection, at index: Int) -> Bool {
+        rosterState(index).navigationPressed(direction)
+    }
+
+    private func rosterState(_ index: Int) -> GPUGamepadState {
+        GPUGamepadRoster.slot(index) != nil ? gamepadStates[index] : GPUGamepadState()
+    }
+
+    /// Slot `index`'s pad's identity (name, serial, GUID, vendor and product), kind, connection and battery, read
+    /// now; nil for an empty slot, an index out of range or without a window.
+    public func gamepadInfo(at index: Int) -> GPUGamepadInfo? {
+        guard let window else { return nil }
+        return GPUGamepadInfo(window.gamepadInfo(at: index))
+    }
+
+    /// Rumbles slot `index`'s pad as `rumbleGamepad` does the lowest one's (motors 0...1, at most 10 s). An empty slot,
+    /// a pad without motors or an index out of range does nothing.
+    public func rumbleGamepad(at index: Int, lowFrequency: Float, highFrequency: Float, durationSeconds: Float) {
+        window?.rumbleGamepad(at: index, low: Self.motor(lowFrequency), high: Self.motor(highFrequency),
+                              durationMilliseconds: Self.rumbleMilliseconds(durationSeconds))
     }
 
     public func wasNavigationPressed(
