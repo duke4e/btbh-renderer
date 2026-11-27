@@ -17,6 +17,10 @@
  *     step the other doesn't, leaves the other's half byte for byte as without the step (where one view of the step
  *     darkens the floor beside it). So does a line through a half-size texel's centre, and the diagonal, for view 0's
  *     pixels beyond the band by the line that both views draw (the second last): no read takes what lies in it.
+ *     Since 0.16.1 these chains' reflections reflect (SSR_SURFACE_REFLECTIVITY and SSR_FACING_HITS, Be The Bullet Hell
+ *     v2's flags; without the first every surface counted as unlit), so a split's reflections are held to its views'
+ *     one-view frames beyond TAP_BAND_LIMIT too. (A hit across the line would fade to nothing, so the step tests can't
+ *     see a reflection's read there.)
  *   - A diagonal split at 30 degrees, at the window's size and at three quarters of it (scaled linearly): no fault, and
  *     no pixel drawn by neither view. The control, both views of one camera on the same line, shows the edge flips
  *     the clipping alone makes. BTBH_VIEWS_SMOKE_DIAG=1 prints every pixel that differs by more than TOLERANCE.
@@ -65,8 +69,9 @@
 #define SMALL_HEIGHT 135u
 /* How far from the line (output pixels) a pixel of a split may differ from its view's one-view frame by more than a
    rounding: without neighbour passes (the line itself: a pixel within a quarter of a render pixel of it is drawn by
-   both views), and with the HBAO or the SSAO with SSR (the reach of the whole frames' taps across the line; measured on
-   NVIDIA within 6 px at 320 x 180, printed). */
+   both views), and with the HBAO or the SSAO with SSR (the reach of the whole frames' taps across the line, and the
+   reflections that the split's fade by it or stop at it; measured on NVIDIA within 6 px at 320 x 180 while they
+   reflected nothing, within 24 since 0.16.1, printed). */
 #define LINE_BAND 1.5f
 #define TAP_BAND_LIMIT 48.0f
 
@@ -301,7 +306,8 @@ enum {
     CHAIN_FOG = 5,           /* fog and ACES: nothing that samples a neighbour */
     CHAIN_HBAO_SSR = 6,      /* HBAO, SSR and fog, no anti-aliasing */
     CHAIN_SSAO_SSR = 7,      /* SSAO and SSR, no anti-aliasing */
-    CHAIN_COUNT = 8
+    CHAIN_HBAO_FOG = 8,      /* chain 6 without SSR (the taps' control) */
+    CHAIN_COUNT = 9
 };
 
 static BTBHGPUScenePost post_chain(uint32_t chain, uint8_t upscale_mode) {
@@ -329,7 +335,15 @@ static BTBHGPUScenePost post_chain(uint32_t chain, uint8_t upscale_mode) {
         post.ssr_thickness = 0.5f;
         post.anti_aliasing = chain == CHAIN_SSAO_SSR || chain == CHAIN_HBAO_SSR ? 0u : 3u; /* FXAA */
     }
-    if (chain == CHAIN_HBAO_SSR) {
+    if (chain == CHAIN_SSAO_SSR || chain == CHAIN_HBAO_SSR) {
+        /* The splits' reflections (since 0.16.1): without SSR_SURFACE_REFLECTIVITY the scene's targets mark every
+           surface unlit, and they reflect nothing. */
+        post.flags = BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY | BTBH_GPU_SCENE_POST_SSR_FACING_HITS;
+    }
+    if (chain == CHAIN_HBAO_FOG) {
+        post.ssao_enabled = 2u;
+    }
+    if (chain == CHAIN_HBAO_SSR || chain == CHAIN_HBAO_FOG) {
         post.ssao_radius = 0.8f;
         post.ssao_intensity = 1.0f;
         post.ssao_power = 1.5f;
@@ -349,7 +363,7 @@ static BTBHGPUScenePost post_chain(uint32_t chain, uint8_t upscale_mode) {
         post.cas_sharpness = 0.5f;
         post.anti_aliasing = 2u; /* SMAA high */
     }
-    if (chain == CHAIN_HBAO_CONTACT || chain == CHAIN_FOG || chain == CHAIN_HBAO_SSR) {
+    if (chain == CHAIN_HBAO_CONTACT || chain == CHAIN_FOG || chain == CHAIN_HBAO_SSR || chain == CHAIN_HBAO_FOG) {
         post.fog_enabled = 1u;
         post.fog_color[0] = 0.5f;
         post.fog_color[1] = 0.55f;
@@ -1015,13 +1029,13 @@ static void check_taps_stay(SmokeWindow *smoke) {
     }
     /* The control proper: the HBAO darkens the floor beside the step in one view (so a tap that crossed would show). */
     Frame on = frame_default();
-    on.chain = CHAIN_HBAO_SSR;
+    on.chain = CHAIN_HBAO_FOG;
     on.lighting = lighting_from(0u, false, -1);
     on.scene_visibility = with_step;
     uint8_t *with_ao = frame_pixels(smoke, &on, NULL, NULL);
     on.chain = CHAIN_FOG;
     uint8_t *fog_only = frame_pixels(smoke, &on, NULL, NULL);
-    /* (Fog differs from chain 6 only by the occlusion and the reflections.) */
+    /* (Fog differs from chain 8 only by the occlusion.) */
     uint32_t darker = 0u;
     for (uint32_t index = 0u; index < WIDTH * HEIGHT; ++index) {
         const int luma_ao = with_ao[index * 4u] + with_ao[index * 4u + 1u] + with_ao[index * 4u + 2u];

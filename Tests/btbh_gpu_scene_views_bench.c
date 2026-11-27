@@ -25,7 +25,12 @@
  * is the calls' wall time with the GPU idle before each (median of 12 frames). BTBH_VIEWS_BENCH_SIZE=WxH,
  * BTBH_VIEWS_BENCH_DETAIL=<n> (default 8: 768 triangles a box, 1.8 million in the scene). BTBH_VIEWS_BENCH_BAND=1 first
  * measures the seam's band: the vertical split against its two cameras' one-view frames joined at the line, read back,
- * with the whole chain, without bloom, and without bloom and SSR.
+ * with the whole chain, without bloom, and without bloom and SSR; BTBH_VIEWS_BENCH_BAND=diagonal (0.16.1) measures the
+ * diagonal split instead. With it, BTBH_VIEWS_BENCH_DUMP=<dir> (0.16.1) writes each variant's three frames there as PNGs
+ * (band_<variant>_first, _second and _split). BTBH_VIEWS_BENCH_SSR=<n> with n a positive number (0.16.1) shows the
+ * reflections, to see them by the line: intensity n and Be The Bullet Hell v2's flags, SSR_SURFACE_REFLECTIVITY and
+ * SSR_FACING_HITS, in every frame. Unset, or anything else, the bench's own: intensity 0.5 without the flags, which
+ * reflects nothing (without SSR_SURFACE_REFLECTIVITY the scene's targets mark every surface unlit).
  *
  * Variants (0.16.0, for the cost log's 4K sample): BTBH_VIEWS_BENCH_UPSCALE=fsr3 runs FSR 3 at the frame's size (render
  * scale 1) in place of SMAA, as Be The Bullet Hell v2's 4K High does; BTBH_VIEWS_BENCH_CAS=<sharpness> turns CAS on;
@@ -460,6 +465,35 @@ static uint8_t *read_texture(BTBHGPUWindow *window, BTBHGPUTexture *texture) {
     return pixels;
 }
 
+/* BTBH_VIEWS_BENCH_DUMP=<dir>: a band frame read back (the texture's bytes) as <dir>/band_<variant>_<which>.png. */
+static void dump_frame(const BTBHGPUTexture *texture, const uint8_t *pixels, uint32_t variant, const char *which) {
+    const char *directory = SDL_getenv("BTBH_VIEWS_BENCH_DUMP");
+    if (directory == NULL || directory[0] == '\0') {
+        return;
+    }
+    const size_t size = (size_t)texture->width * texture->height * 4u;
+    uint8_t *rgba = malloc(size);
+    if (rgba == NULL) {
+        return;
+    }
+    memcpy(rgba, pixels, size);
+    if (texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+        texture->format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB) {
+        for (size_t index = 0u; index < size; index += 4u) {
+            const uint8_t blue = rgba[index];
+            rgba[index] = rgba[index + 2u];
+            rgba[index + 2u] = blue;
+        }
+    }
+    static const char *const variant_names[3] = {"chain", "nobloom", "nossr"};
+    char path[1200];
+    (void)snprintf(path, sizeof(path), "%s/band_%s_%s.png", directory, variant_names[variant], which);
+    if (btbh_gpu_write_png_rgba8(path, texture->width, texture->height, rgba) != BTBH_GPU_OK) {
+        fprintf(stderr, "dump: can't write %s\n", path);
+    }
+    free(rgba);
+}
+
 static void wait_idle(BenchScene *scene) {
     (void)SDL_WaitForGPUIdle(scene->window->device->gpu);
 }
@@ -751,7 +785,13 @@ int main(void) {
     post->ssao_power = 1.5f;
     post->ssao_bias = 0.05f;
     post->ssao_contact = 1u;
-    post->ssr_intensity = 0.5f;
+    const char *ssr_text = SDL_getenv("BTBH_VIEWS_BENCH_SSR");
+    const bool ssr_shown = ssr_text != NULL && atof(ssr_text) > 0.0;
+    post->ssr_intensity = ssr_shown ? (float)atof(ssr_text) : 0.5f;
+    if (ssr_shown) {
+        /* (Without SSR_SURFACE_REFLECTIVITY the scene's targets mark every surface unlit: they reflect nothing.) */
+        post->flags |= BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY | BTBH_GPU_SCENE_POST_SSR_FACING_HITS;
+    }
     post->ssr_max_roughness = 0.7f;
     post->ssr_max_distance = 30.0f;
     post->ssr_thickness = 0.6f;
@@ -860,7 +900,8 @@ int main(void) {
         "shadow period %u, second view's sun map %s, %u frames a sample, %u rounds\n", width, height, GRID * GRID,
         12u * detail * detail, BATCHES, angle_degrees, period, own_sun ? "its own" : "shared", frames_per_sample,
         rounds);
-    printf("BENCH post %s, CAS %s%s\n", fsr3 ? "FSR 3 at scale 1" : "SMAA medium", cas_sharpness > 0.0f ? "on" : "off",
+    printf("BENCH post %s, CAS %s, SSR %s%s\n", fsr3 ? "FSR 3 at scale 1" : "SMAA medium",
+        cas_sharpness > 0.0f ? "on" : "off", ssr_shown ? "shown (BTBH_VIEWS_BENCH_SSR)" : "0.5, reflecting nothing",
         cost_log_mode ? ", cost log (canvas presents)" : "");
 
     for (uint32_t config = 0u; config < CONFIGS; ++config) {
@@ -870,10 +911,13 @@ int main(void) {
             }
         }
     }
-    if (SDL_getenv("BTBH_VIEWS_BENCH_BAND") != NULL) {
-        /* The seam's band: the vertical split against its two cameras' one-view frames joined at the line, by distance
-           from it, the widest distance where a pixel differs by more than 0, 2, 8 and 32 (8-bit steps), with the whole
-           chain, without bloom, and without bloom and SSR. No visibility: every batch in every frame. */
+    const char *band_text = SDL_getenv("BTBH_VIEWS_BENCH_BAND");
+    if (band_text != NULL) {
+        /* The seam's band: the vertical split (or with "diagonal" configuration 3's) against its two cameras' one-view
+           frames joined at the line, by distance from it, the widest distance where a pixel differs by more than 0, 2, 8
+           and 32 (8-bit steps), with the whole chain, without bloom, and without bloom and SSR. No visibility: every
+           batch in every frame. */
+        const uint32_t band_config = strcmp(band_text, "diagonal") == 0 ? 3u : 2u;
         const BTBHGPUScenePost chain = scene.post;
         const char *const *p = paths();
         for (uint32_t variant = 0u; variant < 3u; ++variant) {
@@ -887,7 +931,7 @@ int main(void) {
             uint8_t *frames[3] = {NULL, NULL, NULL};
             for (uint32_t which = 0u; which < 3u; ++which) {
                 BTBHGPUSceneView views[2];
-                memcpy(views, scene.views[2], sizeof(views));
+                memcpy(views, scene.views[band_config], sizeof(views));
                 views[0].visibility = NULL;
                 views[1].visibility = NULL;
                 if (which < 2u) {
@@ -910,8 +954,10 @@ int main(void) {
                     return 1;
                 }
                 frames[which] = read_texture(scene.window, scene.frame);
+                static const char *const which_names[3] = {"first", "second", "split"};
+                dump_frame(scene.frame, frames[which], variant, which_names[which]);
             }
-            const float *clip = scene.views[2][1].clip;
+            const float *clip = scene.views[band_config][1].clip;
             uint32_t widest[4] = {0u, 0u, 0u, 0u};
             static const int thresholds[4] = {0, 2, 8, 32};
             int largest = 0;

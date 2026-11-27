@@ -31,11 +31,71 @@ All notable changes to this project are documented here. The format follows
     runs, runs verified), 421 images a mode, 0 px different, and the same through `present_views` with one view
     (`BTBH_SMOKE_PRESENT_VIEWS=1`); 0 run-verify mismatches; the views smoke passes in the four modes. `check.ps1`
     46/46 (79 shaders, none changed); the Swift suite 306 tests (2 skipped, 0 failures).
+- **Scene views: a reflection fades within 24 render pixels of the line between two views, not 1/12 of the frame**
+  (`production_ssao_resolve.frag`; shaders: rebuild). Asked for by Be The Bullet Hell v2, whose test of 0.16.0 found the
+  fade wide at 4K: a hit within 1/12 of the frame of the line faded, 320 px across a vertical line at 4K where v2's
+  divider covers 8 px each side, so the facades by the line lost their reflections in a broad strip. The width is now
+  fixed in render pixels, the same at any resolution, and measured from the view's edge (its half widened by a quarter
+  of a render pixel toward the other view, as 0.16.0 draws it: the edge lies a quarter pixel past the line): a hit fades
+  from whole 24 render pixels from the edge (23.75 from the line) to nothing at the margin, where the march stops. 24 is
+  three times what v2's divider covers each side at 4K (4.5 times at its Auto render scale of 0.67), so what shows past
+  the divider is a ramp, not a cut.
+  - **The margin** is 0.5 + |nx| + |ny| render pixels inside the view's edge, n the line's unit normal in render
+    pixels: exactly 1.5 for an upright or level line (1.25 from the line), 1.87 at 30 degrees, 1.91 at 45. A bilinear
+    read there (the depth, the normals, the scene's colour, the rough reflections' blur taps) takes nothing the other
+    view drew: the band both views draw reaches 0.5 inside the edge, and a read's four texels lie within a pixel of it
+    each way. 0.16.0's 1.5 everywhere let a read on a diagonal weigh up to 7.7 % of a texel in the band at 30
+    degrees, 8.6 % at 45; with the last step (below) every ray that reaches the line reads there.
+  - **The march's last step:** so that the narrow fade never ends in a cut, a step that would reach the line now ends
+    at the margin (its filtered reads stay on the view's half) and is the march's last. 0.16.0 broke off there as at the
+    screen's edge, missing a surface the ray passed behind within a step of the line (tens of pixels at 4K), which the
+    wide fade hid. In the views bench's city at 4K, split vertically, the last step adds what the narrow fade alone left
+    out to 3,146 pixels by more than 4 levels (504 by more than 16, up to 51), 8 to 512 px from the line. The screen's
+    edge, its fade and its march are as they were.
+  - **Measured** in that city at 4K (`BTBH_VIEWS_BENCH_SSR=6`, below; no bloom) against its two cameras' one-view frames
+    joined at the line. Split vertically, row by row: the split keeps 90 % of their reflection from 47-64 px of the line
+    (medians over 1,650-1,840 rows, each side), where 0.16.0 needed 272-299, and half from 41-61 px (146-171). Split at
+    30 degrees, by distance along the line's normal (the median over the pixels at each distance): 90 % from 16-28 px,
+    where 0.16.0 needed 248-252, and half from 4-24 px (112-132); against the fixed 1.5 margin the diagonal's margin
+    changes 7,323 pixels, 290 by more than 4 levels (up to 58), and the vertical split not at all. Most of what is left
+    by the line is reflections whose rays cross it, which no fade keeps.
+  - A clip normal small enough that its length per render pixel flushes to zero (absurd but accepted) divides by no
+    zero: the divisor is held at 1e-30 or more, which leaves every other normal's result as it was.
+  - **One-view frames are byte for byte 0.16.0's:** their plane is zero, and neither the fade, the margin nor the last
+    step changes anything there. `check.ps1` 46/46; identity against 0.16.0 in the four modes (plain, shared meshes, no
+    runs, runs verified): 421 images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views`
+    with one view (`BTBH_SMOKE_PRESENT_VIEWS=1`); the views smoke passes in the four modes.
+- Tests: the views smoke's split chains (the HBAO or SSAO with SSR) set `SSR_SURFACE_REFLECTIVITY` and
+  `SSR_FACING_HITS`, as v2 does, so its splits test reflections (see Fixed). A split's faults now reach 24 px from the
+  line at 320 x 180 (the limit is 48; 6 px while nothing reflected), and the taps' control, the HBAO's darkening, has a
+  chain of its own without SSR. The views bench: `BTBH_VIEWS_BENCH_DUMP=<dir>` writes its band's frames,
+  `BTBH_VIEWS_BENCH_BAND=diagonal` measures the diagonal split, and `BTBH_VIEWS_BENCH_SSR=<n>` (n positive) shows its
+  reflections, intensity n with v2's two flags; otherwise its frames keep intensity 0.5 without them, as timed.
+
+### Fixed
+- **0.16.0's figures for the reflections' cost in the views bench timed only their early exit.** Nothing in the bench
+  set `SSR_SURFACE_REFLECTIVITY`, so without the radiance cascades every surface counted as unlit and the reflections
+  returned before marching. That covers its 4K numbers' SSR and the cost log's `ssr_ms` in 0.16.0's entry (0.21 ms in
+  its example and its Measured, put down there to matte boxes). Be The Bullet Hell v2's 0.70-1.49 ms on its facades is
+  the real cost. The views smoke's split chains had the same gap, and nothing tested the reflections by the line; they
+  now reflect (Tests, above).
+- **Scene views: the SSAO's denoise keeps its taps off the band by the line on a diagonal** (`ssao_enabled` 1;
+  `production_ssao_denoise.frag`, shaders: rebuild). Its eight taps read the half-size occlusion bilinearly, and were
+  held 1.5 half-size texels inside the view's edge on any line, so on a diagonal a tap could weigh up to 8.6 % of a
+  texel the other view drew. They take the reflections' margin, 0.5 + |nx| + |ny|, in half-size texels: upright and
+  level lines are byte for byte as before (exactly 1.5). The SSAO's other reads, and every read of the HBAO's passes,
+  take texel centres, each tested on its own, so they never reached the band. In the views smoke, the diagonal by the
+  line with the SSAO changes in 102 pixels by one level, and nothing else.
+
+### Known
+- On a reflection's first step the march may refine back toward the ray's origin, which isn't tested against the band:
+  a shaded pixel within the margin of the line (about 2 render pixels, under any divider) can read what the other view
+  drew there.
 
 ### Measured
-Under the machine's perf lock (23:30:00 to 23:33:03, the CPU 1-2 % busy), on an RTX 3070 Ti (Vulkan), 0.16.0's build
-against this one, a process a turn, interleaved (0.16.0, this, this, 0.16.0, ...). Medians, with the 10th and 90th
-percentiles:
+The frame context (above), under the machine's perf lock (23:30:00 to 23:33:03, the CPU 1-2 % busy), on an RTX 3070
+Ti (Vulkan), 0.16.0's build against its branch's, a process a turn, interleaved (0.16.0, this, this, 0.16.0, ...).
+Medians, with the 10th and 90th percentiles:
 - **The frame bench** (the Deck preset's city: 2,001 draws, 2.2 million triangles, 960 x 600 to 1280 x 800 with FSR 1,
   HBAO, FXAA), 6 pairs of 30 rounds of 8 frames. GPU, by the cost log: a whole frame 1.285 ms (1.270-1.312) against
   1.287 (1.271-1.315), 552 frames each, each process's median 1.277-1.290 against 1.278-1.298; of the split frames
@@ -112,7 +172,7 @@ three times the bench's.
     denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the world-edge
     fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the other half,
     or in the band by the line (below), count for nothing, a reflection stops short of the line and fades within 1/12 of
-    the frame of it, as at the screen's edge.
+    the frame of it, as at the screen's edge (0.16.1: within 24 render pixels).
   - **Shadow maps:** the secondary map, and an omni map, are the call's. A sun or spot map is shared by views whose
     matrices are equal byte for byte; else the second view has its own (and its own particle transmittance map), drawn
     with its camera's billboards and its `shadow_visibility`. In the update periods' order a view's own map comes right
@@ -314,7 +374,7 @@ three times the bench's.
   RCAS), against SMAA's 0.38: the 2.69 ms between the two chains. The 0.15.0 way's target view (view 1, the right half
   grown 96 px, at 4K) takes 3.92-4.04 ms a call (`BTBH_GPU_COST_TARGET`, 296 calls a run). This city's reflections
   are cheap (0.21 ms: matte boxes, a ground of roughness 0.25); Be The Bullet Hell v2's 1.4 ms comes from its kit's
-  facades.
+  facades. (0.16.1: they reflected nothing, so this timed the early exit; see 0.16.1's Fixed.)
 
 ### Changed
 - **Skinned palettes cost less CPU: each animation sampler is decoded at load, and palettes are kept across presents**

@@ -2986,7 +2986,9 @@ typedef struct BTBHGPUSceneViewReport {
      sort, the opaque, transparent and refraction passes, and the passes that read the camera, each keeping its
      samples to its own half: the SSAO or HBAO with their denoise and resolve (taps across the line, or in the band
      by it that both views draw, count for nothing),
-     the reflections (a ray stops at the line, as at the screen's edge, and fades near it), the distance pass and the
+     the reflections (since 0.16.1 a ray stops 1.5 render pixels inside the view's edge, up to 1.91 on a diagonal, and
+     fades within 24 of the edge, which is the line widened a quarter pixel toward the other view: 1.25 to 1.66 and
+     23.75 from the line; 0.16.0 faded it within 1/12 of the frame, as at the screen's edge), the distance pass and the
      HDR composite (the distance fog and the world-edge fade at each view's depth; the vignette stays centred on the
      frame). A refracting surface near the line may sample the other view's pixels as far as it displaces them.
    - Shadow maps: the secondary (fill) map is the call's, shared. A sun or spot map is shared by views whose matrices
