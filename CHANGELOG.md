@@ -18,8 +18,10 @@ All notable changes to this project are documented here. The format follows
     window's presents (`present_instances`, `_with_visibility`, `present_views`), the renders into targets, the four
     prewarms, the canvas present and `present_clear` fill it with those queries; the present paths make none of their
     own any more (two size queries and nine format queries in the scene, a size query and three format queries in the
-    canvas). Only `capture_pending_scene_texture`, `copy_pending_scene_texture` and `render_target_create`, which run
-    between presents, still ask for the format themselves.
+    canvas). Still asking: `present_clear` reads the window's sizes for its report after its submit (and when
+    minimized), and `capture_pending_scene_texture`, `copy_pending_scene_texture` and `render_target_create`, which run
+    between presents, ask for the format themselves. A read-back frame's format is now read before the swapchain is
+    acquired, as every other format query was.
   - **`btbh_gpu_window_canvas_present`'s body is split.** The draw half records the pending scene's blit, the
     vertices' upload and the passes into a command buffer and a target; the present half acquires the command buffer
     and the swapchain image before it, and blits a read-back frame into the image and submits after it. Unthreaded
