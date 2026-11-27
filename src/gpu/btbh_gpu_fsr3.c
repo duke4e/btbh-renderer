@@ -907,6 +907,11 @@ bool btbh_gpu_fsr3_encode(
         SDL_SetError("FSR3 inputs do not match its resources");
         return false;
     }
+    /* (The clears go to the first dispatch's step. It comes before any state changes: a failed cut leaves the runtime
+       as it was, its first frame's clear and history included, for the next frame.) */
+    if (!btbh_gpu_fsr3_cost_step(command_slot, &command, BTBH_GPU_COST_STEP_FSR3_PREPARE_INPUTS, runtime, NULL)) {
+        return false;
+    }
     const bool first_frame = runtime->resources_need_clear;
     const bool reset = inputs->reset || !runtime->history_valid || first_frame;
     runtime->resources_need_clear = false;
@@ -926,11 +931,6 @@ bool btbh_gpu_fsr3_encode(
 
     btbh_gpu_fsr3_update_constants(runtime, inputs, reset);
 
-    /* (The clears go to the first dispatch's step.) */
-    if (!btbh_gpu_fsr3_cost_step(command_slot, &command, BTBH_GPU_COST_STEP_FSR3_PREPARE_INPUTS, runtime, NULL)) {
-        runtime->history_valid = false;
-        return false;
-    }
     SDL_InsertGPUDebugLabel(command, "BTBH FSR3");
     bool ok = true;
     if (reset) {
