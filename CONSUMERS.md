@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.14.2` (tag `v0.14.2`; CHIMERA `7e7c905c`, 2026-11-25) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.15.0` (tag `v0.15.0`; BTBH `f69050a7`, 2026-11-27) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.14.2` (tag `v0.14.2`; CHIMERA `7e7c905c`, 2026-11-25) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.16.0` (tag `v0.16.0`; BTBH `225362db3`, 2026-11-27) |
 
 ## Features used
 
@@ -110,8 +110,18 @@ Since 0.15.0, for its local co-op split screen (shaders still `shaders-142`):
 - `btbh_gpu_window_scene_set_shadow_update_periods` from `btbh_gpu.h` (its own declaration dropped): the sun at period
   2 while split, 1 otherwise.
 
-Later: views in one present for the split (RFC 0014, accepted; phase 1 in progress), BC texture formats (RFC 0008
-phase 2), and descriptor pools made before the first frames.
+Since 0.16.0 (shaders `shaders-160`, with `production_post_view.vert` in its list):
+- the split in one present: `btbh_gpu_window_scene_present_views` with two views in place of the target view and its
+  compose, prewarmed with `btbh_gpu_window_scene_prewarm_views` at a two-player stage's load. The old path stays
+  behind `BTBH_SPLIT_VIEWS=0`. One sun map is shared while the two grounds are within 1.25 times each other; on the
+  Deck preset the second view casts sun shadows too; split frames run SMAA medium;
+- the cost log's pass frames (`BTBH_GPU_COST_PASSES=1`) in its perf runs, and SDL's debug info in its prebuilt
+  libraries as an opt-in (`stage_prebuilt.py --sdl-debug-info`, the renderer's `BTBH_SDL_DEBUG_INFO`);
+- the cheaper bone palettes, with nothing to change.
+
+Later: the frame thread (RFC 0015, accepted; phase 1a in progress), multi-draw indirect (RFC 0011 phase 2), a depth
+prepass (RFC 0016), half-resolution SSR, FSR 3 over two views and bloom per view (RFC 0014 phases 2 and 3), BC texture
+formats (RFC 0008 phase 2), and descriptor pools made before the first frames.
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
