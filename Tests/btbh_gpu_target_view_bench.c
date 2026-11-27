@@ -14,7 +14,9 @@
  * A sample is BTBH_TARGET_BENCH_BATCH (default 12) renders submitted back to back and a wait for the GPU: the GPU's
  * time a render is the sample's wall time over the batch (the CPU's encoding, ~2 ms a render here, overlaps the GPU's
  * work). BTBH_TARGET_BENCH_ROUNDS (default 25) rounds; the first 3 are dropped. BTBH_TARGET_BENCH_SIZE=WxH changes the
- * target (and render) size, BTBH_TARGET_BENCH_SUN_MAP=<size> the primary sun map's (default the renderer's 2048).
+ * target (and render) size, BTBH_TARGET_BENCH_SUN_MAP=<size> the primary sun map's (default the renderer's 2048),
+ * BTBH_TARGET_BENCH_DETAIL=<n> cuts each box's faces into n x n quads (default 1: 12 triangles a box; 8: 768, so 1.8
+ * million triangles in the scene and in each sun map, about Be The Bullet Hell v2's city).
  * BTBH_TARGET_BENCH_BAND=1 first measures the band along the straight divider (a render of the whole target against
  * one with the half's rect, read back) with the whole chain, without bloom, and without bloom and SSR.
  *
@@ -166,43 +168,67 @@ static void instance(float out[24], float x, float y, float z, float sx, float s
     memcpy(&out[16], colour, 4 * sizeof(float));
 }
 
-static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window) {
+/* A unit box (-0.5..0.5) wound so the renderer lights its outsides, each face cut into detail x detail quads (a
+   city piece's triangle count: 12 triangles at 1, 768 at 8); 24 floats a vertex. */
+static BTBHGPUCustomMesh *create_cube(BTBHGPUWindow *window, uint32_t detail) {
     static const float faces[6][3] = {
         {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1},
     };
-    float vertices[24][24];
-    uint32_t indices[36];
-    memset(vertices, 0, sizeof(vertices));
+    const uint32_t side = detail + 1u;
+    const uint32_t vertex_count = 6u * side * side;
+    const uint32_t index_count = 6u * detail * detail * 6u;
+    float *vertices = calloc((size_t)vertex_count * 24u, sizeof(float));
+    uint32_t *indices = calloc(index_count, sizeof(uint32_t));
+    if (vertices == NULL || indices == NULL) {
+        free(vertices);
+        free(indices);
+        return NULL;
+    }
+    uint32_t next_index = 0u;
     for (uint32_t face = 0u; face < 6u; ++face) {
         const float *n = faces[face];
         float u[3] = {n[1], n[2], n[0]};
         float v[3];
         cross3(n, u, v);
-        for (uint32_t corner = 0u; corner < 4u; ++corner) {
-            const float su = (corner == 1u || corner == 2u) ? 0.5f : -0.5f;
-            const float sv = corner >= 2u ? 0.5f : -0.5f;
-            float *vertex = vertices[face * 4u + corner];
-            for (int axis = 0; axis < 3; ++axis) {
-                vertex[axis] = 0.5f * n[axis] + su * u[axis] + sv * v[axis];
-                vertex[3 + axis] = n[axis];
-                vertex[8 + axis] = u[axis];
+        const uint32_t base = face * side * side;
+        for (uint32_t j = 0u; j < side; ++j) {
+            for (uint32_t i = 0u; i < side; ++i) {
+                const float su = -0.5f + (float)i / (float)detail;
+                const float sv = -0.5f + (float)j / (float)detail;
+                float *vertex = &vertices[(size_t)(base + j * side + i) * 24u];
+                for (int axis = 0; axis < 3; ++axis) {
+                    vertex[axis] = 0.5f * n[axis] + su * u[axis] + sv * v[axis];
+                    vertex[3 + axis] = n[axis];
+                    vertex[8 + axis] = u[axis];
+                }
+                vertex[6] = su + 0.5f;
+                vertex[7] = sv + 0.5f;
+                vertex[11] = 1.0f;
+                for (int channel = 12; channel < 16; ++channel) {
+                    vertex[channel] = 1.0f;
+                }
+                vertex[20] = 1.0f;
             }
-            vertex[6] = su + 0.5f;
-            vertex[7] = sv + 0.5f;
-            vertex[11] = 1.0f;
-            for (int channel = 12; channel < 16; ++channel) {
-                vertex[channel] = 1.0f;
-            }
-            vertex[20] = 1.0f;
         }
-        const uint32_t base = face * 4u;
-        const uint32_t reversed[6] = {base, base + 2u, base + 1u, base, base + 3u, base + 2u};
-        memcpy(&indices[face * 6u], reversed, sizeof(reversed));
+        for (uint32_t j = 0u; j < detail; ++j) {
+            for (uint32_t i = 0u; i < detail; ++i) {
+                const uint32_t a = base + j * side + i;
+                const uint32_t b = a + 1u;
+                const uint32_t c = a + side + 1u;
+                const uint32_t d = a + side;
+                const uint32_t quad[6] = {a, c, b, a, d, c};
+                memcpy(&indices[next_index], quad, sizeof(quad));
+                next_index += 6u;
+            }
+        }
     }
     BTBHGPUCustomMeshReport report;
     memset(&report, 0, sizeof(report));
-    return btbh_gpu_window_custom_mesh_create(window, vertices, (uint32_t)sizeof(vertices), 24u, indices, 36u,
-        &report);
+    BTBHGPUCustomMesh *mesh = btbh_gpu_window_custom_mesh_create(window, vertices,
+        (uint32_t)(sizeof(float) * 24u * vertex_count), vertex_count, indices, index_count, &report);
+    free(vertices);
+    free(indices);
+    return mesh;
 }
 
 static int compare_doubles(const void *a, const void *b) {
@@ -333,7 +359,11 @@ int main(void) {
         fprintf(stderr, "window: %s\n", window_report.message);
         return 1;
     }
-    BTBHGPUCustomMesh *cube = create_cube(scene.window);
+    const char *detail_text = SDL_getenv("BTBH_TARGET_BENCH_DETAIL");
+    const uint32_t detail = detail_text != NULL && atoi(detail_text) > 0 && atoi(detail_text) <= 64
+        ? (uint32_t)atoi(detail_text)
+        : 1u;
+    BTBHGPUCustomMesh *cube = create_cube(scene.window, detail);
     BTBHGPUTextureReport texture_report;
     scene.target = btbh_gpu_window_render_target_create(scene.window, width, height, BTBH_GPU_TEXTURE_FILTER_LINEAR,
         &texture_report);
@@ -536,10 +566,10 @@ int main(void) {
         fprintf(stderr, "bad sun map size %u\n", sun_map);
         return 1;
     }
-    printf("BENCH target %ux%u, render %ux%u, %u boxes in %u batches, diagonal %.0f deg: box %u,%u %ux%u, shadow"
-        " period %u, sun map %u, %u renders a sample, %u rounds\n", width, height, width, height, GRID * GRID,
-        BATCHES, angle_degrees, box_x, box_y, box_right - box_x, box_bottom - box_y, period, sun_map,
-        renders_per_sample, rounds);
+    printf("BENCH target %ux%u, render %ux%u, %u boxes of %u triangles in %u batches, diagonal %.0f deg: box %u,%u"
+        " %ux%u, shadow period %u, sun map %u, %u renders a sample, %u rounds\n", width, height, width, height,
+        GRID * GRID, 12u * detail * detail, BATCHES, angle_degrees, box_x, box_y, box_right - box_x,
+        box_bottom - box_y, period, sun_map, renders_per_sample, rounds);
 
     BTBHGPUSceneReport report;
     double cpu_milliseconds = 0.0;
