@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The scene and canvas presents read the window through a frame context, and the canvas present is in two halves**
+  (RFC 0015 phase 1a; no API change, nothing to set). Phase 1b encodes a frame on a thread of the renderer's while the
+  window's thread keeps the window and the swapchain; this is what it needs first, done with no thread.
+  - **What a present read from the window, the call that presents now reads once and passes in** (an internal
+    `BTBHGPUFrameContext`, filled by `btbh_gpu_window_frame_context_fill`): the drawable size
+    (`SDL_GetWindowSizeInPixels`: the frame's output size and FSR 3's), the logical size (`SDL_GetWindowSize`: the
+    canvas's projection of its screen passes) and the swapchain's format (`SDL_GetGPUSwapchainTextureFormat`: the post
+    chain's last targets and pipelines, the canvas's pipelines, its target passes' check and a read-back frame). The
+    window's presents (`present_instances`, `_with_visibility`, `present_views`), the renders into targets, the four
+    prewarms, the canvas present and `present_clear` fill it with those queries; the present paths make none of their
+    own any more (two size queries and nine format queries in the scene, a size query and three format queries in the
+    canvas). Still asking: `present_clear` reads the window's sizes for its report after its submit (and when
+    minimized), and `capture_pending_scene_texture`, `copy_pending_scene_texture` and `render_target_create`, which run
+    between presents, ask for the format themselves. A read-back frame's format is now read before the swapchain is
+    acquired, as every other format query was.
+  - **`btbh_gpu_window_canvas_present`'s body is split.** The draw half records the pending scene's blit, the
+    vertices' upload and the passes into a command buffer and a target; the present half acquires the command buffer
+    and the swapchain image before it, and blits a read-back frame into the image and submits after it. Unthreaded
+    they run in that order, the swapchain acquired first as before, so the GPU's work is unchanged; a failure drops
+    the frame and reports as it did.
+  - **Every image is byte for byte 0.16.0's:** identity against 0.16.0's build in four modes (plain, shared meshes, no
+    runs, runs verified), 421 images a mode, 0 px different, and the same through `present_views` with one view
+    (`BTBH_SMOKE_PRESENT_VIEWS=1`); 0 run-verify mismatches; the views smoke passes in the four modes. `check.ps1`
+    46/46 (79 shaders, none changed); the Swift suite 306 tests (2 skipped, 0 failures).
+
+### Measured
+Under the machine's perf lock (23:30:00 to 23:33:03, the CPU 1-2 % busy), on an RTX 3070 Ti (Vulkan), 0.16.0's build
+against this one, a process a turn, interleaved (0.16.0, this, this, 0.16.0, ...). Medians, with the 10th and 90th
+percentiles:
+- **The frame bench** (the Deck preset's city: 2,001 draws, 2.2 million triangles, 960 x 600 to 1280 x 800 with FSR 1,
+  HBAO, FXAA), 6 pairs of 30 rounds of 8 frames. GPU, by the cost log: a whole frame 1.285 ms (1.270-1.312) against
+  1.287 (1.271-1.315), 552 frames each, each process's median 1.277-1.290 against 1.278-1.298; of the split frames
+  `main` 0.830 against 0.831, `post` 0.177 both, `ui` (the canvas) 0.052 both. CPU (`BTBH_FRAME_BENCH_CPU=1`, 1,440
+  frames each): the scene present's call 0.586 ms (0.531-1.910) against 0.560 (0.529-1.937), its preparation 0.055
+  both, its geometry encode 0.235 against 0.233. The present's lower median is its shadow encode's (0.256 against
+  0.229 ms, at the 10th percentile 0.218 against 0.217), which this change doesn't touch.
+- **The views bench** (its defaults: the 4K city, 22 rounds), 2 pairs, GPU ms a frame: one view through the present
+  8.24 and 8.33 against 8.31 and 8.32, through `present_views` 8.26 and 8.35 against 8.30 and 8.32; split vertically
+  7.44 and 7.52 against 7.49 and 7.49, diagonally 7.34 and 7.40 against 7.37 and 7.40; 0.15.0's way 12.26 and 12.36
+  against 12.33 and 12.35 (vertical), 13.44 and 13.57 against 13.49 and 13.49 (diagonal). 0.16.0's two runs differ
+  by more than either does from this build's. Neither bench times the canvas call on the CPU; what changes there is
+  its queries, three a call (the drawable size's new) where it made the logical size's and a format query for each
+  target pass.
+
 ## [0.16.0] — 2026-11-27
 
 0.16.0: Be The Bullet Hell v2's split screen in one present, and three answers to its perf round of 2026-11-27, all

@@ -2007,6 +2007,7 @@ static bool btbh_gpu_scene_ensure_post_pipeline(
     const char *vertex_shader_path,
     const char *fragment_shader_path,
     BTBHGPUShaderFormat project_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -2053,10 +2054,7 @@ static bool btbh_gpu_scene_ensure_post_pipeline(
     SDL_GPUGraphicsPipelineCreateInfo info;
     SDL_zero(color_target);
     SDL_zero(info);
-    color_target.format = SDL_GetGPUSwapchainTextureFormat(
-        device,
-        window->window
-    );
+    color_target.format = swapchain_format;
     color_target.blend_state.color_write_mask = 0x0fu;
     info.vertex_shader = vertex_shader;
     info.fragment_shader = fragment_shader;
@@ -2254,6 +2252,7 @@ static bool btbh_gpu_scene_ensure_post_stage_pipelines(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -2336,10 +2335,7 @@ static bool btbh_gpu_scene_ensure_post_stage_pipelines(
                 post_vertex_shader_path,
                 path,
                 shader_format,
-                SDL_GetGPUSwapchainTextureFormat(
-                    window->device->gpu,
-                    window->window
-                ),
+                swapchain_format,
                 1u,
                 &runtime->post_tilt_shift_pipeline,
                 report
@@ -2419,6 +2415,7 @@ static bool btbh_gpu_scene_ensure_upscale_pipeline(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     if (*pipeline != NULL) {
@@ -2447,10 +2444,7 @@ static bool btbh_gpu_scene_ensure_upscale_pipeline(
             post_vertex_shader_path,
             path,
             shader_format,
-            SDL_GetGPUSwapchainTextureFormat(
-                window->device->gpu,
-                window->window
-            ),
+            swapchain_format,
             1u,
             pipeline,
             report
@@ -2463,6 +2457,7 @@ static bool btbh_gpu_scene_ensure_upscale_pipelines(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -2471,20 +2466,20 @@ static bool btbh_gpu_scene_ensure_upscale_pipelines(
             window, "production_upscale_lanczos",
             &runtime->upscale_lanczos_pipeline,
             post_vertex_shader_path, post_fragment_shader_path,
-            shader_format, report
+            shader_format, swapchain_format, report
         );
     }
     return btbh_gpu_scene_ensure_upscale_pipeline(
             window, "production_upscale_fsr_easu",
             &runtime->upscale_fsr_easu_pipeline,
             post_vertex_shader_path, post_fragment_shader_path,
-            shader_format, report
+            shader_format, swapchain_format, report
         ) &&
         btbh_gpu_scene_ensure_upscale_pipeline(
             window, "production_upscale_fsr_rcas",
             &runtime->upscale_fsr_rcas_pipeline,
             post_vertex_shader_path, post_fragment_shader_path,
-            shader_format, report
+            shader_format, swapchain_format, report
         );
 }
 
@@ -3225,6 +3220,7 @@ static bool btbh_gpu_scene_ensure_smaa_resources(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    SDL_GPUTextureFormat swapchain_format,
     uint8_t quality,
     BTBHGPUSceneReport *report
 ) {
@@ -3354,10 +3350,7 @@ static bool btbh_gpu_scene_ensure_smaa_resources(
                 post_vertex_shader_path,
                 path,
                 shader_format,
-                SDL_GetGPUSwapchainTextureFormat(
-                    window->device->gpu,
-                    window->window
-                ),
+                swapchain_format,
                 2u,
                 &runtime->smaa_blend_pipeline,
                 report
@@ -3373,6 +3366,7 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
     const char *post_vertex_shader_path,
     const char *post_fragment_shader_path,
     BTBHGPUShaderFormat shader_format,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -3400,10 +3394,7 @@ static bool btbh_gpu_scene_ensure_fxaa_pipeline(
             post_vertex_shader_path,
             path,
             shader_format,
-            SDL_GetGPUSwapchainTextureFormat(
-                window->device->gpu,
-                window->window
-            ),
+            swapchain_format,
             1u,
             &runtime->fxaa_pipeline,
             report
@@ -4886,6 +4877,7 @@ static bool btbh_gpu_scene_ensure_upscaled_color_target(
     uint32_t width,
     uint32_t height,
     bool sharpened,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -4916,10 +4908,7 @@ static bool btbh_gpu_scene_ensure_upscaled_color_target(
                 device,
                 width,
                 height,
-                SDL_GetGPUSwapchainTextureFormat(
-                    device,
-                    window->window
-                )
+                swapchain_format
             );
         if (runtime->sharpened_color_texture == NULL) {
             btbh_gpu_scene_error(
@@ -4937,10 +4926,7 @@ static bool btbh_gpu_scene_ensure_upscaled_color_target(
             device,
             width,
             height,
-            SDL_GetGPUSwapchainTextureFormat(
-                device,
-                window->window
-            )
+            swapchain_format
         );
     if (runtime->upscaled_color_texture == NULL) {
         btbh_gpu_scene_error(
@@ -4961,6 +4947,7 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
     uint32_t height,
     bool post_color_enabled,
     bool smaa_enabled,
+    SDL_GPUTextureFormat swapchain_format,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
@@ -5004,8 +4991,6 @@ static bool btbh_gpu_scene_ensure_anti_aliasing_targets(
             runtime->smaa_weights_texture = NULL;
         }
     }
-    const SDL_GPUTextureFormat swapchain_format =
-        SDL_GetGPUSwapchainTextureFormat(device, window->window);
     if (runtime->final_color_texture == NULL) {
         runtime->final_color_texture =
             btbh_gpu_scene_create_smaa_target(
@@ -10161,6 +10146,7 @@ static void btbh_gpu_scene_frame_uniforms(
    set, when it failed (a failed shadow setup releases the window's scene). */
 static bool btbh_gpu_scene_prepare_frame(
     BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const char *fast_shadow_vertex_shader_path,
     const char *fast_shadow_fragment_shader_path,
     const char *shadow_vertex_shader_path,
@@ -10250,7 +10236,8 @@ static bool btbh_gpu_scene_prepare_frame(
             BTBH_GPU_SCENE_RC_DEBUG_NONE;
     /* Temporal upscaling (FSR 3.1): the projection takes a sub-pixel jitter, the opaque pass writes
        motion vectors and the transparent pass a reactive mask, and the upscaler replaces FXAA and
-       FSR 1 after the post chain. A device without its storage formats or shaders keeps FSR 1. */
+       FSR 1 after the post chain. A device without its storage formats or shaders keeps FSR 1. Its output is the
+       window's drawable size (the frame context's). */
     int temporal_window_width = 0;
     int temporal_window_height = 0;
     const bool temporal_requested =
@@ -10258,13 +10245,11 @@ static bool btbh_gpu_scene_prepare_frame(
         !radiance_cascades_debug_output &&
         output_width == 0u &&
         !views_clipped &&
-        SDL_GetWindowSizeInPixels(
-            window->window,
-            &temporal_window_width,
-            &temporal_window_height
-        ) &&
-        temporal_window_width > 0 &&
-        temporal_window_height > 0;
+        frame_context->drawable_width != 0u;
+    if (temporal_requested) {
+        temporal_window_width = (int)frame_context->drawable_width;
+        temporal_window_height = (int)frame_context->drawable_height;
+    }
     bool temporal_active = false;
     if (temporal_requested) {
         char temporal_message[256];
@@ -10380,6 +10365,7 @@ static bool btbh_gpu_scene_prepare_frame(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             anti_aliasing,
             report
         )) {
@@ -10391,6 +10377,7 @@ static bool btbh_gpu_scene_prepare_frame(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             report
         )) {
         return false;
@@ -10562,11 +10549,12 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
 
 /* The frame's targets at its render (and drawable) size and the post chain's pipelines, made where missing: shared
    by the present and btbh_gpu_window_scene_prewarm. The drawable size is output_width x output_height, or the
-   window's in pixels when output_width is 0. scene_distance_ready says whether the soft particles' and the
-   refraction's distance pass can run (a missing pass never fails the frame). False when a target or a pipeline is
-   missing, with the report set where it said why. */
+   window's in pixels (the frame context's) when output_width is 0. scene_distance_ready says whether the soft
+   particles' and the refraction's distance pass can run (a missing pass never fails the frame). False when a target or
+   a pipeline is missing, with the report set where it said why. */
 static bool btbh_gpu_scene_ensure_frame_targets(
     BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const BTBHGPUSceneFrameSetup *setup,
     const BTBHGPUScenePost *post,
     const char *post_vertex_shader_path,
@@ -10583,13 +10571,11 @@ static bool btbh_gpu_scene_ensure_frame_targets(
 ) {
     int drawable_width_value = (int)output_width;
     int drawable_height_value = (int)output_height;
+    if (output_width == 0u) {
+        drawable_width_value = (int)frame_context->drawable_width;
+        drawable_height_value = (int)frame_context->drawable_height;
+    }
     const bool drawable_size_available =
-        (output_width != 0u ||
-         SDL_GetWindowSizeInPixels(
-             window->window,
-             &drawable_width_value,
-             &drawable_height_value
-         )) &&
         drawable_width_value > 0 &&
         drawable_height_value > 0;
     const uint32_t drawable_width =
@@ -10627,6 +10613,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             setup->anti_aliasing >= 1u &&
                 setup->anti_aliasing <=
                     BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
+            frame_context->swapchain_format,
             report
         ) &&
         (!setup->temporal_active ||
@@ -10648,6 +10635,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
               post_vertex_shader_path,
               post_fragment_shader_path,
               shader_format,
+              frame_context->swapchain_format,
               report
           ) &&
           btbh_gpu_scene_ensure_upscaled_color_target(
@@ -10656,6 +10644,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
               drawable_height,
               setup->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 ||
                   setup->temporal_active,
+              frame_context->swapchain_format,
               report
           ))) &&
         (!setup->ssao_resolve_active ||
@@ -10685,6 +10674,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             report
         ) &&
         (!setup->hdr_composite_active ||
@@ -10707,6 +10697,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
+            frame_context->swapchain_format,
             report
         ) &&
         /* The refracting batches' copy of the scene. */
@@ -10806,6 +10797,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     /* A target view's rect (since 0.15.0): the part of a render target the scene shades. NULL for the window's frame
        and every other present: every pixel. */
     const BTBHGPUSceneScissor *scissor,
+    /* What the frame reads from the window (RFC 0015 phase 1a, since 0.16.1): filled by the call, so the present queries
+       neither the window nor its swapchain. */
+    const BTBHGPUFrameContext *frame_context,
     BTBHGPUSceneReport *report
 ) {
     if (report == NULL) {
@@ -10943,6 +10937,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     btbh_gpu_lazy_creation_prewarm_step(true);
     const bool frame_prepared = btbh_gpu_scene_prepare_frame(
             window,
+            frame_context,
             fast_shadow_vertex_shader_path,
             fast_shadow_fragment_shader_path,
             shadow_vertex_shader_path,
@@ -11863,6 +11858,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     btbh_gpu_lazy_creation_prewarm_step(true);
     const bool targets_ready = btbh_gpu_scene_ensure_frame_targets(
         window,
+        frame_context,
         &setup,
         post,
         post_vertex_shader_path,
@@ -13870,7 +13866,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     device,
                     render_width,
                     render_height,
-                    SDL_GetGPUSwapchainTextureFormat(device, window->window)
+                    frame_context->swapchain_format
                 );
                 runtime->temporal_previous_color_width = render_width;
                 runtime->temporal_previous_color_height = render_height;
@@ -14138,6 +14134,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
@@ -14176,6 +14174,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
         0u,
         0u,
         NULL,
+        &frame_context,
         report
     );
     btbh_gpu_lazy_creation_end(&lazy_scope);
@@ -14218,6 +14217,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
@@ -14256,6 +14257,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
         0u,
         0u,
         NULL,
+        &frame_context,
         report
     );
     btbh_gpu_lazy_creation_end(&lazy_scope);
@@ -14271,6 +14273,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
    settings, its pipelines and a second view's own maps. */
 static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     BTBHGPUWindow *window,
+    const BTBHGPUFrameContext *frame_context,
     const char *vertex_shader_path,
     const char *animated_vertex_shader_path,
     const char *fast_shadow_vertex_shader_path,
@@ -14355,6 +14358,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     BTBHGPUSceneFrameSetup setup;
     if (!btbh_gpu_scene_prepare_frame(
             window,
+            frame_context,
             fast_shadow_vertex_shader_path,
             fast_shadow_fragment_shader_path,
             shadow_vertex_shader_path,
@@ -14511,6 +14515,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
     bool scene_distance_ready = false;
     if (!btbh_gpu_scene_ensure_frame_targets(
             window,
+            frame_context,
             &setup,
             post,
             post_vertex_shader_path,
@@ -14580,8 +14585,11 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     return btbh_gpu_scene_prewarm_internal(
         window,
+        &frame_context,
         vertex_shader_path,
         animated_vertex_shader_path,
         fast_shadow_vertex_shader_path,
@@ -14643,6 +14651,8 @@ BTBHGPUResult btbh_gpu_window_scene_present_views(
     BTBHGPUSceneViewReport *view_reports,
     BTBHGPUSceneReport *report
 ) {
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
@@ -14681,6 +14691,7 @@ BTBHGPUResult btbh_gpu_window_scene_present_views(
         0u,
         0u,
         NULL,
+        &frame_context,
         report
     );
     btbh_gpu_lazy_creation_end(&lazy_scope);
@@ -14720,8 +14731,11 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
     if (!btbh_gpu_scene_views_valid(views, view_count, 0u, report)) {
         return report->result;
     }
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     return btbh_gpu_scene_prewarm_internal(
         window,
+        &frame_context,
         vertex_shader_path,
         animated_vertex_shader_path,
         fast_shadow_vertex_shader_path,
@@ -15104,10 +15118,13 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_to_target_internal(
         target,
         target_post.mirror_horizontal != 0u
     );
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPUSceneAsideSwap swap;
     btbh_gpu_scene_enter_aside(window, btbh_gpu_scene_target_view_slot(window, view), &swap);
     BTBHGPUResult result = btbh_gpu_scene_prewarm_internal(
         window,
+        &frame_context,
         vertex_shader_path,
         animated_vertex_shader_path,
         fast_shadow_vertex_shader_path,
@@ -15333,6 +15350,8 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
         target_post.mirror_horizontal != 0u
     );
     const bool kept = view != NULL && view->view_id != 0u;
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET, &lazy_scope);
     BTBHGPUSceneAsideSwap swap;
@@ -15403,6 +15422,7 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
             target->width,
             target->height,
             scissor.active ? &scissor : NULL,
+            &frame_context,
             report
         );
     if (result == BTBH_GPU_OK) {
