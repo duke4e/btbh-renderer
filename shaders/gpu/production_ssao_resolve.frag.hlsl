@@ -77,6 +77,14 @@ bool view_own_side_by(float2 uv, float2 texel, float margin)
     return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= margin * length(ssr_hit_options.yz * texel);
 }
 
+// RFC 0014 (since 0.16.1): how far a point in clip space lies on the view's half past `margin` render pixels inside its
+// line (view_own_side_by's test, negative before it), times clip.w: linear along a ray, for the reflections' march.
+float view_side_in_clip(float4 clip, float margin)
+{
+    return dot(ssr_hit_options.yzw, float3(0.5f * (clip.w + clip.x), 0.5f * (clip.w - clip.y), clip.w)) -
+        margin * length(ssr_hit_options.yz * inverse_resolution) * clip.w;
+}
+
 struct FragmentInput
 {
     float4 position : SV_Position;
@@ -395,19 +403,35 @@ float3 screen_space_reflection(
     bool hit = false;
     float2 hit_uv = float2(0.0f, 0.0f);
     float hit_confidence = 1.0f;
+    bool last_step = false;
     [loop]
-    for (uint march = 0u; march < 24u && t < ssr_controls.z; ++march)
+    for (uint march = 0u; march < 24u && t < ssr_controls.z && !last_step; ++march)
     {
-        const float4 clip = mul(view_projection, float4(origin + ray * t, 1.0f));
+        float4 clip = mul(view_projection, float4(origin + ray * t, 1.0f));
         if (clip.w <= 0.0001f)
         {
             break;
         }
-        const float2 sample_uv = clip_to_uv(clip);
-        // (RFC 0014: and before the line between two views, as at the screen's edge: its filtered reads of the depth,
-        // and the hit's of the scene, stay on the view's half.)
-        if (any(sample_uv <= 0.0f) || any(sample_uv >= 1.0f) ||
-            !view_own_side_by(sample_uv, inverse_resolution, 1.5f))
+        float2 sample_uv = clip_to_uv(clip);
+        // RFC 0014: a step that would reach the line between two views ends 1.5 render pixels before it (so that its
+        // filtered reads of the depth, and the hit's of the scene, stay on the view's half) and is the march's last: a
+        // surface the ray passes behind before the line is hit, however long the step. (0.16.0 stopped the march there
+        // as at the screen's edge, losing the hits of a step's length before the line, tens of pixels at 4K.)
+        if (!view_own_side_by(sample_uv, inverse_resolution, 1.5f))
+        {
+            const float inside =
+                view_side_in_clip(mul(view_projection, float4(origin + ray * previous_t, 1.0f)), 1.5f);
+            const float outside = view_side_in_clip(clip, 1.5f);
+            if (!(inside > 0.0f && outside <= 0.0f))
+            {
+                break;
+            }
+            t = lerp(previous_t, t, inside / (inside - outside));
+            clip = mul(view_projection, float4(origin + ray * t, 1.0f));
+            sample_uv = clip_to_uv(clip);
+            last_step = true;
+        }
+        if (any(sample_uv <= 0.0f) || any(sample_uv >= 1.0f))
         {
             break;
         }
@@ -484,8 +508,13 @@ float3 screen_space_reflection(
         (1.0f - smoothstep(max_roughness * 0.5f, max_roughness, roughness));
     if (any(ssr_hit_options.yz != 0.0f))
     {
-        // RFC 0014: a hit near the line between two views fades as one near the screen's edge does.
-        fade *= saturate(dot(ssr_hit_options.yzw, float3(hit_uv, 1.0f)) / length(ssr_hit_options.yz) * 12.0f);
+        // RFC 0014: a hit near the line between two views fades within 24 render pixels of it, to nothing 1.5 from it
+        // where the march stops, so the reflection ends without a cut: a fixed width at any resolution, three times
+        // what Be The Bullet Hell v2's divider covers each side at 4K (8 pixels). (0.16.0 faded it within 1/12 of the
+        // frame, as at the screen's edge: 320 pixels at 4K.) One view's plane is zero: none of this runs.
+        const float line_pixels =
+            dot(ssr_hit_options.yzw, float3(hit_uv, 1.0f)) / length(ssr_hit_options.yz * inverse_resolution);
+        fade *= saturate((line_pixels - 1.5f) / 22.5f);
     }
     // Rough surfaces blur what they reflect, the more the farther the hit.
     const float blur = min(roughness * t * 0.004f, 0.012f);

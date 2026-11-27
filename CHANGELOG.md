@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Scene views: a reflection fades within 24 render pixels of the line between two views, not 1/12 of the frame**
+  (`production_ssao_resolve.frag`; shaders: rebuild). Asked for by Be The Bullet Hell v2, whose test of 0.16.0 found the
+  fade wide at 4K: a hit within 1/12 of the frame of the line faded, 320 px across a vertical line at 4K where v2's
+  divider covers 8 px each side, so the facades by the line lost their reflections in a broad strip. The width is now
+  fixed in render pixels, the same at any resolution: a hit fades from whole 24 render pixels from the line to nothing
+  1.5 from it, where the march stops. 24 is three times what v2's divider covers each side at 4K (4.5 times at its Auto
+  render scale of 0.67), so what shows past the divider is a ramp, not a cut.
+  - **The march's last step:** so that the narrow fade never ends in a cut, a step that would reach the line now ends
+    1.5 render pixels before it (its filtered reads stay on the view's half, as before) and is the march's last. 0.16.0
+    broke off there as at the screen's edge, missing a surface the ray passed behind within a step of the line (tens of
+    pixels at 4K), which the wide fade hid. In the views bench's city at 4K the last step adds what the narrow fade alone
+    left out to 3,146 pixels of a split by more than 4 levels (504 by more than 16, up to 51), 8 to 512 px from the line.
+    The screen's edge, its fade and its march are as they were.
+  - **Measured** in that city at 4K (`BTBH_VIEWS_BENCH_SSR=6`, below; no bloom), row by row against its two cameras'
+    one-view frames joined at the line: the split keeps 90 % of their reflection from 47-64 px of the line (medians over
+    1,650-1,840 rows, each side), where 0.16.0 needed 272-299, and half from 41-61 px (146-171). Most of what is left by
+    the line is reflections whose rays cross it, which no fade keeps.
+  - **One-view frames are byte for byte 0.16.0's:** their plane is zero, and neither the fade nor the last step runs.
+    `check.ps1` 46/46; identity against 0.16.0 in the four modes (plain, shared meshes, no runs, runs verified): 421
+    images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view
+    (`BTBH_SMOKE_PRESENT_VIEWS=1`); the views smoke passes in the four modes.
+- Tests: the views smoke's split chains (the HBAO or SSAO with SSR) set `SSR_SURFACE_REFLECTIVITY` and
+  `SSR_FACING_HITS`, as v2 does. Without the first every surface counted as unlit, so their reflections reflected
+  nothing and no split tested them. A split's faults now reach 24 px from the line at 320 x 180 (the limit is 48; 6 px
+  while nothing reflected), and the taps' control, the HBAO's darkening, has a chain of its own without SSR. The
+  views bench: `BTBH_VIEWS_BENCH_DUMP=<dir>` writes its band's frames, and `BTBH_VIEWS_BENCH_SSR=<n>` shows its
+  reflections (intensity n with v2's two flags). Its timed frames still set neither flag, so their SSR, in 0.16.0's
+  numbers too, reflected nothing.
+
 ## [0.16.0] — 2026-11-27
 
 0.16.0: Be The Bullet Hell v2's split screen in one present, and three answers to its perf round of 2026-11-27, all
@@ -67,7 +97,7 @@ three times the bench's.
     denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the world-edge
     fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the other half,
     or in the band by the line (below), count for nothing, a reflection stops short of the line and fades within 1/12 of
-    the frame of it, as at the screen's edge.
+    the frame of it, as at the screen's edge (0.16.1: within 24 render pixels).
   - **Shadow maps:** the secondary map, and an omni map, are the call's. A sun or spot map is shared by views whose
     matrices are equal byte for byte; else the second view has its own (and its own particle transmittance map), drawn
     with its camera's billboards and its `shadow_visibility`. In the update periods' order a view's own map comes right
