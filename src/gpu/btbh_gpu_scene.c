@@ -5272,12 +5272,15 @@ static void btbh_gpu_scene_refuse_batch(
    RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
    UV rect may be; and (0.11.0) one with the light factor; and (phase 2, 0.14.0) one with the particle shadow. Batches
    often share a detail, a table or a lift, so a run of batches pointing at the same one checks it once.
-   directional_shadow_visibility: the _with_visibility calls' array, or NULL. False with the report naming the batch and
-   the fault. */
+   directional_shadow_visibility: the _with_visibility calls' array, or NULL. views (RFC 0014, view_count of them; NULL
+   with 0): a lifted batch's byte in a view's shadow_visibility, which picks the casters of that view's sun map, follows
+   the rule directional_shadow_visibility's does. False with the report naming the batch and the fault. */
 static bool btbh_gpu_scene_validate_world_details(
     const BTBHGPUWindow *window,
     const BTBHGPUSceneGeometryBatch *batches,
     const uint8_t *directional_shadow_visibility,
+    const BTBHGPUSceneView *views,
+    uint32_t view_count,
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
@@ -5415,8 +5418,17 @@ static bool btbh_gpu_scene_validate_world_details(
                 batch,
                 directional_shadow_visibility != NULL ? directional_shadow_visibility[index] : 1u
             );
+            const char *what = "height_lift";
+            for (uint32_t view = 0u; problem == NULL && view < view_count; ++view) {
+                if (views[view].shadow_visibility != NULL) {
+                    problem = btbh_gpu_height_lift_batch_problem(batch, views[view].shadow_visibility[index]);
+                    what = view == 0u
+                        ? "height_lift (view 0's shadow_visibility)"
+                        : "height_lift (view 1's shadow_visibility)";
+                }
+            }
             if (problem != NULL) {
-                btbh_gpu_scene_refuse_batch(report, index, "height_lift", problem);
+                btbh_gpu_scene_refuse_batch(report, index, what, problem);
                 return false;
             }
         }
@@ -9023,8 +9035,11 @@ static bool btbh_gpu_scene_views_valid(
             fault = "its view-projection matrix is not invertible";
         } else if (!isfinite(view->clip[0]) || !isfinite(view->clip[1]) || !isfinite(view->clip[2])) {
             fault = "its clip isn't finite";
-        } else if (view_count > 1u && view->clip[0] == 0.0f && view->clip[1] == 0.0f) {
-            fault = "two views need each a clip line (clip[0] or clip[1] not 0)";
+        } else if (view->clip[0] == 0.0f && view->clip[1] == 0.0f && (view_count > 1u || view->clip[2] != 0.0f)) {
+            /* (clip[0] and clip[1] 0 with clip[2] not: no line, the whole frame or none of it.) */
+            fault = view_count > 1u
+                ? "two views need each a clip line (clip[0] or clip[1] not 0)"
+                : "its clip has no line (clip[0] and clip[1] 0) but clip[2] isn't 0: all zero for the whole frame";
         } else if ((view->flags & ~(uint32_t)BTBH_GPU_SCENE_VIEW_TEMPORAL_RESET) != 0u || view->reserved != 0u) {
             fault = "an unknown flag, or reserved isn't 0";
         } else if (view->lighting != NULL && !btbh_gpu_scene_lighting_valid(view->lighting)) {
@@ -9084,8 +9099,9 @@ static void btbh_gpu_scene_view_own_maps(
 /* A clipped frame's vertex shaders must write the clip distance (this release's production_model.vert, its table and
    lifted siblings, production_animated_model.vert): SPIR-V that doesn't would draw every view over the whole frame. Each
    one a geometry of the frame draws with is read once (bone_offsets: btbh_gpu_scene_prepare_bones'), and
-   production_post_view.vert beside the post vertex shader must exist (and, in SPIR-V, clip). Metal libraries aren't
-   read. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path), when one doesn't. */
+   production_post_view.vert beside the post vertex shader must exist (and, in SPIR-V, clip): read once too, in either
+   format (a split frame stats no file). Metal libraries aren't otherwise read. False, with the report set
+   (BTBH_GPU_INVALID_ARGUMENT, the path), when one doesn't. */
 static bool btbh_gpu_scene_check_view_shaders(
     BTBHGPUSceneRuntime *runtime,
     const BTBHGPUSceneGeometryBatch *batches,
@@ -9109,7 +9125,9 @@ static bool btbh_gpu_scene_check_view_shaders(
         btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Scene views' post vertex shader path is too long");
         return false;
     }
-    if (!SDL_GetPathInfo(post_view_path, NULL)) {
+    /* (Kept by path in runtime->scene_shader_checks, as the clip distance's test: only a missing file is looked for
+       again.) */
+    if (btbh_gpu_scene_shader_check(runtime, post_view_path) == NULL) {
         (void)snprintf(
             message,
             sizeof(message),
@@ -9842,12 +9860,10 @@ static bool btbh_gpu_scene_prepare_frame(
     char radiance_cascades_message[256];
     radiance_cascades_message[0] = '\0';
     /* RFC 0014: a clipped frame of views runs no cascades. Their state and resources stay as they were; their history
-       starts afresh on the next frame that runs them. */
+       starts afresh on the next frame that runs them (dropped by the present once such a frame is drawn: not here, which
+       a prewarm and a refused present pass through too). */
     const bool radiance_cascades_held =
         views_clipped && post->radiance_cascades.tier != BTBH_GPU_SCENE_RC_OFF;
-    if (radiance_cascades_held) {
-        btbh_gpu_radiance_cascades_runtime_invalidate_history(&runtime->radiance_cascades);
-    }
     const bool radiance_cascades_ready =
         !radiance_cascades_held &&
         btbh_gpu_radiance_cascades_runtime_prepare(
@@ -10544,8 +10560,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, directional_shadow_visibility, batch_count,
-            report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, directional_shadow_visibility, views, view_count,
+            batch_count, report)) {
         return report->result;
     }
     /* View 0's camera (the present's own); RFC 0014: a clipped frame (two views, or one clipped) draws each view clipped
@@ -13626,6 +13642,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
 
     /* Only an unbroken run of temporal frames reprojects; any other frame restarts the history. */
     runtime->temporal_previous_valid = temporal_active;
+    /* RFC 0014: a clipped frame of views, drawn, leaves the cascades' history behind (the next frame that runs them
+       starts a new one); a refused one, or a prewarm, keeps it. */
+    if (setup.radiance_cascades_held_for_views) {
+        btbh_gpu_radiance_cascades_runtime_invalidate_history(&runtime->radiance_cascades);
+    }
     if (temporal_active) {
         (void)memcpy(
             runtime->temporal_previous_view_projection,
@@ -13936,7 +13957,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
         );
         return report->result;
     }
-    if (!btbh_gpu_scene_validate_world_details(window, batches, NULL, batch_count, report)) {
+    if (!btbh_gpu_scene_validate_world_details(window, batches, NULL, NULL, 0u, batch_count, report)) {
         return report->result;
     }
     BTBHGPUSceneFrameSetup setup;
