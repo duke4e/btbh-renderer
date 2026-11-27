@@ -2654,7 +2654,9 @@ uint8_t btbh_gpu_window_scene_set_directional_shadow_size(
      particle transmittance map (RFC 0013) is redrawn every frame, with the kept sun matrix.
    - The maps take turns: the n-th map a frame uses (in the order primary, secondary, spot; 0 for the first) is
      redrawn on the frames whose count, modulo its period, is n modulo its period. At periods 2, 2 and 1 the two
-     directional maps alternate and the spot map is redrawn every frame.
+     directional maps alternate and the spot map is redrawn every frame. (Since 0.16.0, a frame of scene views counts
+     a second view's own primary map right after the primary, and its own spot map right after the spot, each with
+     that kind's period: btbh_gpu_window_scene_present_views.)
    - A map is redrawn whatever its period on the first frame that uses it after one that didn't, when its size
      changes, when the spot map switches between spot and omni, and after a frame whose submit failed.
    - Renders into a target: btbh_gpu_window_scene_render_to_target redraws every map each call. A target view of
