@@ -23,7 +23,9 @@
  * first 3 are dropped. Shadow update periods of BTBH_VIEWS_BENCH_PERIOD (default 2, v2's while split) frames;
  * BTBH_VIEWS_BENCH_OWN_SUN=1 gives the second view a sun matrix of its own (its own map, taking turns). The CPU a frame
  * is the calls' wall time with the GPU idle before each (median of 12 frames). BTBH_VIEWS_BENCH_SIZE=WxH,
- * BTBH_VIEWS_BENCH_DETAIL=<n> (default 8: 768 triangles a box, 1.8 million in the scene).
+ * BTBH_VIEWS_BENCH_DETAIL=<n> (default 8: 768 triangles a box, 1.8 million in the scene). BTBH_VIEWS_BENCH_BAND=1 first
+ * measures the seam's band: the vertical split against its two cameras' one-view frames joined at the line, read back,
+ * with the whole chain, without bloom, and without bloom and SSR.
  *
  * Output: one line a configuration (median, 10th and 90th percentiles, min, max in ms a frame), the CPU a frame and the
  * draws (each view's, or each call's). With no device it is skipped (77). */
@@ -397,6 +399,39 @@ static bool bench_frame(BenchScene *scene, uint32_t config, uint64_t *cpu_nanose
     return true;
 }
 
+/* The texture's bytes (4 a texel), read back. */
+static uint8_t *read_texture(BTBHGPUWindow *window, BTBHGPUTexture *texture) {
+    SDL_GPUDevice *device = window->device->gpu;
+    const uint32_t size = texture->width * texture->height * 4u;
+    SDL_GPUTransferBufferCreateInfo info;
+    SDL_zero(info);
+    info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    info.size = size;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(device, &info);
+    SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    SDL_GPUTextureRegion region;
+    SDL_zero(region);
+    region.texture = texture->texture;
+    region.w = texture->width;
+    region.h = texture->height;
+    region.d = 1u;
+    SDL_GPUTextureTransferInfo destination;
+    SDL_zero(destination);
+    destination.transfer_buffer = transfer;
+    SDL_DownloadFromGPUTexture(copy, &region, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
+    SDL_ReleaseGPUFence(device, fence);
+    uint8_t *pixels = malloc(size);
+    const void *mapped = SDL_MapGPUTransferBuffer(device, transfer, false);
+    memcpy(pixels, mapped, size);
+    SDL_UnmapGPUTransferBuffer(device, transfer);
+    SDL_ReleaseGPUTransferBuffer(device, transfer);
+    return pixels;
+}
+
 static void wait_idle(BenchScene *scene) {
     (void)SDL_WaitForGPUIdle(scene->window->device->gpu);
 }
@@ -765,6 +800,80 @@ int main(void) {
                 return 1;
             }
         }
+    }
+    if (SDL_getenv("BTBH_VIEWS_BENCH_BAND") != NULL) {
+        /* The seam's band: the vertical split against its two cameras' one-view frames joined at the line, by distance
+           from it, the widest distance where a pixel differs by more than 0, 2, 8 and 32 (8-bit steps), with the whole
+           chain, without bloom, and without bloom and SSR. No visibility: every batch in every frame. */
+        const BTBHGPUScenePost chain = scene.post;
+        const char *const *p = paths();
+        for (uint32_t variant = 0u; variant < 3u; ++variant) {
+            scene.post = chain;
+            if (variant >= 1u) {
+                scene.post.bloom_enabled = 0u;
+            }
+            if (variant >= 2u) {
+                scene.post.ssr_intensity = 0.0f;
+            }
+            uint8_t *frames[3] = {NULL, NULL, NULL};
+            for (uint32_t which = 0u; which < 3u; ++which) {
+                BTBHGPUSceneView views[2];
+                memcpy(views, scene.views[2], sizeof(views));
+                views[0].visibility = NULL;
+                views[1].visibility = NULL;
+                if (which < 2u) {
+                    views[0] = views[which];
+                    memset(views[0].clip, 0, sizeof(views[0].clip));
+                    views[0].lighting = NULL;
+                }
+                BTBHGPUSceneReport report;
+                if (btbh_gpu_window_scene_present_views(scene.window,
+                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10],
+                        BENCH_SHADER_FORMAT, width, height, views, which < 2u ? 1u : 2u,
+                        which == 1u && own_sun ? &scene.second_lighting : &scene.lighting, &scene.post,
+                        scene.instances, scene.instance_count, scene.instance_count, scene.batches, NULL, NULL,
+                        BATCHES + 1u, 30u, 40u, 55u, 255u, NULL, &report) != BTBH_GPU_OK) {
+                    fprintf(stderr, "band: %s\n", report.message);
+                    return 1;
+                }
+                BTBHGPUTextureReport copied;
+                if (btbh_gpu_window_copy_pending_scene_texture(scene.window, scene.frame, &copied) != BTBH_GPU_OK) {
+                    return 1;
+                }
+                frames[which] = read_texture(scene.window, scene.frame);
+            }
+            const float *clip = scene.views[2][1].clip;
+            uint32_t widest[4] = {0u, 0u, 0u, 0u};
+            static const int thresholds[4] = {0, 2, 8, 32};
+            int largest = 0;
+            for (uint32_t y = 0u; y < height; ++y) {
+                for (uint32_t x = 0u; x < width; ++x) {
+                    const float side = clip[0] * ((float)x + 0.5f) + clip[1] * ((float)y + 0.5f) + clip[2];
+                    const size_t texel = ((size_t)y * width + x) * 4u;
+                    const uint8_t *expected = side >= 0.0f ? frames[1] + texel : frames[0] + texel;
+                    const uint8_t *split = frames[2] + texel;
+                    int difference = 0;
+                    for (uint32_t channel = 0u; channel < 3u; ++channel) {
+                        const int d = abs((int)split[channel] - (int)expected[channel]);
+                        difference = d > difference ? d : difference;
+                    }
+                    largest = difference > largest ? difference : largest;
+                    const uint32_t distance = (uint32_t)fabsf(side) + 1u;
+                    for (uint32_t index = 0u; index < 4u; ++index) {
+                        if (difference > thresholds[index] && distance > widest[index]) {
+                            widest[index] = distance;
+                        }
+                    }
+                }
+            }
+            static const char *const variant_names[3] = {"whole chain", "no bloom", "no bloom, no SSR"};
+            printf("BENCH band %-17s: differs (>0) to %4u px, >2 to %4u px, >8 to %4u px, >32 to %4u px; largest %3d\n",
+                variant_names[variant], widest[0], widest[1], widest[2], widest[3], largest);
+            for (uint32_t which = 0u; which < 3u; ++which) {
+                free(frames[which]);
+            }
+        }
+        scene.post = chain;
     }
     /* The CPU a frame: the calls alone, the GPU idle before each. */
     double cpu_milliseconds[CONFIGS];
