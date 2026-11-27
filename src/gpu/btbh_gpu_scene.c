@@ -949,6 +949,31 @@ static double btbh_gpu_cost_group_milliseconds[BTBH_GPU_COST_GROUP_COUNT];
 /* The radiance-cascade emitters (gameplay lights) the frame drew into the source field and the direct light. */
 static uint32_t btbh_gpu_cost_rc_emitters;
 
+/* The pass frames (see `BTBHGPUCostStep`, since 0.16.0): whether the current split frame is one, the step its passes
+   go to now, each step's time less the floor, the floor, the pieces submitted and their time. */
+static const char *const btbh_gpu_cost_step_names[BTBH_GPU_COST_STEP_COUNT] = {
+    "ao", "ssr", "bloom", "composite", "lut", "cas", "output", "fxaa", "smaa",
+    "fsr3_prepare_inputs", "fsr3_luma_pyramid", "fsr3_shading_change_pyramid", "fsr3_shading_change",
+    "fsr3_prepare_reactivity", "fsr3_luma_instability", "fsr3_accumulate", "fsr3_rcas",
+    "fsr1_easu", "fsr1_rcas", "lanczos"
+};
+static int btbh_gpu_cost_passes_state = -1;
+static uint64_t btbh_gpu_cost_split_serial;
+static bool btbh_gpu_cost_pass_frame;
+static int btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+static double btbh_gpu_cost_step_milliseconds[BTBH_GPU_COST_STEP_COUNT];
+static double btbh_gpu_cost_floor_milliseconds;
+static uint32_t btbh_gpu_cost_pieces;
+static double btbh_gpu_cost_pieces_milliseconds;
+
+static bool btbh_gpu_cost_passes_enabled(void) {
+    if (btbh_gpu_cost_passes_state < 0) {
+        const char *value = SDL_getenv("BTBH_GPU_COST_PASSES");
+        btbh_gpu_cost_passes_state = value != NULL && strcmp(value, "1") == 0 ? 1 : 0;
+    }
+    return btbh_gpu_cost_passes_state == 1;
+}
+
 /* Warm clocks (2026-10-17). Waiting for every frame leaves the GPU idle while the CPU prepares the next one
    (about 60 % of a fight's frame on the RTX 3070 Ti), and the driver lowers its clocks at that load: a boss run
    measured 1605 MHz, the same run without enemies 1065 MHz with the memory at half its speed, so a cheaper frame
@@ -1072,8 +1097,33 @@ void btbh_gpu_cost_release_warm(void) {
     btbh_gpu_cost_warm_device = NULL;
 }
 
+/* A pass frame's submission floor: an empty command buffer's submit-to-fence time, the median of three, with the GPU
+   idle as before each piece (0 when the GPU failed). */
+static double btbh_gpu_cost_measure_floor(SDL_GPUDevice *device) {
+    double samples[3] = {0.0, 0.0, 0.0};
+    for (uint32_t index = 0u; index < 3u; ++index) {
+        SDL_GPUCommandBuffer *command = SDL_AcquireGPUCommandBuffer(device);
+        if (command == NULL) {
+            return 0.0;
+        }
+        const uint64_t submit_started_ticks = SDL_GetTicksNS();
+        SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+        if (fence == NULL) {
+            return 0.0;
+        }
+        (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
+        samples[index] = (double)(SDL_GetTicksNS() - submit_started_ticks) / 1000000.0;
+        SDL_ReleaseGPUFence(device, fence);
+    }
+    const double low = SDL_min(samples[0], samples[1]);
+    const double high = SDL_max(samples[0], samples[1]);
+    return SDL_max(low, SDL_min(high, samples[2]));
+}
+
 void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
     btbh_gpu_cost_split_device = NULL;
+    btbh_gpu_cost_pass_frame = false;
+    btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
     if (!btbh_gpu_cost_log_enabled()) {
         return;
     }
@@ -1087,14 +1137,27 @@ void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
        temporal phase) then falls on split and whole frames alike. */
     if ((btbh_gpu_cost_frame_serial * UINT64_C(0x9E3779B97F4A7C15)) >> 63 != 0u) {
         btbh_gpu_cost_split_device = device;
+        if (btbh_gpu_cost_passes_enabled()) {
+            /* Of the split frames about every other one is a pass frame, in the sequence {k sqrt(2)} >= 0.5 over
+               them (another irrational, so that it follows neither the frames' parity nor their sequence). */
+            btbh_gpu_cost_split_serial += 1u;
+            btbh_gpu_cost_pass_frame =
+                (btbh_gpu_cost_split_serial * UINT64_C(0x6A09E667F3BCC908)) >> 63 != 0u;
+        }
+        if (btbh_gpu_cost_pass_frame) {
+            SDL_zeroa(btbh_gpu_cost_step_milliseconds);
+            btbh_gpu_cost_pieces = 0u;
+            btbh_gpu_cost_pieces_milliseconds = 0.0;
+            btbh_gpu_cost_floor_milliseconds = btbh_gpu_cost_measure_floor(device);
+        }
     }
 }
 
-bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group) {
+/* In a split frame: submits `*command`, waits for it (its submit-to-fence time into `*milliseconds`, 0 when the submit
+   failed) and acquires the next command buffer. False, with `*command` NULL, when the GPU failed either. */
+static bool btbh_gpu_cost_submit_piece(SDL_GPUCommandBuffer **command, double *milliseconds) {
     SDL_GPUDevice *device = btbh_gpu_cost_split_device;
-    if (device == NULL) {
-        return true;
-    }
+    *milliseconds = 0.0;
     const uint64_t submit_started_ticks = SDL_GetTicksNS();
     SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(*command);
     *command = NULL;
@@ -1102,11 +1165,79 @@ bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finish
         return false;
     }
     (void)SDL_WaitForGPUFences(device, true, &fence, 1u);
-    btbh_gpu_cost_group_milliseconds[finished_group] +=
-        (double)(SDL_GetTicksNS() - submit_started_ticks) / 1000000.0;
+    *milliseconds = (double)(SDL_GetTicksNS() - submit_started_ticks) / 1000000.0;
     SDL_ReleaseGPUFence(device, fence);
+    btbh_gpu_cost_pieces += 1u;
+    btbh_gpu_cost_pieces_milliseconds += *milliseconds;
     *command = SDL_AcquireGPUCommandBuffer(device);
     return *command != NULL;
+}
+
+bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group) {
+    if (btbh_gpu_cost_split_device == NULL) {
+        return true;
+    }
+    double milliseconds = 0.0;
+    const bool split = btbh_gpu_cost_submit_piece(command, &milliseconds);
+    btbh_gpu_cost_group_milliseconds[finished_group] += milliseconds;
+    if (btbh_gpu_cost_current_step != BTBH_GPU_COST_STEP_NONE) {
+        /* A pass frame: the group's last step ends here. */
+        btbh_gpu_cost_step_milliseconds[btbh_gpu_cost_current_step] +=
+            milliseconds - btbh_gpu_cost_floor_milliseconds;
+        btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+    }
+    return split;
+}
+
+bool btbh_gpu_cost_step(SDL_GPUCommandBuffer **command, BTBHGPUCostStep step, bool *submitted) {
+    if (submitted != NULL) {
+        *submitted = false;
+    }
+    if (btbh_gpu_cost_split_device == NULL ||
+        !btbh_gpu_cost_pass_frame ||
+        (int)step == btbh_gpu_cost_current_step) {
+        return true;
+    }
+    if (btbh_gpu_cost_current_step == BTBH_GPU_COST_STEP_NONE) {
+        /* A group's first step: it began at the group's split, with nothing recorded since. */
+        btbh_gpu_cost_current_step = (int)step;
+        return true;
+    }
+    double milliseconds = 0.0;
+    const bool split = btbh_gpu_cost_submit_piece(command, &milliseconds);
+    btbh_gpu_cost_step_milliseconds[btbh_gpu_cost_current_step] += milliseconds - btbh_gpu_cost_floor_milliseconds;
+    btbh_gpu_cost_current_step = (int)step;
+    if (submitted != NULL) {
+        *submitted = true;
+    }
+    return split;
+}
+
+/* A pass frame's line (see `BTBHGPUCostStep`): gpu_ms and pieces count every piece, the canvas's last one too. */
+static void btbh_gpu_cost_emit_passes(double canvas_milliseconds) {
+    char steps[1024];
+    int length = 0;
+    steps[0] = '\0';
+    for (uint32_t step = 0u; step < BTBH_GPU_COST_STEP_COUNT; ++step) {
+        if (length >= 0 && (size_t)length < sizeof(steps)) {
+            length += snprintf(
+                steps + length,
+                sizeof(steps) - (size_t)length,
+                " %s_ms=%.4f",
+                btbh_gpu_cost_step_names[step],
+                btbh_gpu_cost_step_milliseconds[step]
+            );
+        }
+    }
+    (void)fprintf(
+        stdout,
+        "BTBH_GPU_COST_PASSES gpu_ms=%.4f pieces=%u floor_ms=%.4f%s\n",
+        btbh_gpu_cost_pieces_milliseconds + canvas_milliseconds,
+        btbh_gpu_cost_pieces + 1u,
+        btbh_gpu_cost_floor_milliseconds,
+        steps
+    );
+    (void)fflush(stdout);
 }
 
 void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
@@ -1114,6 +1245,17 @@ void btbh_gpu_cost_emit_frame(double gpu_milliseconds) {
     if (btbh_gpu_cost_model_frames == BTBH_GPU_COST_MODEL_FRAMES) {
         btbh_gpu_cost_model_frames = 0u;
         btbh_gpu_cost_emit_models();
+    }
+    if (btbh_gpu_cost_split_device != NULL && btbh_gpu_cost_pass_frame) {
+        /* A pass frame prints its own line instead of the frame's (its groups hold the extra pieces). */
+        btbh_gpu_cost_emit_passes(gpu_milliseconds);
+        btbh_gpu_cost_split_device = NULL;
+        btbh_gpu_cost_pass_frame = false;
+        btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
+        SDL_zeroa(btbh_gpu_cost_triangles);
+        SDL_zeroa(btbh_gpu_cost_draws);
+        btbh_gpu_cost_rc_emitters = 0u;
+        return;
     }
     /* A split frame's last piece is the canvas's; its gpu_ms is the sum of the pieces. */
     char groups[320] = "split=0";
@@ -1211,6 +1353,8 @@ static void btbh_gpu_scene_cancel_submission(
         (void)SDL_CancelGPUCommandBuffer(command);
     }
     btbh_gpu_cost_split_device = NULL;
+    btbh_gpu_cost_pass_frame = false;
+    btbh_gpu_cost_current_step = BTBH_GPU_COST_STEP_NONE;
     btbh_gpu_window_scene_submission_finished(window, false);
 }
 
@@ -1236,6 +1380,22 @@ static bool btbh_gpu_scene_cost_split(
     BTBHGPUSceneReport *report
 ) {
     if (btbh_gpu_cost_split(command, finished_group)) {
+        return true;
+    }
+    btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+    btbh_gpu_scene_cancel_submission(window, *command);
+    *command = NULL;
+    return false;
+}
+
+/* `btbh_gpu_cost_step` for the scene, the same way. */
+static bool btbh_gpu_scene_cost_step(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer **command,
+    BTBHGPUCostStep step,
+    BTBHGPUSceneReport *report
+) {
+    if (btbh_gpu_cost_step(command, step, NULL)) {
         return true;
     }
     btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
@@ -11772,6 +11932,11 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         : 1u);
             SDL_GPUTexture *hbao_kept_emission =
                 scene_contact_targets ? runtime->ambient_texture : runtime->emission_texture;
+            /* (The cost log's pass frames: the occlusion's step.) */
+            if (!btbh_gpu_scene_cost_step(window, &command, BTBH_GPU_COST_STEP_AO, report)) {
+                free(bone_offsets);
+                return report->result;
+            }
             /* (RFC 0014: a clipped frame's passes draw each view clipped to its half.) */
             if (!(views_clipped
                     ? btbh_gpu_scene_encode_hbao_views(
@@ -11820,6 +11985,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             /* Ambient occlusion darkens the opaque scene only: resolved before the
                transparent pass, an effect drawn over a dark corner keeps its light. */
             bool ssao_ok = true;
+            /* (The cost log's pass frames: the occlusion's step, then the reflections' for the resolve.) */
+            if (!btbh_gpu_scene_cost_step(
+                    window,
+                    &command,
+                    ambient_occlusion_active ? BTBH_GPU_COST_STEP_AO : BTBH_GPU_COST_STEP_SSR,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
             SDL_GPUTextureSamplerBinding ssao_samplers[2];
             SDL_zeroa(ssao_samplers);
             ssao_samplers[0].texture = runtime->depth_texture;
@@ -11921,6 +12096,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             resolve_samplers[6].texture = runtime->emission_texture;
             resolve_samplers[6].sampler =
                 runtime->scene_color_sampler;
+            if (ssao_ok &&
+                !btbh_gpu_scene_cost_step(
+                    window,
+                    &command,
+                    ssr_active ? BTBH_GPU_COST_STEP_SSR : BTBH_GPU_COST_STEP_AO,
+                    report
+                )) {
+                free(bone_offsets);
+                return report->result;
+            }
             if (ssao_ok) {
                 ssao_ok = views_clipped
                     ? btbh_gpu_scene_render_fullscreen_views(
@@ -12822,6 +13007,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             /* BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO with the HBAO's contact mode (since 0.12.0): laid over
                the opaque scene before the cascades add their bounce light to it, which it then leaves as it is; the
                emission it keeps rides the ambient target (unlit_enabled bit 10). */
+            if (!btbh_gpu_scene_cost_step(window, &command, BTBH_GPU_COST_STEP_AO, report)) {
+                free(bone_offsets);
+                return report->result;
+            }
             if (!btbh_gpu_scene_encode_hbao(
                     command,
                     runtime,
@@ -12998,9 +13187,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     const uint64_t post_started_ticks = SDL_GetTicksNS();
     SDL_GPUTexture *post_input = radiance_cascades_post_input;
     bool fullscreen_ok = true;
+    /* (The cost log's pass frames take a step a pass, or a few (bloom's levels, SMAA's three), from here to FSR 1 or
+       Lanczos: btbh_gpu_cost_step, which may replace `command`.) */
     if (fullscreen_ok && hdr_composite_active) {
         SDL_GPUTexture *bloom_texture = NULL;
         if (bloom_active) {
+            fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_BLOOM, NULL);
             /* Downsample from the HDR image; level 0 also thresholds. The
              * image is not exposed yet, so the threshold (in exposed units)
              * is divided by the exposure the grading stage applies later. */
@@ -13123,6 +13315,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ? bloom_texture
             : runtime->fallback_texture->texture;
         composite_samplers[2].sampler = runtime->scene_color_sampler;
+        fullscreen_ok = fullscreen_ok && btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_COMPOSITE, NULL);
         /* The LUT stage always writes post_ping, so the composite uses pong. */
         if (fullscreen_ok && views_clipped) {
             /* RFC 0014: each view's fog (its distance and the world-edge fade) at its own depth, from its own camera;
@@ -13173,7 +13366,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         lut_samplers[0].sampler = runtime->scene_color_sampler;
         lut_samplers[1].texture = post->lut_texture->texture;
         lut_samplers[1].sampler = post->lut_texture->sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_LUT, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH Post LUT",
             runtime->post_lut_pipeline,
@@ -13195,7 +13389,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(cas_sampler);
         cas_sampler.texture = post_stage_input;
         cas_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_CAS, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH Post CAS",
             runtime->post_cas_pipeline,
@@ -13218,7 +13413,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(tilt_shift_sampler);
         tilt_shift_sampler.texture = post_stage_input;
         tilt_shift_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_OUTPUT, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH Post Tilt Shift + Output",
             runtime->post_tilt_shift_pipeline,
@@ -13241,7 +13437,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             ? runtime->post_color_texture
             : runtime->final_color_texture;
     if (fullscreen_ok && !production_output_rendered) {
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_OUTPUT, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH Production Output",
             runtime->post_pipeline,
@@ -13264,7 +13461,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(fxaa_sampler);
         fxaa_sampler.texture = runtime->post_color_texture;
         fxaa_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_FXAA, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH FXAA",
             runtime->fxaa_pipeline,
@@ -13291,7 +13489,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(edge_sampler);
         edge_sampler.texture = runtime->post_color_texture;
         edge_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_SMAA, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH SMAA Edge",
             runtime->smaa_edge_pipelines[quality_index],
@@ -13405,11 +13604,16 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             runtime->temporal_previous_color_height == render_height) {
             fsr3_inputs.previous_color = runtime->temporal_previous_color;
         }
-        const bool fsr3_encoded =
+        /* (The cost log's pass frames take a step a dispatch: the encode may replace `command`.) */
+        bool fsr3_encoded =
             drawable_width == runtime->fsr3.output_width &&
             drawable_height == runtime->fsr3.output_height &&
-            btbh_gpu_fsr3_encode(command, &runtime->fsr3, &fsr3_inputs);
-        if (!fsr3_encoded) {
+            btbh_gpu_fsr3_encode(&command, &runtime->fsr3, &fsr3_inputs);
+        if (command == NULL) {
+            /* The cost log's split inside the upscaler failed: the frame fails below. */
+            fsr3_encoded = false;
+            fullscreen_ok = false;
+        } else if (!fsr3_encoded) {
             /* The frame goes out at the render size (the canvas scales it) and later frames use
                FSR 1, rather than the scene failing. */
             SDL_LogWarn(
@@ -13419,6 +13623,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             );
             runtime->fsr3.unavailable = true;
             runtime->fsr3.logged_failure = true;
+        }
+        if (fsr3_encoded && !btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_FSR3_RCAS, NULL)) {
+            fsr3_encoded = false;
+            fullscreen_ok = false;
         }
         if (fsr3_encoded &&
             runtime->temporal_debug_view == BTBH_GPU_FSR3_DEBUG_NONE) {
@@ -13530,7 +13738,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(easu_sampler);
         easu_sampler.texture = runtime->composite_color_texture;
         easu_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_FSR1_EASU, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH FSR1 EASU",
             runtime->upscale_fsr_easu_pipeline,
@@ -13550,7 +13759,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(rcas_sampler);
         rcas_sampler.texture = runtime->upscaled_color_texture;
         rcas_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = fullscreen_ok && btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = fullscreen_ok &&
+            btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_FSR1_RCAS, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH FSR1 RCAS",
             runtime->upscale_fsr_rcas_pipeline,
@@ -13583,7 +13794,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         SDL_zero(upscale_sampler);
         upscale_sampler.texture = runtime->composite_color_texture;
         upscale_sampler.sampler = runtime->scene_color_sampler;
-        fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_LANCZOS, NULL) &&
+            btbh_gpu_scene_render_fullscreen(
             command,
             "BTBH Lanczos Upscale",
             runtime->upscale_lanczos_pipeline,

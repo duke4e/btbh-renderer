@@ -590,7 +590,7 @@ typedef enum BTBHGPUCostGroup {
     BTBH_GPU_COST_GROUP_RC_SOURCE = 3,   /* radiance-cascade emitters and material sources */
     BTBH_GPU_COST_GROUP_RC_FIELD = 4,    /* HRC trace, merges, quadrant finish, temporal reprojection (probe space) */
     BTBH_GPU_COST_GROUP_RC_SCREEN = 5,   /* HRC resolve (internal size), reconstruction and compose (render size) */
-    BTBH_GPU_COST_GROUP_SSAO = 6,        /* SSAO, its denoise and the lighting resolve */
+    BTBH_GPU_COST_GROUP_SSAO = 6,        /* SSAO or HBAO, their denoise and resolve, the reflections' resolve */
     BTBH_GPU_COST_GROUP_TRANSPARENT = 7, /* the soft-particle distance and the transparent/effects pass */
     BTBH_GPU_COST_GROUP_POST = 8,        /* bloom, HDR composite, LUT, CAS, tilt-shift, FXAA/SMAA, FSR, upscale */
     BTBH_GPU_COST_GROUP_UI = 9,          /* the canvas: the scene onto the swapchain, the UI */
@@ -605,6 +605,42 @@ void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device);
 /* In a split frame: submits `*command` (the passes of `finished_group`), waits for it and acquires the next
    command buffer into `*command`. False, with `*command` NULL, when the GPU failed either. Otherwise a no-op. */
 bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group);
+/* The cost log's pass frames (since 0.16.0, `BTBH_GPU_COST_PASSES=1` with the log): about every other split frame (the
+   golden-ratio sequence again, over the split frames) also cuts the ssao and post groups at each pass, a piece a step
+   below, and prints a `BTBH_GPU_COST_PASSES` line instead of its `BTBH_GPU_COST` line: each step's submit-to-fence time
+   less the frame's submission floor (`floor_ms`, an empty command buffer's submit-to-fence time), so the steps of a
+   group add up to about its time less one floor. The other split frames and the whole ones print as before. */
+typedef enum BTBHGPUCostStep {
+    BTBH_GPU_COST_STEP_NONE = -1,
+    BTBH_GPU_COST_STEP_AO = 0,                           /* ssao: the HBAO or SSAO passes (and the SSAO's resolve
+                                                            without reflections) */
+    BTBH_GPU_COST_STEP_SSR = 1,                          /* ssao: the lighting resolve with the reflections */
+    BTBH_GPU_COST_STEP_BLOOM = 2,                        /* post: its downsample and upsample levels */
+    BTBH_GPU_COST_STEP_COMPOSITE = 3,                    /* post: the HDR composite (fog, bloom, vignette) */
+    BTBH_GPU_COST_STEP_LUT = 4,                          /* post: the LUT pass, with the grading */
+    BTBH_GPU_COST_STEP_CAS = 5,
+    BTBH_GPU_COST_STEP_OUTPUT = 6,                       /* post: the output pass (tone map, the grading without a
+                                                            LUT), or tilt-shift with it */
+    BTBH_GPU_COST_STEP_FXAA = 7,
+    BTBH_GPU_COST_STEP_SMAA = 8,                         /* edges, weights, blend */
+    BTBH_GPU_COST_STEP_FSR3_PREPARE_INPUTS = 9,          /* FSR 3's dispatches, with its clears */
+    BTBH_GPU_COST_STEP_FSR3_LUMA_PYRAMID = 10,
+    BTBH_GPU_COST_STEP_FSR3_SHADING_CHANGE_PYRAMID = 11,
+    BTBH_GPU_COST_STEP_FSR3_SHADING_CHANGE = 12,
+    BTBH_GPU_COST_STEP_FSR3_PREPARE_REACTIVITY = 13,
+    BTBH_GPU_COST_STEP_FSR3_LUMA_INSTABILITY = 14,
+    BTBH_GPU_COST_STEP_FSR3_ACCUMULATE = 15,
+    BTBH_GPU_COST_STEP_FSR3_RCAS = 16,                   /* the RCAS after FSR 3 */
+    BTBH_GPU_COST_STEP_FSR1_EASU = 17,
+    BTBH_GPU_COST_STEP_FSR1_RCAS = 18,
+    BTBH_GPU_COST_STEP_LANCZOS = 19,
+    BTBH_GPU_COST_STEP_COUNT = 20
+} BTBHGPUCostStep;
+/* In a pass frame: the passes recorded since the current step began go to it (submitted, waited for and the next
+   command buffer acquired, as btbh_gpu_cost_split does), and `step` begins; a group's split ends the current step.
+   `*submitted` (may be NULL) tells whether `*command` is a new command buffer, which holds no pushed uniforms. False,
+   with `*command` NULL, when the GPU failed. Otherwise a no-op. */
+bool btbh_gpu_cost_step(SDL_GPUCommandBuffer **command, BTBHGPUCostStep step, bool *submitted);
 /* With the cost log, after each measured frame: keeps the GPU busy (`BTBH_GPU_COST_WARM_MS`, default 12) so the
    driver does not lower its clocks while the CPU prepares the next frame; `btbh_gpu_cost_wait_warm` waits for it
    before measured work is submitted. */

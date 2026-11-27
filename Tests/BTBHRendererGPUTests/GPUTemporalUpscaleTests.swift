@@ -90,7 +90,7 @@ final class GPUTemporalUpscaleTests: XCTestCase {
         XCTAssertTrue(scene.contains("color_targets[1].blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;"))
         XCTAssertTrue(scene.contains("? (transparent ? 2u : 6u)"))
         // FSR 3 runs on the finished frame, RCAS sharpens it, Mirror Curse mirrors it last.
-        let encode = try XCTUnwrap(scene.range(of: "btbh_gpu_fsr3_encode(command, &runtime->fsr3, &fsr3_inputs)"))
+        let encode = try XCTUnwrap(scene.range(of: "btbh_gpu_fsr3_encode(&command, &runtime->fsr3, &fsr3_inputs)"))
         let rcas = try XCTUnwrap(scene.range(of: "\"BTBH FSR3 RCAS\""))
         XCTAssertLessThan(encode.lowerBound, rcas.lowerBound)
         // Motion vectors: previous minus current UV, from the unjittered clip positions.
