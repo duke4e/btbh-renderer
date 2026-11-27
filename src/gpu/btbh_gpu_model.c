@@ -195,8 +195,86 @@ void btbh_gpu_model_normalize_bone_weights(
     }
 }
 
+/* Since 0.16.0 a library decodes, at load, what sampling a skin reads (btbh_gpu_animation_library_decode): each
+   channel's key times and values as flat floats, read once through cgltf_accessor_read_float (normalised integers
+   convert as they always did), each skin's joints and inverse bind matrices, and the nodes' rest transforms. Sampling
+   reads those floats with the comparisons and the arithmetic it ran on cgltf's reader, in the same order, so a pose's
+   palette is the same to the bit. */
+
+/* One translation, rotation or scale channel with a target node, as its sampler decoded. */
+typedef struct BTBHGPUAnimationTrack {
+    /* The output's elements, component_count floats each (a cubic spline's: in-tangent, value, out-tangent a key),
+       zero past the `written` floats its reader filled. */
+    const float *values;
+    size_t node;
+    /* Its key times: the clip's time slot (BTBHGPUAnimationClip.time_sets). */
+    uint32_t time_slot;
+    /* 3, or 4 for a rotation. */
+    uint8_t component_count;
+    /* The floats a read of one element wrote: component_count, or fewer for an output narrower than its path (the
+       rest of the target keeps what it held). */
+    uint8_t written;
+    /* BTBH_GPU_ANIMATION_LINEAR, _STEP or _CUBIC_SPLINE. */
+    uint8_t interpolation;
+    /* BTBH_GPU_ANIMATION_PATH_*. */
+    uint8_t path;
+} BTBHGPUAnimationTrack;
+
+/* One set of key times, shared by every channel whose times are the same floats. */
+typedef struct BTBHGPUAnimationKeyTimes {
+    float *times;
+    size_t count;
+    uint64_t hash;
+} BTBHGPUAnimationKeyTimes;
+
+/* One output accessor decoded at a component count, shared by the channels that read it so. */
+typedef struct BTBHGPUAnimationValues {
+    const cgltf_accessor *accessor;
+    float *values;
+    uint32_t component_count;
+    bool readable;
+} BTBHGPUAnimationValues;
+
+typedef struct BTBHGPUAnimationClip {
+    /* Its sampled channels, in the file's order (a later channel on the same target wins, as it did). */
+    BTBHGPUAnimationTrack *tracks;
+    uint32_t track_count;
+    /* The key times its tracks read: library key_times indices, one a slot. */
+    uint32_t *time_sets;
+    uint32_t time_slot_count;
+    /* False when sampling it fails whatever the time (an unreadable accessor, a channel without keys), as reading it
+       through cgltf did: every such failure is the accessor's, never a key's. */
+    bool valid;
+} BTBHGPUAnimationClip;
+
+typedef struct BTBHGPUAnimationSkin {
+    size_t *joint_nodes;
+    /* 16 floats a joint, NULL when the skin has none (each joint's is the identity). */
+    float *inverse_binds;
+    /* False when a joint isn't a node, or its inverse bind matrices can't be read or are fewer than its joints:
+       sampling it fails. */
+    bool valid;
+} BTBHGPUAnimationSkin;
+
 struct BTBHGPUAnimationLibrary {
     cgltf_data *data;
+    /* Unique among libraries and blended poses for the process's life (btbh_gpu_animation_next_serial): the key a
+       palette is kept under across presents, which a later library at the same address can't take over. */
+    uint64_t serial;
+    BTBHGPUAnimationClip *clips;
+    BTBHGPUAnimationKeyTimes *key_times;
+    uint32_t key_time_count;
+    BTBHGPUAnimationValues *values;
+    uint32_t value_count;
+    BTBHGPUAnimationSkin *skins;
+    /* The nodes' rest transforms (each node's, or the identity's parts): 3, 4 and 3 floats a node. */
+    float *rest_translations;
+    float *rest_rotations;
+    float *rest_scales;
+    /* The most time slots of any clip: the segments a sample resolves. */
+    uint32_t max_time_slots;
+    /* What the decoded arrays hold, in bytes (btbh_gpu_animation_library_decoded_bytes). */
+    size_t decoded_bytes;
 };
 
 struct BTBHGPUAnimationPose {
@@ -205,6 +283,9 @@ struct BTBHGPUAnimationPose {
     float *animation_times;
     float *animation_weights;
     uint32_t sample_count;
+    /* A blend's (more than one sample) key for the palettes kept across presents: a new serial whenever its samples
+       change. A pose of one sample is kept under its library's, clip's and time's key instead. */
+    uint64_t serial;
 };
 
 static void btbh_gpu_model_error(
@@ -2925,6 +3006,511 @@ void btbh_gpu_window_release_models(BTBHGPUWindow *window) {
     }
 }
 
+/* ------------------------------------------------------------ Decoded animation data (since 0.16.0) */
+
+enum {
+    BTBH_GPU_ANIMATION_PATH_TRANSLATION = 0,
+    BTBH_GPU_ANIMATION_PATH_ROTATION = 1,
+    BTBH_GPU_ANIMATION_PATH_SCALE = 2
+};
+
+/* A sampler's interpolation as sampling reads it: anything but step and cubic spline is linear. */
+enum {
+    BTBH_GPU_ANIMATION_LINEAR = 0,
+    BTBH_GPU_ANIMATION_STEP = 1,
+    BTBH_GPU_ANIMATION_CUBIC_SPLINE = 2
+};
+
+/* The accessor maps' "not decoded yet" and "can't be read". */
+#define BTBH_GPU_ANIMATION_NOT_DECODED UINT32_MAX
+#define BTBH_GPU_ANIMATION_UNREADABLE (UINT32_MAX - 1u)
+
+static SDL_SpinLock btbh_gpu_animation_serial_lock;
+static uint64_t btbh_gpu_animation_serial_last;
+
+/* A serial no library or blended pose took before in this process (never 0). */
+static uint64_t btbh_gpu_animation_next_serial(void) {
+    SDL_LockSpinlock(&btbh_gpu_animation_serial_lock);
+    const uint64_t serial = ++btbh_gpu_animation_serial_last;
+    SDL_UnlockSpinlock(&btbh_gpu_animation_serial_lock);
+    return serial;
+}
+
+static void btbh_gpu_animation_library_free_decoded(
+    BTBHGPUAnimationLibrary *library
+) {
+    if (library->clips != NULL) {
+        for (cgltf_size index = 0u;
+             index < library->data->animations_count;
+             index += 1u) {
+            free(library->clips[index].tracks);
+            free(library->clips[index].time_sets);
+        }
+    }
+    free(library->clips);
+    library->clips = NULL;
+    for (uint32_t index = 0u; index < library->key_time_count; index += 1u) {
+        free(library->key_times[index].times);
+    }
+    free(library->key_times);
+    library->key_times = NULL;
+    library->key_time_count = 0u;
+    for (uint32_t index = 0u; index < library->value_count; index += 1u) {
+        free(library->values[index].values);
+    }
+    free(library->values);
+    library->values = NULL;
+    library->value_count = 0u;
+    if (library->skins != NULL) {
+        for (cgltf_size index = 0u;
+             index < library->data->skins_count;
+             index += 1u) {
+            free(library->skins[index].joint_nodes);
+            free(library->skins[index].inverse_binds);
+        }
+    }
+    free(library->skins);
+    library->skins = NULL;
+    free(library->rest_translations);
+    free(library->rest_rotations);
+    free(library->rest_scales);
+    library->rest_translations = NULL;
+    library->rest_rotations = NULL;
+    library->rest_scales = NULL;
+}
+
+/* Grows `*items` (of `item_size` bytes each) to hold one more than `count`. */
+static bool btbh_gpu_animation_reserve(
+    void **items,
+    uint32_t count,
+    uint32_t *capacity,
+    size_t item_size
+) {
+    if (count < *capacity) {
+        return true;
+    }
+    if (*capacity > UINT32_MAX / 2u) {
+        return false;
+    }
+    const uint32_t grown = *capacity == 0u ? 16u : *capacity * 2u;
+    if ((size_t)grown > SIZE_MAX / item_size) {
+        return false;
+    }
+    void *items_grown = realloc(*items, (size_t)grown * item_size);
+    if (items_grown == NULL) {
+        return false;
+    }
+    *items = items_grown;
+    *capacity = grown;
+    return true;
+}
+
+/* `input`'s key times (it has keys): *index is their library key_times entry, BTBH_GPU_ANIMATION_UNREADABLE when they
+   can't be read (cgltf_accessor_read_float fails for the accessor, never for one element: then for every key). A
+   channel whose times are the same floats as another's shares its entry, so a sample finds where a time falls once
+   for both. False when memory runs out. */
+static bool btbh_gpu_animation_decode_key_times(
+    BTBHGPUAnimationLibrary *library,
+    const cgltf_accessor *input,
+    uint32_t *capacity,
+    uint32_t *index
+) {
+    const size_t count = input->count;
+    if (count > SIZE_MAX / sizeof(float)) {
+        return false;
+    }
+    float *times = malloc(count * sizeof(float));
+    if (times == NULL) {
+        return false;
+    }
+    uint64_t hash = 14695981039346656037ull;
+    for (size_t key = 0u; key < count; key += 1u) {
+        if (!cgltf_accessor_read_float(input, key, &times[key], 1u)) {
+            free(times);
+            *index = BTBH_GPU_ANIMATION_UNREADABLE;
+            return true;
+        }
+        uint32_t bits = 0u;
+        (void)memcpy(&bits, &times[key], sizeof(bits));
+        hash = (hash ^ bits) * 1099511628211ull;
+    }
+    for (uint32_t existing = 0u;
+         existing < library->key_time_count;
+         existing += 1u) {
+        const BTBHGPUAnimationKeyTimes *other = &library->key_times[existing];
+        if (other->hash == hash &&
+            other->count == count &&
+            memcmp(other->times, times, count * sizeof(float)) == 0) {
+            free(times);
+            *index = existing;
+            return true;
+        }
+    }
+    if (library->key_time_count >= BTBH_GPU_ANIMATION_UNREADABLE ||
+        !btbh_gpu_animation_reserve(
+            (void **)&library->key_times,
+            library->key_time_count,
+            capacity,
+            sizeof(*library->key_times)
+        )) {
+        free(times);
+        return false;
+    }
+    BTBHGPUAnimationKeyTimes *entry =
+        &library->key_times[library->key_time_count];
+    entry->times = times;
+    entry->count = count;
+    entry->hash = hash;
+    library->decoded_bytes += count * sizeof(float);
+    *index = library->key_time_count;
+    library->key_time_count += 1u;
+    return true;
+}
+
+/* `output`'s elements read `component_count` floats at a time, as sampling read them, into a library values entry
+   (*index); the floats a read doesn't write stay zero. False when memory runs out. */
+static bool btbh_gpu_animation_decode_values(
+    BTBHGPUAnimationLibrary *library,
+    const cgltf_accessor *output,
+    uint32_t component_count,
+    uint32_t *capacity,
+    uint32_t *index
+) {
+    const size_t count = output->count;
+    if (count == 0u ||
+        count > SIZE_MAX / (sizeof(float) * component_count) ||
+        library->value_count >= BTBH_GPU_ANIMATION_UNREADABLE ||
+        !btbh_gpu_animation_reserve(
+            (void **)&library->values,
+            library->value_count,
+            capacity,
+            sizeof(*library->values)
+        )) {
+        return false;
+    }
+    float *values = calloc(count * component_count, sizeof(float));
+    if (values == NULL) {
+        return false;
+    }
+    bool readable = true;
+    for (size_t element = 0u; element < count; element += 1u) {
+        if (!cgltf_accessor_read_float(
+                output,
+                element,
+                &values[element * component_count],
+                component_count
+            )) {
+            readable = false;
+            break;
+        }
+    }
+    if (!readable) {
+        free(values);
+        values = NULL;
+    } else {
+        library->decoded_bytes += count * component_count * sizeof(float);
+    }
+    BTBHGPUAnimationValues *entry = &library->values[library->value_count];
+    entry->accessor = output;
+    entry->values = values;
+    entry->component_count = component_count;
+    entry->readable = readable;
+    *index = library->value_count;
+    library->value_count += 1u;
+    return true;
+}
+
+/* One clip's tracks (`clip` zeroed). A channel that sampling skips (no target node, a path other than translation,
+   rotation and scale) has none. `times_by_accessor` and `values_by_accessor` (two a accessor: three and four
+   components) map the accessors decoded so far. False when memory runs out. */
+static bool btbh_gpu_animation_decode_clip(
+    BTBHGPUAnimationLibrary *library,
+    const cgltf_animation *animation,
+    BTBHGPUAnimationClip *clip,
+    uint32_t *times_by_accessor,
+    uint32_t *values_by_accessor,
+    uint32_t *key_time_capacity,
+    uint32_t *value_capacity
+) {
+    const cgltf_data *data = library->data;
+    clip->valid = true;
+    if (animation->channels_count == 0u) {
+        return true;
+    }
+    if (animation->channels_count > UINT32_MAX ||
+        animation->channels_count > SIZE_MAX / sizeof(*clip->tracks)) {
+        return false;
+    }
+    clip->tracks = malloc(animation->channels_count * sizeof(*clip->tracks));
+    clip->time_sets = malloc(animation->channels_count * sizeof(*clip->time_sets));
+    if (clip->tracks == NULL || clip->time_sets == NULL) {
+        return false;
+    }
+    library->decoded_bytes += animation->channels_count *
+        (sizeof(*clip->tracks) + sizeof(*clip->time_sets));
+    for (cgltf_size channel_index = 0u;
+         channel_index < animation->channels_count;
+         channel_index += 1u) {
+        const cgltf_animation_channel *channel =
+            &animation->channels[channel_index];
+        if (channel->target_node == NULL) {
+            continue;
+        }
+        const ptrdiff_t node_index = channel->target_node - data->nodes;
+        if (node_index < 0 || (cgltf_size)node_index >= data->nodes_count) {
+            clip->valid = false;
+            return true;
+        }
+        uint8_t path = 0u;
+        uint32_t component_count = 0u;
+        switch (channel->target_path) {
+            case cgltf_animation_path_type_translation:
+                path = BTBH_GPU_ANIMATION_PATH_TRANSLATION;
+                component_count = 3u;
+                break;
+            case cgltf_animation_path_type_rotation:
+                path = BTBH_GPU_ANIMATION_PATH_ROTATION;
+                component_count = 4u;
+                break;
+            case cgltf_animation_path_type_scale:
+                path = BTBH_GPU_ANIMATION_PATH_SCALE;
+                component_count = 3u;
+                break;
+            case cgltf_animation_path_type_weights:
+            case cgltf_animation_path_type_invalid:
+            case cgltf_animation_path_type_max_enum:
+            default:
+                continue;
+        }
+        const cgltf_animation_sampler *sampler = channel->sampler;
+        if (sampler == NULL ||
+            sampler->input == NULL ||
+            sampler->output == NULL ||
+            sampler->input->count == 0u) {
+            clip->valid = false;
+            return true;
+        }
+        const uint8_t interpolation =
+            sampler->interpolation == cgltf_interpolation_type_step
+                ? BTBH_GPU_ANIMATION_STEP
+                : sampler->interpolation ==
+                        cgltf_interpolation_type_cubic_spline
+                    ? BTBH_GPU_ANIMATION_CUBIC_SPLINE
+                    : BTBH_GPU_ANIMATION_LINEAR;
+        /* Every read stays inside the output: one element a key, three for a cubic spline (cgltf_validate checks it,
+           so this only guards the arrays). */
+        const size_t elements_per_key =
+            interpolation == BTBH_GPU_ANIMATION_CUBIC_SPLINE ? 3u : 1u;
+        if (sampler->input->count > SIZE_MAX / elements_per_key ||
+            sampler->output->count <
+                sampler->input->count * elements_per_key) {
+            clip->valid = false;
+            return true;
+        }
+
+        const size_t input_index = (size_t)(sampler->input - data->accessors);
+        uint32_t times = times_by_accessor[input_index];
+        if (times == BTBH_GPU_ANIMATION_NOT_DECODED) {
+            if (!btbh_gpu_animation_decode_key_times(
+                    library,
+                    sampler->input,
+                    key_time_capacity,
+                    &times
+                )) {
+                return false;
+            }
+            times_by_accessor[input_index] = times;
+        }
+        const size_t output_index = (size_t)(sampler->output - data->accessors);
+        uint32_t *values_slot =
+            &values_by_accessor[output_index * 2u + (component_count == 4u ? 1u : 0u)];
+        if (*values_slot == BTBH_GPU_ANIMATION_NOT_DECODED &&
+            !btbh_gpu_animation_decode_values(
+                library,
+                sampler->output,
+                component_count,
+                value_capacity,
+                values_slot
+            )) {
+            return false;
+        }
+        if (times == BTBH_GPU_ANIMATION_UNREADABLE ||
+            !library->values[*values_slot].readable) {
+            clip->valid = false;
+            return true;
+        }
+
+        uint32_t time_slot = 0u;
+        while (time_slot < clip->time_slot_count &&
+               clip->time_sets[time_slot] != times) {
+            time_slot += 1u;
+        }
+        if (time_slot == clip->time_slot_count) {
+            clip->time_sets[time_slot] = times;
+            clip->time_slot_count += 1u;
+        }
+        BTBHGPUAnimationTrack *track = &clip->tracks[clip->track_count];
+        track->values = library->values[*values_slot].values;
+        track->node = (size_t)node_index;
+        track->time_slot = time_slot;
+        track->component_count = (uint8_t)component_count;
+        /* An accessor without a buffer view reads as zeros, all component_count of them; otherwise a read writes the
+           accessor's own components (fewer than the path's for a narrower output; never more, or it fails). */
+        track->written = sampler->output->buffer_view == NULL
+            ? (uint8_t)component_count
+            : (uint8_t)cgltf_num_components(sampler->output->type);
+        track->interpolation = interpolation;
+        track->path = path;
+        clip->track_count += 1u;
+    }
+    return true;
+}
+
+/* Decodes what sampling reads (`library->data` loaded and validated). Only running out of memory fails: an accessor
+   that can't be read marks its clip or skin, whose samples fail as they did. */
+static bool btbh_gpu_animation_library_decode(BTBHGPUAnimationLibrary *library) {
+    const cgltf_data *data = library->data;
+    const size_t node_count = data->nodes_count;
+    if (node_count > SIZE_MAX / (sizeof(float) * 4u) ||
+        data->accessors_count > SIZE_MAX / (sizeof(uint32_t) * 3u) ||
+        data->animations_count > SIZE_MAX / sizeof(*library->clips) ||
+        data->skins_count > SIZE_MAX / sizeof(*library->skins)) {
+        return false;
+    }
+    if (node_count > 0u) {
+        library->rest_translations = malloc(node_count * 3u * sizeof(float));
+        library->rest_rotations = malloc(node_count * 4u * sizeof(float));
+        library->rest_scales = malloc(node_count * 3u * sizeof(float));
+        if (library->rest_translations == NULL ||
+            library->rest_rotations == NULL ||
+            library->rest_scales == NULL) {
+            return false;
+        }
+        library->decoded_bytes += node_count * 10u * sizeof(float);
+    }
+    for (size_t index = 0u; index < node_count; index += 1u) {
+        const cgltf_node *node = &data->nodes[index];
+        float *translation = &library->rest_translations[index * 3u];
+        float *rotation = &library->rest_rotations[index * 4u];
+        float *scale = &library->rest_scales[index * 3u];
+        (void)memset(translation, 0, sizeof(float) * 3u);
+        (void)memset(rotation, 0, sizeof(float) * 4u);
+        (void)memset(scale, 0, sizeof(float) * 3u);
+        if (node->has_translation) {
+            (void)memcpy(translation, node->translation, sizeof(float) * 3u);
+        }
+        if (node->has_rotation) {
+            (void)memcpy(rotation, node->rotation, sizeof(float) * 4u);
+        } else {
+            rotation[3] = 1.0f;
+        }
+        if (node->has_scale) {
+            (void)memcpy(scale, node->scale, sizeof(float) * 3u);
+        } else {
+            scale[0] = 1.0f;
+            scale[1] = 1.0f;
+            scale[2] = 1.0f;
+        }
+    }
+
+    if (data->skins_count > 0u) {
+        library->skins = calloc(data->skins_count, sizeof(*library->skins));
+        if (library->skins == NULL) {
+            return false;
+        }
+        library->decoded_bytes += data->skins_count * sizeof(*library->skins);
+    }
+    for (cgltf_size skin_index = 0u;
+         skin_index < data->skins_count;
+         skin_index += 1u) {
+        const cgltf_skin *skin = &data->skins[skin_index];
+        BTBHGPUAnimationSkin *decoded = &library->skins[skin_index];
+        decoded->valid = true;
+        const size_t joint_count = skin->joints_count;
+        if (joint_count == 0u) {
+            continue;
+        }
+        if (joint_count > SIZE_MAX / (sizeof(float) * 16u)) {
+            return false;
+        }
+        decoded->joint_nodes = malloc(joint_count * sizeof(size_t));
+        if (decoded->joint_nodes == NULL) {
+            return false;
+        }
+        library->decoded_bytes += joint_count * sizeof(size_t);
+        for (size_t joint = 0u; decoded->valid && joint < joint_count; joint += 1u) {
+            const ptrdiff_t node_index = skin->joints[joint] - data->nodes;
+            if (node_index < 0 || (cgltf_size)node_index >= node_count) {
+                decoded->valid = false;
+            } else {
+                decoded->joint_nodes[joint] = (size_t)node_index;
+            }
+        }
+        /* Fewer inverse binds than joints (cgltf_validate doesn't check skins): the skin can't be read, rather than
+           read past its accessor (0.15.0 read past it when it sampled the skin). */
+        if (decoded->valid &&
+            skin->inverse_bind_matrices != NULL &&
+            skin->inverse_bind_matrices->count < joint_count) {
+            decoded->valid = false;
+        }
+        if (decoded->valid && skin->inverse_bind_matrices != NULL) {
+            decoded->inverse_binds = calloc(joint_count * 16u, sizeof(float));
+            if (decoded->inverse_binds == NULL) {
+                return false;
+            }
+            library->decoded_bytes += joint_count * 16u * sizeof(float);
+            for (size_t joint = 0u; decoded->valid && joint < joint_count; joint += 1u) {
+                decoded->valid = cgltf_accessor_read_float(
+                    skin->inverse_bind_matrices,
+                    joint,
+                    &decoded->inverse_binds[joint * 16u],
+                    16u
+                );
+            }
+        }
+    }
+
+    library->clips = calloc(data->animations_count, sizeof(*library->clips));
+    if (library->clips == NULL) {
+        return false;
+    }
+    library->decoded_bytes += data->animations_count * sizeof(*library->clips);
+    uint32_t *accessor_maps = NULL;
+    if (data->accessors_count > 0u) {
+        accessor_maps = malloc(data->accessors_count * 3u * sizeof(uint32_t));
+        if (accessor_maps == NULL) {
+            return false;
+        }
+        for (size_t index = 0u; index < data->accessors_count * 3u; index += 1u) {
+            accessor_maps[index] = BTBH_GPU_ANIMATION_NOT_DECODED;
+        }
+    }
+    uint32_t key_time_capacity = 0u;
+    uint32_t value_capacity = 0u;
+    bool decoded = true;
+    for (cgltf_size animation_index = 0u;
+         decoded && animation_index < data->animations_count;
+         animation_index += 1u) {
+        BTBHGPUAnimationClip *clip = &library->clips[animation_index];
+        decoded = btbh_gpu_animation_decode_clip(
+            library,
+            &data->animations[animation_index],
+            clip,
+            accessor_maps,
+            accessor_maps + data->accessors_count,
+            &key_time_capacity,
+            &value_capacity
+        );
+        if (clip->time_slot_count > library->max_time_slots) {
+            library->max_time_slots = clip->time_slot_count;
+        }
+    }
+    free(accessor_maps);
+    library->decoded_bytes += (size_t)key_time_capacity * sizeof(*library->key_times) +
+        (size_t)value_capacity * sizeof(*library->values);
+    return decoded;
+}
+
 BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
     const char *path,
     BTBHGPUAnimationLibraryReport *report
@@ -2973,6 +3559,20 @@ BTBHGPUAnimationLibrary *btbh_gpu_animation_library_load(
         return NULL;
     }
     library->data = data;
+    library->serial = btbh_gpu_animation_next_serial();
+    if (!btbh_gpu_animation_library_decode(library)) {
+        btbh_gpu_animation_library_free_decoded(library);
+        cgltf_free(data);
+        free(library);
+        report->result = BTBH_GPU_DEVICE_FAILURE;
+        (void) snprintf(
+            report->message,
+            sizeof(report->message),
+            "%s",
+            "Could not allocate animation library"
+        );
+        return NULL;
+    }
     report->result = BTBH_GPU_OK;
     report->animation_count = (uint32_t) data->animations_count;
     return library;
@@ -3030,187 +3630,118 @@ float btbh_gpu_animation_library_duration(
     return duration;
 }
 
-static bool btbh_gpu_animation_read_value(
-    const cgltf_animation_sampler *sampler,
-    cgltf_size key_index,
-    cgltf_size value_index,
-    cgltf_size component_count,
-    float *value
-) {
-    if (
-        sampler == NULL ||
-        sampler->output == NULL ||
-        value == NULL
-    ) {
-        return false;
-    }
-    const cgltf_size sample_index =
-        sampler->interpolation == cgltf_interpolation_type_cubic_spline
-            ? key_index * 3u + value_index
-            : key_index;
-    return cgltf_accessor_read_float(
-        sampler->output,
-        sample_index,
-        value,
-        component_count
-    );
-}
+/* Where a time falls among a set of key times (btbh_gpu_animation_find_segment). */
+enum {
+    /* At or before the first key, or from the last on: that key's value as it is. */
+    BTBH_GPU_ANIMATION_SEGMENT_KEY = 0,
+    /* Between two keys whose upper doesn't come after its lower: the lower key's value. */
+    BTBH_GPU_ANIMATION_SEGMENT_HOLD = 1,
+    /* Between two keys: interpolated over `interval` at `amount`. */
+    BTBH_GPU_ANIMATION_SEGMENT_BETWEEN = 2
+};
 
-static bool btbh_gpu_animation_sample_value(
-    const cgltf_animation_sampler *sampler,
+typedef struct BTBHGPUAnimationSegment {
+    size_t lower;
+    size_t upper;
+    float interval;
+    float amount;
+    uint32_t kind;
+} BTBHGPUAnimationSegment;
+
+/* Where `time` falls among `keys`, found with the comparisons sampling ran on cgltf's reader: the first and last keys,
+   then a binary search for the last key at or before the time. It depends on the times alone, so the channels that
+   share them share it. */
+static void btbh_gpu_animation_find_segment(
+    const BTBHGPUAnimationKeyTimes *keys,
     float time,
-    cgltf_size component_count,
-    bool quaternion,
-    float *value
+    BTBHGPUAnimationSegment *segment
 ) {
-    if (
-        sampler == NULL ||
-        sampler->input == NULL ||
-        sampler->output == NULL ||
-        sampler->input->count == 0u ||
-        component_count == 0u ||
-        component_count > 4u ||
-        value == NULL
-    ) {
-        return false;
-    }
-    const cgltf_size key_count = sampler->input->count;
-    float first_time = 0.0f;
-    float last_time = 0.0f;
-    if (
-        !cgltf_accessor_read_float(
-            sampler->input,
-            0u,
-            &first_time,
-            1u
-        ) ||
-        !cgltf_accessor_read_float(
-            sampler->input,
-            key_count - 1u,
-            &last_time,
-            1u
-        )
-    ) {
-        return false;
-    }
+    const float *times = keys->times;
+    const size_t key_count = keys->count;
+    const float first_time = times[0];
+    const float last_time = times[key_count - 1u];
+    segment->kind = BTBH_GPU_ANIMATION_SEGMENT_KEY;
+    segment->interval = 0.0f;
+    segment->amount = 0.0f;
     if (key_count == 1u || time <= first_time) {
-        return btbh_gpu_animation_read_value(
-            sampler,
-            0u,
-            1u,
-            component_count,
-            value
-        );
+        segment->lower = 0u;
+        segment->upper = 0u;
+        return;
     }
     if (time >= last_time) {
-        return btbh_gpu_animation_read_value(
-            sampler,
-            key_count - 1u,
-            1u,
-            component_count,
-            value
-        );
+        segment->lower = key_count - 1u;
+        segment->upper = key_count - 1u;
+        return;
     }
-
-    cgltf_size lower = 0u;
-    cgltf_size upper = key_count - 1u;
+    size_t lower = 0u;
+    size_t upper = key_count - 1u;
     while (upper - lower > 1u) {
-        const cgltf_size middle = lower + (upper - lower) / 2u;
-        float middle_time = 0.0f;
-        if (!cgltf_accessor_read_float(
-                sampler->input,
-                middle,
-                &middle_time,
-                1u
-            )) {
-            return false;
-        }
-        if (time < middle_time) {
+        const size_t middle = lower + (upper - lower) / 2u;
+        if (time < times[middle]) {
             upper = middle;
         } else {
             lower = middle;
         }
     }
-    float lower_time = 0.0f;
-    float upper_time = 0.0f;
-    float lower_value[4] = {0};
-    float upper_value[4] = {0};
-    if (
-        !cgltf_accessor_read_float(
-            sampler->input,
-            lower,
-            &lower_time,
-            1u
-        ) ||
-        !cgltf_accessor_read_float(
-            sampler->input,
-            upper,
-            &upper_time,
-            1u
-        ) ||
-        !btbh_gpu_animation_read_value(
-            sampler,
-            lower,
-            1u,
-            component_count,
-            lower_value
-        )
-    ) {
-        return false;
-    }
-    if (
-        sampler->interpolation == cgltf_interpolation_type_step ||
-        upper_time <= lower_time
-    ) {
-        (void)memcpy(
-            value,
-            lower_value,
-            component_count * sizeof(float)
-        );
-        return true;
-    }
-    if (!btbh_gpu_animation_read_value(
-            sampler,
-            upper,
-            1u,
-            component_count,
-            upper_value
-        )) {
-        return false;
+    const float lower_time = times[lower];
+    const float upper_time = times[upper];
+    segment->lower = lower;
+    segment->upper = upper;
+    if (upper_time <= lower_time) {
+        segment->kind = BTBH_GPU_ANIMATION_SEGMENT_HOLD;
+        return;
     }
     const float interval = upper_time - lower_time;
     const float amount = (time - lower_time) / interval;
-    if (
-        sampler->interpolation ==
-        cgltf_interpolation_type_cubic_spline
-    ) {
-        float lower_tangent[4] = {0};
-        float upper_tangent[4] = {0};
-        if (
-            !btbh_gpu_animation_read_value(
-                sampler,
-                lower,
-                2u,
-                component_count,
-                lower_tangent
-            ) ||
-            !btbh_gpu_animation_read_value(
-                sampler,
-                upper,
-                0u,
-                component_count,
-                upper_tangent
-            )
-        ) {
-            return false;
-        }
+    segment->kind = BTBH_GPU_ANIMATION_SEGMENT_BETWEEN;
+    segment->interval = interval;
+    segment->amount = amount;
+}
+
+/* A track's value at `segment` into `value`, as sampling computed it from cgltf's reader: a key's value writes the
+   floats its read wrote (the rest of `value` keeps what it held); a step or a hold the lower key's components; a cubic
+   spline the Hermite curve through the lower key's value and out-tangent and the upper's value and in-tangent; a
+   rotation the shortest slerp; anything else the linear blend. */
+static void btbh_gpu_animation_track_sample(
+    const BTBHGPUAnimationTrack *track,
+    const BTBHGPUAnimationSegment *segment,
+    float *value
+) {
+    const size_t component_count = track->component_count;
+    const bool cubic =
+        track->interpolation == BTBH_GPU_ANIMATION_CUBIC_SPLINE;
+    /* A key's value: element key (key * 3 + 1 among a cubic spline's in-tangent, value and out-tangent). */
+    const size_t elements_per_key = cubic ? 3u : 1u;
+    const size_t value_element = cubic ? 1u : 0u;
+    const float *lower_value = &track->values[
+        (segment->lower * elements_per_key + value_element) * component_count
+    ];
+    if (segment->kind == BTBH_GPU_ANIMATION_SEGMENT_KEY) {
+        (void)memcpy(value, lower_value, track->written * sizeof(float));
+        return;
+    }
+    if (track->interpolation == BTBH_GPU_ANIMATION_STEP ||
+        segment->kind == BTBH_GPU_ANIMATION_SEGMENT_HOLD) {
+        (void)memcpy(value, lower_value, component_count * sizeof(float));
+        return;
+    }
+    const float *upper_value = &track->values[
+        (segment->upper * elements_per_key + value_element) * component_count
+    ];
+    const float interval = segment->interval;
+    const float amount = segment->amount;
+    if (cubic) {
+        const float *lower_tangent =
+            &track->values[(segment->lower * 3u + 2u) * component_count];
+        const float *upper_tangent =
+            &track->values[(segment->upper * 3u) * component_count];
         const float amount2 = amount * amount;
         const float amount3 = amount2 * amount;
         const float h00 = 2.0f * amount3 - 3.0f * amount2 + 1.0f;
         const float h10 = amount3 - 2.0f * amount2 + amount;
         const float h01 = -2.0f * amount3 + 3.0f * amount2;
         const float h11 = amount3 - amount2;
-        for (cgltf_size component = 0u;
+        for (size_t component = 0u;
              component < component_count;
              component += 1u) {
             value[component] =
@@ -3219,7 +3750,10 @@ static bool btbh_gpu_animation_sample_value(
                 h01 * upper_value[component] +
                 h11 * interval * upper_tangent[component];
         }
-    } else if (quaternion && component_count == 4u) {
+    } else if (
+        track->path == BTBH_GPU_ANIMATION_PATH_ROTATION &&
+        component_count == 4u
+    ) {
         btbh_gpu_animation_slerp_shortest(
             lower_value,
             upper_value,
@@ -3227,7 +3761,7 @@ static bool btbh_gpu_animation_sample_value(
             value
         );
     } else {
-        for (cgltf_size component = 0u;
+        for (size_t component = 0u;
              component < component_count;
              component += 1u) {
             value[component] =
@@ -3236,7 +3770,6 @@ static bool btbh_gpu_animation_sample_value(
                     amount;
         }
     }
-    return true;
 }
 
 static void btbh_gpu_animation_normalize_quaternion(float rotation[4]) {
@@ -3455,6 +3988,9 @@ uint32_t btbh_gpu_animation_library_skin_joint_count(
     return (uint32_t)library->data->skins[skin_index].joints_count;
 }
 
+/* The clip's local transforms at `time` into translations, rotations and scales (3, 4 and 3 floats a node), starting
+   from the nodes' rest transforms; animated_nodes marks the nodes a channel set. `segments` has a place for each of
+   the clip's time slots. */
 static bool btbh_gpu_animation_sample_local_transforms(
     const BTBHGPUAnimationLibrary *library,
     uint32_t animation_index,
@@ -3462,7 +3998,8 @@ static bool btbh_gpu_animation_sample_local_transforms(
     float *translations,
     float *rotations,
     float *scales,
-    uint8_t *animated_nodes
+    uint8_t *animated_nodes,
+    BTBHGPUAnimationSegment *segments
 ) {
     if (
         library == NULL ||
@@ -3476,108 +4013,60 @@ static bool btbh_gpu_animation_sample_local_transforms(
     ) {
         return false;
     }
-    const cgltf_data *data = library->data;
-    (void)memset(
-        translations,
-        0,
-        data->nodes_count * 3u * sizeof(float)
-    );
-    (void)memset(
-        rotations,
-        0,
-        data->nodes_count * 4u * sizeof(float)
-    );
-    (void)memset(
-        scales,
-        0,
-        data->nodes_count * 3u * sizeof(float)
-    );
-    (void)memset(
-        animated_nodes,
-        0,
-        data->nodes_count * sizeof(uint8_t)
-    );
-
-    for (cgltf_size index = 0u; index < data->nodes_count; index += 1u) {
-        const cgltf_node *node = &data->nodes[index];
-        float *translation = &translations[index * 3u];
-        float *rotation = &rotations[index * 4u];
-        float *scale = &scales[index * 3u];
-        if (node->has_translation) {
-            (void)memcpy(translation, node->translation, sizeof(float) * 3u);
-        }
-        if (node->has_rotation) {
-            (void)memcpy(rotation, node->rotation, sizeof(float) * 4u);
-        } else {
-            rotation[3] = 1.0f;
-        }
-        if (node->has_scale) {
-            (void)memcpy(scale, node->scale, sizeof(float) * 3u);
-        } else {
-            scale[0] = 1.0f;
-            scale[1] = 1.0f;
-            scale[2] = 1.0f;
-        }
+    const size_t node_count = library->data->nodes_count;
+    if (node_count > 0u) {
+        (void)memcpy(
+            translations,
+            library->rest_translations,
+            node_count * 3u * sizeof(float)
+        );
+        (void)memcpy(
+            rotations,
+            library->rest_rotations,
+            node_count * 4u * sizeof(float)
+        );
+        (void)memcpy(
+            scales,
+            library->rest_scales,
+            node_count * 3u * sizeof(float)
+        );
+        (void)memset(animated_nodes, 0, node_count * sizeof(uint8_t));
     }
 
-    const cgltf_animation *animation = &data->animations[animation_index];
-    bool valid = true;
-    for (cgltf_size index = 0u;
-         valid && index < animation->channels_count;
-         index += 1u) {
-        const cgltf_animation_channel *channel =
-            &animation->channels[index];
-        if (channel->target_node == NULL) {
-            continue;
-        }
-        const ptrdiff_t node_index = channel->target_node - data->nodes;
-        if (
-            node_index < 0 ||
-            (cgltf_size)node_index >= data->nodes_count
-        ) {
-            valid = false;
-            break;
-        }
-        float *target = NULL;
-        cgltf_size component_count = 0u;
-        switch (channel->target_path) {
-            case cgltf_animation_path_type_translation:
-                target = &translations[(cgltf_size)node_index * 3u];
-                component_count = 3u;
-                break;
-            case cgltf_animation_path_type_rotation:
-                target = &rotations[(cgltf_size)node_index * 4u];
-                component_count = 4u;
-                break;
-            case cgltf_animation_path_type_scale:
-                target = &scales[(cgltf_size)node_index * 3u];
-                component_count = 3u;
-                break;
-            case cgltf_animation_path_type_weights:
-            case cgltf_animation_path_type_invalid:
-            case cgltf_animation_path_type_max_enum:
-            default:
-                continue;
-        }
-        valid = btbh_gpu_animation_sample_value(
-            channel->sampler,
+    const BTBHGPUAnimationClip *clip = &library->clips[animation_index];
+    if (!clip->valid) {
+        return false;
+    }
+    for (uint32_t slot = 0u; slot < clip->time_slot_count; slot += 1u) {
+        btbh_gpu_animation_find_segment(
+            &library->key_times[clip->time_sets[slot]],
             time,
-            component_count,
-            channel->target_path ==
-                cgltf_animation_path_type_rotation,
+            &segments[slot]
+        );
+    }
+    for (uint32_t index = 0u; index < clip->track_count; index += 1u) {
+        const BTBHGPUAnimationTrack *track = &clip->tracks[index];
+        float *target =
+            track->path == BTBH_GPU_ANIMATION_PATH_ROTATION
+                ? &rotations[track->node * 4u]
+                : track->path == BTBH_GPU_ANIMATION_PATH_TRANSLATION
+                    ? &translations[track->node * 3u]
+                    : &scales[track->node * 3u];
+        btbh_gpu_animation_track_sample(
+            track,
+            &segments[track->time_slot],
             target
         );
-        animated_nodes[(cgltf_size)node_index] = 1u;
-        if (
-            valid &&
-            channel->target_path == cgltf_animation_path_type_rotation
-        ) {
+        animated_nodes[track->node] = 1u;
+        if (track->path == BTBH_GPU_ANIMATION_PATH_ROTATION) {
             btbh_gpu_animation_normalize_quaternion(target);
         }
     }
-    return valid;
+    return true;
 }
 
+/* The skin's palette from the blended local transforms: every node's local and world matrix (local_matrices,
+   world_matrices and states have room for every node), then each joint's world matrix times its inverse bind. */
 static bool btbh_gpu_animation_build_skin_matrices(
     const BTBHGPUAnimationLibrary *library,
     uint32_t skin_index,
@@ -3585,6 +4074,9 @@ static bool btbh_gpu_animation_build_skin_matrices(
     const float *rotations,
     const float *scales,
     const uint8_t *animated_nodes,
+    float *local_matrices,
+    float *world_matrices,
+    uint8_t *states,
     float *matrices,
     uint32_t matrix_capacity
 ) {
@@ -3610,19 +4102,7 @@ static bool btbh_gpu_animation_build_skin_matrices(
     ) {
         return false;
     }
-    float *local_matrices = calloc(data->nodes_count * 16u, sizeof(float));
-    float *world_matrices = calloc(data->nodes_count * 16u, sizeof(float));
-    uint8_t *states = calloc(data->nodes_count, sizeof(uint8_t));
-    if (
-        local_matrices == NULL ||
-        world_matrices == NULL ||
-        states == NULL
-    ) {
-        free(states);
-        free(world_matrices);
-        free(local_matrices);
-        return false;
-    }
+    (void)memset(states, 0, data->nodes_count * sizeof(uint8_t));
     for (cgltf_size index = 0u; index < data->nodes_count; index += 1u) {
         const cgltf_node *node = &data->nodes[index];
         float *local = &local_matrices[index * 16u];
@@ -3659,41 +4139,27 @@ static bool btbh_gpu_animation_build_skin_matrices(
         0.0f, 0.0f, 1.0f, 0.0f,
         0.0f, 0.0f, 0.0f, 1.0f
     };
+    const BTBHGPUAnimationSkin *decoded = &library->skins[skin_index];
+    valid = valid && decoded->valid;
     for (cgltf_size joint_index = 0u;
          valid && joint_index < skin->joints_count;
          joint_index += 1u) {
-        const ptrdiff_t node_index = skin->joints[joint_index] - data->nodes;
-        float inverse_bind[16];
-        if (
-            node_index < 0 ||
-            (cgltf_size)node_index >= data->nodes_count
-        ) {
-            valid = false;
-            break;
-        }
-        if (skin->inverse_bind_matrices != NULL) {
-            valid = cgltf_accessor_read_float(
-                skin->inverse_bind_matrices,
-                joint_index,
-                inverse_bind,
-                16u
-            );
-        } else {
-            (void)memcpy(inverse_bind, identity, sizeof(identity));
-        }
-        if (valid) {
-            btbh_gpu_animation_multiply_matrix(
-                &world_matrices[(cgltf_size)node_index * 16u],
-                inverse_bind,
-                &matrices[joint_index * 16u]
-            );
-        }
+        const size_t node_index = decoded->joint_nodes[joint_index];
+        const float *inverse_bind = decoded->inverse_binds != NULL
+            ? &decoded->inverse_binds[joint_index * 16u]
+            : identity;
+        btbh_gpu_animation_multiply_matrix(
+            &world_matrices[node_index * 16u],
+            inverse_bind,
+            &matrices[joint_index * 16u]
+        );
     }
-    free(states);
-    free(world_matrices);
-    free(local_matrices);
     return valid;
 }
+
+/* The floats a blended sample's scratch holds a node: the blend's translation, rotation and scale and its rotation
+   weight, one sample's translation, rotation and scale, and the local and world matrices. */
+#define BTBH_GPU_ANIMATION_SCRATCH_FLOATS_PER_NODE (3u + 4u + 3u + 1u + 3u + 4u + 3u + 16u + 16u)
 
 static bool btbh_gpu_animation_library_sample_skin_blended(
     const BTBHGPUAnimationLibrary *library,
@@ -3740,43 +4206,36 @@ static bool btbh_gpu_animation_library_sample_skin_blended(
         return false;
     }
 
-    float *translations = calloc(data->nodes_count * 3u, sizeof(float));
-    float *rotations = calloc(data->nodes_count * 4u, sizeof(float));
-    float *scales = calloc(data->nodes_count * 3u, sizeof(float));
-    float *sample_translations =
-        calloc(data->nodes_count * 3u, sizeof(float));
-    float *sample_rotations =
-        calloc(data->nodes_count * 4u, sizeof(float));
-    float *sample_scales =
-        calloc(data->nodes_count * 3u, sizeof(float));
-    float *rotation_weight_sums =
-        calloc(data->nodes_count, sizeof(float));
-    uint8_t *animated_nodes =
-        calloc(data->nodes_count, sizeof(uint8_t));
-    uint8_t *sample_animated_nodes =
-        calloc(data->nodes_count, sizeof(uint8_t));
-    if (
-        translations == NULL ||
-        rotations == NULL ||
-        scales == NULL ||
-        sample_translations == NULL ||
-        sample_rotations == NULL ||
-        sample_scales == NULL ||
-        rotation_weight_sums == NULL ||
-        animated_nodes == NULL ||
-        sample_animated_nodes == NULL
-    ) {
-        free(sample_animated_nodes);
-        free(animated_nodes);
-        free(rotation_weight_sums);
-        free(sample_scales);
-        free(sample_rotations);
-        free(sample_translations);
-        free(scales);
-        free(rotations);
-        free(translations);
+    /* One block: the clip's segments, then the floats, then three bytes a node (the blend's animated nodes, one
+       sample's, the world matrices' states). */
+    const size_t node_count = data->nodes_count;
+    const size_t node_bytes =
+        BTBH_GPU_ANIMATION_SCRATCH_FLOATS_PER_NODE * sizeof(float) + 3u;
+    const size_t segment_bytes =
+        (size_t)library->max_time_slots * sizeof(BTBHGPUAnimationSegment);
+    if (node_count > (SIZE_MAX - segment_bytes) / node_bytes) {
         return false;
     }
+    uint8_t *scratch = malloc(segment_bytes + node_count * node_bytes);
+    if (scratch == NULL) {
+        return false;
+    }
+    BTBHGPUAnimationSegment *segments = (BTBHGPUAnimationSegment *)scratch;
+    float *translations = (float *)(scratch + segment_bytes);
+    float *rotations = translations + node_count * 3u;
+    float *scales = rotations + node_count * 4u;
+    float *rotation_weight_sums = scales + node_count * 3u;
+    float *sample_translations = rotation_weight_sums + node_count;
+    float *sample_rotations = sample_translations + node_count * 3u;
+    float *sample_scales = sample_rotations + node_count * 4u;
+    float *local_matrices = sample_scales + node_count * 3u;
+    float *world_matrices = local_matrices + node_count * 16u;
+    uint8_t *animated_nodes = (uint8_t *)(world_matrices + node_count * 16u);
+    uint8_t *sample_animated_nodes = animated_nodes + node_count;
+    uint8_t *states = sample_animated_nodes + node_count;
+    /* The blend's sums start at zero: translations, rotations, scales and the rotation weights. */
+    (void)memset(translations, 0, node_count * 11u * sizeof(float));
+    (void)memset(animated_nodes, 0, node_count * sizeof(uint8_t));
 
     bool valid = true;
     for (uint32_t sample = 0u;
@@ -3789,7 +4248,8 @@ static bool btbh_gpu_animation_library_sample_skin_blended(
             sample_translations,
             sample_rotations,
             sample_scales,
-            sample_animated_nodes
+            sample_animated_nodes,
+            segments
         );
         const float weight = animation_weights[sample] / weight_sum;
         for (cgltf_size node = 0u;
@@ -3834,20 +4294,14 @@ static bool btbh_gpu_animation_library_sample_skin_blended(
             rotations,
             scales,
             animated_nodes,
+            local_matrices,
+            world_matrices,
+            states,
             matrices,
             matrix_capacity
         );
     }
-
-    free(sample_animated_nodes);
-    free(animated_nodes);
-    free(rotation_weight_sums);
-    free(sample_scales);
-    free(sample_rotations);
-    free(sample_translations);
-    free(scales);
-    free(rotations);
-    free(translations);
+    free(scratch);
     return valid;
 }
 
@@ -3938,6 +4392,16 @@ uint8_t btbh_gpu_animation_pose_set_samples(
         free(indices);
         return 0u;
     }
+    /* The samples' bits, as before: the palettes kept under the pose's serial still hold. */
+    const bool unchanged =
+        pose->serial != 0u &&
+        pose->sample_count == sample_count &&
+        memcmp(pose->animation_indices, indices, (size_t)sample_count * sizeof(*indices)) == 0 &&
+        memcmp(pose->animation_times, times, (size_t)sample_count * sizeof(*times)) == 0 &&
+        memcmp(pose->animation_weights, weights, (size_t)sample_count * sizeof(*weights)) == 0;
+    if (!unchanged) {
+        pose->serial = btbh_gpu_animation_next_serial();
+    }
     free(pose->animation_weights);
     free(pose->animation_times);
     free(pose->animation_indices);
@@ -3997,6 +4461,491 @@ void btbh_gpu_animation_library_destroy(
     if (library == NULL) {
         return;
     }
+    btbh_gpu_animation_library_free_decoded(library);
     cgltf_free(library->data);
     free(library);
+}
+
+size_t btbh_gpu_animation_library_decoded_bytes(
+    const BTBHGPUAnimationLibrary *library
+) {
+    return library != NULL ? library->decoded_bytes : 0u;
+}
+
+bool btbh_gpu_animation_library_sample_channel(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index,
+    uint32_t channel_index,
+    float time,
+    float value[4]
+) {
+    if (library == NULL ||
+        library->data == NULL ||
+        animation_index >= library->data->animations_count ||
+        !isfinite(time) ||
+        value == NULL) {
+        return false;
+    }
+    const cgltf_animation *animation =
+        &library->data->animations[animation_index];
+    const BTBHGPUAnimationClip *clip = &library->clips[animation_index];
+    if (channel_index >= animation->channels_count || !clip->valid) {
+        return false;
+    }
+    /* Its track: the sampled channels before it are the tracks before it. */
+    uint32_t track_index = 0u;
+    for (uint32_t index = 0u; index <= channel_index; index += 1u) {
+        const cgltf_animation_channel *channel = &animation->channels[index];
+        const bool sampled =
+            channel->target_node != NULL &&
+            (channel->target_path == cgltf_animation_path_type_translation ||
+             channel->target_path == cgltf_animation_path_type_rotation ||
+             channel->target_path == cgltf_animation_path_type_scale);
+        if (index == channel_index) {
+            if (!sampled) {
+                return false;
+            }
+            break;
+        }
+        track_index += sampled ? 1u : 0u;
+    }
+    if (track_index >= clip->track_count) {
+        return false;
+    }
+    const BTBHGPUAnimationTrack *track = &clip->tracks[track_index];
+    BTBHGPUAnimationSegment segment;
+    btbh_gpu_animation_find_segment(
+        &library->key_times[clip->time_sets[track->time_slot]],
+        time,
+        &segment
+    );
+    btbh_gpu_animation_track_sample(track, &segment, value);
+    return true;
+}
+
+/* ------------------------------------------------- Palettes kept across presents (since 0.16.0) */
+
+static uint32_t btbh_gpu_animation_float_bits(float value) {
+    uint32_t bits = 0u;
+    (void)memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+bool btbh_gpu_bone_palette_key(
+    const BTBHGPUAnimationLibrary *library,
+    const BTBHGPUAnimationPose *pose,
+    uint32_t animation_index,
+    float animation_time,
+    uint32_t skin_index,
+    uint32_t joint_count,
+    BTBHGPUBonePaletteKey *key
+) {
+    if (key == NULL) {
+        return false;
+    }
+    (void)memset(key, 0, sizeof(*key));
+    if (pose != NULL) {
+        if (pose->library == NULL || pose->sample_count == 0u) {
+            return false;
+        }
+        if (pose->sample_count == 1u) {
+            /* One sample's weight over itself is 1: the palette is the library's at that clip and time. */
+            key->serial = pose->library->serial;
+            key->animation_index = pose->animation_indices[0];
+            key->time_bits = btbh_gpu_animation_float_bits(pose->animation_times[0]);
+        } else {
+            key->serial = pose->serial;
+            key->animation_index = UINT32_MAX;
+        }
+    } else {
+        if (library == NULL) {
+            return false;
+        }
+        key->serial = library->serial;
+        key->animation_index = animation_index;
+        key->time_bits = btbh_gpu_animation_float_bits(animation_time);
+    }
+    key->skin_index = skin_index;
+    key->joint_count = joint_count;
+    return true;
+}
+
+typedef struct BTBHGPUBonePaletteEntry {
+    BTBHGPUBonePaletteKey key;
+    /* key.joint_count matrices (a block is always its palette's size). */
+    float *matrices;
+    uint32_t hash;
+    /* The cache's use (the window's frame) that last stored or found it; 0 for an empty slot. */
+    uint64_t last_use;
+} BTBHGPUBonePaletteEntry;
+
+/* An evicted palette's block, kept for the next palette of its size (a skin always comes back at its joint count). */
+typedef struct BTBHGPUBonePaletteSpare {
+    float *matrices;
+    uint32_t joint_count;
+} BTBHGPUBonePaletteSpare;
+
+/* The most spare blocks kept, and how far down the spares a store looks for one of its size. */
+#define BTBH_GPU_BONE_PALETTE_SPARE_LIMIT 256u
+#define BTBH_GPU_BONE_PALETTE_SPARE_SEARCH 32u
+/* The spares a use keeps however few palettes the last one stored. */
+#define BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM 16u
+
+struct BTBHGPUBonePaletteCache {
+    /* Open addressing with linear probing, a power of two of slots (0 before the first palette), at most half full. */
+    BTBHGPUBonePaletteEntry *slots;
+    uint32_t slot_count;
+    uint32_t entry_count;
+    /* The uses so far, from 1: the window's frames, and a use every BTBH_GPU_BONE_PALETTE_SCENES_PER_USE scenes
+       rendered without one (btbh_gpu_bone_palette_cache_begin). */
+    uint64_t use;
+    /* The scenes begun in this use. */
+    uint32_t scenes_this_use;
+    /* The use in which a palette found no room beside that use's own: nothing more is kept until the next use. */
+    uint64_t full_use;
+    /* The matrices every block holds, the entries' and the spares': never more than BTBH_GPU_BONE_PALETTE_BUDGET. */
+    size_t held_matrices;
+    /* The matrices the entries' palettes hold. */
+    size_t matrix_count;
+    /* The palettes stored in this use and in the last: the spares the next use keeps (its likely turnover). */
+    uint32_t stored_this_use;
+    uint32_t stored_last_use;
+    BTBHGPUBonePaletteSpare *spares;
+    uint32_t spare_count;
+    uint32_t spare_capacity;
+};
+
+static uint32_t btbh_gpu_bone_palette_hash(const BTBHGPUBonePaletteKey *key) {
+    uint64_t hash = key->serial * 0x9e3779b97f4a7c15ull;
+    hash ^= ((uint64_t)key->animation_index << 32u) | key->time_bits;
+    hash *= 0xbf58476d1ce4e5b9ull;
+    hash ^= ((uint64_t)key->skin_index << 32u) | key->joint_count;
+    hash *= 0x94d049bb133111ebull;
+    hash ^= hash >> 31u;
+    return (uint32_t)hash ^ (uint32_t)(hash >> 32u);
+}
+
+static bool btbh_gpu_bone_palette_key_equal(
+    const BTBHGPUBonePaletteKey *a,
+    const BTBHGPUBonePaletteKey *b
+) {
+    return a->serial == b->serial &&
+        a->animation_index == b->animation_index &&
+        a->time_bits == b->time_bits &&
+        a->skin_index == b->skin_index &&
+        a->joint_count == b->joint_count;
+}
+
+/* Frees spare `index` (the top one takes its place). */
+static void btbh_gpu_bone_palette_cache_free_spare(
+    BTBHGPUBonePaletteCache *cache,
+    uint32_t index
+) {
+    free(cache->spares[index].matrices);
+    cache->held_matrices -= cache->spares[index].joint_count;
+    cache->spare_count -= 1u;
+    cache->spares[index] = cache->spares[cache->spare_count];
+}
+
+/* Keeps an evicted palette's block as a spare, or frees it past BTBH_GPU_BONE_PALETTE_SPARE_LIMIT. */
+static void btbh_gpu_bone_palette_cache_keep_spare(
+    BTBHGPUBonePaletteCache *cache,
+    float *matrices,
+    uint32_t joint_count
+) {
+    if (cache->spare_count == cache->spare_capacity &&
+        cache->spare_capacity < BTBH_GPU_BONE_PALETTE_SPARE_LIMIT) {
+        const uint32_t capacity = cache->spare_capacity == 0u ? 16u : cache->spare_capacity * 2u;
+        BTBHGPUBonePaletteSpare *spares = realloc(cache->spares, capacity * sizeof(*spares));
+        if (spares != NULL) {
+            cache->spares = spares;
+            cache->spare_capacity = capacity;
+        }
+    }
+    if (cache->spare_count < cache->spare_capacity) {
+        cache->spares[cache->spare_count].matrices = matrices;
+        cache->spares[cache->spare_count].joint_count = joint_count;
+        cache->spare_count += 1u;
+    } else {
+        free(matrices);
+        cache->held_matrices -= joint_count;
+    }
+}
+
+/* A spare block of exactly `joint_count` matrices from the top BTBH_GPU_BONE_PALETTE_SPARE_SEARCH spares, or NULL. */
+static float *btbh_gpu_bone_palette_cache_take_spare(
+    BTBHGPUBonePaletteCache *cache,
+    uint32_t joint_count
+) {
+    const uint32_t lowest = cache->spare_count > BTBH_GPU_BONE_PALETTE_SPARE_SEARCH
+        ? cache->spare_count - BTBH_GPU_BONE_PALETTE_SPARE_SEARCH
+        : 0u;
+    for (uint32_t index = cache->spare_count; index > lowest; index -= 1u) {
+        BTBHGPUBonePaletteSpare *spare = &cache->spares[index - 1u];
+        if (spare->joint_count == joint_count) {
+            float *matrices = spare->matrices;
+            cache->spare_count -= 1u;
+            *spare = cache->spares[cache->spare_count];
+            return matrices;
+        }
+    }
+    return NULL;
+}
+
+/* Empties slot `index`, keeping its block as a spare, and shifts the entries probed past it back (no tombstones). */
+static void btbh_gpu_bone_palette_cache_remove(
+    BTBHGPUBonePaletteCache *cache,
+    uint32_t index
+) {
+    BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
+    cache->matrix_count -= entry->key.joint_count;
+    cache->entry_count -= 1u;
+    btbh_gpu_bone_palette_cache_keep_spare(cache, entry->matrices, entry->key.joint_count);
+    const uint32_t mask = cache->slot_count - 1u;
+    uint32_t hole = index;
+    uint32_t next = (hole + 1u) & mask;
+    while (cache->slots[next].last_use != 0u) {
+        const uint32_t home = cache->slots[next].hash & mask;
+        /* It may fill the hole when the hole lies between its home slot and where it sits. */
+        if (((next - home) & mask) >= ((next - hole) & mask)) {
+            cache->slots[hole] = cache->slots[next];
+            hole = next;
+        }
+        next = (next + 1u) & mask;
+    }
+    (void)memset(&cache->slots[hole], 0, sizeof(cache->slots[hole]));
+}
+
+/* Drops every palette last used before `oldest_kept_use`. */
+static void btbh_gpu_bone_palette_cache_evict_before(
+    BTBHGPUBonePaletteCache *cache,
+    uint64_t oldest_kept_use
+) {
+    uint32_t index = 0u;
+    while (cache->entry_count > 0u && index < cache->slot_count) {
+        const BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
+        if (entry->last_use != 0u && entry->last_use < oldest_kept_use) {
+            /* An entry shifted back into this slot is looked at next. */
+            btbh_gpu_bone_palette_cache_remove(cache, index);
+        } else {
+            index += 1u;
+        }
+    }
+}
+
+BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
+    BTBHGPUBonePaletteCache **slot,
+    bool frame,
+    bool skinned
+) {
+    if (slot == NULL || (*slot == NULL && !skinned)) {
+        return NULL;
+    }
+    if (*slot == NULL) {
+        *slot = calloc(1, sizeof(**slot));
+        if (*slot == NULL) {
+            return NULL;
+        }
+        (*slot)->use = 1u;
+    }
+    BTBHGPUBonePaletteCache *cache = *slot;
+    if (frame || cache->scenes_this_use >= BTBH_GPU_BONE_PALETTE_SCENES_PER_USE) {
+        cache->use += 1u;
+        cache->scenes_this_use = 0u;
+        if (cache->use > BTBH_GPU_BONE_PALETTE_MAX_AGE) {
+            btbh_gpu_bone_palette_cache_evict_before(
+                cache,
+                cache->use - BTBH_GPU_BONE_PALETTE_MAX_AGE
+            );
+        }
+        /* The spares this use is likely to take: as many as the last use stored. */
+        cache->stored_last_use = cache->stored_this_use;
+        cache->stored_this_use = 0u;
+        const uint32_t keep = cache->stored_last_use > BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM
+            ? cache->stored_last_use
+            : BTBH_GPU_BONE_PALETTE_SPARE_MINIMUM;
+        while (cache->spare_count > keep) {
+            btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
+        }
+    }
+    if (!frame) {
+        cache->scenes_this_use += 1u;
+    }
+    if (!skinned) {
+        /* A frame, or a scene without skins, only ages the palettes; once every one is gone, so is the cache. */
+        if (cache->entry_count == 0u) {
+            btbh_gpu_bone_palette_cache_destroy(cache);
+            *slot = NULL;
+        }
+        return NULL;
+    }
+    return cache;
+}
+
+const float *btbh_gpu_bone_palette_cache_find(
+    BTBHGPUBonePaletteCache *cache,
+    const BTBHGPUBonePaletteKey *key
+) {
+    if (cache == NULL || key == NULL || cache->entry_count == 0u) {
+        return NULL;
+    }
+    const uint32_t hash = btbh_gpu_bone_palette_hash(key);
+    const uint32_t mask = cache->slot_count - 1u;
+    for (uint32_t index = hash & mask;
+         cache->slots[index].last_use != 0u;
+         index = (index + 1u) & mask) {
+        BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
+        if (entry->hash == hash &&
+            btbh_gpu_bone_palette_key_equal(&entry->key, key)) {
+            entry->last_use = cache->use;
+            return entry->matrices;
+        }
+    }
+    return NULL;
+}
+
+/* Doubles the slots (at least 64), placing every entry anew. */
+static bool btbh_gpu_bone_palette_cache_grow(BTBHGPUBonePaletteCache *cache) {
+    const uint32_t slot_count = cache->slot_count == 0u ? 64u : cache->slot_count * 2u;
+    if (slot_count == 0u || (size_t)slot_count > SIZE_MAX / sizeof(BTBHGPUBonePaletteEntry)) {
+        return false;
+    }
+    BTBHGPUBonePaletteEntry *slots = calloc(slot_count, sizeof(*slots));
+    if (slots == NULL) {
+        return false;
+    }
+    const uint32_t mask = slot_count - 1u;
+    for (uint32_t index = 0u; index < cache->slot_count; index += 1u) {
+        const BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
+        if (entry->last_use == 0u) {
+            continue;
+        }
+        uint32_t target = entry->hash & mask;
+        while (slots[target].last_use != 0u) {
+            target = (target + 1u) & mask;
+        }
+        slots[target] = *entry;
+    }
+    free(cache->slots);
+    cache->slots = slots;
+    cache->slot_count = slot_count;
+    return true;
+}
+
+void btbh_gpu_bone_palette_cache_store(
+    BTBHGPUBonePaletteCache *cache,
+    const BTBHGPUBonePaletteKey *key,
+    const float *matrices
+) {
+    if (cache == NULL ||
+        key == NULL ||
+        matrices == NULL ||
+        key->joint_count == 0u ||
+        key->joint_count > BTBH_GPU_BONE_PALETTE_BUDGET ||
+        cache->full_use == cache->use ||
+        btbh_gpu_bone_palette_cache_find(cache, key) != NULL) {
+        return;
+    }
+    if (((size_t)cache->entry_count + 1u) * 2u > cache->slot_count &&
+        !btbh_gpu_bone_palette_cache_grow(cache)) {
+        return;
+    }
+    const uint32_t joint_count = key->joint_count;
+    /* A spare of its size, else a new block within the budget: the spares go first, then the palettes unused the
+       longest (their blocks become spares, which may fit). This use's palettes stay: when only they are left, this
+       one isn't kept, and neither is any other until the next use. */
+    float *block = btbh_gpu_bone_palette_cache_take_spare(cache, joint_count);
+    while (block == NULL &&
+           cache->held_matrices + joint_count > BTBH_GPU_BONE_PALETTE_BUDGET) {
+        if (cache->spare_count > 0u) {
+            btbh_gpu_bone_palette_cache_free_spare(cache, 0u);
+            continue;
+        }
+        uint64_t oldest = UINT64_MAX;
+        for (uint32_t index = 0u; index < cache->slot_count; index += 1u) {
+            const uint64_t last_use = cache->slots[index].last_use;
+            if (last_use != 0u && last_use < oldest) {
+                oldest = last_use;
+            }
+        }
+        if (oldest >= cache->use) {
+            cache->full_use = cache->use;
+            return;
+        }
+        btbh_gpu_bone_palette_cache_evict_before(cache, oldest + 1u);
+        block = btbh_gpu_bone_palette_cache_take_spare(cache, joint_count);
+    }
+    if (block == NULL) {
+        block = malloc((size_t)joint_count * 16u * sizeof(float));
+        if (block == NULL) {
+            return;
+        }
+        cache->held_matrices += joint_count;
+    }
+    (void)memcpy(block, matrices, (size_t)joint_count * 16u * sizeof(float));
+    const uint32_t hash = btbh_gpu_bone_palette_hash(key);
+    const uint32_t mask = cache->slot_count - 1u;
+    uint32_t index = hash & mask;
+    while (cache->slots[index].last_use != 0u) {
+        index = (index + 1u) & mask;
+    }
+    BTBHGPUBonePaletteEntry *entry = &cache->slots[index];
+    entry->key = *key;
+    entry->matrices = block;
+    entry->hash = hash;
+    entry->last_use = cache->use;
+    cache->entry_count += 1u;
+    cache->matrix_count += joint_count;
+    cache->stored_this_use += 1u;
+}
+
+void btbh_gpu_bone_palette_cache_read(
+    const BTBHGPUBonePaletteCache *cache,
+    uint32_t *palette_count,
+    size_t *matrix_count,
+    size_t *block_matrix_count,
+    size_t *bytes
+) {
+    uint32_t palettes = 0u;
+    size_t matrices = 0u;
+    size_t blocks = 0u;
+    size_t total = 0u;
+    if (cache != NULL) {
+        palettes = cache->entry_count;
+        matrices = cache->matrix_count;
+        blocks = cache->held_matrices;
+        total = sizeof(*cache) +
+            (size_t)cache->slot_count * sizeof(*cache->slots) +
+            (size_t)cache->spare_capacity * sizeof(*cache->spares) +
+            cache->held_matrices * 16u * sizeof(float);
+    }
+    if (palette_count != NULL) {
+        *palette_count = palettes;
+    }
+    if (matrix_count != NULL) {
+        *matrix_count = matrices;
+    }
+    if (block_matrix_count != NULL) {
+        *block_matrix_count = blocks;
+    }
+    if (bytes != NULL) {
+        *bytes = total;
+    }
+}
+
+void btbh_gpu_bone_palette_cache_destroy(BTBHGPUBonePaletteCache *cache) {
+    if (cache == NULL) {
+        return;
+    }
+    for (uint32_t index = 0u; index < cache->slot_count; index += 1u) {
+        if (cache->slots[index].last_use != 0u) {
+            free(cache->slots[index].matrices);
+        }
+    }
+    for (uint32_t spare = 0u; spare < cache->spare_count; spare += 1u) {
+        free(cache->spares[spare].matrices);
+    }
+    free(cache->spares);
+    free(cache->slots);
+    free(cache);
 }

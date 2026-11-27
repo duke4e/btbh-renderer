@@ -76,6 +76,7 @@ typedef struct BTBHGPUSceneRuntime BTBHGPUSceneRuntime;
 typedef struct BTBHGPUCanvasRuntime BTBHGPUCanvasRuntime;
 typedef struct BTBHGPUModelTextureShare BTBHGPUModelTextureShare;
 typedef struct BTBHGPULazyCreationLog BTBHGPULazyCreationLog;
+typedef struct BTBHGPUBonePaletteCache BTBHGPUBonePaletteCache;
 
 #define BTBH_GPU_FRAME_TELEMETRY_CAPACITY 256u
 
@@ -191,6 +192,9 @@ struct BTBHGPUWindow {
     /* The target views that keep a runtime of their own (btbh_gpu_window_scene_render_to_target_view, since 0.15.0):
        view_id 1 in [0] and so on, each made by the view's first call and kept until it is released. */
     BTBHGPUSceneRuntime *target_view_runtimes[BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY];
+    /* The skin palettes its scenes sampled, kept for later presents (since 0.16.0, btbh_gpu_model.c): shared by the
+       window's frame and every scene it renders to a target. Made by the first scene with a skinned geometry. */
+    BTBHGPUBonePaletteCache *bone_palette_cache;
     BTBHGPUSceneTelemetryReport scene_telemetry;
     /* BTBH_GPU_SCENE_RUNS=verify (since 0.13.0, btbh_gpu_scene.c): the window's counts so far. */
     BTBHGPUSceneRunVerifyReport scene_run_verify;
@@ -442,6 +446,21 @@ uint32_t btbh_gpu_scene_opaque_order(
     uint64_t *scratch
 );
 
+/* For the tests (since 0.16.0): the scene's bone palettes for `batches`, as a frame prepares them outside the temporal
+   path (btbh_gpu_scene.c's btbh_gpu_scene_prepare_bones): each geometry's palette offset (UINT32_MAX unskinned), then
+   the previous offsets (the same), and the palettes, freed by the caller. palette_cache is the window's kept palettes
+   or NULL; *palette_hit_count the palettes copied from it. */
+bool btbh_gpu_scene_prepare_bones_for_test(
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    BTBHGPUBonePaletteCache **palette_cache,
+    uint32_t **bone_offsets,
+    uint32_t *geometry_count,
+    float **bone_matrices,
+    uint32_t *bone_count,
+    uint32_t *palette_hit_count
+);
+
 /* RFC 0011 phase 1b, the run key (btbh_gpu_scene.c): whether `batch` continues the run of `previous`, the batch the
    pass drew before it, so that it binds and pushes nothing but its vertex and index buffers. True when the two are
    equal, byte for byte, in every field but kind, model, custom_mesh, material_slot, first_instance and
@@ -681,6 +700,88 @@ uint32_t btbh_gpu_animation_pose_skin_joint_count(
     const BTBHGPUAnimationPose *pose,
     uint32_t skin_index
 );
+/* The bytes the library's decoded arrays hold (since 0.16.0): key times, values, tracks, skins' joints and inverse
+   bind matrices, the nodes' rest transforms. */
+size_t btbh_gpu_animation_library_decoded_bytes(
+    const BTBHGPUAnimationLibrary *library
+);
+/* For the tests (since 0.16.0): channel `channel_index` of clip `animation_index` at `time` into `value`, from the
+   decoded arrays, as sampling a skin computes it before normalising a rotation; the floats a key's value doesn't
+   write keep what `value` held. False when sampling skips the channel (no target node, a path other than
+   translation, rotation and scale) or the clip can't be sampled. */
+bool btbh_gpu_animation_library_sample_channel(
+    const BTBHGPUAnimationLibrary *library,
+    uint32_t animation_index,
+    uint32_t channel_index,
+    float time,
+    float value[4]
+);
+
+/* The skin palettes kept across presents (since 0.16.0, btbh_gpu_model.c; BTBHGPUWindow.bone_palette_cache). A
+   palette is sampled once and copied while its key comes back: a library's (by its serial, unique for the process's
+   life), clip and time bits, or a blended pose's serial (new whenever its samples change); and the skin and its joint
+   count. A pose of one sample takes its library's, clip's and time's key (its weight over itself is 1, so its palette
+   is the library's to the bit). The cache counts uses: the window's frames (each one it finishes, its scenes rendered
+   into targets in it), and one every 16 scenes rendered without a frame. A palette unused for
+   BTBH_GPU_BONE_PALETTE_MAX_AGE uses goes, also while nothing skinned is drawn (a menu); once every palette is gone, so
+   is the cache. Every block counts against BTBH_GPU_BONE_PALETTE_BUDGET matrices, a hard
+   cap: the kept palettes' and the spare blocks' (evicted palettes' blocks, kept for palettes of their size, about as
+   many as the last use stored). Past it the spares go first, then the palettes unused the longest; a palette that
+   doesn't fit beside the current use's isn't kept, and nothing more is until the next use. */
+#define BTBH_GPU_BONE_PALETTE_MAX_AGE 8u
+#define BTBH_GPU_BONE_PALETTE_BUDGET 32768u
+typedef struct BTBHGPUBonePaletteKey {
+    uint64_t serial;
+    /* UINT32_MAX for a blended pose. */
+    uint32_t animation_index;
+    uint32_t time_bits;
+    uint32_t skin_index;
+    uint32_t joint_count;
+} BTBHGPUBonePaletteKey;
+/* The key of a geometry's palette (`pose` when set, else `library` at the clip and time); false when it has none (a
+   pose without samples). */
+bool btbh_gpu_bone_palette_key(
+    const BTBHGPUAnimationLibrary *library,
+    const BTBHGPUAnimationPose *pose,
+    uint32_t animation_index,
+    float animation_time,
+    uint32_t skin_index,
+    uint32_t joint_count,
+    BTBHGPUBonePaletteKey *key
+);
+/* Begins a use when the window finishes a frame (`frame`; btbh_gpu_window_finish_pending_frame and
+   btbh_gpu_window_copy_pending_scene_texture, with `skinned` false), or a scene (btbh_gpu_scene_prepare_bones,
+   `skinned` when it samples a skin; a new use after BTBH_GPU_BONE_PALETTE_SCENES_PER_USE scenes without a frame).
+   Makes the cache in *slot for the first skinned scene; a new use drops the palettes unused too long. Without
+   `skinned` it only ages the cache (nothing when there is none), frees it once it is empty, and returns NULL, as it
+   does when the cache can't be made. */
+#define BTBH_GPU_BONE_PALETTE_SCENES_PER_USE 16u
+BTBHGPUBonePaletteCache *btbh_gpu_bone_palette_cache_begin(
+    BTBHGPUBonePaletteCache **slot,
+    bool frame,
+    bool skinned
+);
+/* The palette kept under `key` (key->joint_count matrices), marked used; NULL when there is none. */
+const float *btbh_gpu_bone_palette_cache_find(
+    BTBHGPUBonePaletteCache *cache,
+    const BTBHGPUBonePaletteKey *key
+);
+/* Keeps a copy of `matrices` (key->joint_count of them) under `key`, unless it is kept already or doesn't fit. */
+void btbh_gpu_bone_palette_cache_store(
+    BTBHGPUBonePaletteCache *cache,
+    const BTBHGPUBonePaletteKey *key,
+    const float *matrices
+);
+/* The palettes kept and their matrices, the matrices every block holds (the palettes' and the spare blocks': never
+   more than BTBH_GPU_BONE_PALETTE_BUDGET), and every byte the cache holds (its slots, spare list and blocks). */
+void btbh_gpu_bone_palette_cache_read(
+    const BTBHGPUBonePaletteCache *cache,
+    uint32_t *palette_count,
+    size_t *matrix_count,
+    size_t *block_matrix_count,
+    size_t *bytes
+);
+void btbh_gpu_bone_palette_cache_destroy(BTBHGPUBonePaletteCache *cache);
 bool btbh_gpu_model_compose_orm_rgba8(
     const uint8_t *occlusion_pixels,
     uint32_t occlusion_width,

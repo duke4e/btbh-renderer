@@ -712,6 +712,11 @@ bool btbh_gpu_window_finish_pending_frame(
     if (scene_frame && !cost_emitted) {
         btbh_gpu_cost_abandon_frame();
     }
+    /* A frame of the window's, submitted or dropped: a new use of its kept palettes (since 0.16.0); nothing when it
+       keeps none. */
+    if (window->bone_palette_cache != NULL) {
+        (void)btbh_gpu_bone_palette_cache_begin(&window->bone_palette_cache, true, false);
+    }
     if (must_submit && result) {
         window->submitted_frame_count += 1u;
         if (acquired_swapchain) {

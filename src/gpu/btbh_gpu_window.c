@@ -1804,5 +1804,6 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
         window->owns_video_subsystem = false;
     }
     btbh_gpu_lazy_creation_release(window);
+    btbh_gpu_bone_palette_cache_destroy(window->bone_palette_cache);
     free(window);
 }
