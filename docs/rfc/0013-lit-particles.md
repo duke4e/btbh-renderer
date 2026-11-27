@@ -1,7 +1,7 @@
 # RFC 0013: Lit particles
 
 - **Status:** Phase 1 accepted on 2026-11-23 (the owner left the decision to the coordinator) and released in v0.11.0.
-  Phase 2 implemented for 0.14.0 (unreleased), once v2's owner picked the lit smoke as its default. See "Decisions",
+  Phase 2 implemented in v0.14.0, once v2's owner picked the lit smoke as its default. See "Decisions",
   "Implementation notes (phase 1)" and "Implementation notes (phase 2)"
 - **Requested by:** Be The Bullet Hell v2 (its session, 2026-11-23, after it shipped fake-lit smoke)
 - **Affects:** Be The Bullet Hell v2 (adopts it). Be The Bullet Hell (v1, Swift), CHIMERA and Tyrian3D: nothing, it is
