@@ -22,9 +22,13 @@ cbuffer HBAOUniforms : register(b0, space3)
 #define ssao_flags hbao_options.y
 #define projection_scale_y hbao_view.x
 
-// RFC 0014: whether a point (UV units) lies in the view's half of the frame: the passes draw each view clipped to its
-// half, and a tap on the other side counts for nothing, as one on the background doesn't. Always with one view.
-bool hbao_own_side(float2 uv)
+// RFC 0014: whether a pixel's or texel's centre (UV units) lies in the view's half of the frame, for a read of what
+// the passes wrote there. The passes draw each view clipped to its half widened by a quarter of a render pixel
+// (render_texel: one, in UV units), so what lies within a quarter pixel of the line was drawn by both views, the second
+// last: a read takes only what lies 3/8 of a render pixel or more inside the view's own line, which the other view
+// never drew (a quarter, and an eighth for the rasterizer's rounding). A tap elsewhere counts for nothing, as one on the
+// background does. Always with one view.
+bool hbao_own_side(float2 uv, float2 render_texel)
 {
-    return dot(hbao_view.yzw, float3(uv, 1.0f)) >= 0.0f;
+    return dot(hbao_view.yzw, float3(uv, 1.0f)) >= 0.625f * length(hbao_view.yz * render_texel);
 }

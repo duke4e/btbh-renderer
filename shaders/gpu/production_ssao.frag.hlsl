@@ -35,12 +35,15 @@ cbuffer PostUniforms : register(b0, space3)
     float4 ssr_hit_options;
 };
 
-// RFC 0014 (scene views, since 0.16.0): whether a point (UV units) lies in the view's half of the frame,
-// ssr_hit_options.yzw as a plane (all zero with one view: always). The pass draws each view clipped to its half, and
-// a sample on the other side counts for nothing.
+// RFC 0014 (scene views, since 0.16.0): whether a pixel's or texel's centre (UV units) lies in the view's half of the
+// frame, ssr_hit_options.yzw as a plane (all zero with one view: always), for a read of what the passes wrote there.
+// They draw each view clipped to its half widened by a quarter of a render pixel (inverse_resolution), so what lies
+// within a quarter pixel of the line was drawn by both views, the second last: a read takes only what lies 3/8 of a
+// render pixel or more inside the view's own line, which the other view never drew (a quarter, and an eighth for the
+// rasterizer's rounding). A sample elsewhere counts for nothing.
 bool view_own_side(float2 uv)
 {
-    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.0f;
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.625f * length(ssr_hit_options.yz * inverse_resolution);
 }
 
 struct FragmentInput

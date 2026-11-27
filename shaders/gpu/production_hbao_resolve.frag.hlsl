@@ -71,8 +71,9 @@ float4 main(FragmentInput input) : SV_Target0
         // (Texel centres through the sampler: a texture read without one would share another's slot in Metal.)
         const int2 at = clamp(base + int2(index & 1, index >> 1), int2(0, 0), low_size - 1);
         taps[index] = ssao_texture.SampleLevel(ssao_sampler, (float2(at) + 0.5f) / float2(low_size), 0.0f);
-        // RFC 0014: a texel of the other view's half counts for nothing, as one of a surface that takes none.
-        if (!hbao_own_side((float2(at) + 0.5f) / float2(low_size)))
+        // RFC 0014: a texel of the other view's half counts for nothing, as one of a surface that takes none; so
+        // does one by the line, which both views drew (the second last).
+        if (!hbao_own_side((float2(at) + 0.5f) / float2(low_size), 1.0f / float2(width, height)))
         {
             taps[index].x = -1.0f;
         }

@@ -52,10 +52,20 @@ cbuffer PostUniforms : register(b0, space3)
     float4 ssr_hit_options;
 };
 
-// RFC 0014 (scene views, since 0.16.0): whether a point (UV units) lies in the view's half of the frame,
-// ssr_hit_options.yzw as a plane (all zero with one view: always). The pass draws each view clipped to its half, and
-// a sample on the other side counts for nothing.
+// RFC 0014 (scene views, since 0.16.0): whether a pixel's or texel's centre (UV units) lies in the view's half of the
+// frame, ssr_hit_options.yzw as a plane (all zero with one view: always), for a read of what the passes wrote there.
+// They draw each view clipped to its half widened by a quarter of a render pixel (inverse_resolution), so what lies
+// within a quarter pixel of the line was drawn by both views, the second last: a read takes only what lies 3/8 of a
+// render pixel or more inside the view's own line, which the other view never drew (a quarter, and an eighth for the
+// rasterizer's rounding). A sample elsewhere counts for nothing.
 bool view_own_side(float2 uv)
+{
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.625f * length(ssr_hit_options.yz * inverse_resolution);
+}
+
+// RFC 0014: whether a texel's centre lies where the view drew (its half widened, the band by the line too): the
+// occlusion's last resort at a pixel in that band whose four texels all lie within it (depth_aware_upsample).
+bool view_drawn_side(float2 uv)
 {
     return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.0f;
 }
@@ -243,16 +253,33 @@ float depth_aware_upsample(float2 uv)
         max(normal_dot_view, 0.05f) / depth_edge_tolerance;
     float result = 0.0f;
     float weight_sum = 0.0f;
+    // RFC 0014: a texel of the other view's half counts for nothing, nor one by the line, which both views drew (the
+    // second last). A pixel in that band whose four texels all lie within it takes those its view drew: the second
+    // view's are its own, and such a pixel of the first view's is the second's to draw over.
+    bool own[4];
     bool any_own = false;
     [unroll]
     for (int index = 0; index < 4; ++index)
     {
-        // RFC 0014: a texel of the other view's half counts for nothing.
-        if (!view_own_side((float2(coordinates[index]) + 0.5f) / ssao_resolution))
+        own[index] = view_own_side((float2(coordinates[index]) + 0.5f) / ssao_resolution);
+        any_own = any_own || own[index];
+    }
+    if (!any_own)
+    {
+        [unroll]
+        for (int index = 0; index < 4; ++index)
+        {
+            own[index] = view_drawn_side((float2(coordinates[index]) + 0.5f) / ssao_resolution);
+            any_own = any_own || own[index];
+        }
+    }
+    [unroll]
+    for (int index = 0; index < 4; ++index)
+    {
+        if (!own[index])
         {
             continue;
         }
-        any_own = true;
         float sample_depth;
         const int2 sample_pixel = representative_full_pixel(
             coordinates[index],
