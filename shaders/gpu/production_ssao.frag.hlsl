@@ -31,7 +31,17 @@ cbuffer PostUniforms : register(b0, space3)
     float4x4 view_projection;
     float4 ssr_controls;
     float4 ao_controls;
+    // x the reflections' hits (production_ssao_resolve.frag.hlsl); yzw (RFC 0014) the view's half (view_own_side)
+    float4 ssr_hit_options;
 };
+
+// RFC 0014 (scene views, since 0.16.0): whether a point (UV units) lies in the view's half of the frame,
+// ssr_hit_options.yzw as a plane (all zero with one view: always). The pass draws each view clipped to its half, and
+// a sample on the other side counts for nothing.
+bool view_own_side(float2 uv)
+{
+    return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= 0.0f;
+}
 
 struct FragmentInput
 {
@@ -104,6 +114,8 @@ int2 representative_full_pixel(
         full_resolution - 1
     );
     selected_depth = sample_depth_at(selected_pixel);
+    // RFC 0014: one of the view's own half (the first such when the first pixel lies across the line).
+    bool own = view_own_side((float2(selected_pixel) + 0.5f) * inverse_resolution);
     const bool use_maximum =
         ((half_pixel.x + half_pixel.y) & 1) == 0;
     [unroll]
@@ -114,12 +126,18 @@ int2 representative_full_pixel(
             int2(0, 0),
             full_resolution - 1
         );
+        if (!view_own_side((float2(candidate_pixel) + 0.5f) * inverse_resolution))
+        {
+            continue;
+        }
         const float candidate_depth = sample_depth_at(candidate_pixel);
-        if ((use_maximum && candidate_depth > selected_depth) ||
+        if (!own ||
+            (use_maximum && candidate_depth > selected_depth) ||
             (!use_maximum && candidate_depth < selected_depth))
         {
             selected_pixel = candidate_pixel;
             selected_depth = candidate_depth;
+            own = true;
         }
     }
     return selected_pixel;
@@ -209,6 +227,11 @@ float main(FragmentInput input) : SV_Target0
             full_resolution,
             sample_depth
         );
+        // (RFC 0014: a sample on the other view's half occludes nothing.)
+        if (!view_own_side((float2(sample_pixel) + 0.5f) * inverse_resolution))
+        {
+            continue;
+        }
         const float3 sample_position = world_position(
             sample_pixel,
             sample_depth

@@ -44,7 +44,9 @@ float2 main(FragmentInput input) : SV_Target0
         {
             const float2 tap = texel_at(pixel + int2(x, y), size);
             const float box = (abs(x) == 2 ? 0.5f : 1.0f) * (abs(y) == 2 ? 0.5f : 1.0f);
-            const float weight = tap.x < 0.0f ? 0.0f : box * saturate(1.0f - abs(tap.y - centre.y) / tolerance);
+            // (RFC 0014: a tap on the other view's half counts for nothing.)
+            const bool own = hbao_own_side((float2(clamp(pixel + int2(x, y), int2(0, 0), size - 1)) + 0.5f) / float2(size));
+            const float weight = tap.x < 0.0f || !own ? 0.0f : box * saturate(1.0f - abs(tap.y - centre.y) / tolerance);
             sum += tap.x * weight;
             weight_sum += weight;
         }

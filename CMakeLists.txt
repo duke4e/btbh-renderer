@@ -216,6 +216,7 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_particle_transmittance.vert|vertex"
         "production_particle_transmittance.frag|fragment"
         "production_post.vert|vertex"
+        "production_post_view.vert|vertex"
         "production_ssao.frag|fragment"
         "production_ssao_denoise.frag|fragment"
         "production_ssao_resolve.frag|fragment"
