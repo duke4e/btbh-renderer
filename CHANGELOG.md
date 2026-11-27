@@ -17,20 +17,23 @@ All notable changes to this project are documented here. The format follows
     transforms. A sample finds where its time falls once for each set of key times, with the same comparisons and
     binary search, and computes every channel from it with the same arithmetic in the same order (step, the cubic
     spline with its tangents, the shortest slerp, the linear blend): palettes are the same to the bit. A clip or skin
-    whose accessor can't be read fails as before. The decoded arrays are about the size of the clips' own data
-    (0.9–1.25 times): 1 KB for the smokes' skinned quad, 104 KiB for v2's rocket spider (24 joints, 3 clips), 415 KiB
-    for its bruiser (41 joints, 4 clips), 870 KiB for its kaiju (123 joints, 10 clips).
+    whose accessor can't be read fails as before, and so does a skin with fewer inverse bind matrices than joints
+    (0.15.0 read past the accessor). The decoded arrays are about the size of the clips' own data (0.9–1.25 times): 1
+    KB for the smokes' skinned quad, 104 KiB for v2's rocket spider (24 joints, 3 clips), 415 KiB for its bruiser (41
+    joints, 4 clips), 870 KiB for its kaiju (123 joints, 10 clips).
   - **Each window keeps the palettes its scenes sampled** (its frame and its renders into targets alike), under the
     library, clip, time (its bits), skin and joint count, or a blended pose's samples; a pose of one sample shares its
     library's. A pose that comes back (a paused game, frozen bodies, corpses on a time grid, a second view of the same
-    frame) is copied, not sampled. A palette unused for 8 scenes goes, and past 32,768 matrices (2 MiB) the oldest go
-    first. A frame's batches with the same pose still share one palette in the bone buffer, found by a hash lookup now
-    instead of a scan of every earlier pose.
+    frame) is copied, not sampled. A palette unused for 8 of the window's frames goes, also while nothing skinned is
+    drawn (the cache itself goes once it is empty). Its blocks, the spare blocks it keeps for palettes of their size
+    included, never hold more than 32,768 matrices (2 MiB): past that the spares go first, then the palettes unused the
+    longest. A frame's batches with the same pose still share one palette in the bone buffer, found by a hash lookup
+    now instead of a scan of every earlier pose.
 - Tests: `btbh_gpu_animation_sampler` compares the decoded sampler with 0.15.0's cgltf reads, value by value and
   palette by palette, on every fixture with clips (the new `Tests/Fixtures/animation-samplers.gltf` has every kind of
   sampler: step, linear and cubic spline, normalised and integer outputs, repeated and single keys, clips that can't be
-  read) at every key time, either side of it, outside the range and at random times, and blends through a pose; and the
-  kept palettes against a model of them. `btbh_gpu_bone_bench` (a measurement): an army of skinned bodies in v2's
+  read) at every key time, either side of it, outside the range and at random times, and blends through a pose; the
+  kept palettes against a model of them; and the scene's palettes with the kept ones against those without. `btbh_gpu_bone_bench` (a measurement): an army of skinned bodies in v2's
   buckets of clip, rate and phase.
 
 ### Measured
@@ -46,9 +49,13 @@ built against it) then 0.16.0 each round.
 | v2's kaiju (123, 125) | 2.52 / 3.68 → 0.98 / 1.12 ms | 2.50 / 2.80 → 0.109 / 0.112 ms | 2.40 / 2.74 → 0.106 / 0.101 ms |
 
 A new pose costs 2.6 to 4.7 times less (5–6 µs for the spider, 6–11 for the bruiser, 14–16 for the kaiju, against 15–18,
-27–32 and 35–51); a pose that comes back is a copy. Kept palettes held at most 1.8 MB (the kaiju's moving army, at the
-budget). Every image of the renderer's smokes is byte for byte 0.15.0's in four modes (plain, shared meshes, no runs,
-runs verified): 421 images a mode, 0 px different, 331 of them from the smokes that draw a skinned model (flags,
+27–32 and 35–51); a pose that comes back is a copy. After the review's fixes (a hard budget, uses counted by frames),
+again under the lock (20:44:50 to 20:46:32, a quieter machine): moving 0.57 / 0.57 → 0.17 / 0.17 ms (spider), 0.91 /
+0.84 → 0.24 / 0.26 (bruiser), 2.00 / 1.93 → 0.65 / 0.61 (kaiju); held 0.57 / 0.56 → 0.027 / 0.027, 0.87 / 0.87 →
+0.006 / 0.007, 1.94 / 1.80 → 0.094 / 0.083: 3.1 to 3.8 times less for a new pose, the same as before. The kaiju's moving
+army holds the cache at its budget: 2.15 MB in all (2 MiB of palette blocks, the rest its table). Every image of the
+renderer's smokes is byte for byte 0.15.0's in four modes (plain, shared meshes, no runs, runs verified), before and
+after the fixes: 421 images a mode, 0 px different, 331 of them from the smokes that draw a skinned model (flags,
 height lift, prewarm, runs, world detail, lit particle).
 
 ## [0.15.0] — 2026-11-27
