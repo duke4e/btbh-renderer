@@ -27,6 +27,14 @@
  * measures the seam's band: the vertical split against its two cameras' one-view frames joined at the line, read back,
  * with the whole chain, without bloom, and without bloom and SSR.
  *
+ * Variants (0.16.0, for the cost log's 4K sample): BTBH_VIEWS_BENCH_UPSCALE=fsr3 runs FSR 3 at the frame's size (render
+ * scale 1) in place of SMAA, as Be The Bullet Hell v2's 4K High does; BTBH_VIEWS_BENCH_CAS=<sharpness> turns CAS on;
+ * BTBH_VIEWS_BENCH_CONFIGS=<names, comma-separated> runs only those configurations.
+ * With BTBH_GPU_COST_LOG=1 (the renderer's cost log; BTBH_GPU_COST_PASSES=1 adds its pass frames) each frame ends with a
+ * canvas present instead of the copy (the canvas submits the frame and the log times it; 0.15.0's way blits no box),
+ * and a line "BENCH sample <configuration> <round>" comes before each sample's frames, so that the log's lines can be
+ * told apart. The log waits for every frame, so the bench's own timings mean nothing then, and are not printed.
+ *
  * Output: one line a configuration (median, 10th and 90th percentiles, min, max in ms a frame), the CPU a frame and the
  * draws (each view's, or each call's). With no device it is skipped (77). */
 #include "btbh_gpu/btbh_gpu.h"
@@ -72,6 +80,14 @@ static const char *const shader_names[11] = {
     "production_post.frag",
 };
 static char shader_paths[11][1024];
+static const char *const canvas_shader_names[3] = {
+    "production_canvas.vert",
+    "production_canvas.frag",
+    "production_canvas_textured.frag",
+};
+static char canvas_shader_paths[3][1024];
+/* BTBH_GPU_COST_LOG=1: each frame ends with a canvas present (the cost log times it) instead of the copy. */
+static bool cost_log_mode;
 
 static void multiply(const float a[16], const float b[16], float out[16]) {
     for (int column = 0; column < 4; ++column) {
@@ -368,6 +384,18 @@ static bool bench_frame(BenchScene *scene, uint32_t config, uint64_t *cpu_nanose
     if (cpu_nanoseconds != NULL) {
         *cpu_nanoseconds = SDL_GetTicksNS() - started;
     }
+    if (cost_log_mode) {
+        BTBHGPUCanvasPass pass;
+        memset(&pass, 0, sizeof(pass));
+        BTBHGPUCanvasReport canvas_report;
+        if (btbh_gpu_window_canvas_present(scene->window, canvas_shader_paths[0], canvas_shader_paths[1],
+                canvas_shader_paths[2], BENCH_SHADER_FORMAT, NULL, 0u, NULL, 0u, &pass, 1u, &canvas_report) !=
+            BTBH_GPU_OK) {
+            fprintf(stderr, "%s: canvas: %s\n", names[config], canvas_report.message);
+            return false;
+        }
+        return true;
+    }
     BTBHGPUTextureReport copied;
     if (btbh_gpu_window_copy_pending_scene_texture(scene->window, scene->frame, &copied) != BTBH_GPU_OK) {
         fprintf(stderr, "%s: copy: %s\n", names[config], copied.message);
@@ -496,6 +524,31 @@ int main(void) {
     for (int index = 0; index < 11; ++index) {
         (void)snprintf(shader_paths[index], sizeof(shader_paths[index]), "%s/%s%s", BTBH_GPU_SMOKE_SHADER_DIR,
             shader_names[index], BENCH_SHADER_EXTENSION);
+    }
+    for (int index = 0; index < 3; ++index) {
+        (void)snprintf(canvas_shader_paths[index], sizeof(canvas_shader_paths[index]), "%s/%s%s",
+            BTBH_GPU_SMOKE_SHADER_DIR, canvas_shader_names[index], BENCH_SHADER_EXTENSION);
+    }
+    const char *cost_text = SDL_getenv("BTBH_GPU_COST_LOG");
+    cost_log_mode = cost_text != NULL && strcmp(cost_text, "1") == 0;
+    const char *upscale_text = SDL_getenv("BTBH_VIEWS_BENCH_UPSCALE");
+    const bool fsr3 = upscale_text != NULL && strcmp(upscale_text, "fsr3") == 0;
+    const char *cas_text = SDL_getenv("BTBH_VIEWS_BENCH_CAS");
+    const float cas_sharpness = cas_text != NULL ? (float)atof(cas_text) : 0.0f;
+    /* The configurations to run (all by default). */
+    bool enabled[CONFIGS];
+    const char *configs_text = SDL_getenv("BTBH_VIEWS_BENCH_CONFIGS");
+    for (uint32_t config = 0u; config < CONFIGS; ++config) {
+        enabled[config] = true;
+        if (configs_text != NULL && configs_text[0] != '\0') {
+            const size_t length = strlen(names[config]);
+            enabled[config] = false;
+            for (const char *at = strstr(configs_text, names[config]); at != NULL; at = strstr(at + 1, names[config])) {
+                if ((at == configs_text || at[-1] == ',') && (at[length] == '\0' || at[length] == ',')) {
+                    enabled[config] = true;
+                }
+            }
+        }
     }
     uint32_t width = 3840u;
     uint32_t height = 2160u;
@@ -718,6 +771,20 @@ int main(void) {
     post->vignette_intensity = 0.3f;
     post->vignette_smoothness = 0.5f;
     post->anti_aliasing = 1u; /* SMAA medium */
+    if (fsr3) {
+        /* FSR 3 at the frame's size (render scale 1) replaces the anti-aliasing (with one view; two run FSR 1). */
+        post->upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR3;
+        post->temporal_camera_near = 0.2f;
+        post->temporal_camera_far = 200.0f;
+        post->temporal_vertical_fov = 0.9f;
+        post->temporal_frame_seconds = 1.0f / 60.0f;
+        post->temporal_meters_per_unit = 1.0f;
+        post->temporal_reactive_scale = 0.3f;
+    }
+    if (cas_sharpness > 0.0f) {
+        post->cas_enabled = 1u;
+        post->cas_sharpness = cas_sharpness;
+    }
 
     /* The configurations' views, visibilities, rects and boxes. */
     float vertical_clip[3];
@@ -793,9 +860,11 @@ int main(void) {
         "shadow period %u, second view's sun map %s, %u frames a sample, %u rounds\n", width, height, GRID * GRID,
         12u * detail * detail, BATCHES, angle_degrees, period, own_sun ? "its own" : "shared", frames_per_sample,
         rounds);
+    printf("BENCH post %s, CAS %s%s\n", fsr3 ? "FSR 3 at scale 1" : "SMAA medium", cas_sharpness > 0.0f ? "on" : "off",
+        cost_log_mode ? ", cost log (canvas presents)" : "");
 
     for (uint32_t config = 0u; config < CONFIGS; ++config) {
-        for (uint32_t warm = 0u; warm < 6u; ++warm) {
+        for (uint32_t warm = 0u; warm < 6u && enabled[config]; ++warm) {
             if (!bench_frame(&scene, config, NULL)) {
                 return 1;
             }
@@ -879,6 +948,10 @@ int main(void) {
     double cpu_milliseconds[CONFIGS];
     for (uint32_t config = 0u; config < CONFIGS; ++config) {
         double values[12];
+        cpu_milliseconds[config] = 0.0;
+        if (!enabled[config]) {
+            continue;
+        }
         for (uint32_t index = 0u; index < 12u; ++index) {
             wait_idle(&scene);
             uint64_t nanoseconds = 0u;
@@ -894,6 +967,12 @@ int main(void) {
     for (uint32_t round = 0u; round < rounds; ++round) {
         for (uint32_t step = 0u; step < CONFIGS; ++step) {
             const uint32_t config = (step + round) % CONFIGS;
+            if (!enabled[config]) {
+                continue;
+            }
+            if (cost_log_mode) {
+                printf("BENCH sample %s %u\n", names[config], round);
+            }
             wait_idle(&scene);
             const uint64_t started = SDL_GetTicksNS();
             for (uint32_t index = 0u; index < frames_per_sample; ++index) {
@@ -907,7 +986,10 @@ int main(void) {
         }
     }
     wait_idle(&scene);
-    for (uint32_t config = 0u; config < CONFIGS; ++config) {
+    for (uint32_t config = 0u; config < CONFIGS && !cost_log_mode; ++config) {
+        if (!enabled[config]) {
+            continue;
+        }
         const uint32_t kept = rounds - 3u;
         double *values = &samples[config * rounds + 3u];
         qsort(values, kept, sizeof(double), compare_doubles);

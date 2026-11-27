@@ -870,11 +870,32 @@ static bool btbh_gpu_fsr3_clear_history(
     return cleared;
 }
 
+/* The cost log's pass frames (btbh_gpu_cost_step): the dispatches since the last step go to it and `step` begins here,
+   in `*command` (also stored in `*command_slot`). A new command buffer takes the upscaler's uniforms again once they
+   were pushed (`spd` not NULL). False, with both NULL, when the GPU failed. */
+static bool btbh_gpu_fsr3_cost_step(
+    SDL_GPUCommandBuffer **command_slot,
+    SDL_GPUCommandBuffer **command,
+    BTBHGPUCostStep step,
+    const BTBHGPUFSR3Runtime *runtime,
+    const BTBHGPUFSR3SPDConstants *spd
+) {
+    bool submitted = false;
+    const bool stepped = btbh_gpu_cost_step(command, step, &submitted);
+    *command_slot = *command;
+    if (stepped && submitted && spd != NULL) {
+        SDL_PushGPUComputeUniformData(*command, 0u, &runtime->constants, (uint32_t)sizeof(runtime->constants));
+        SDL_PushGPUComputeUniformData(*command, 1u, spd, (uint32_t)sizeof(*spd));
+    }
+    return stepped;
+}
+
 bool btbh_gpu_fsr3_encode(
-    SDL_GPUCommandBuffer *command,
+    SDL_GPUCommandBuffer **command_slot,
     BTBHGPUFSR3Runtime *runtime,
     const BTBHGPUFSR3Inputs *inputs
 ) {
+    SDL_GPUCommandBuffer *command = command_slot != NULL ? *command_slot : NULL;
     if (command == NULL || runtime == NULL || inputs == NULL ||
         runtime->pipelines[0] == NULL || runtime->output == NULL ||
         inputs->color == NULL || inputs->depth == NULL ||
@@ -905,6 +926,11 @@ bool btbh_gpu_fsr3_encode(
 
     btbh_gpu_fsr3_update_constants(runtime, inputs, reset);
 
+    /* (The clears go to the first dispatch's step.) */
+    if (!btbh_gpu_fsr3_cost_step(command_slot, &command, BTBH_GPU_COST_STEP_FSR3_PREPARE_INPUTS, runtime, NULL)) {
+        runtime->history_valid = false;
+        return false;
+    }
     SDL_InsertGPUDebugLabel(command, "BTBH FSR3");
     bool ok = true;
     if (reset) {
@@ -973,6 +999,8 @@ bool btbh_gpu_fsr3_encode(
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_PREPARE_INPUTS,
             "BTBH FSR3 Prepare Inputs", textures, point, 3u, storage, 5u, source_x, source_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_LUMA_PYRAMID, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {current_luma, runtime->intermediate};
         const BTBHGPUFSR3Storage storage[] = {
@@ -984,6 +1012,8 @@ bool btbh_gpu_fsr3_encode(
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_LUMA_PYRAMID,
             "BTBH FSR3 Luma Pyramid", textures, NULL, 2u, storage, 4u, spd_groups_x, spd_groups_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_SHADING_CHANGE_PYRAMID, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {
             current_luma, previous_luma, runtime->dilated_motion_vectors, runtime->default_exposure
@@ -1000,12 +1030,16 @@ bool btbh_gpu_fsr3_encode(
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_SHADING_CHANGE_PYRAMID,
             "BTBH FSR3 Shading Change Pyramid", textures, NULL, 4u, storage, 7u, spd_groups_x, spd_groups_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_SHADING_CHANGE, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {runtime->spd_mips};
         const BTBHGPUFSR3Storage storage[] = {{runtime->shading_change, 0u}};
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_SHADING_CHANGE,
             "BTBH FSR3 Shading Change", textures, NULL, 1u, storage, 1u, shading_x, shading_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_PREPARE_REACTIVITY, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {
             runtime->reconstructed_previous_depth,
@@ -1027,6 +1061,8 @@ bool btbh_gpu_fsr3_encode(
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_PREPARE_REACTIVITY,
             "BTBH FSR3 Prepare Reactivity", textures, point, 9u, storage, 3u, source_x, source_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_LUMA_INSTABILITY, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {
             runtime->default_exposure,
@@ -1045,6 +1081,8 @@ bool btbh_gpu_fsr3_encode(
         ok = btbh_gpu_fsr3_dispatch(command, runtime, BTBH_GPU_FSR3_PIPELINE_LUMA_INSTABILITY,
             "BTBH FSR3 Luma Instability", textures, point, 7u, storage, 2u, source_x, source_y);
     }
+    ok = ok && btbh_gpu_fsr3_cost_step(
+        command_slot, &command, BTBH_GPU_COST_STEP_FSR3_ACCUMULATE, runtime, &spd);
     if (ok) {
         SDL_GPUTexture *textures[] = {
             runtime->default_exposure,

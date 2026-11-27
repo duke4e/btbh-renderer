@@ -157,9 +157,11 @@ void btbh_gpu_fsr3_next_jitter(
     float *jitter_y
 );
 
-/* Encodes the upscaler's passes for this frame into runtime->output (RGBA16F, the output size). */
+/* Encodes the upscaler's passes for this frame into runtime->output (RGBA16F, the output size). `*command` may be
+   replaced: the cost log's pass frames (btbh_gpu_cost_step) submit it between the dispatches, and it is NULL after a
+   failed split. */
 bool btbh_gpu_fsr3_encode(
-    SDL_GPUCommandBuffer *command,
+    SDL_GPUCommandBuffer **command,
     BTBHGPUFSR3Runtime *runtime,
     const BTBHGPUFSR3Inputs *inputs
 );
