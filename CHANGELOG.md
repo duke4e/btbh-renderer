@@ -26,26 +26,36 @@ All notable changes to this project are documented here. The format follows
     camera, as one pass with a clipped draw per view through the new **`production_post_view.vert`**: the SSAO or HBAO
     with their denoise and resolve, the reflections, the distance pass and the HDR composite. So the distance fog, the
     world-edge fade and the lit particles' fog read each view's camera, as v2 asked. The SSAO's and HBAO's taps on the
-    other half count for nothing, a reflection stops short of the line (and fades near it), as at the screen's edge.
+    other half, or in the band by the line (below), count for nothing, a reflection stops short of the line (and fades
+    near it), as at the screen's edge.
   - **Shadow maps:** the secondary map, and an omni map, are the call's. A sun or spot map is shared by views whose
     matrices are equal byte for byte; else the second view has its own (and its own particle transmittance map), drawn
     with its camera's billboards and its `shadow_visibility`. In the update periods' order a view's own map comes right
     after view 0's, so at v2's sun period of 2 the two sun maps are redrawn on alternate frames: one map a frame.
-  - **The line:** each half is widened by a quarter of a render pixel, so no pixel is drawn by neither view; a pixel
-    whose centre lies within that of the line is drawn by both (the nearer surface shows, the screen-space passes take
-    the second view's). Bloom reaches across (its widest level, 1/64 of the frame), the anti-aliasing and FSR 1 a few
-    pixels, and a refracting surface its displacement: v2's divider covers them.
+  - **The line:** each half is widened by a quarter of a render pixel, so no pixel is drawn by neither view. A pixel
+    whose centre lies within that of the line is drawn by both, the band by the line: none on a line along pixel
+    edges, a column on one through pixel centres, about one pixel a row on a diagonal. There the nearer opaque surface
+    shows and the screen-space passes that write a pixel take the second view's, but both views' transparent and
+    additive surfaces blend into it, and the HBAO's occlusion (which darkens by blending) can darken it twice. The
+    screen-space passes' reads leave the band out: each view's taps, at full and half size, come from pixels and
+    texels it alone drew (3/8 of a render pixel or more inside its line). Bloom reaches across (its widest level, 1/64
+    of the frame), the anti-aliasing and FSR 1 a few pixels, and a refracting surface its displacement: v2's divider
+    covers them.
   - **Not with two views (phase 1):** the radiance cascades (off for the frame, `fallback_reason`
-    `BTBH_GPU_SCENE_RC_FALLBACK_VIEWS`; their history starts afresh) and FSR 3 (FSR 1 runs, `report.upscale_mode`
-    says so; the next FSR 3 frame starts a new history). One view with a `clip` counts as a split.
+    `BTBH_GPU_SCENE_RC_FALLBACK_VIEWS`; once such a frame is drawn their history starts afresh, while a prewarm or a
+    refused present keeps it) and FSR 3 (FSR 1 runs, `report.upscale_mode` says so; the next FSR 3 frame starts a new
+    history). One view with a `clip` counts as a split.
   - **The report:** the frame's, as the present's (its draws are every view's); `view_reports` gives each view's
     draws, instances (each drawn batch once), the sun and spot maps it read (itself or view 0; `UINT32_MAX` without the
     shadow) and its sort's and encode's CPU time. Under `BTBH_GPU_COST_LOG`'s split frames a second view's geometry goes
     to passes of its own (`view1_main_ms`, `view1_transparent_ms`, printed only on such frames).
   - **Refused** with `BTBH_GPU_INVALID_ARGUMENT`, naming the view, the window left as it was: `views` NULL, 0 or more
-    than 2 views, a camera not finite or not invertible, a `clip` not finite, two views without a line, a visibility
-    byte above 1, an unknown flag, `reserved` set, an invalid `lighting`; and for a split, SPIR-V scene vertex shaders
-    that don't write the clip distance (older builds) or no `production_post_view.vert`, naming the file.
+    than 2 views, a camera not finite or not invertible, a `clip` not finite, two views without a line or one view's
+    `clip` of (0, 0, c) with c not 0, a visibility byte above 1, an unknown flag, `reserved` set, an invalid `lighting`,
+    a lifted batch (RFC 0012) that a view's `shadow_visibility` lets into its sun map (as the call's
+    `directional_shadow_visibility` may not); and for a split, SPIR-V scene vertex shaders that don't write the clip
+    distance (older builds) or no `production_post_view.vert`, naming the file (found once per path, not looked for
+    again each frame). Every refusal comes before the present changes anything.
   - **What stays as before:** the present, `_with_visibility`, `render_to_target` (with views and rects), the prewarms
     and every other call. They now go through the same internal function as one view, and one view with a zero clip
     and no visibility or lighting of its own draws byte for byte as `_with_visibility`. Shaders: the five scene vertex
@@ -65,9 +75,11 @@ All notable changes to this project are documented here. The format follows
     call's visibility, the opaque sort, FSR 3 from half the size), in the four modes; a vertical split and a 30-degree
     diagonal (also from three quarters of the size) against the two cameras' one-view frames joined along the line;
     no tap crossing it (one view's raised step leaves the other's half byte for byte as it was, where one view of it
-    darkens 608 pixels beside it); no pixel drawn by neither view; shared and own shadow maps (one map a frame with
-    equal matrices, two with different ones, one a frame at a sun period of 2), a view's own sun, spot and point light;
-    the per-view report; the FSR 3 and cascades fallbacks; the prewarm; the refusals, older vertex shaders and a
+    darkens 608 pixels beside it), nor taking the band by the line (the same with the line through a half-size
+    texel's centre, and on the diagonal); no pixel drawn by neither view; shared and own shadow maps (one map a frame
+    with equal matrices, two with different ones, one a frame at a sun period of 2), a view's own sun, spot and point
+    light; the per-view report; the FSR 3 and cascades fallbacks (the cascades' history new after a frame of two
+    views, kept after a prewarm for them and a refused present); the prewarm; the refusals, older vertex shaders and a
     missing `production_post_view.vert`. `btbh_gpu_scene_order_test` asserts the structs' layouts and the planes on
     the CPU. The joined frames differ from the split's halves by a level or few here and there, and by an edge pixel
     or two: the rasterizer clips each view's triangles at its line and interpolates from the vertices it makes there,
@@ -98,7 +110,8 @@ All notable changes to this project are documented here. The format follows
     priority had medians within 0.7 ms of these and wider spreads everywhere). At 4K the split against the two
     cameras' whole frames joined: within 263 px of the line more than 2 steps apart with bloom (80 px without: the
     whole frames' HBAO reaching across), more than 32 steps only within 7 px (1 px without bloom); elsewhere at most 2
-    steps (the clipping's rounding).
+    steps (the clipping's rounding). (Measured before the AO passes' reads left out the band by the line, which adds
+    a few instructions a tap; not measured again.)
 
 ### Known
 - **Metal: the clip distance was never run on a GPU.** The MSL carries `[[clip_distance]]` (and SPIRV-Cross's
