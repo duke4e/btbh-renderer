@@ -609,7 +609,7 @@ void btbh_gpu_cost_abandon_frame(void);
    command buffer into `*command`. False, with `*command` NULL, when the GPU failed either. Otherwise a no-op. */
 bool btbh_gpu_cost_split(SDL_GPUCommandBuffer **command, BTBHGPUCostGroup finished_group);
 /* The cost log's pass frames (since 0.16.0, `BTBH_GPU_COST_PASSES=1` with the log): about every other split frame (the
-   golden-ratio sequence again, over the split frames) also cuts the ssao and post groups at each pass, a piece a step
+   sequence {k sqrt 2} >= 0.5 over the split frames) also cuts the ssao and post groups at each pass, a piece a step
    below, and prints a `BTBH_GPU_COST_PASSES` line instead of its `BTBH_GPU_COST` line: each step's submit-to-fence time
    less the frame's submission floor (`floor_ms`, an empty command buffer's submit-to-fence time), so the steps of a
    group add up to about its time less one floor. The other split frames and the whole ones print as before. */
