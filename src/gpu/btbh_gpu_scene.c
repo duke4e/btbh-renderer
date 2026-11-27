@@ -13179,23 +13179,12 @@ static BTBHGPUSceneScissor btbh_gpu_scene_target_scissor(
     return scissor;
 }
 
-/* The 1x1 texture a target view's rect fills the target with outside it (since 0.15.0), in the target's format: made
-   where missing or of another format, in the window's current scene runtime. False, with the report set, when it
-   can't be made. */
-static bool btbh_gpu_scene_ensure_target_clear_texture(
-    BTBHGPUWindow *window,
-    SDL_GPUTextureFormat format,
-    BTBHGPUSceneReport *report
+/* The 1x1 texture a target view's rect fills the target with outside it (since 0.15.0), in the target's format; NULL,
+   with SDL's error set, when it can't be made. */
+static SDL_GPUTexture *btbh_gpu_scene_create_target_clear_texture(
+    SDL_GPUDevice *device,
+    SDL_GPUTextureFormat format
 ) {
-    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
-    if (runtime->target_clear_texture != NULL && runtime->target_clear_format == format) {
-        return true;
-    }
-    SDL_GPUDevice *device = window->device->gpu;
-    if (runtime->target_clear_texture != NULL) {
-        SDL_ReleaseGPUTexture(device, runtime->target_clear_texture);
-        runtime->target_clear_texture = NULL;
-    }
     SDL_GPUTextureCreateInfo info;
     SDL_zero(info);
     info.type = SDL_GPU_TEXTURETYPE_2D;
@@ -13206,19 +13195,55 @@ static bool btbh_gpu_scene_ensure_target_clear_texture(
     info.layer_count_or_depth = 1u;
     info.num_levels = 1u;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    runtime->target_clear_texture = SDL_CreateGPUTexture(device, &info);
-    if (runtime->target_clear_texture == NULL) {
+    return SDL_CreateGPUTexture(device, &info);
+}
+
+/* Whether `runtime` (NULL: not made yet) holds the fill texture for a target of `format`. */
+static bool btbh_gpu_scene_has_target_clear_texture(
+    const BTBHGPUSceneRuntime *runtime,
+    SDL_GPUTextureFormat format
+) {
+    return runtime != NULL && runtime->target_clear_texture != NULL && runtime->target_clear_format == format;
+}
+
+/* Gives `runtime` its fill texture (made for `format`), releasing one of another format. */
+static void btbh_gpu_scene_install_target_clear_texture(
+    SDL_GPUDevice *device,
+    BTBHGPUSceneRuntime *runtime,
+    SDL_GPUTexture *texture,
+    SDL_GPUTextureFormat format
+) {
+    if (runtime->target_clear_texture != NULL) {
+        SDL_ReleaseGPUTexture(device, runtime->target_clear_texture);
+    }
+    runtime->target_clear_texture = texture;
+    runtime->target_clear_format = format;
+}
+
+/* The fill texture in the window's current scene runtime (the prewarm's), made where missing or of another format.
+   False, with the report set, when it can't be made. */
+static bool btbh_gpu_scene_ensure_target_clear_texture(
+    BTBHGPUWindow *window,
+    SDL_GPUTextureFormat format,
+    BTBHGPUSceneReport *report
+) {
+    if (btbh_gpu_scene_has_target_clear_texture(window->scene_runtime, format)) {
+        return true;
+    }
+    SDL_GPUDevice *device = window->device->gpu;
+    SDL_GPUTexture *texture = btbh_gpu_scene_create_target_clear_texture(device, format);
+    if (texture == NULL) {
         btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
         return false;
     }
-    runtime->target_clear_format = format;
+    btbh_gpu_scene_install_target_clear_texture(device, window->scene_runtime, texture, format);
     return true;
 }
 
 /* Fills `target` outside `rect` (in its pixels) with the clear colour (since 0.15.0), after the finished scene was
    blitted into it whole: the 1x1 texture is cleared to the colour and blitted, unfiltered, over each of the four bands
-   round the rect. A clear stores the colour as the target's format does (an 8-bit one: these bytes). False when the
-   clear's pass can't begin. */
+   round the rect. A clear stores the colour as the target's format does (an 8-bit UNORM target: these bytes; an sRGB
+   one: their sRGB encoding). False when the clear's pass can't begin. */
 static bool btbh_gpu_scene_fill_outside_rect(
     SDL_GPUCommandBuffer *command,
     BTBHGPUSceneRuntime *runtime,
@@ -13568,6 +13593,23 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET, &lazy_scope);
     BTBHGPUSceneAsideSwap swap;
     btbh_gpu_scene_enter_aside(window, btbh_gpu_scene_target_view_slot(window, view), &swap);
+    /* A rect's fill texture, made before the present: a present that returns OK has committed the window's upload
+       queue (its copies are in the command buffer), so nothing after it may cancel that command buffer. Made apart
+       from the runtime (which the present may make first), and handed to it once the present succeeded; released if
+       the present refused or failed, so that a refused call leaves the window as it was. (What
+       btbh_gpu_window_scene_prewarm_render_to_target_view makes for a view with a rect.) */
+    SDL_GPUTexture *fresh_clear_texture = NULL;
+    if (scissor.active && !btbh_gpu_scene_has_target_clear_texture(window->scene_runtime, target->format)) {
+        btbh_gpu_lazy_creation_prewarm_step(true);
+        fresh_clear_texture = btbh_gpu_scene_create_target_clear_texture(window->device->gpu, target->format);
+        btbh_gpu_lazy_creation_prewarm_step(false);
+        if (fresh_clear_texture == NULL) {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            btbh_gpu_scene_leave_aside(window, &swap);
+            btbh_gpu_lazy_creation_end(&lazy_scope);
+            return report->result;
+        }
+    }
     if (!kept) {
         /* Each such scene starts afresh: no shadow map kept from the last one (whatever the window's shadow
            update periods), no radiance-cascade history (two portraits are two pictures). A kept view's runtime
@@ -13618,12 +13660,14 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
         SDL_GPUCommandBuffer *command = window->pending_command;
         window->pending_command = NULL;
         window->pending_scene_ready = false;
-        bool fill_ready = true;
-        if (scissor.active) {
-            /* (What btbh_gpu_window_scene_prewarm_render_to_target_view makes for a view with a rect.) */
-            btbh_gpu_lazy_creation_prewarm_step(true);
-            fill_ready = btbh_gpu_scene_ensure_target_clear_texture(window, target->format, report);
-            btbh_gpu_lazy_creation_prewarm_step(false);
+        if (fresh_clear_texture != NULL) {
+            btbh_gpu_scene_install_target_clear_texture(
+                window->device->gpu,
+                runtime,
+                fresh_clear_texture,
+                target->format
+            );
+            fresh_clear_texture = NULL;
         }
         /* The composite is at the target's size after an upscale, else at the render size: a blit
            scales it (bilinearly; a render twice the target's size is halved exactly). */
@@ -13640,13 +13684,15 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
                 runtime->composite_height == target->height
             ? SDL_GPU_FILTER_NEAREST
             : SDL_GPU_FILTER_LINEAR;
-        if (fill_ready) {
-            SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
-            SDL_BlitGPUTexture(command, &blit);
-        }
-        /* A target view's rect: outside it, the clear colour (the blit filtered across its border). */
-        if (fill_ready &&
-            scissor.active &&
+        SDL_InsertGPUDebugLabel(command, "BTBH Scene To Target");
+        SDL_BlitGPUTexture(command, &blit);
+        /* A target view's rect: outside it, the clear colour (the blit filtered across its border). If the fill's
+           pass can't begin, what was recorded is still submitted, as a frame holding queued uploads is when the canvas
+           drops it (btbh_gpu_window_finish_pending_frame): the queue was committed with this command buffer. The call
+           then fails, the target holding the scene but not the fill. */
+        char fill_error[256];
+        fill_error[0] = '\0';
+        if (scissor.active &&
             !btbh_gpu_scene_fill_outside_rect(
                 command,
                 runtime,
@@ -13657,24 +13703,26 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
                 clear_blue,
                 clear_alpha
             )) {
-            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
-            fill_ready = false;
+            (void)snprintf(fill_error, sizeof(fill_error), "GPU scene could not fill outside the rect: %s",
+                SDL_GetError());
         }
-        if (!fill_ready) {
-            btbh_gpu_scene_cancel_submission(window, command);
-        } else {
-            const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
-            const bool submitted = SDL_SubmitGPUCommandBuffer(command);
-            btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
-            btbh_gpu_window_scene_submission_finished(window, submitted);
-            if (!submitted) {
-                btbh_gpu_scene_error(
-                    report,
-                    BTBH_GPU_DEVICE_FAILURE,
-                    SDL_GetError()
-                );
-            }
+        const uint64_t submit_started_ticks = btbh_gpu_lazy_creation_clock();
+        const bool submitted = SDL_SubmitGPUCommandBuffer(command);
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_TARGET_SUBMIT, submit_started_ticks);
+        btbh_gpu_window_scene_submission_finished(window, submitted);
+        if (!submitted) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_DEVICE_FAILURE,
+                SDL_GetError()
+            );
+        } else if (fill_error[0] != '\0') {
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, fill_error);
         }
+    }
+    if (fresh_clear_texture != NULL) {
+        /* The present refused or failed: the texture made for it goes. */
+        SDL_ReleaseGPUTexture(window->device->gpu, fresh_clear_texture);
     }
     btbh_gpu_scene_leave_aside(window, &swap);
     btbh_gpu_lazy_creation_end(&lazy_scope);

@@ -2630,7 +2630,8 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target(
      nor are the cascades' passes in their field; their per-pixel compute passes run whole, but stop at once where the
      depth outside the rect is the far plane's.
    - Outside the rect the target holds the clear colour (clear_red / 255 and so on, as a clear of the target stores
-     it: an 8-bit target, these bytes). The passes that read their neighbours read cleared values there, so a band
+     it: an 8-bit UNORM target holds these bytes, an sRGB one their sRGB encoding, so clear_red 128 reads back about
+     188). The passes that read their neighbours read cleared values there, so a band
      inside the rect's border differs from a render of the whole target: a seam of a few pixels where the
      anti-aliasing, CAS and FSR 1 read the clear (in the renderer's smoke 3 pixels at the render size, 19 target
      pixels when FSR 1 enlarges a half-size render), and a softer band as wide as the SSAO's, HBAO's and bloom's
@@ -2691,8 +2692,9 @@ BTBHGPUResult btbh_gpu_window_scene_render_to_target_view(
     BTBHGPUSceneReport *report
 );
 /* btbh_gpu_window_scene_prewarm_render_to_target for renders with `view`: in the view's runtime (view_id 1 and up:
-   made here if it doesn't exist yet), and with what a rect needs besides. A NULL view, or view_id 0, is exactly
-   btbh_gpu_window_scene_prewarm_render_to_target. Refusals: its own, and those of
+   made here if it doesn't exist yet), and with what a rect needs besides. A NULL view, or view_id 0 without a rect, is
+   exactly btbh_gpu_window_scene_prewarm_render_to_target; view_id 0 with a rect also makes the rect's 1x1 fill
+   texture (in the target's format) in render_to_target's runtime. Refusals: its own, and those of
    btbh_gpu_window_scene_render_to_target_view for the view. */
 BTBHGPUResult btbh_gpu_window_scene_prewarm_render_to_target_view(
     BTBHGPUWindow *window,

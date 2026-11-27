@@ -29,9 +29,11 @@ All notable changes to this project are documented here. The format follows
     CAS, tilt-shift, the output pass, SMAA or FXAA, and FSR 1's EASU and RCAS or Lanczos. The shadow maps and the
     cascades' field are never limited; the cascades' per-pixel compute passes run whole but stop at once on the
     cleared depth outside. With `mirror_horizontal` the rect is the target's after the mirror.
-  - **Outside the rect** the target holds the clear colour, byte for byte (an 8-bit target holds `clear_red` and so on):
-    the finished scene is blitted in whole, as before, and a 1x1 texture cleared to the colour is blitted over the
-    four bands round the rect. Every pass clears its own target first, so what the neighbour-reading passes read
+  - **Outside the rect** the target holds the clear colour, as a clear of the target stores it (an 8-bit UNORM target
+    holds `clear_red` and so on, byte for byte; an sRGB one their sRGB encoding): the finished scene is blitted in
+    whole, as before, and a 1x1 texture cleared to the colour is blitted over the four bands round the rect. The
+    texture is made before the scene is recorded (a prewarm with a rect makes it too), so nothing after the present
+    cancels a command buffer that carries the window's queued uploads. Every pass clears its own target first, so what the neighbour-reading passes read
     outside is defined, and the band inside the border differs from a whole render: in the smoke, a seam of 3 pixels
     (the anti-aliasing, CAS, FSR 1 reading the clear; 19 target pixels when FSR 1 doubles a half-size render) inside a
     softer band of 24-34 (the SSAO's and HBAO's reach; bloom's 51). At 4K in the bench: the HBAO's within 80 pixels
