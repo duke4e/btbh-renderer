@@ -511,6 +511,22 @@ void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
    or a kept target view's (1 to BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY). -1 when that runtime doesn't exist. */
 #define BTBH_GPU_SCENE_WINDOW_RUNTIME UINT32_MAX
 int64_t btbh_gpu_window_scene_shadow_render_count(const BTBHGPUWindow *window, uint32_t view_id);
+/* RFC 0014 (scene views, since 0.16.0): a view's half of the frame (BTBHGPUSceneView.clip, in output_width x
+   output_height pixels) widened by a quarter of a render pixel (render_width x render_height), as the planes its passes
+   test:
+   clip_plane (a, b, c, 0) in clip space, a point drawn where a x + b y + c w >= 0 (surface_controls.yzw,
+   production_post_view.vert's block); uv_plane (0, a, b, c) in UV units, a point (u, v) the view's where
+   a u + b v + c >= 0 (BTBHGPUSceneHBAOUniforms.view, BTBHGPUPostUniforms.ssr_hit_options). A zero clip gives zero
+   planes: the whole frame. */
+void btbh_gpu_scene_view_planes(
+    const float clip[3],
+    uint32_t output_width,
+    uint32_t output_height,
+    uint32_t render_width,
+    uint32_t render_height,
+    float clip_plane[4],
+    float uv_plane[4]
+);
 void btbh_gpu_window_release_canvas(BTBHGPUWindow *window);
 uint32_t btbh_gpu_parse_allowed_frames_in_flight(const char *value);
 /* The present mode a window takes for `requested` (a BTBHGPUPresentMode), given whether it supports
@@ -578,7 +594,11 @@ typedef enum BTBHGPUCostGroup {
     BTBH_GPU_COST_GROUP_TRANSPARENT = 7, /* the soft-particle distance and the transparent/effects pass */
     BTBH_GPU_COST_GROUP_POST = 8,        /* bloom, HDR composite, LUT, CAS, tilt-shift, FXAA/SMAA, FSR, upscale */
     BTBH_GPU_COST_GROUP_UI = 9,          /* the canvas: the scene onto the swapchain, the UI */
-    BTBH_GPU_COST_GROUP_COUNT = 10
+    /* RFC 0014 (since 0.16.0): a frame of two scene views draws its second view's geometry in passes of their own; the
+       first view's are main and transparent. Printed only when a frame drew a second view. */
+    BTBH_GPU_COST_GROUP_VIEW1_MAIN = 10,
+    BTBH_GPU_COST_GROUP_VIEW1_TRANSPARENT = 11,
+    BTBH_GPU_COST_GROUP_COUNT = 12
 } BTBHGPUCostGroup;
 /* Starts a scene frame; with the cost log about every other one is split. */
 void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device);
