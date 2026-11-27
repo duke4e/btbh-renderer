@@ -95,13 +95,14 @@ float view_plane_scale()
 // RFC 0014 (since 0.16.1): how far inside the view's edge (render pixels; the edge is its line widened a quarter pixel
 // toward the other view) a bilinear read of a render-size target keeps all four texels clear of what the other view
 // drew there. The band both views draw reaches 0.5 inside the edge, and a read's texel centres lie within a pixel of
-// it each way: up to |nx| + |ny| nearer the line, n the line's unit normal in render pixels. So 0.5 + |nx| + |ny|: 1.5
-// for an upright or level line (as 0.16.0's 1.5 texels), 1.87 at 30 degrees, 1.91 at 45. (0.5 with one view, whose
-// zero plane no margin changes.)
+// it each way: up to |nx| + |ny| nearer the line, n the line's unit normal in render pixels. So 0.5 + |nx| + |ny|:
+// exactly 1.5 for an upright or level line (as 0.16.0's 1.5 texels), whatever the square root's rounding; 1.87 at 30
+// degrees, 1.91 at 45. (production_ssao_denoise.frag.hlsl's line_margin, for its half-size taps, is the same.) One
+// view's zero plane takes 1.5 too, which no test reads.
 float line_margin()
 {
-    const float2 normal = ssr_hit_options.yz * inverse_resolution;
-    return 0.5f + (abs(normal.x) + abs(normal.y)) / view_plane_scale();
+    const float2 normal = abs(ssr_hit_options.yz * inverse_resolution);
+    return min(normal.x, normal.y) > 0.0f ? 0.5f + (normal.x + normal.y) / view_plane_scale() : 1.5f;
 }
 
 struct FragmentInput

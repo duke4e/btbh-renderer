@@ -17,11 +17,11 @@ All notable changes to this project are documented here. The format follows
   three times what v2's divider covers each side at 4K (4.5 times at its Auto render scale of 0.67), so what shows past
   the divider is a ramp, not a cut.
   - **The margin** is 0.5 + |nx| + |ny| render pixels inside the view's edge, n the line's unit normal in render
-    pixels: 1.5 for an upright or level line (1.25 from the line), 1.87 at 30 degrees, 1.91 at 45. A bilinear read
-    there (the depth, the normals, the scene's colour, the rough reflections' blur taps) takes nothing the other view
-    drew: the band both views draw reaches 0.5 inside the edge, and a read's four texels lie within a pixel of it each
-    way. 0.16.0's 1.5 everywhere let a read on a diagonal weigh up to 7.7 % of a texel in the band at 30 degrees, 8.6 %
-    at 45; with the last step (below) every ray that reaches the line reads there.
+    pixels: exactly 1.5 for an upright or level line (1.25 from the line), 1.87 at 30 degrees, 1.91 at 45. A bilinear
+    read there (the depth, the normals, the scene's colour, the rough reflections' blur taps) takes nothing the other
+    view drew: the band both views draw reaches 0.5 inside the edge, and a read's four texels lie within a pixel of it
+    each way. 0.16.0's 1.5 everywhere let a read on a diagonal weigh up to 7.7 % of a texel in the band at 30
+    degrees, 8.6 % at 45; with the last step (below) every ray that reaches the line reads there.
   - **The march's last step:** so that the narrow fade never ends in a cut, a step that would reach the line now ends
     at the margin (its filtered reads stay on the view's half) and is the march's last. 0.16.0 broke off there as at the
     screen's edge, missing a surface the ray passed behind within a step of the line (tens of pixels at 4K), which the
@@ -55,6 +55,18 @@ All notable changes to this project are documented here. The format follows
   its example and its Measured, put down there to matte boxes). Be The Bullet Hell v2's 0.70-1.49 ms on its facades is
   the real cost. The views smoke's split chains had the same gap, and nothing tested the reflections by the line; they
   now reflect (Tests, above).
+- **Scene views: the SSAO's denoise keeps its taps off the band by the line on a diagonal** (`ssao_enabled` 1;
+  `production_ssao_denoise.frag`, shaders: rebuild). Its eight taps read the half-size occlusion bilinearly, and were
+  held 1.5 half-size texels inside the view's edge on any line, so on a diagonal a tap could weigh up to 8.6 % of a
+  texel the other view drew. They take the reflections' margin, 0.5 + |nx| + |ny|, in half-size texels: upright and
+  level lines are byte for byte as before (exactly 1.5). The SSAO's other reads, and every read of the HBAO's passes,
+  take texel centres, each tested on its own, so they never reached the band. In the views smoke, the diagonal by the
+  line with the SSAO changes in 102 pixels by one level, and nothing else.
+
+### Known
+- On a reflection's first step the march may refine back toward the ray's origin, which isn't tested against the band:
+  a shaded pixel within the margin of the line (about 2 render pixels, under any divider) can read what the other view
+  drew there.
 
 ## [0.16.0] — 2026-11-27
 

@@ -54,6 +54,20 @@ bool view_own_side_by(float2 uv, float2 texel, float margin)
     return dot(ssr_hit_options.yzw, float3(uv, 1.0f)) >= margin * length(ssr_hit_options.yz * texel);
 }
 
+// RFC 0014 (since 0.16.1): view_own_side_by's margin for a bilinear read of a texture of `texel` texels (UV units), in
+// those texels: 0.5 + |nx| + |ny|, n the line's unit normal in them. A read's four texel centres lie within a texel of
+// it each way, so up to |nx| + |ny| nearer the line, and what the other view drew reaches half a render pixel inside
+// the view's edge (a quarter of a half-size texel; 0.5 leaves room and keeps 0.16.0's 1.5). Exactly 1.5 for an upright
+// or level line, whatever the square root's rounding; 1.87 at 30 degrees, 1.91 at 45 (0.16.0's 1.5 let a tap there
+// weigh up to 8.6 % of a texel the other view drew). One view's zero plane takes 1.5 too, which no test reads.
+float line_margin(float2 texel)
+{
+    const float2 normal = abs(ssr_hit_options.yz * texel);
+    return min(normal.x, normal.y) > 0.0f
+        ? 0.5f + (normal.x + normal.y) / max(length(normal), 1.0e-30f)
+        : 1.5f;
+}
+
 struct FragmentInput
 {
     float4 position : SV_Position;
@@ -193,6 +207,8 @@ float main(FragmentInput input) : SV_Target0
     float result = sample_ssao_at(center_half_pixel, half_resolution);
     float weight_sum = 1.0f;
     const float blur_radius = 4.0f;
+    const float2 half_texel = 1.0f / float2(half_resolution);
+    const float tap_margin = line_margin(half_texel);
     [unroll]
     for (int index = 0; index < 8; ++index)
     {
@@ -208,8 +224,9 @@ float main(FragmentInput input) : SV_Target0
         const float2 sample_uv =
             (input.position.xy + offset) /
             float2(half_resolution);
-        // (RFC 0014: a tap on the other view's half counts for nothing, nor one whose filtered texels reach it.)
-        if (!view_own_side_by(sample_uv, 1.0f / float2(half_resolution), 1.5f))
+        // (RFC 0014: a tap on the other view's half counts for nothing, nor one whose filtered texels reach it or the
+        // band by the line, line_margin.)
+        if (!view_own_side_by(sample_uv, half_texel, tap_margin))
         {
             continue;
         }
