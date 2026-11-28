@@ -75,5 +75,12 @@ float3 post_cas(float2 uv)
 
 float4 main(FragmentInput input) : SV_Target0
 {
+#if BTBH_HDR_OUTPUT
+    return float4(
+        post_cas(input.texture_coordinate),
+        scene_texture.Sample(scene_sampler, input.texture_coordinate).a
+    );
+#else
     return float4(post_cas(input.texture_coordinate), 1.0f);
+#endif
 }

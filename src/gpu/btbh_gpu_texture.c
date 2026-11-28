@@ -299,6 +299,17 @@ BTBHGPUTexture *btbh_gpu_window_render_target_create(
     BTBHGPUTextureFilter filter,
     BTBHGPUTextureReport *report
 ) {
+    return btbh_gpu_window_render_target_create_ex(window, width, height, filter, 0u, report);
+}
+
+BTBHGPUTexture *btbh_gpu_window_render_target_create_ex(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    uint32_t flags,
+    BTBHGPUTextureReport *report
+) {
     if (
         window == NULL ||
         window->window == NULL ||
@@ -308,11 +319,24 @@ BTBHGPUTexture *btbh_gpu_window_render_target_create(
     ) {
         return NULL;
     }
-    const SDL_GPUTextureFormat format =
-        SDL_GetGPUSwapchainTextureFormat(
+    if ((flags & ~(uint32_t)BTBH_GPU_RENDER_TARGET_FRAME_FORMAT) != 0u) {
+        (void)memset(report, 0, sizeof(*report));
+        report->result = BTBH_GPU_INVALID_ARGUMENT;
+        (void)snprintf(report->message, sizeof(report->message), "%s", "Unknown render target flags");
+        return NULL;
+    }
+    /* RFC 0017: a render target is in the target format (the SDR swapchain's, kept from the claim), or with
+       BTBH_GPU_RENDER_TARGET_FRAME_FORMAT in the frame format (RGBA16F while HDR is on). Before the claim, the
+       swapchain's (as before). */
+    SDL_GPUTextureFormat format = window->sdr_format != SDL_GPU_TEXTUREFORMAT_INVALID
+        ? window->sdr_format
+        : SDL_GetGPUSwapchainTextureFormat(
             window->device->gpu,
             window->window
         );
+    if ((flags & (uint32_t)BTBH_GPU_RENDER_TARGET_FRAME_FORMAT) != 0u && window->hdr_active) {
+        format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    }
     return btbh_gpu_window_texture_create_empty(
         window,
         width,

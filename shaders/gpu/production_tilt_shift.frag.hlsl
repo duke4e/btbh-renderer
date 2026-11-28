@@ -2,6 +2,9 @@ Texture2D<float4> scene_texture : register(t0, space2);
 SamplerState scene_sampler : register(s0, space2);
 
 #include "production_tonemap.hlsli"
+#if BTBH_HDR_OUTPUT
+#include "production_hdr.hlsli"
+#endif
 
 cbuffer PostUniforms : register(b0, space3)
 {
@@ -25,6 +28,16 @@ cbuffer PostUniforms : register(b0, space3)
     float4x4 inverse_view_projection;
     float projection_scale_y;
     float saturation;
+#if BTBH_HDR_OUTPUT
+    // BTBHGPUPostUniforms' tail (unused here), then BTBHGPUPostHDRUniforms' two vectors (production_hdr.hlsli).
+    float2 hdr_unused_ssr_options;
+    float4x4 hdr_unused_view_projection;
+    float4 hdr_unused_ssr_controls;
+    float4 hdr_unused_ao_controls;
+    float4 hdr_unused_ssr_hit_options;
+    float4 hdr_tone;
+    float4 hdr_misc;
+#endif
 };
 
 struct FragmentInput
@@ -193,8 +206,129 @@ float3 post_tilt_shift(float2 uv)
     return accumulated / max(weight_sum, 0.00001f);
 }
 
+#if BTBH_HDR_OUTPUT
+float4 tilt_sample(float2 uv)
+{
+    return scene_texture.Sample(scene_sampler, uv);
+}
+
+// post_tilt_shift with the alpha (the LUT pass's heat) blurred by the same kernel and weights: keep the two the same.
+float4 post_tilt_shift_hdr(float2 uv)
+{
+    const float2 legacy_uv = legacy_screen_coordinate(uv);
+    const float2 direction = normalize(focus_direction);
+    const float2 normal = float2(-direction.y, direction.x);
+    const float distance_to_line = abs(dot(legacy_uv - focus_point, normal));
+    float amount = max(
+        0.0f,
+        (distance_to_line - focus_half_width) /
+            max(0.00001f, 1.0f - focus_half_width)
+    );
+    amount = pow(saturate(amount), blur_curve);
+    const float radius = amount * maximum_radius_pixels;
+    if (radius < 0.5f)
+    {
+        return tilt_sample(uv);
+    }
+    const float angle = tilt_shift_enabled >= 2u
+        ? 0.5235988f
+        : hash12(legacy_uv / inverse_resolution) * 6.2831853f;
+    const float cosine = cos(angle);
+    const float sine = sin(angle);
+    const float2 directions[6] = {
+        float2(1.0f, 0.0f),
+        float2(0.5f, 0.8660254f),
+        float2(-0.5f, 0.8660254f),
+        float2(-1.0f, 0.0f),
+        float2(-0.5f, -0.8660254f),
+        float2(0.5f, -0.8660254f)
+    };
+    const float4 middle = tilt_sample(uv);
+    const float center_boost =
+        1.0f +
+        smoothstep(
+            highlight_threshold,
+            1.0f,
+            luminance(middle.rgb)
+        ) * highlight_gain;
+    float4 accumulated = middle * center_boost;
+    float weight_sum = center_boost;
+    [unroll]
+    for (int index = 0; index < 6; ++index)
+    {
+        const float2 base = directions[index];
+        const float2 rotated = float2(
+            cosine * base.x + sine * base.y,
+            -sine * base.x + cosine * base.y
+        );
+        const float4 sample_value = tilt_sample(
+            uv + gpu_texture_offset(rotated) * inverse_resolution * radius
+        );
+        const float sample_weight =
+            1.1f *
+            (
+                1.0f +
+                smoothstep(
+                    highlight_threshold,
+                    1.0f,
+                    luminance(sample_value.rgb)
+                ) * highlight_gain
+            );
+        accumulated += sample_value * sample_weight;
+        weight_sum += sample_weight;
+    }
+    [unroll]
+    for (int index = 0; index < 6; ++index)
+    {
+        const float2 base = directions[index];
+        const float2 rotated = float2(
+            cosine * base.x + sine * base.y,
+            -sine * base.x + cosine * base.y
+        );
+        const float4 sample_value = tilt_sample(
+            uv + gpu_texture_offset(rotated) *
+                inverse_resolution * radius * 0.55f
+        );
+        const float sample_weight =
+            0.85f *
+            (
+                1.0f +
+                smoothstep(
+                    highlight_threshold,
+                    1.0f,
+                    luminance(sample_value.rgb)
+                ) * highlight_gain
+            );
+        accumulated += sample_value * sample_weight;
+        weight_sum += sample_weight;
+    }
+    return accumulated / max(weight_sum, 0.00001f);
+}
+
+float4 output_color_hdr(float4 blurred)
+{
+    const float3 encoded = linear_to_srgb(btbh_tone_map_for_output(
+        quantize_half3(blurred.rgb),
+        tonemap_mode,
+        tonemap_white,
+        lut_enabled,
+        exposure,
+        contrast,
+        saturation
+    ));
+    const float heat = lut_enabled != 0u ? blurred.a : btbh_hdr_heat(blurred.rgb, exposure);
+    return float4(
+        btbh_hdr_lift(encoded, btbh_hdr_gain(heat, hdr_tone)),
+        hdr_misc.x != 0.0f ? heat : 1.0f
+    );
+}
+#endif
+
 float4 main(FragmentInput input) : SV_Target0
 {
+#if BTBH_HDR_OUTPUT
+    return output_color_hdr(post_tilt_shift_hdr(input.texture_coordinate));
+#else
     const float2 legacy_fragment_coordinate = float2(
         input.position.x,
         1.0f / inverse_resolution.y - input.position.y
@@ -206,4 +340,5 @@ float4 main(FragmentInput input) : SV_Target0
         ),
         1.0f
     );
+#endif
 }

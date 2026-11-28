@@ -1,4 +1,5 @@
 #include "btbh_gpu_internal.h"
+#include "btbh_gpu_hdr.h"
 #include "btbh_gpu_sdf_terrain_internal.h"
 
 #include <limits.h>
@@ -620,6 +621,817 @@ BTBHGPUWindow *btbh_gpu_window_create(
     return window;
 }
 
+/* HDR output (RFC 0017, since 0.17.0). The window's HDR state: what SDL reports, which composition is in use, the
+   switch, the debug switches and the log line. The GPU side (the frame texture, the encode, the canvas's RGBA16F
+   pipelines) is in btbh_gpu_canvas.c, the scene's HDR post tail in btbh_gpu_scene.c. */
+
+static const char *btbh_gpu_hdr_composition_name(BTBHGPUSwapchainComposition composition) {
+    switch (composition) {
+        case BTBH_GPU_SWAPCHAIN_SDR: return "SDR";
+        case BTBH_GPU_SWAPCHAIN_HDR10_ST2084: return "HDR10_ST2084";
+        case BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR: return "HDR_EXTENDED_LINEAR";
+        default: return "INVALID";
+    }
+}
+
+static const char *btbh_gpu_hdr_format_name(BTBHGPUTextureFormat format) {
+    switch (format) {
+        case BTBH_GPU_TEXTURE_FORMAT_RGBA8_UNORM: return "RGBA8_UNORM";
+        case BTBH_GPU_TEXTURE_FORMAT_RGBA8_SRGB: return "RGBA8_SRGB";
+        case BTBH_GPU_TEXTURE_FORMAT_BGRA8_UNORM: return "BGRA8_UNORM";
+        case BTBH_GPU_TEXTURE_FORMAT_BGRA8_SRGB: return "BGRA8_SRGB";
+        case BTBH_GPU_TEXTURE_FORMAT_RGB10A2_UNORM: return "RGB10A2_UNORM";
+        case BTBH_GPU_TEXTURE_FORMAT_RGBA16_FLOAT: return "RGBA16_FLOAT";
+        default: return "INVALID";
+    }
+}
+
+static const char *btbh_gpu_hdr_mode_name(uint8_t mode) {
+    switch (mode) {
+        case BTBH_GPU_HDR_MODE_OFF: return "off";
+        case BTBH_GPU_HDR_MODE_AUTO: return "auto";
+        case BTBH_GPU_HDR_MODE_FORCE: return "force";
+        default: return "?";
+    }
+}
+
+static const char *btbh_gpu_hdr_fallback_name(uint8_t fallback) {
+    switch (fallback) {
+        case BTBH_GPU_HDR_FALLBACK_NONE: return "none";
+        case BTBH_GPU_HDR_FALLBACK_UNSUPPORTED: return "unsupported";
+        case BTBH_GPU_HDR_FALLBACK_OS_SDR: return "os_sdr";
+        case BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED: return "switch_failed";
+        case BTBH_GPU_HDR_FALLBACK_LOST: return "lost";
+        case BTBH_GPU_HDR_FALLBACK_PENDING: return "pending";
+        default: return "?";
+    }
+}
+
+/* SDL's colour space for a composition, by its own tables (SDL_gpu_vulkan.c:258-263, SDL_gpu_metal.m:4596-4602). */
+static const char *btbh_gpu_hdr_colorspace_name(BTBHGPUSwapchainComposition composition) {
+#if defined(__APPLE__)
+    switch (composition) {
+        case BTBH_GPU_SWAPCHAIN_HDR10_ST2084: return "ITUR_2100_PQ";
+        case BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR: return "EXTENDED_LINEAR_SRGB";
+        default: return "SRGB";
+    }
+#else
+    switch (composition) {
+        case BTBH_GPU_SWAPCHAIN_HDR10_ST2084: return "HDR10_ST2084";
+        case BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR: return "EXTENDED_SRGB_LINEAR";
+        default: return "SRGB_NONLINEAR";
+    }
+#endif
+}
+
+static SDL_GPUSwapchainComposition btbh_gpu_hdr_sdl_composition(BTBHGPUSwapchainComposition composition) {
+    switch (composition) {
+        case BTBH_GPU_SWAPCHAIN_HDR10_ST2084: return SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084;
+        case BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR: return SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR;
+        default: return SDL_GPU_SWAPCHAINCOMPOSITION_SDR;
+    }
+}
+
+/* Wine/Proton: ntdll.dll exports wine_get_version there (found through SDL's own loader). */
+static bool btbh_gpu_hdr_detect_wine(void) {
+#if defined(_WIN32)
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
+    SDL_SharedObject *ntdll = SDL_LoadObject("ntdll.dll");
+    if (ntdll == NULL) {
+        btbh_gpu_hdr_restore_error(&saved);
+        return false;
+    }
+    const bool wine = SDL_LoadFunction(ntdll, "wine_get_version") != NULL;
+    SDL_UnloadObject(ntdll);
+    btbh_gpu_hdr_restore_error(&saved);
+    return wine;
+#else
+    return false;
+#endif
+}
+
+static bool btbh_gpu_hdr_env_is(const char *name, const char *value) {
+    const char *set = SDL_getenv(name);
+    return set != NULL && SDL_strcasecmp(set, value) == 0;
+}
+
+/* The debug switches, once at the claim (RFC 0017, "Debug switches"). */
+static void btbh_gpu_hdr_read_switches(BTBHGPUWindow *window) {
+    window->hdr_log = btbh_gpu_hdr_env_is("BTBH_GPU_HDR_LOG", "1");
+    window->hdr_dither = !btbh_gpu_hdr_env_is("BTBH_GPU_HDR_DITHER", "0");
+    window->hdr_debug_heat = btbh_gpu_hdr_env_is("BTBH_GPU_HDR_DEBUG", "heat");
+    window->hdr_simulate = 0u;
+    if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR_SIMULATE", "hdr10")) {
+        window->hdr_simulate = (uint8_t)BTBH_GPU_SWAPCHAIN_HDR10_ST2084;
+    } else if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR_SIMULATE", "scrgb")) {
+        window->hdr_simulate = (uint8_t)BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR;
+    }
+    window->hdr_override_mode = -1;
+    window->hdr_override_composition = 0u;
+    if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR", "off")) {
+        window->hdr_override_mode = (int8_t)BTBH_GPU_HDR_MODE_OFF;
+    } else if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR", "auto")) {
+        window->hdr_override_mode = (int8_t)BTBH_GPU_HDR_MODE_AUTO;
+    } else if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR", "force")) {
+        window->hdr_override_mode = (int8_t)BTBH_GPU_HDR_MODE_FORCE;
+    } else if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR", "hdr10")) {
+        window->hdr_override_mode = (int8_t)BTBH_GPU_HDR_MODE_FORCE;
+        window->hdr_override_composition = (uint8_t)BTBH_GPU_SWAPCHAIN_HDR10_ST2084;
+    } else if (btbh_gpu_hdr_env_is("BTBH_GPU_HDR", "scrgb")) {
+        window->hdr_override_mode = (int8_t)BTBH_GPU_HDR_MODE_FORCE;
+        window->hdr_override_composition = (uint8_t)BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR;
+    }
+    window->hdr_override_paper_white = 0.0f;
+    window->hdr_override_peak = 0.0f;
+    const char *nits = SDL_getenv("BTBH_GPU_HDR_NITS");
+    if (nits != NULL) {
+        float paper = 0.0f;
+        float peak = 0.0f;
+        if (SDL_sscanf(nits, "%f,%f", &paper, &peak) == 2 && paper > 0.0f && peak > 0.0f) {
+            window->hdr_override_paper_white = paper;
+            window->hdr_override_peak = peak;
+        }
+    }
+    window->hdr_knee_override = 0.0f;
+    const char *knee = SDL_getenv("BTBH_GPU_HDR_KNEE");
+    if (knee != NULL) {
+        const float value = (float)SDL_atof(knee);
+        window->hdr_knee_override = value > 0.0f && value < 1.0f ? value : 0.0f;
+    }
+    window->hdr_shoulder_scale = BTBH_HDR_SHOULDER_SCALE;
+    const char *shoulder = SDL_getenv("BTBH_GPU_HDR_SHOULDER");
+    if (shoulder != NULL) {
+        const float value = (float)SDL_atof(shoulder);
+        window->hdr_shoulder_scale = value > 0.0f ? value : BTBH_HDR_SHOULDER_SCALE;
+    }
+    window->under_wine = btbh_gpu_hdr_detect_wine();
+}
+
+static uint8_t btbh_gpu_hdr_effective_mode(const BTBHGPUWindow *window) {
+    return window->hdr_override_mode >= 0 ? (uint8_t)window->hdr_override_mode : window->hdr_settings.mode;
+}
+
+static uint8_t btbh_gpu_hdr_effective_composition(const BTBHGPUWindow *window) {
+    return window->hdr_override_mode >= 0 ? window->hdr_override_composition : window->hdr_settings.composition;
+}
+
+/* What SDL reports for the window now: the compositions, the properties, the display; with BTBH_GPU_HDR_SIMULATE a
+   display that is HDR (203-nit SDR white, 1000-nit peak) offering the simulated composition alone. */
+static void btbh_gpu_hdr_query(BTBHGPUWindow *window, BTBHGPUWindowHDRState *state) {
+    /* (SDL's queries may set an error: the host's is kept.) */
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
+    SDL_PropertiesID properties = SDL_GetWindowProperties(window->window);
+    state->os_hdr_enabled = SDL_GetBooleanProperty(properties, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false) ? 1u : 0u;
+    state->sdr_white_level = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 1.0f);
+    state->hdr_headroom = SDL_GetFloatProperty(properties, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 1.0f);
+    state->display_id = (uint32_t)SDL_GetDisplayForWindow(window->window);
+    state->under_wine = window->under_wine ? 1u : 0u;
+#if defined(__APPLE__)
+    state->relative_luminance = 1u;
+#else
+    state->relative_luminance = 0u;
+#endif
+    for (uint32_t index = 0u; index < 4u; ++index) {
+        state->supported[index] = SDL_WindowSupportsGPUSwapchainComposition(
+            window->device->gpu,
+            window->window,
+            (SDL_GPUSwapchainComposition)index
+        ) ? 1u : 0u;
+    }
+    btbh_gpu_hdr_restore_error(&saved);
+    if (window->hdr_simulate != 0u) {
+        /* (A test may make the simulated display report SDR: hdr_simulate_os_sdr.) */
+        state->os_hdr_enabled = window->hdr_simulate_os_sdr ? 0u : 1u;
+        state->sdr_white_level = BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS / BTBH_HDR_SCRGB_NITS;
+        state->hdr_headroom = window->hdr_simulate_os_sdr
+            ? 1.0f
+            : BTBH_GPU_HDR_DEFAULT_PEAK_NITS / BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS;
+        state->supported[SDL_GPU_SWAPCHAINCOMPOSITION_HDR_EXTENDED_LINEAR] =
+            window->hdr_simulate == (uint8_t)BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR ? 1u : 0u;
+        state->supported[SDL_GPU_SWAPCHAINCOMPOSITION_HDR10_ST2084] =
+            window->hdr_simulate == (uint8_t)BTBH_GPU_SWAPCHAIN_HDR10_ST2084 ? 1u : 0u;
+    }
+    if (state->relative_luminance != 0u) {
+        state->display_sdr_white_nits = 0.0f;
+        state->display_peak_nits = 0.0f;
+    } else {
+        state->display_sdr_white_nits = state->sdr_white_level * BTBH_HDR_SCRGB_NITS;
+        state->display_peak_nits = state->hdr_headroom > 1.0f
+            ? state->hdr_headroom * state->display_sdr_white_nits
+            : 0.0f;
+    }
+}
+
+static bool btbh_gpu_hdr_composition_supported(
+    const BTBHGPUWindowHDRState *state,
+    BTBHGPUSwapchainComposition composition
+) {
+    return state->supported[btbh_gpu_hdr_sdl_composition(composition)] != 0u;
+}
+
+/* The HDR composition to use when HDR is wanted: the one named, else HDR10 then extended linear (extended linear
+   first on Apple); SDR when none is offered. */
+static BTBHGPUSwapchainComposition btbh_gpu_hdr_pick(
+    const BTBHGPUWindowHDRState *state,
+    uint8_t requested
+) {
+    if (requested != 0u) {
+        return btbh_gpu_hdr_composition_supported(state, (BTBHGPUSwapchainComposition)requested)
+            ? (BTBHGPUSwapchainComposition)requested
+            : BTBH_GPU_SWAPCHAIN_SDR;
+    }
+#if defined(__APPLE__)
+    const BTBHGPUSwapchainComposition order[2] = {
+        BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR, BTBH_GPU_SWAPCHAIN_HDR10_ST2084
+    };
+#else
+    const BTBHGPUSwapchainComposition order[2] = {
+        BTBH_GPU_SWAPCHAIN_HDR10_ST2084, BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR
+    };
+#endif
+    for (uint32_t index = 0u; index < 2u; ++index) {
+        if (btbh_gpu_hdr_composition_supported(state, order[index])) {
+            return order[index];
+        }
+    }
+    return BTBH_GPU_SWAPCHAIN_SDR;
+}
+
+/* Whether HDR can be shown (BTBHGPUWindowHDRState.available) and, for the mode, the composition to be in. */
+static BTBHGPUSwapchainComposition btbh_gpu_hdr_target(
+    const BTBHGPUWindow *window,
+    BTBHGPUWindowHDRState *state
+) {
+    const uint8_t requested = btbh_gpu_hdr_effective_composition(window);
+    const BTBHGPUSwapchainComposition offered = btbh_gpu_hdr_pick(state, requested);
+    bool platform = state->os_hdr_enabled != 0u;
+    if (window->under_wine && window->hdr_simulate == 0u) {
+        platform = true;
+    }
+#if defined(__APPLE__)
+    platform = state->hdr_headroom > 1.0f;
+#endif
+    state->available = offered != BTBH_GPU_SWAPCHAIN_SDR && platform ? 1u : 0u;
+    const uint8_t mode = btbh_gpu_hdr_effective_mode(window);
+    if (mode == BTBH_GPU_HDR_MODE_FORCE) {
+        return offered;
+    }
+    if (mode == BTBH_GPU_HDR_MODE_AUTO && state->available != 0u) {
+        return offered;
+    }
+    return BTBH_GPU_SWAPCHAIN_SDR;
+}
+
+/* The nits in use: the settings' (or BTBH_GPU_HDR_NITS), their defaults and clamps; P the peak over paper white. */
+static void btbh_gpu_hdr_resolve_nits(const BTBHGPUWindow *window, BTBHGPUWindowHDRState *state) {
+    float paper = window->hdr_override_paper_white > 0.0f
+        ? window->hdr_override_paper_white
+        : window->hdr_settings.paper_white_nits;
+    if (!(paper > 0.0f)) {
+        paper = BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS;
+    }
+    paper = paper < 80.0f ? 80.0f : (paper > 1000.0f ? 1000.0f : paper);
+    float peak = window->hdr_override_peak > 0.0f ? window->hdr_override_peak : window->hdr_settings.peak_nits;
+    if (!(peak > 0.0f)) {
+        peak = state->display_peak_nits > paper ? state->display_peak_nits : BTBH_GPU_HDR_DEFAULT_PEAK_NITS;
+    }
+    peak = peak < paper ? paper : (peak > 10000.0f ? 10000.0f : peak);
+    state->paper_white_nits = paper;
+    state->peak_nits = peak;
+    float ratio = peak / paper;
+    if (state->relative_luminance != 0u && state->hdr_headroom > 1.0f && ratio > state->hdr_headroom) {
+        ratio = state->hdr_headroom;
+    }
+    state->highlight_ratio = window->hdr_active ? (ratio > 1.0f ? ratio : 1.0f) : 1.0f;
+}
+
+/* The whole state: SDL's answers (queried when `query`), the composition in use, the fallback. */
+static void btbh_gpu_hdr_fill(BTBHGPUWindow *window, bool query) {
+    BTBHGPUWindowHDRState *state = &window->hdr_state;
+    if (query) {
+        btbh_gpu_hdr_query(window, state);
+    }
+    const BTBHGPUSwapchainComposition target = btbh_gpu_hdr_target(window, state);
+    state->mode = btbh_gpu_hdr_effective_mode(window);
+    state->active = window->hdr_active ? 1u : 0u;
+    state->composition = window->hdr_active ? window->hdr_composition : BTBH_GPU_SWAPCHAIN_SDR;
+    state->swapchain_format = window->hdr_active && window->hdr_simulate != 0u
+        ? (window->hdr_composition == BTBH_GPU_SWAPCHAIN_HDR10_ST2084
+            ? BTBH_GPU_TEXTURE_FORMAT_RGB10A2_UNORM
+            : BTBH_GPU_TEXTURE_FORMAT_RGBA16_FLOAT)
+        : window->swapchain_format;
+    state->target_format = btbh_gpu_texture_format(window->sdr_format);
+    state->frame_format = window->hdr_active ? BTBH_GPU_TEXTURE_FORMAT_RGBA16_FLOAT : window->swapchain_format;
+    state->metadata_set = 0u;
+    btbh_gpu_hdr_resolve_nits(window, state);
+    state->switch_count = window->hdr_switch_count;
+    state->last_switch_milliseconds = window->hdr_last_switch_milliseconds;
+    uint8_t fallback = BTBH_GPU_HDR_FALLBACK_NONE;
+    if (state->mode != BTBH_GPU_HDR_MODE_OFF && !window->hdr_active) {
+        if (window->hdr_sticky_fallback != BTBH_GPU_HDR_FALLBACK_NONE) {
+            fallback = window->hdr_sticky_fallback;
+        } else if (target != BTBH_GPU_SWAPCHAIN_SDR) {
+            fallback = BTBH_GPU_HDR_FALLBACK_PENDING;
+        } else if (btbh_gpu_hdr_pick(state, btbh_gpu_hdr_effective_composition(window)) == BTBH_GPU_SWAPCHAIN_SDR) {
+            fallback = BTBH_GPU_HDR_FALLBACK_UNSUPPORTED;
+        } else {
+            fallback = BTBH_GPU_HDR_FALLBACK_OS_SDR;
+        }
+    } else if (state->mode == BTBH_GPU_HDR_MODE_AUTO && window->hdr_active && target == BTBH_GPU_SWAPCHAIN_SDR) {
+        fallback = BTBH_GPU_HDR_FALLBACK_PENDING;
+    }
+    state->fallback = fallback;
+    /* (Zeroed first: two fills that report the same compare equal byte for byte, btbh_gpu_hdr_refill.) */
+    SDL_zeroa(state->message);
+    (void)snprintf(state->message, sizeof(state->message), "%s", window->hdr_message);
+    if (fallback == BTBH_GPU_HDR_FALLBACK_NONE) {
+        state->message[0] = '\0';
+    } else if (state->message[0] == '\0') {
+        const char *why =
+            fallback == BTBH_GPU_HDR_FALLBACK_UNSUPPORTED
+                ? "The swapchain offers no HDR composition here"
+            : fallback == BTBH_GPU_HDR_FALLBACK_OS_SDR
+                ? "The display is SDR (the OS reports HDR off)"
+            : fallback == BTBH_GPU_HDR_FALLBACK_PENDING
+                ? "The change is taken at the next frame's start"
+                : "";
+        (void)snprintf(state->message, sizeof(state->message), "%s", why);
+    }
+}
+
+uint32_t btbh_gpu_window_hdr_describe(
+    BTBHGPUWindow *window,
+    char *buffer,
+    uint32_t capacity
+) {
+    if (window == NULL || buffer == NULL || capacity == 0u) {
+        return 0u;
+    }
+    const BTBHGPUWindowHDRState *state = &window->hdr_state;
+    char supported[96];
+    supported[0] = '\0';
+    static const char *const names[4] = { "SDR", "SDR_LINEAR", "HDR_EXTENDED_LINEAR", "HDR10_ST2084" };
+    for (uint32_t index = 0u; index < 4u; ++index) {
+        if (state->supported[index] != 0u) {
+            if (supported[0] != '\0') {
+                (void)SDL_strlcat(supported, ",", sizeof(supported));
+            }
+            (void)SDL_strlcat(supported, names[index], sizeof(supported));
+        }
+    }
+    /* (SDL may set an error for a display that is gone: the host's is kept.) */
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
+    const char *display_name = window->window != NULL ? SDL_GetDisplayName((SDL_DisplayID)state->display_id) : NULL;
+    const char *driver = window->device != NULL && window->device->gpu != NULL
+        ? SDL_GetGPUDeviceDriver(window->device->gpu)
+        : NULL;
+    btbh_gpu_hdr_restore_error(&saved);
+    char reason[160];
+    reason[0] = '\0';
+    if (state->fallback != BTBH_GPU_HDR_FALLBACK_NONE && state->message[0] != '\0') {
+        (void)snprintf(reason, sizeof(reason), " reason=\"%s\"", state->message);
+    }
+    const int written = snprintf(
+        buffer,
+        capacity,
+        "BTBH_GPU_HDR event=%s serial=%u gpu=%s wine=%u simulate=%s display=%u '%s' os_hdr=%u sdr_white=%.3f "
+        "(%.0f nits) headroom=%.3f peak_reported=%.0f supported=%s available=%u mode=%s composition=%s swapchain=%s "
+        "colorspace=%s frame=%s target=%s paper=%.0f peak=%.0f P=%.2f metadata=%u%s fallback=%s%s switch_ms=%.1f",
+        window->hdr_event[0] != '\0' ? window->hdr_event : "state",
+        (unsigned)state->serial,
+        driver != NULL ? driver : "none",
+        (unsigned)state->under_wine,
+        window->hdr_simulate == (uint8_t)BTBH_GPU_SWAPCHAIN_HDR10_ST2084
+            ? "hdr10"
+            : (window->hdr_simulate != 0u ? "scrgb" : "off"),
+        (unsigned)state->display_id,
+        display_name != NULL ? display_name : "?",
+        (unsigned)state->os_hdr_enabled,
+        (double)state->sdr_white_level,
+        (double)(state->sdr_white_level * BTBH_HDR_SCRGB_NITS),
+        (double)state->hdr_headroom,
+        (double)state->display_peak_nits,
+        supported[0] != '\0' ? supported : "none",
+        (unsigned)state->available,
+        btbh_gpu_hdr_mode_name(state->mode),
+        btbh_gpu_hdr_composition_name(state->composition),
+        btbh_gpu_hdr_format_name(state->swapchain_format),
+        btbh_gpu_hdr_colorspace_name(state->composition),
+        btbh_gpu_hdr_format_name(state->frame_format),
+        btbh_gpu_hdr_format_name(state->target_format),
+        (double)state->paper_white_nits,
+        (double)state->peak_nits,
+        (double)state->highlight_ratio,
+        (unsigned)state->metadata_set,
+        state->metadata_set != 0u ? "" : " (SDL 3.4.2 has no call)",
+        btbh_gpu_hdr_fallback_name(state->fallback),
+        reason,
+        state->last_switch_milliseconds
+    );
+    if (written < 0) {
+        buffer[0] = '\0';
+        return 0u;
+    }
+    return (uint32_t)written < capacity ? (uint32_t)written : capacity - 1u;
+}
+
+/* A new state (its serial; the snapshot's flag when `changed`) and, with BTBH_GPU_HDR_LOG=1, its line. A fall back to
+   SDR the host didn't ask for (events lost and encode) is logged always. */
+static void btbh_gpu_hdr_announce(BTBHGPUWindow *window, const char *event, bool changed) {
+    (void)snprintf(window->hdr_event, sizeof(window->hdr_event), "%s", event);
+    window->hdr_serial += 1u;
+    window->hdr_state.serial = window->hdr_serial;
+    if (changed) {
+        window->hdr_changed = true;
+    }
+    const bool fell_back = SDL_strcmp(event, "lost") == 0 || SDL_strcmp(event, "encode") == 0;
+    if (window->hdr_log || fell_back) {
+        char line[BTBH_GPU_HDR_DESCRIBE_CAPACITY];
+        (void)btbh_gpu_window_hdr_describe(window, line, sizeof(line));
+        SDL_Log("%s", line);
+    }
+}
+
+/* The fallback's words when the encode pass can't be made. */
+static void btbh_gpu_hdr_encode_unavailable_message(BTBHGPUWindow *window) {
+    (void)snprintf(
+        window->hdr_message,
+        sizeof(window->hdr_message),
+        "The HDR encode is unavailable (%s)",
+        window->hdr_encode_error[0] != '\0' ? window->hdr_encode_error : "its pipeline could not be made"
+    );
+}
+
+/* Puts the window in `target` (SDR or an HDR composition): SDL's swapchain (none with BTBH_GPU_HDR_SIMULATE, whose
+   swapchain stays SDR), the window's fields, the HDR frame's resources. False, the window in SDR and the fallback
+   SWITCH_FAILED, when SDL refused or the encode pass can't be made. Inside a present's scope the lazy creation log
+   names SDL's wait and what the switch makes. */
+static bool btbh_gpu_hdr_switch(BTBHGPUWindow *window, BTBHGPUSwapchainComposition target) {
+    const BTBHGPUSwapchainComposition current =
+        window->hdr_active ? window->hdr_composition : BTBH_GPU_SWAPCHAIN_SDR;
+    if (target == current) {
+        return true;
+    }
+    const uint64_t started = SDL_GetTicksNS();
+    bool switched = true;
+    window->hdr_acquire_failures = 0u;
+    if (window->hdr_simulate == 0u) {
+        const uint64_t switch_started_ticks = btbh_gpu_lazy_creation_clock();
+        switched = SDL_SetGPUSwapchainParameters(
+            window->device->gpu,
+            window->window,
+            btbh_gpu_hdr_sdl_composition(target),
+            btbh_gpu_sdl_present_mode(window->present_mode)
+        );
+        btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_HDR_SWITCH, switch_started_ticks);
+        if (!switched) {
+            (void)snprintf(window->hdr_message, sizeof(window->hdr_message), "%s", SDL_GetError());
+            /* SDL may have taken the composition before rebuilding the swapchain failed: back to SDR. */
+            (void)SDL_SetGPUSwapchainParameters(
+                window->device->gpu,
+                window->window,
+                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                btbh_gpu_sdl_present_mode(window->present_mode)
+            );
+            target = BTBH_GPU_SWAPCHAIN_SDR;
+        }
+        const BTBHGPUTextureFormat format = btbh_gpu_texture_format(
+            SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window)
+        );
+        if (format != BTBH_GPU_TEXTURE_FORMAT_INVALID) {
+            window->swapchain_format = format;
+        }
+        window->composition = target == BTBH_GPU_SWAPCHAIN_SDR ? BTBH_GPU_SWAPCHAIN_SDR : target;
+    }
+    window->hdr_active = target != BTBH_GPU_SWAPCHAIN_SDR;
+    window->hdr_composition = window->hdr_active ? target : BTBH_GPU_SWAPCHAIN_SDR;
+    if (switched) {
+        window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_NONE;
+        window->hdr_message[0] = '\0';
+    } else {
+        window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED;
+    }
+    if (window->hdr_active) {
+        btbh_gpu_window_hdr_prewarm(window);
+    } else {
+        /* The HDR frame and the simulated swapchain are made again when HDR comes back. */
+        if (window->presented_frame != NULL &&
+            window->presented_frame->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+            btbh_gpu_texture_destroy(window->presented_frame);
+            window->presented_frame = NULL;
+        }
+        if (window->hdr_virtual_swapchain != NULL) {
+            btbh_gpu_texture_destroy(window->hdr_virtual_swapchain);
+            window->hdr_virtual_swapchain = NULL;
+        }
+    }
+    window->hdr_switch_count += 1u;
+    window->hdr_last_switch_milliseconds = (double)(SDL_GetTicksNS() - started) / 1000000.0;
+    if (window->hdr_active && window->hdr_encode_failed) {
+        /* The prewarm could not make the encode from the shaders a present gave: never unencoded values into an HDR
+           swapchain, so SDR. */
+        (void)btbh_gpu_hdr_switch(window, BTBH_GPU_SWAPCHAIN_SDR);
+        window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED;
+        btbh_gpu_hdr_encode_unavailable_message(window);
+        return false;
+    }
+    return switched;
+}
+
+/* The frame's HDR numbers (BTBHGPUFrameContext.hdr_*), from the state in use; at a frame's start and at the claim. */
+static void btbh_gpu_hdr_latch_frame(BTBHGPUWindow *window) {
+    const BTBHGPUWindowHDRState *state = &window->hdr_state;
+    window->hdr_frame_ratio = window->hdr_active && state->highlight_ratio > 1.0f ? state->highlight_ratio : 1.0f;
+    window->hdr_frame_paper_white = state->paper_white_nits > 0.0f
+        ? state->paper_white_nits
+        : BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS;
+    window->hdr_frame_linear_scale = state->relative_luminance != 0u
+        ? 1.0f
+        : window->hdr_frame_paper_white / BTBH_HDR_SCRGB_NITS;
+}
+
+/* Fills the state again (asking SDL when `query`); true when what it reports changed. The serial is kept: the caller
+   announces a change. */
+static bool btbh_gpu_hdr_refill(BTBHGPUWindow *window, bool query) {
+    const BTBHGPUWindowHDRState before = window->hdr_state;
+    btbh_gpu_hdr_fill(window, query);
+    window->hdr_state.serial = before.serial;
+    return memcmp(&before, &window->hdr_state, sizeof(before)) != 0;
+}
+
+/* At the claim: the SDR format kept, the switches read, the state filled; a mode forced by BTBH_GPU_HDR taken. */
+static void btbh_gpu_hdr_claimed(BTBHGPUWindow *window) {
+    window->sdr_format = SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window);
+    SDL_zero(window->hdr_settings);
+    window->hdr_active = false;
+    window->hdr_composition = BTBH_GPU_SWAPCHAIN_SDR;
+    window->hdr_dirty = false;
+    window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_NONE;
+    window->hdr_message[0] = '\0';
+    window->hdr_pending_event[0] = '\0';
+    window->hdr_encode_failed = false;
+    window->hdr_encode_error[0] = '\0';
+    window->hdr_acquire_failures = 0u;
+    window->hdr_last_check_milliseconds = SDL_GetTicks();
+    btbh_gpu_hdr_read_switches(window);
+    btbh_gpu_hdr_fill(window, true);
+    if (btbh_gpu_hdr_effective_mode(window) != BTBH_GPU_HDR_MODE_OFF) {
+        (void)btbh_gpu_hdr_switch(window, btbh_gpu_hdr_target(window, &window->hdr_state));
+        btbh_gpu_hdr_fill(window, true);
+    }
+    btbh_gpu_hdr_latch_frame(window);
+    btbh_gpu_hdr_announce(window, "claim", false);
+}
+
+BTBHGPUResult btbh_gpu_window_hdr_state(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowHDRState *state
+) {
+    if (window == NULL || state == NULL || window->window == NULL || !window->claimed ||
+        window->device == NULL || window->device->gpu == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (btbh_gpu_hdr_refill(window, true)) {
+        /* What it reports changed with no event the renderer saw (a list SDL changed silently, say): a new serial, and
+           the line. */
+        btbh_gpu_hdr_announce(window, "state", false);
+    }
+    *state = window->hdr_state;
+    return BTBH_GPU_OK;
+}
+
+static bool btbh_gpu_hdr_finite_nits(float value) {
+    return value >= 0.0f && value <= 1.0e30f;
+}
+
+BTBHGPUResult btbh_gpu_window_set_hdr(
+    BTBHGPUWindow *window,
+    const BTBHGPUWindowHDRSettings *settings,
+    BTBHGPUWindowHDRState *state
+) {
+    if (window == NULL || settings == NULL || state == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (window->window == NULL || !window->claimed || window->device == NULL || window->device->gpu == NULL) {
+        SDL_zerop(state);
+        (void)snprintf(state->message, sizeof(state->message), "%s", "The window is not claimed");
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    bool reserved_clear = settings->flags == 0u;
+    for (uint32_t index = 0u; index < 5u; ++index) {
+        reserved_clear = reserved_clear && settings->reserved[index] == 0u;
+    }
+    const char *refusal = NULL;
+    if (settings->mode > BTBH_GPU_HDR_MODE_FORCE) {
+        refusal = "Unknown HDR mode";
+    } else if (settings->composition != 0u &&
+               settings->composition != (uint8_t)BTBH_GPU_SWAPCHAIN_HDR10_ST2084 &&
+               settings->composition != (uint8_t)BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR) {
+        refusal = "The composition must be 0, HDR10_ST2084 or HDR_EXTENDED_LINEAR";
+    } else if (!reserved_clear) {
+        refusal = "flags and reserved words must be 0";
+    } else if (!btbh_gpu_hdr_finite_nits(settings->paper_white_nits) ||
+               !btbh_gpu_hdr_finite_nits(settings->peak_nits)) {
+        refusal = "Nits must be finite and not below 0";
+    } else if ((settings->mode != window->hdr_settings.mode ||
+                settings->composition != window->hdr_settings.composition) &&
+               (window->pending_command != NULL || window->pending_scene_ready)) {
+        refusal = "A frame is pending: switch HDR between frames";
+    }
+    if (refusal != NULL) {
+        *state = window->hdr_state;
+        (void)snprintf(state->message, sizeof(state->message), "%s", refusal);
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    const bool switch_asked =
+        settings->mode != window->hdr_settings.mode || settings->composition != window->hdr_settings.composition;
+    const bool nits_changed =
+        settings->paper_white_nits != window->hdr_settings.paper_white_nits ||
+        settings->peak_nits != window->hdr_settings.peak_nits;
+    window->hdr_settings = *settings;
+    bool encode_fell_back = false;
+    if (switch_asked) {
+        /* A new mode: an old fallback (lost, a failed switch or encode) no longer explains anything; a failed encode is
+           tried once more. */
+        window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_NONE;
+        window->hdr_message[0] = '\0';
+        window->hdr_encode_failed = false;
+        window->hdr_encode_error[0] = '\0';
+        btbh_gpu_hdr_fill(window, true);
+        (void)btbh_gpu_hdr_switch(window, btbh_gpu_hdr_target(window, &window->hdr_state));
+        encode_fell_back = window->hdr_encode_failed && !window->hdr_active;
+    }
+    btbh_gpu_hdr_fill(window, switch_asked);
+    if (switch_asked || nits_changed) {
+        /* hdr_changed for a mode or composition change; a change of nits takes a new serial only (the host made it,
+           and it takes effect from the next frame). */
+        btbh_gpu_hdr_announce(window, encode_fell_back ? "encode" : "set", switch_asked);
+    }
+    *state = window->hdr_state;
+    return BTBH_GPU_OK;
+}
+
+/* The re-check at a frame's start (btbh_gpu_window_hdr_frame_start): after an SDL event, or (AUTO) every frame while a
+   change is pending and once a second otherwise, SDL is asked again and an AUTO window switches when it should. A
+   silent re-check doesn't undo a fallback (lost, a failed switch or encode); an event retries. */
+static void btbh_gpu_hdr_recheck(BTBHGPUWindow *window) {
+    const uint8_t mode = btbh_gpu_hdr_effective_mode(window);
+    const bool event = window->hdr_dirty;
+    if (!event) {
+        if (mode != BTBH_GPU_HDR_MODE_AUTO) {
+            return;
+        }
+        const uint64_t now = SDL_GetTicks();
+        if (window->hdr_state.fallback != BTBH_GPU_HDR_FALLBACK_PENDING &&
+            now - window->hdr_last_check_milliseconds < 1000u) {
+            return;
+        }
+    }
+    window->hdr_dirty = false;
+    window->hdr_last_check_milliseconds = SDL_GetTicks();
+    char pending_event[16];
+    (void)snprintf(
+        pending_event,
+        sizeof(pending_event),
+        "%s",
+        window->hdr_pending_event[0] != '\0' ? window->hdr_pending_event : "os"
+    );
+    window->hdr_pending_event[0] = '\0';
+    const bool changed = btbh_gpu_hdr_refill(window, true);
+    const BTBHGPUSwapchainComposition current =
+        window->hdr_active ? window->hdr_composition : BTBH_GPU_SWAPCHAIN_SDR;
+    const BTBHGPUSwapchainComposition target = btbh_gpu_hdr_target(window, &window->hdr_state);
+    if (mode == BTBH_GPU_HDR_MODE_AUTO && target != current &&
+        (event || window->hdr_sticky_fallback == BTBH_GPU_HDR_FALLBACK_NONE)) {
+        if (event) {
+            window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_NONE;
+            window->hdr_message[0] = '\0';
+        }
+        const bool switched = btbh_gpu_hdr_switch(window, target);
+        btbh_gpu_hdr_fill(window, false);
+        btbh_gpu_hdr_announce(
+            window,
+            !switched && window->hdr_encode_failed ? "encode" : "switch",
+            true
+        );
+        return;
+    }
+    if (event) {
+        /* (The event itself was in the poll's snapshot already.) */
+        btbh_gpu_hdr_announce(window, pending_event, false);
+    } else if (changed) {
+        /* What SDL reports changed with no event (Wine's lists): for the host's next poll too. */
+        btbh_gpu_hdr_announce(window, "recheck", true);
+    }
+}
+
+void btbh_gpu_window_hdr_frame_start(BTBHGPUWindow *window) {
+    if (window == NULL || !window->claimed || window->device == NULL || window->device->gpu == NULL ||
+        window->pending_command != NULL || window->pending_scene_ready) {
+        return;
+    }
+    if (window->hdr_encode_failed && window->hdr_active) {
+        /* The last frame could not encode (btbh_gpu_window_hdr_record_encode): SDR from this frame, until a set_hdr
+           switch tries again. */
+        (void)btbh_gpu_hdr_switch(window, BTBH_GPU_SWAPCHAIN_SDR);
+        window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED;
+        btbh_gpu_hdr_encode_unavailable_message(window);
+        btbh_gpu_hdr_fill(window, true);
+        btbh_gpu_hdr_announce(window, "encode", true);
+    } else {
+        btbh_gpu_hdr_recheck(window);
+    }
+    /* The frame's HDR numbers, for its gain, its encode and its fold alike. */
+    btbh_gpu_hdr_latch_frame(window);
+}
+
+bool btbh_gpu_window_hdr_acquire_failed(BTBHGPUWindow *window) {
+    if (window == NULL || !window->hdr_active || window->hdr_simulate != 0u || !window->claimed ||
+        window->device == NULL || window->device->gpu == NULL) {
+        return false;
+    }
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
+    window->hdr_acquire_failures += 1u;
+    const bool listed = SDL_WindowSupportsGPUSwapchainComposition(
+        window->device->gpu,
+        window->window,
+        btbh_gpu_hdr_sdl_composition(window->hdr_composition)
+    );
+    if (listed && window->hdr_acquire_failures < BTBH_GPU_HDR_ACQUIRE_FAILURE_LIMIT) {
+        btbh_gpu_hdr_restore_error(&saved);
+        return false;
+    }
+    const uint32_t failures = window->hdr_acquire_failures;
+    (void)btbh_gpu_hdr_switch(window, BTBH_GPU_SWAPCHAIN_SDR);
+    window->hdr_sticky_fallback = BTBH_GPU_HDR_FALLBACK_LOST;
+    if (listed) {
+        /* gamescope may keep listing a composition it can't present: don't let every present fail. */
+        (void)snprintf(
+            window->hdr_message,
+            sizeof(window->hdr_message),
+            "%u swapchain acquires failed in a row in HDR (%s)",
+            (unsigned)failures,
+            saved.text[0] != '\0' ? saved.text : "no error"
+        );
+    } else {
+        (void)snprintf(
+            window->hdr_message,
+            sizeof(window->hdr_message),
+            "%s",
+            "The swapchain lost its HDR composition (the display or the OS changed)"
+        );
+    }
+    btbh_gpu_hdr_fill(window, true);
+    btbh_gpu_hdr_announce(window, "lost", true);
+    btbh_gpu_hdr_restore_error(&saved);
+    return true;
+}
+
+void btbh_gpu_window_hdr_remember_shaders(BTBHGPUWindow *window, const char *path, BTBHGPUShaderFormat format) {
+    if (window == NULL || path == NULL) {
+        return;
+    }
+    const size_t length = strlen(path);
+    if (length == 0u || length >= sizeof(window->shader_reference_path)) {
+        return;
+    }
+    if (window->shader_reference_format == format && strcmp(window->shader_reference_path, path) == 0) {
+        return;
+    }
+    (void)memcpy(window->shader_reference_path, path, length + 1u);
+    window->shader_reference_format = format;
+}
+
+void btbh_gpu_window_release_hdr(BTBHGPUWindow *window) {
+    if (window == NULL || window->device == NULL || window->device->gpu == NULL) {
+        return;
+    }
+    for (uint32_t index = 0u; index < 2u; ++index) {
+        if (window->hdr_encode_pipelines[index] != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(window->device->gpu, window->hdr_encode_pipelines[index]);
+            window->hdr_encode_pipelines[index] = NULL;
+        }
+    }
+    if (window->hdr_fold_pipeline != NULL) {
+        SDL_ReleaseGPUGraphicsPipeline(window->device->gpu, window->hdr_fold_pipeline);
+        window->hdr_fold_pipeline = NULL;
+    }
+    /* The renderer's own textures (the window's texture list would only orphan them): the simulated swapchain, and the
+       frame texture (HDR's, or a read-back frame's). */
+    if (window->hdr_virtual_swapchain != NULL) {
+        btbh_gpu_texture_destroy(window->hdr_virtual_swapchain);
+        window->hdr_virtual_swapchain = NULL;
+    }
+    if (window->presented_frame != NULL) {
+        btbh_gpu_texture_destroy(window->presented_frame);
+        window->presented_frame = NULL;
+    }
+}
+
 BTBHGPUResult btbh_gpu_window_claim(
     BTBHGPUDevice *device,
     BTBHGPUWindow *window,
@@ -710,6 +1522,8 @@ BTBHGPUResult btbh_gpu_window_claim(
     window->swapchain_format = swapchain_format;
     window->present_mode = project_present_mode;
     window->composition = BTBH_GPU_SWAPCHAIN_SDR;
+    /* RFC 0017: the SDR format kept, HDR's debug switches read, its state filled (a mode BTBH_GPU_HDR forces taken). */
+    btbh_gpu_hdr_claimed(window);
     btbh_gpu_write_window_state(window, report);
     report->result = BTBH_GPU_OK;
     return report->result;
@@ -883,7 +1697,7 @@ BTBHGPUResult btbh_gpu_window_set_present_mode(
             !SDL_SetGPUSwapchainParameters(
                 window->device->gpu,
                 window->window,
-                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                btbh_gpu_hdr_sdl_composition(window->composition),
                 btbh_gpu_sdl_present_mode(taken)
             )
         ) {
@@ -897,7 +1711,7 @@ BTBHGPUResult btbh_gpu_window_set_present_mode(
             (void) SDL_SetGPUSwapchainParameters(
                 window->device->gpu,
                 window->window,
-                SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+                btbh_gpu_hdr_sdl_composition(window->composition),
                 btbh_gpu_sdl_present_mode(window->present_mode)
             );
             btbh_gpu_write_window_state(window, report);
@@ -939,6 +1753,8 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
 
+    /* RFC 0017: a frame's start, where an AUTO window takes an HDR change. */
+    btbh_gpu_window_hdr_frame_start(window);
     /* What the frame reads from the window (RFC 0015 phase 1a): here, a read-back frame's format. */
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
@@ -969,8 +1785,11 @@ BTBHGPUResult btbh_gpu_window_present_clear(
             BTBH_GPU_ERROR_STAGE_SWAPCHAIN_CONFIGURATION,
             SDL_GetError()
         );
+        /* RFC 0017: the swapchain may have lost its HDR composition; the window is SDR from the next frame. */
+        (void)btbh_gpu_window_hdr_acquire_failed(window);
         return report->result;
     }
+    window->hdr_acquire_failures = 0u;
     if (window->pending_swapchain == NULL) {
         // A minimized or hidden window has no swapchain image. Submit the frame's offscreen
         // work and present nothing; only a requested readback needs the image.
@@ -1053,8 +1872,9 @@ BTBHGPUResult btbh_gpu_window_present_clear(
         SDL_EndGPURenderPass(render_pass);
     }
 
+    /* A read-back frame, or (RFC 0017) the HDR frame, goes to the swapchain image. */
     const bool recorded =
-        !window->presented_frame_readback_requested ||
+        (!window->presented_frame_readback_requested && !window->hdr_active) ||
         btbh_gpu_window_record_presented_frame(window);
     const bool submitted = btbh_gpu_window_finish_pending_frame(
         window,
@@ -1119,6 +1939,7 @@ static void btbh_gpu_platform_snapshot(
             ? 1u
             : 0u;
     snapshot->cursor_visible = window->cursor_visible ? 1u : 0u;
+    snapshot->hdr_changed = window->hdr_changed ? 1u : 0u;
 }
 
 double btbh_gpu_monotonic_elapsed_seconds(void) {
@@ -1225,11 +2046,27 @@ BTBHGPUResult btbh_gpu_window_poll_events(
             event.button.button < 4
         ) {
             window->mouse_released[event.button.button] = true;
+        } else if (
+            (event.type == SDL_EVENT_WINDOW_HDR_STATE_CHANGED ||
+             event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED) &&
+            event.window.windowID == window_id &&
+            window->claimed
+        ) {
+            /* RFC 0017: re-checked at the next frame's start (an AUTO window switches there); no GPU work here. */
+            window->hdr_dirty = true;
+            window->hdr_changed = true;
+            (void)snprintf(
+                window->hdr_pending_event,
+                sizeof(window->hdr_pending_event),
+                "%s",
+                event.type == SDL_EVENT_WINDOW_HDR_STATE_CHANGED ? "os" : "display"
+            );
         }
     }
 
     btbh_gpu_sample_gamepads(window);
     btbh_gpu_platform_snapshot(window, snapshot, 0.0f);
+    window->hdr_changed = false;
     return BTBH_GPU_OK;
 }
 
@@ -1765,6 +2602,7 @@ void btbh_gpu_window_destroy(BTBHGPUWindow *window) {
             (unsigned long long)window->scene_run_verify.mismatch_count
         );
     }
+    btbh_gpu_window_release_hdr(window);
     btbh_gpu_window_release_canvas(window);
     btbh_gpu_window_release_aside_scene(window);
     btbh_gpu_window_release_scene(window);

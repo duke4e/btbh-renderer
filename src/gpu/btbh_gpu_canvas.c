@@ -1,4 +1,5 @@
 #include "btbh_gpu_internal.h"
+#include "btbh_gpu_hdr.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -36,6 +37,22 @@ struct BTBHGPUCanvasRuntime {
        production_canvas_coverage.frag. Made the first time a batch needs them. */
     SDL_GPUGraphicsPipeline
         *coverage_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    /* The format the pipelines above draw into: the window's target format (the SDR swapchain's). */
+    SDL_GPUTextureFormat format;
+    /* RFC 0017 (since 0.17.0): the same pipelines drawing into RGBA16F (an HDR frame's screen passes, a frame-format
+       render target), made the first time a pass needs them; float_ready once the solid and textured ones exist. */
+    SDL_GPUGraphicsPipeline
+        *float_solid_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    SDL_GPUGraphicsPipeline
+        *float_textured_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    SDL_GPUGraphicsPipeline
+        *float_coverage_pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT];
+    bool float_ready;
+    /* The shader paths the runtime was made with, for the RGBA16F pipelines. */
+    char vertex_shader_path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    char fragment_shader_path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    char textured_fragment_shader_path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    BTBHGPUShaderFormat shader_format;
     SDL_GPUBuffer *vertex_buffer;
     SDL_GPUTransferBuffer *upload_transfer;
     uint32_t vertex_capacity;
@@ -159,6 +176,12 @@ static bool btbh_gpu_canvas_create_pipelines(
     SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT]
 );
 
+static bool btbh_gpu_canvas_ensure_float_pipelines(
+    BTBHGPUWindow *window,
+    bool coverage,
+    BTBHGPUCanvasReport *report
+);
+
 static bool btbh_gpu_canvas_create_runtime(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -260,6 +283,17 @@ static bool btbh_gpu_canvas_create_runtime(
         btbh_gpu_window_release_canvas(window);
         return false;
     }
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    runtime->format = swapchain_format;
+    runtime->shader_format = project_format;
+    (void)snprintf(runtime->vertex_shader_path, sizeof(runtime->vertex_shader_path), "%s", vertex_shader_path);
+    (void)snprintf(runtime->fragment_shader_path, sizeof(runtime->fragment_shader_path), "%s", fragment_shader_path);
+    (void)snprintf(
+        runtime->textured_fragment_shader_path,
+        sizeof(runtime->textured_fragment_shader_path),
+        "%s",
+        textured_fragment_shader_path
+    );
     return true;
 }
 
@@ -384,6 +418,89 @@ static bool btbh_gpu_canvas_ensure_coverage_pipelines(
     return true;
 }
 
+
+/* RFC 0017: one blend set of pipelines from these shader paths drawing into RGBA16F. */
+static bool btbh_gpu_canvas_make_float_set(
+    BTBHGPUWindow *window,
+    const char *fragment_shader_path,
+    uint32_t sampler_count,
+    SDL_GPUGraphicsPipeline *pipelines[BTBH_GPU_CANVAS_PIPELINE_COUNT],
+    BTBHGPUCanvasReport *report
+) {
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    SDL_GPUDevice *gpu = window->device->gpu;
+    const SDL_GPUShaderFormat format = btbh_gpu_canvas_shader_format(runtime->shader_format);
+    const char *entrypoint = runtime->shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "main0" : "main";
+    SDL_GPUShader *vertex_shader = btbh_gpu_canvas_load_shader(
+        gpu, runtime->vertex_shader_path, entrypoint, format, SDL_GPU_SHADERSTAGE_VERTEX, 0u, 1u, report
+    );
+    if (vertex_shader == NULL) {
+        return false;
+    }
+    SDL_GPUShader *fragment_shader = btbh_gpu_canvas_load_shader(
+        gpu, fragment_shader_path, entrypoint, format, SDL_GPU_SHADERSTAGE_FRAGMENT, sampler_count, 0u, report
+    );
+    if (fragment_shader == NULL) {
+        SDL_ReleaseGPUShader(gpu, vertex_shader);
+        return false;
+    }
+    const bool created = btbh_gpu_canvas_create_pipelines(
+        window,
+        vertex_shader,
+        fragment_shader,
+        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+        pipelines
+    );
+    SDL_ReleaseGPUShader(gpu, fragment_shader);
+    SDL_ReleaseGPUShader(gpu, vertex_shader);
+    if (!created) {
+        btbh_gpu_canvas_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+    }
+    return created;
+}
+
+/* RFC 0017: the canvas's pipelines drawing into RGBA16F (an HDR frame's screen passes, a frame-format render target),
+   made once from the shader paths the runtime was made with; the coverage ones when `coverage`. */
+static bool btbh_gpu_canvas_ensure_float_pipelines(
+    BTBHGPUWindow *window,
+    bool coverage,
+    BTBHGPUCanvasReport *report
+) {
+    BTBHGPUCanvasRuntime *runtime = window->canvas_runtime;
+    if (runtime == NULL) {
+        return false;
+    }
+    if (!runtime->float_ready) {
+        if (!btbh_gpu_canvas_make_float_set(
+                window, runtime->fragment_shader_path, 0u, runtime->float_solid_pipelines, report
+            )) {
+            return false;
+        }
+        if (!btbh_gpu_canvas_make_float_set(
+                window, runtime->textured_fragment_shader_path, 1u, runtime->float_textured_pipelines, report
+            )) {
+            return false;
+        }
+        runtime->float_ready = true;
+    }
+    if (coverage && runtime->float_coverage_pipelines[0] == NULL) {
+        char path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+        const bool metal = runtime->shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB;
+        if (!btbh_gpu_canvas_sibling_path(
+                runtime->textured_fragment_shader_path,
+                metal ? "production_canvas_coverage.frag.metallib" : "production_canvas_coverage.frag.spv",
+                path
+            )) {
+            btbh_gpu_canvas_error(report, BTBH_GPU_INVALID_ARGUMENT, "The canvas coverage shader's path is too long");
+            return false;
+        }
+        if (!btbh_gpu_canvas_make_float_set(window, path, 1u, runtime->float_coverage_pipelines, report)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* The canvas's pipeline for each blend mode from these shaders, drawing into the swapchain's format; false, with none
    kept, if one of them can't be made. */
 static bool btbh_gpu_canvas_create_pipelines(
@@ -498,7 +615,8 @@ static bool btbh_gpu_canvas_validate_passes(
              (pass->target->owner != window ||
               btbh_gpu_texture_is_array(pass->target) ||
               btbh_gpu_texture_is_heightfield(pass->target) ||
-              pass->target->format != frame_context->swapchain_format))
+              (pass->target->format != frame_context->target_format &&
+               (pass->target->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT || !pass->target->color_target))))
         ) {
             return false;
         }
@@ -955,6 +1073,25 @@ void btbh_gpu_window_frame_context_fill(
         frame_context->logical_height = (uint32_t)logical_height;
     }
     frame_context->swapchain_format = SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window);
+    /* RFC 0017: in SDR the three formats are equal (the target format is the SDR swapchain's, kept from the claim). */
+    frame_context->target_format = window->sdr_format != SDL_GPU_TEXTUREFORMAT_INVALID
+        ? window->sdr_format
+        : frame_context->swapchain_format;
+    frame_context->frame_format = window->hdr_active
+        ? SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT
+        : frame_context->swapchain_format;
+    frame_context->hdr_active = window->hdr_active;
+    frame_context->hdr_debug_heat = window->hdr_active && window->hdr_debug_heat;
+    /* The frame's numbers, latched at its start (btbh_gpu_window_hdr_frame_start): a nits change while a frame is
+       pending reaches the next one, its gain and its encode alike. */
+    frame_context->hdr_highlight_ratio = window->hdr_active && window->hdr_frame_ratio > 1.0f
+        ? window->hdr_frame_ratio
+        : 1.0f;
+    frame_context->hdr_paper_white_nits = window->hdr_frame_paper_white;
+    frame_context->hdr_linear_scale = window->hdr_frame_linear_scale;
+    frame_context->hdr_knee_override = window->hdr_knee_override;
+    frame_context->hdr_shoulder_scale =
+        window->hdr_shoulder_scale > 0.0f ? window->hdr_shoulder_scale : BTBH_HDR_SHOULDER_SCALE;
 }
 
 /* The texture the frame's screen passes draw into: the swapchain image, or with a readback requested the presented
@@ -975,10 +1112,11 @@ SDL_GPUTexture *btbh_gpu_window_present_target(
     ) {
         return NULL;
     }
-    if (!window->presented_frame_readback_requested) {
+    if (!window->presented_frame_readback_requested && !window->hdr_active) {
         return window->pending_swapchain;
     }
-    const SDL_GPUTextureFormat format = frame_context->swapchain_format;
+    /* A read-back frame in the swapchain's format, or (RFC 0017) the HDR frame in RGBA16F. */
+    const SDL_GPUTextureFormat format = frame_context->frame_format;
     if (
         window->presented_frame != NULL &&
         (
@@ -1012,6 +1150,8 @@ SDL_GPUTexture *btbh_gpu_window_present_target(
     return window->presented_frame->texture;
 }
 
+static bool btbh_gpu_window_record_hdr_frame(BTBHGPUWindow *window);
+
 bool btbh_gpu_window_record_presented_frame(
     BTBHGPUWindow *window
 ) {
@@ -1023,6 +1163,10 @@ bool btbh_gpu_window_record_presented_frame(
         window->presented_frame->texture == NULL
     ) {
         return false;
+    }
+    if (window->hdr_active) {
+        /* RFC 0017: the HDR frame is encoded into the image. */
+        return btbh_gpu_window_record_hdr_frame(window);
     }
     SDL_GPUBlitInfo blit;
     SDL_zero(blit);
@@ -1040,6 +1184,520 @@ bool btbh_gpu_window_record_presented_frame(
     );
     SDL_BlitGPUTexture(window->pending_command, &blit);
     return true;
+}
+
+
+/* HDR output (RFC 0017, since 0.17.0): the GPU side of the window's HDR frame. */
+
+static SDL_GPUTextureFormat btbh_gpu_hdr_output_format(const BTBHGPUWindow *window) {
+    return window->hdr_composition == BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR
+        ? SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT
+        : SDL_GPU_TEXTUREFORMAT_R10G10B10A2_UNORM;
+}
+
+SDL_GPUGraphicsPipeline *btbh_gpu_window_hdr_create_pass_pipeline(
+    BTBHGPUWindow *window,
+    const char *fragment_name,
+    SDL_GPUTextureFormat target_format,
+    char *message,
+    size_t message_capacity
+) {
+    if (window == NULL || window->device == NULL || window->device->gpu == NULL ||
+        window->shader_reference_path[0] == '\0') {
+        (void)snprintf(message, message_capacity, "%s", "HDR output needs a present's shader paths first");
+        return NULL;
+    }
+    const bool metal = window->shader_reference_format == BTBH_GPU_SHADER_FORMAT_METALLIB;
+    const char *extension = metal ? "metallib" : "spv";
+    char filename[128];
+    char vertex_path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    char fragment_path[BTBH_GPU_CANVAS_PATH_CAPACITY];
+    (void)snprintf(filename, sizeof(filename), "production_post.vert.%s", extension);
+    if (!btbh_gpu_canvas_sibling_path(window->shader_reference_path, filename, vertex_path)) {
+        (void)snprintf(message, message_capacity, "%s", "The HDR pass's shader path is too long");
+        return NULL;
+    }
+    (void)snprintf(filename, sizeof(filename), "%s.%s", fragment_name, extension);
+    if (!btbh_gpu_canvas_sibling_path(window->shader_reference_path, filename, fragment_path)) {
+        (void)snprintf(message, message_capacity, "%s", "The HDR pass's shader path is too long");
+        return NULL;
+    }
+    SDL_GPUDevice *gpu = window->device->gpu;
+    const SDL_GPUShaderFormat format = btbh_gpu_canvas_shader_format(window->shader_reference_format);
+    const char *entrypoint = metal ? "main0" : "main";
+    BTBHGPUCanvasReport report;
+    SDL_zero(report);
+    SDL_GPUShader *vertex_shader = btbh_gpu_canvas_load_shader(
+        gpu, vertex_path, entrypoint, format, SDL_GPU_SHADERSTAGE_VERTEX, 0u, 0u, &report
+    );
+    SDL_GPUShader *fragment_shader = vertex_shader == NULL
+        ? NULL
+        : btbh_gpu_canvas_load_shader(
+            gpu, fragment_path, entrypoint, format, SDL_GPU_SHADERSTAGE_FRAGMENT, 1u, 1u, &report
+        );
+    SDL_GPUGraphicsPipeline *pipeline = NULL;
+    if (fragment_shader != NULL) {
+        SDL_GPUColorTargetDescription color_target;
+        SDL_GPUGraphicsPipelineCreateInfo info;
+        SDL_zero(color_target);
+        SDL_zero(info);
+        color_target.format = target_format;
+        color_target.blend_state.color_write_mask = 0x0fu;
+        info.vertex_shader = vertex_shader;
+        info.fragment_shader = fragment_shader;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+        info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.target_info.color_target_descriptions = &color_target;
+        info.target_info.num_color_targets = 1u;
+        pipeline = btbh_gpu_create_graphics_pipeline(gpu, &info);
+        if (pipeline == NULL) {
+            (void)snprintf(report.message, sizeof(report.message), "%s", SDL_GetError());
+        }
+    }
+    if (fragment_shader != NULL) {
+        SDL_ReleaseGPUShader(gpu, fragment_shader);
+    }
+    if (vertex_shader != NULL) {
+        SDL_ReleaseGPUShader(gpu, vertex_shader);
+    }
+    if (pipeline == NULL) {
+        (void)snprintf(message, message_capacity, "%s", report.message);
+    }
+    return pipeline;
+}
+
+typedef struct BTBHGPUHDREncodeUniforms {
+    float paper_white_nits;
+    float highlight_ratio;
+    float linear_scale;
+    float dither_scale;
+    uint32_t encode_mode;
+    float unused[3];
+} BTBHGPUHDREncodeUniforms;
+
+bool btbh_gpu_window_hdr_record_encode(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    SDL_GPUTexture *frame,
+    SDL_GPUTexture *destination,
+    SDL_GPUTextureFormat destination_format,
+    uint32_t width,
+    uint32_t height
+) {
+    const uint32_t index = destination_format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 1u : 0u;
+    if (window->hdr_encode_pipelines[index] == NULL) {
+        if (window->hdr_encode_failed) {
+            /* (Not again every frame: the window goes to SDR at the next frame's start.) */
+            SDL_SetError("The HDR encode is unavailable (%s)", window->hdr_encode_error);
+            return false;
+        }
+        if (window->shader_reference_path[0] == '\0') {
+            /* No present has given its shader paths yet (a present_clear first): this frame only. */
+            SDL_SetError("%s", "HDR output needs a present's shader paths first");
+            return false;
+        }
+        char message[256];
+        window->hdr_encode_pipelines[index] = btbh_gpu_window_hdr_create_pass_pipeline(
+            window,
+            "production_hdr_encode.frag",
+            destination_format,
+            message,
+            sizeof(message)
+        );
+        if (window->hdr_encode_pipelines[index] == NULL) {
+            window->hdr_encode_failed = true;
+            (void)snprintf(window->hdr_encode_error, sizeof(window->hdr_encode_error), "%s", message);
+            SDL_SetError("The HDR encode is unavailable (%s)", message);
+            return false;
+        }
+    }
+    if (window->presented_frame == NULL || window->presented_frame->sampler == NULL) {
+        return false;
+    }
+    /* The frame's numbers, latched at its start with the ones its gain used. */
+    BTBHGPUHDREncodeUniforms uniforms;
+    SDL_zero(uniforms);
+    uniforms.paper_white_nits = window->hdr_frame_paper_white;
+    uniforms.highlight_ratio = window->hdr_frame_ratio > 1.0f ? window->hdr_frame_ratio : 1.0f;
+    uniforms.linear_scale = window->hdr_frame_linear_scale;
+    const bool hdr10 = window->hdr_composition == BTBH_GPU_SWAPCHAIN_HDR10_ST2084;
+    uniforms.dither_scale = hdr10 && window->hdr_dither ? 1.0f / 1023.0f : 0.0f;
+    uniforms.encode_mode = hdr10 ? 0u : 1u;
+    SDL_GPUColorTargetInfo color_target;
+    SDL_zero(color_target);
+    color_target.texture = destination;
+    color_target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_InsertGPUDebugLabel(command, "BTBH HDR Encode");
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &color_target, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    SDL_Rect scissor;
+    scissor.x = 0;
+    scissor.y = 0;
+    scissor.w = (int)width;
+    scissor.h = (int)height;
+    SDL_SetGPUScissor(pass, &scissor);
+    SDL_PushGPUFragmentUniformData(command, 0u, &uniforms, (uint32_t)sizeof(uniforms));
+    SDL_BindGPUGraphicsPipeline(pass, window->hdr_encode_pipelines[index]);
+    SDL_GPUTextureSamplerBinding sampler;
+    SDL_zero(sampler);
+    sampler.texture = frame;
+    sampler.sampler = window->presented_frame->sampler;
+    SDL_BindGPUFragmentSamplers(pass, 0u, &sampler, 1u);
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+/* BTBH_GPU_HDR_SIMULATE: the encode's target in place of the swapchain image, at the frame's size. */
+static SDL_GPUTexture *btbh_gpu_hdr_virtual_swapchain(BTBHGPUWindow *window, uint32_t width, uint32_t height) {
+    const SDL_GPUTextureFormat format = btbh_gpu_hdr_output_format(window);
+    if (window->hdr_virtual_swapchain != NULL &&
+        (window->hdr_virtual_swapchain->width != width ||
+         window->hdr_virtual_swapchain->height != height ||
+         window->hdr_virtual_swapchain->format != format)) {
+        btbh_gpu_texture_destroy(window->hdr_virtual_swapchain);
+        window->hdr_virtual_swapchain = NULL;
+    }
+    if (window->hdr_virtual_swapchain == NULL) {
+        BTBHGPUTextureReport report;
+        window->hdr_virtual_swapchain = btbh_gpu_window_texture_create_empty(
+            window,
+            width,
+            height,
+            format,
+            SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+            BTBH_GPU_TEXTURE_FILTER_NEAREST,
+            BTBH_GPU_TEXTURE_WRAP_CLAMP,
+            &report
+        );
+    }
+    return window->hdr_virtual_swapchain != NULL ? window->hdr_virtual_swapchain->texture : NULL;
+}
+
+/* The HDR frame into the swapchain image: the encode (with BTBH_GPU_HDR_SIMULATE into the simulated swapchain, and the
+   frame blitted to the SDR image, clamped). Without the encode (no present has given its shader paths yet, or its
+   pipeline can't be made) an HDR swapchain image is cleared to black, never given unencoded values; the window goes
+   to SDR at the next frame's start when the encode can't be made. */
+static bool btbh_gpu_window_record_hdr_frame(BTBHGPUWindow *window) {
+    const uint32_t width = window->pending_drawable_width;
+    const uint32_t height = window->pending_drawable_height;
+    SDL_GPUTexture *frame = window->presented_frame->texture;
+    SDL_GPUTexture *destination = window->pending_swapchain;
+    if (window->hdr_simulate != 0u) {
+        destination = btbh_gpu_hdr_virtual_swapchain(window, width, height);
+        if (destination == NULL) {
+            return false;
+        }
+    }
+    const bool encoded = btbh_gpu_window_hdr_record_encode(
+        window,
+        window->pending_command,
+        frame,
+        destination,
+        btbh_gpu_hdr_output_format(window),
+        width,
+        height
+    );
+    if (encoded && window->hdr_simulate == 0u) {
+        return true;
+    }
+    if (window->hdr_simulate == 0u) {
+        SDL_GPUColorTargetInfo black;
+        SDL_zero(black);
+        black.texture = window->pending_swapchain;
+        black.clear_color.a = 1.0f;
+        black.load_op = SDL_GPU_LOADOP_CLEAR;
+        black.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_InsertGPUDebugLabel(window->pending_command, "BTBH HDR No Encode");
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(window->pending_command, &black, 1u, NULL);
+        if (pass == NULL) {
+            return false;
+        }
+        SDL_EndGPURenderPass(pass);
+        return true;
+    }
+    /* The simulated swapchain's real image is SDR: the frame, clamped, encoded or not. */
+    SDL_GPUBlitInfo blit;
+    SDL_zero(blit);
+    blit.source.texture = frame;
+    blit.source.w = width;
+    blit.source.h = height;
+    blit.destination.texture = window->pending_swapchain;
+    blit.destination.w = width;
+    blit.destination.h = height;
+    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blit.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_InsertGPUDebugLabel(window->pending_command, "BTBH HDR Frame To SDR");
+    SDL_BlitGPUTexture(window->pending_command, &blit);
+    return true;
+}
+
+void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window) {
+    if (window == NULL || !window->hdr_active || window->device == NULL || window->device->gpu == NULL) {
+        return;
+    }
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
+    int drawable_width = 0;
+    int drawable_height = 0;
+    /* (Not the textures while a frame is pending: its commands may draw into the frame texture.) */
+    const bool frame_pending = window->pending_command != NULL || window->pending_scene_ready;
+    if (!frame_pending &&
+        SDL_GetWindowSizeInPixels(window->window, &drawable_width, &drawable_height) &&
+        drawable_width > 0 && drawable_height > 0) {
+        if (window->presented_frame != NULL &&
+            (window->presented_frame->width != (uint32_t)drawable_width ||
+             window->presented_frame->height != (uint32_t)drawable_height ||
+             window->presented_frame->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT)) {
+            btbh_gpu_texture_destroy(window->presented_frame);
+            window->presented_frame = NULL;
+        }
+        if (window->presented_frame == NULL) {
+            BTBHGPUTextureReport report;
+            window->presented_frame = btbh_gpu_window_texture_create_empty(
+                window,
+                (uint32_t)drawable_width,
+                (uint32_t)drawable_height,
+                SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+                BTBH_GPU_TEXTURE_FILTER_LINEAR,
+                BTBH_GPU_TEXTURE_WRAP_CLAMP,
+                &report
+            );
+        }
+        if (window->hdr_simulate != 0u) {
+            (void)btbh_gpu_hdr_virtual_swapchain(window, (uint32_t)drawable_width, (uint32_t)drawable_height);
+        }
+    }
+    const SDL_GPUTextureFormat output_format = btbh_gpu_hdr_output_format(window);
+    const uint32_t index = output_format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 1u : 0u;
+    if (window->hdr_encode_pipelines[index] == NULL && !window->hdr_encode_failed &&
+        window->shader_reference_path[0] != '\0') {
+        char message[256];
+        window->hdr_encode_pipelines[index] = btbh_gpu_window_hdr_create_pass_pipeline(
+            window,
+            "production_hdr_encode.frag",
+            output_format,
+            message,
+            sizeof(message)
+        );
+        if (window->hdr_encode_pipelines[index] == NULL) {
+            /* Remembered: the switch falls back to SDR, and nothing tries again until a set_hdr switch. */
+            window->hdr_encode_failed = true;
+            (void)snprintf(window->hdr_encode_error, sizeof(window->hdr_encode_error), "%s", message);
+        }
+    }
+    /* The fold of an HDR capture into an SDR target (btbh_gpu_window_copy_pending_scene_texture). */
+    if (window->hdr_fold_pipeline == NULL) {
+        char message[256];
+        window->hdr_fold_pipeline = btbh_gpu_window_hdr_create_pass_pipeline(
+            window,
+            "production_hdr_fold.frag",
+            window->sdr_format,
+            message,
+            sizeof(message)
+        );
+    }
+    if (window->canvas_runtime != NULL) {
+        BTBHGPUCanvasReport report;
+        SDL_zero(report);
+        (void)btbh_gpu_canvas_ensure_float_pipelines(window, false, &report);
+    }
+    btbh_gpu_hdr_restore_error(&saved);
+}
+
+/* Halves to RGBA8 (an HDR frame's RGBA8 read-back: clamped and rounded), or RGBA8/BGRA8 widened to halves. */
+static void btbh_gpu_hdr_convert_row(
+    const uint8_t *source,
+    SDL_GPUTextureFormat format,
+    uint32_t width,
+    uint8_t *rgba8,
+    uint16_t *rgba16f
+) {
+    if (format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+        const uint16_t *halves = (const uint16_t *)source;
+        for (uint32_t x = 0u; x < width * 4u; ++x) {
+            if (rgba8 != NULL) {
+                rgba8[x] = btbh_hdr_clamp_to_unorm8(btbh_hdr_half_to_float(halves[x]));
+            } else {
+                rgba16f[x] = halves[x];
+            }
+        }
+        return;
+    }
+    const bool bgra =
+        format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM ||
+        format == SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB;
+    for (uint32_t x = 0u; x < width; ++x) {
+        const uint8_t r = source[x * 4u + (bgra ? 2u : 0u)];
+        const uint8_t g = source[x * 4u + 1u];
+        const uint8_t b = source[x * 4u + (bgra ? 0u : 2u)];
+        const uint8_t a = source[x * 4u + 3u];
+        rgba16f[x * 4u] = btbh_hdr_float_to_half((float)r / 255.0f);
+        rgba16f[x * 4u + 1u] = btbh_hdr_float_to_half((float)g / 255.0f);
+        rgba16f[x * 4u + 2u] = btbh_hdr_float_to_half((float)b / 255.0f);
+        rgba16f[x * 4u + 3u] = btbh_hdr_float_to_half((float)a / 255.0f);
+    }
+}
+
+/* Downloads `texture` (width x height, `bytes_per_pixel`) into a mapped transfer buffer, rows `row_pitch` apart: the
+   caller reads it, then unmaps and releases it. NULL with SDL's error on failure. */
+static SDL_GPUTransferBuffer *btbh_gpu_hdr_download(
+    SDL_GPUDevice *gpu,
+    SDL_GPUTexture *texture,
+    uint32_t width,
+    uint32_t height,
+    uint32_t bytes_per_pixel,
+    uint64_t *row_pitch,
+    const uint8_t **mapped
+) {
+    const uint64_t row_bytes = (uint64_t)width * bytes_per_pixel;
+    *row_pitch = (row_bytes + UINT64_C(255)) & ~UINT64_C(255);
+    const uint64_t transfer_bytes = *row_pitch * (uint64_t)height;
+    if (transfer_bytes > UINT32_MAX) {
+        SDL_SetError("The frame is too large to read back");
+        return NULL;
+    }
+    SDL_GPUTransferBufferCreateInfo transfer_info;
+    SDL_zero(transfer_info);
+    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    transfer_info.size = (uint32_t)transfer_bytes;
+    SDL_GPUTransferBuffer *transfer = SDL_CreateGPUTransferBuffer(gpu, &transfer_info);
+    SDL_GPUCommandBuffer *command = transfer != NULL ? SDL_AcquireGPUCommandBuffer(gpu) : NULL;
+    SDL_GPUCopyPass *copy = command != NULL ? SDL_BeginGPUCopyPass(command) : NULL;
+    if (copy == NULL) {
+        if (command != NULL) {
+            (void)SDL_CancelGPUCommandBuffer(command);
+        }
+        if (transfer != NULL) {
+            SDL_ReleaseGPUTransferBuffer(gpu, transfer);
+        }
+        return NULL;
+    }
+    SDL_GPUTextureRegion source;
+    SDL_GPUTextureTransferInfo destination;
+    SDL_zero(source);
+    SDL_zero(destination);
+    source.texture = texture;
+    source.w = width;
+    source.h = height;
+    source.d = 1u;
+    destination.transfer_buffer = transfer;
+    destination.pixels_per_row = (uint32_t)(*row_pitch / bytes_per_pixel);
+    destination.rows_per_layer = height;
+    SDL_DownloadFromGPUTexture(copy, &source, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence *fence = SDL_SubmitGPUCommandBufferAndAcquireFence(command);
+    if (fence == NULL || !SDL_WaitForGPUFences(gpu, true, &fence, 1u)) {
+        if (fence != NULL) {
+            SDL_ReleaseGPUFence(gpu, fence);
+        }
+        SDL_ReleaseGPUTransferBuffer(gpu, transfer);
+        return NULL;
+    }
+    SDL_ReleaseGPUFence(gpu, fence);
+    *mapped = (const uint8_t *)SDL_MapGPUTransferBuffer(gpu, transfer, false);
+    if (*mapped == NULL) {
+        SDL_ReleaseGPUTransferBuffer(gpu, transfer);
+        return NULL;
+    }
+    return transfer;
+}
+
+BTBHGPUResult btbh_gpu_window_readback_presented_frame_rgba16f(
+    BTBHGPUWindow *window,
+    uint16_t *rgba16f,
+    uint32_t byte_capacity,
+    BTBHGPUCanvasReport *report
+) {
+    if (report == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    (void)memset(report, 0, sizeof(*report));
+    if (window == NULL || window->device == NULL || window->device->gpu == NULL ||
+        window->presented_frame == NULL || rgba16f == NULL) {
+        btbh_gpu_canvas_error(report, BTBH_GPU_INVALID_ARGUMENT, "No presented GPU frame is available");
+        return report->result;
+    }
+    BTBHGPUTexture *frame = window->presented_frame;
+    const uint64_t output_bytes = (uint64_t)frame->width * (uint64_t)frame->height * UINT64_C(8);
+    if (output_bytes > byte_capacity) {
+        btbh_gpu_canvas_error(report, BTBH_GPU_INVALID_ARGUMENT, "Presented GPU frame readback buffer is too small");
+        return report->result;
+    }
+    const uint32_t bytes_per_pixel = frame->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 8u : 4u;
+    uint64_t row_pitch = 0u;
+    const uint8_t *mapped = NULL;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_hdr_download(
+        window->device->gpu, frame->texture, frame->width, frame->height, bytes_per_pixel, &row_pitch, &mapped
+    );
+    if (transfer == NULL) {
+        btbh_gpu_canvas_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+        return report->result;
+    }
+    for (uint32_t y = 0u; y < frame->height; ++y) {
+        btbh_gpu_hdr_convert_row(
+            mapped + (size_t)y * (size_t)row_pitch,
+            frame->format,
+            frame->width,
+            NULL,
+            rgba16f + (size_t)y * (size_t)frame->width * 4u
+        );
+    }
+    SDL_UnmapGPUTransferBuffer(window->device->gpu, transfer);
+    SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+    report->result = BTBH_GPU_OK;
+    report->drawable_width = frame->width;
+    report->drawable_height = frame->height;
+    report->vertex_count = (uint32_t)output_bytes;
+    return report->result;
+}
+
+BTBHGPUResult btbh_gpu_window_readback_hdr_output(
+    BTBHGPUWindow *window,
+    void *pixels,
+    uint32_t byte_capacity,
+    uint32_t *width,
+    uint32_t *height,
+    uint32_t *bytes_per_pixel
+) {
+    if (window == NULL || pixels == NULL || width == NULL || height == NULL || bytes_per_pixel == NULL ||
+        window->device == NULL || window->device->gpu == NULL || window->hdr_virtual_swapchain == NULL) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    BTBHGPUTexture *output = window->hdr_virtual_swapchain;
+    const uint32_t pixel_bytes = output->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 8u : 4u;
+    const uint64_t output_bytes = (uint64_t)output->width * (uint64_t)output->height * pixel_bytes;
+    if (output_bytes > byte_capacity) {
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    uint64_t row_pitch = 0u;
+    const uint8_t *mapped = NULL;
+    SDL_GPUTransferBuffer *transfer = btbh_gpu_hdr_download(
+        window->device->gpu, output->texture, output->width, output->height, pixel_bytes, &row_pitch, &mapped
+    );
+    if (transfer == NULL) {
+        return BTBH_GPU_DEVICE_FAILURE;
+    }
+    for (uint32_t y = 0u; y < output->height; ++y) {
+        (void)memcpy(
+            (uint8_t *)pixels + (size_t)y * (size_t)output->width * pixel_bytes,
+            mapped + (size_t)y * (size_t)row_pitch,
+            (size_t)output->width * pixel_bytes
+        );
+    }
+    SDL_UnmapGPUTransferBuffer(window->device->gpu, transfer);
+    SDL_ReleaseGPUTransferBuffer(window->device->gpu, transfer);
+    *width = output->width;
+    *height = output->height;
+    *bytes_per_pixel = pixel_bytes;
+    return BTBH_GPU_OK;
 }
 
 static uint32_t btbh_gpu_canvas_buffer_capacity(
@@ -1132,6 +1790,44 @@ BTBHGPUResult btbh_gpu_window_readback_presented_frame(
         return report->result;
     }
     BTBHGPUTexture *frame = window->presented_frame;
+    if (frame->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+        /* RFC 0017: an HDR frame, clamped to 0-1 and rounded. */
+        const uint64_t hdr_output_bytes = (uint64_t)frame->width * (uint64_t)frame->height * UINT64_C(4);
+        if (hdr_output_bytes > byte_capacity) {
+            btbh_gpu_canvas_error(
+                report,
+                BTBH_GPU_INVALID_ARGUMENT,
+                "Presented GPU frame readback buffer is too small"
+            );
+            return report->result;
+        }
+        uint64_t hdr_row_pitch = 0u;
+        const uint8_t *hdr_mapped = NULL;
+        SDL_GPUTransferBuffer *hdr_transfer = btbh_gpu_hdr_download(
+            window->device->gpu, frame->texture, frame->width, frame->height, 8u, &hdr_row_pitch, &hdr_mapped
+        );
+        if (hdr_transfer == NULL) {
+            btbh_gpu_canvas_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return report->result;
+        }
+        for (uint32_t y = 0u; y < frame->height; ++y) {
+            btbh_gpu_hdr_convert_row(
+                hdr_mapped + (size_t)y * (size_t)hdr_row_pitch,
+                frame->format,
+                frame->width,
+                rgba8 + (size_t)y * (size_t)frame->width * 4u,
+                NULL
+            );
+        }
+        SDL_UnmapGPUTransferBuffer(window->device->gpu, hdr_transfer);
+        SDL_ReleaseGPUTransferBuffer(window->device->gpu, hdr_transfer);
+        report->result = BTBH_GPU_OK;
+        report->drawable_width = frame->width;
+        report->drawable_height = frame->height;
+        report->vertex_count = (uint32_t)hdr_output_bytes;
+        report->message[0] = '\0';
+        return report->result;
+    }
     const uint64_t row_bytes = (uint64_t)frame->width * UINT64_C(4);
     const uint64_t output_bytes =
         row_bytes * (uint64_t)frame->height;
@@ -1355,10 +2051,13 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
 ) {
-    BTBHGPUFrameContext frame_context;
-    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
+    /* RFC 0017: a canvas present with no scene before it starts the frame (an AUTO window takes an HDR change), inside
+       the log's scope, so that it names a switch's wait and what it makes. */
+    btbh_gpu_window_hdr_frame_start(window);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
         window,
         &frame_context,
@@ -1404,6 +2103,10 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
         return BTBH_GPU_INVALID_ARGUMENT;
     }
     (void)memset(report, 0, sizeof(*report));
+    if (window != NULL && fragment_shader_path != NULL) {
+        /* RFC 0017: the HDR passes' shaders are siblings of the canvas's. */
+        btbh_gpu_window_hdr_remember_shaders(window, fragment_shader_path, shader_format);
+    }
     if (
         window == NULL ||
         window->window == NULL ||
@@ -1452,7 +2155,7 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             fragment_shader_path,
             textured_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            frame_context->target_format,
             report
         )
     ) {
@@ -1472,9 +2175,25 @@ static BTBHGPUResult btbh_gpu_window_canvas_present_internal(
             vertex_shader_path,
             textured_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            window->canvas_runtime->format,
             report
         )
+    ) {
+        if (window->pending_command != NULL) {
+            (void)btbh_gpu_window_finish_pending_frame(window, false);
+        }
+        return report->result;
+    }
+    /* RFC 0017: an HDR frame's screen passes, and passes into frame-format render targets, draw into RGBA16F. */
+    bool draws_float = frame_context->hdr_active;
+    for (uint32_t index = 0u; index < pass_count && !draws_float; ++index) {
+        draws_float = passes[index].target != NULL &&
+            passes[index].target->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    }
+    if (
+        draws_float &&
+        window->canvas_runtime->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT &&
+        !btbh_gpu_canvas_ensure_float_pipelines(window, draws_coverage, report)
     ) {
         if (window->pending_command != NULL) {
             (void)btbh_gpu_window_finish_pending_frame(window, false);
@@ -1555,8 +2274,11 @@ static bool btbh_gpu_window_canvas_acquire_frame(
             BTBH_GPU_WINDOW_FAILURE,
             SDL_GetError()
         );
+        /* RFC 0017: the swapchain may have lost its HDR composition; the window is SDR from the next frame. */
+        (void)btbh_gpu_window_hdr_acquire_failed(window);
         return false;
     }
+    window->hdr_acquire_failures = 0u;
     // A minimized or hidden window has no swapchain image. That is not an error: the
     // frame's offscreen work (scene and canvas target passes) still runs and is
     // submitted, and only the screen passes are skipped.
@@ -1745,6 +2467,22 @@ static bool btbh_gpu_window_canvas_draw(
         }
         const uint32_t last_batch =
             canvas_pass->first_batch + canvas_pass->batch_count;
+        /* RFC 0017: a pass into RGBA16F (an HDR frame's screen pass, a frame-format target) takes the RGBA16F set. */
+        const SDL_GPUTextureFormat pass_format = is_screen
+            ? frame_context->frame_format
+            : canvas_pass->target->format;
+        const bool float_pass =
+            pass_format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT &&
+            window->canvas_runtime->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        SDL_GPUGraphicsPipeline *const *solid_pipelines = float_pass
+            ? window->canvas_runtime->float_solid_pipelines
+            : window->canvas_runtime->solid_pipelines;
+        SDL_GPUGraphicsPipeline *const *textured_pipelines = float_pass
+            ? window->canvas_runtime->float_textured_pipelines
+            : window->canvas_runtime->textured_pipelines;
+        SDL_GPUGraphicsPipeline *const *coverage_pipelines = float_pass
+            ? window->canvas_runtime->float_coverage_pipelines
+            : window->canvas_runtime->coverage_pipelines;
         SDL_GPUGraphicsPipeline *bound_pipeline = NULL;
         SDL_Rect bound_scissor;
         SDL_zero(bound_scissor);
@@ -1755,13 +2493,10 @@ static bool btbh_gpu_window_canvas_draw(
             const BTBHGPUCanvasBatch *batch = &batches[index];
             SDL_GPUGraphicsPipeline *pipeline =
                 batch->texture == NULL
-                    ? window->canvas_runtime
-                        ->solid_pipelines[batch->blend_mode]
+                    ? solid_pipelines[batch->blend_mode]
                     : btbh_gpu_canvas_texture_is_coverage(batch->texture)
-                    ? window->canvas_runtime
-                        ->coverage_pipelines[batch->blend_mode]
-                    : window->canvas_runtime
-                        ->textured_pipelines[batch->blend_mode];
+                    ? coverage_pipelines[batch->blend_mode]
+                    : textured_pipelines[batch->blend_mode];
             if (pipeline != bound_pipeline) {
                 SDL_BindGPUGraphicsPipeline(pass, pipeline);
                 bound_pipeline = pipeline;
@@ -1864,7 +2599,8 @@ static BTBHGPUResult btbh_gpu_window_canvas_submit_frame(
     const uint32_t drawable_height =
         window->pending_drawable_height;
     if (
-        window->presented_frame_readback_requested &&
+        (window->presented_frame_readback_requested || window->hdr_active) &&
+        window->pending_swapchain != NULL &&
         !btbh_gpu_window_record_presented_frame(window)
     ) {
         (void)btbh_gpu_window_finish_pending_frame(window, false);
@@ -1905,6 +2641,18 @@ void btbh_gpu_window_release_canvas(BTBHGPUWindow *window) {
             ? window->device->gpu
             : NULL;
     if (device != NULL) {
+        for (uint32_t index = 0u; index < BTBH_GPU_CANVAS_PIPELINE_COUNT; ++index) {
+            SDL_GPUGraphicsPipeline *const float_pipelines[3] = {
+                window->canvas_runtime->float_solid_pipelines[index],
+                window->canvas_runtime->float_textured_pipelines[index],
+                window->canvas_runtime->float_coverage_pipelines[index]
+            };
+            for (uint32_t set = 0u; set < 3u; ++set) {
+                if (float_pipelines[set] != NULL) {
+                    SDL_ReleaseGPUGraphicsPipeline(device, float_pipelines[set]);
+                }
+            }
+        }
         if (window->canvas_runtime->upload_transfer != NULL) {
             SDL_ReleaseGPUTransferBuffer(
                 device,

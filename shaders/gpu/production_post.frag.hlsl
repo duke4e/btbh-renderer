@@ -2,6 +2,9 @@ Texture2D<float4> scene_texture : register(t0, space2);
 SamplerState scene_sampler : register(s0, space2);
 
 #include "production_tonemap.hlsli"
+#if BTBH_HDR_OUTPUT
+#include "production_hdr.hlsli"
+#endif
 
 cbuffer PostUniforms : register(b0, space3)
 {
@@ -25,6 +28,16 @@ cbuffer PostUniforms : register(b0, space3)
     float4x4 inverse_view_projection;
     float projection_scale_y;
     float saturation;
+#if BTBH_HDR_OUTPUT
+    // BTBHGPUPostUniforms' tail (unused here), then BTBHGPUPostHDRUniforms' two vectors (production_hdr.hlsli).
+    float2 hdr_unused_ssr_options;
+    float4x4 hdr_unused_view_projection;
+    float4 hdr_unused_ssr_controls;
+    float4 hdr_unused_ao_controls;
+    float4 hdr_unused_ssr_hit_options;
+    float4 hdr_tone;
+    float4 hdr_misc;
+#endif
 };
 
 struct FragmentInput
@@ -59,6 +72,28 @@ float3 output_color(float3 color, float2 fragment_coordinate)
     return color + (noise - 0.5f) / 255.0f;
 }
 
+#if BTBH_HDR_OUTPUT
+// The SDR result before its dither, lifted by the highlight gain. The heat comes from the LUT pass's alpha when it
+// graded the scene (it is the last pass to see the scene's values), else from the input.
+float4 output_color_hdr(float4 scene_value)
+{
+    const float3 encoded = linear_to_srgb(btbh_tone_map_for_output(
+        scene_value.rgb,
+        tonemap_mode,
+        tonemap_white,
+        lut_enabled,
+        exposure,
+        contrast,
+        saturation
+    ));
+    const float heat = lut_enabled != 0u ? scene_value.a : btbh_hdr_heat(scene_value.rgb, exposure);
+    return float4(
+        btbh_hdr_lift(encoded, btbh_hdr_gain(heat, hdr_tone)),
+        hdr_misc.x != 0.0f ? heat : 1.0f
+    );
+}
+#endif
+
 float4 main(FragmentInput input) : SV_Target0
 {
     const float4 scene_sample = scene_texture.SampleLevel(
@@ -66,6 +101,9 @@ float4 main(FragmentInput input) : SV_Target0
         input.texture_coordinate,
         0.0f
     );
+#if BTBH_HDR_OUTPUT
+    return output_color_hdr(scene_sample);
+#else
     const float2 legacy_fragment_coordinate = float2(
         input.position.x,
         1.0f / inverse_resolution.y - input.position.y
@@ -77,4 +115,5 @@ float4 main(FragmentInput input) : SV_Target0
         ),
         1.0f
     );
+#endif
 }

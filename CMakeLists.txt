@@ -308,6 +308,15 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_canvas.frag|fragment"
         "production_canvas_textured.frag|fragment"
         "production_canvas_coverage.frag|fragment"
+        # HDR output (RFC 0017, since 0.17.0): the HDR variants of the post tail (each its SDR source with
+        # BTBH_HDR_OUTPUT), the encode into the swapchain and the fold of an HDR capture into SDR.
+        "production_post_hdr.frag|fragment"
+        "production_tilt_shift_hdr.frag|fragment"
+        "production_lut_hdr.frag|fragment"
+        "production_cas_hdr.frag|fragment"
+        "production_upscale_fsr_rcas_hdr.frag|fragment"
+        "production_hdr_encode.frag|fragment"
+        "production_hdr_fold.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
@@ -480,6 +489,16 @@ if(BTBH_BUILD_GPU_SPIKE)
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_tonemap.hlsli"
+            )
+        endif()
+        # RFC 0017: an HDR variant is its SDR source with BTBH_HDR_OUTPUT, and the HDR helpers.
+        if(_shader_name MATCHES "^(production_[a-z0-9_]+)_hdr\\.frag$")
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/${CMAKE_MATCH_1}.frag.hlsl"
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_tonemap.hlsli"
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_hdr.hlsli"
             )
         endif()
         add_custom_command(
@@ -725,6 +744,28 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(
             NAME btbh_gpu_scene_order
             COMMAND btbh_gpu_scene_order_test
+        )
+
+        # RFC 0017: HDR output's curves on the CPU (btbh_gpu_hdr.h: the gain, the knee, PQ, the encode, the fold) and
+        # the public structs' layout, without a GPU.
+        add_executable(btbh_gpu_hdr_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_hdr_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_hdr_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(btbh_gpu_hdr_test PRIVATE btbh_gpu)
+        if(MSVC)
+            target_compile_options(btbh_gpu_hdr_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_hdr_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(
+            NAME btbh_gpu_hdr
+            COMMAND btbh_gpu_hdr_test
         )
 
         # RFC 0008: the world detail's projection, frame and seed (the C copy of production_world_detail.hlsli),
@@ -1194,6 +1235,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_dependencies(btbh_gpu_scene_views_smoke btbh_gpu_shaders)
         add_test(NAME btbh_gpu_scene_views_smoke COMMAND btbh_gpu_scene_views_smoke)
         set_tests_properties(btbh_gpu_scene_views_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
+        # HDR output (RFC 0017, since 0.17.0), offscreen with BTBH_GPU_HDR_SIMULATE (this PC has no HDR display): the
+        # encode (HDR10 PQ and scRGB) against the CPU reference, the highlight gain, peak = paper white giving the SDR
+        # picture, the toggle with nothing made after a prewarm, refusals, captures, copies and read-backs.
+        add_executable(btbh_gpu_hdr_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_hdr_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_hdr_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_hdr_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_hdr_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_hdr_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_hdr_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_hdr_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_hdr_smoke COMMAND btbh_gpu_hdr_smoke)
+        set_tests_properties(btbh_gpu_hdr_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).

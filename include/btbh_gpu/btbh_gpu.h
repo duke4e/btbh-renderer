@@ -127,7 +127,13 @@ typedef enum BTBHGPUPresentMode {
 
 typedef enum BTBHGPUSwapchainComposition {
     BTBH_GPU_SWAPCHAIN_INVALID = 0,
-    BTBH_GPU_SWAPCHAIN_SDR = 1
+    BTBH_GPU_SWAPCHAIN_SDR = 1,
+    /* HDR output (RFC 0017, since 0.17.0; btbh_gpu_window_set_hdr). RGB10A2_UNORM: BT.2020 primaries, PQ, absolute
+       nits. */
+    BTBH_GPU_SWAPCHAIN_HDR10_ST2084 = 2,
+    /* RGBA16_FLOAT: BT.709 primaries, linear; 1.0 is 80 nits (Windows, gamescope) or the system's SDR white (Apple's
+       EDR). */
+    BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR = 3
 } BTBHGPUSwapchainComposition;
 
 typedef struct BTBHGPUWindowDescriptor {
@@ -189,7 +195,12 @@ typedef struct BTBHGPUPlatformSnapshot {
     uint8_t should_close;
     uint8_t focused;
     uint8_t cursor_visible;
-    uint8_t reserved[5];
+    /* 1 (since 0.17.0, RFC 0017) when, since the last btbh_gpu_window_poll_events, SDL reported an HDR change, the
+       window moved to another display, the renderer switched the window's HDR or fell back to SDR, or (AUTO) its
+       re-check found what SDL reports changed: read btbh_gpu_window_hdr_state. Raised in every mode, OFF included
+       (an option row can show whether HDR is available). A change of nits alone doesn't raise it. */
+    uint8_t hdr_changed;
+    uint8_t reserved[4];
 } BTBHGPUPlatformSnapshot;
 
 /* Button bits follow the public GamepadButton order: south, east, west,
@@ -1959,9 +1970,9 @@ BTBHGPUResult btbh_gpu_window_restore(
 /* Switches the window's present mode without recreating the window, e.g. from a Graphics menu's
    V-Sync row (since 0.3.0). present_mode is taken as BTBHGPUWindowDescriptor.present_mode is:
    0 for the default choice (the fastest mode the window supports), else that mode, or VSYNC where
-   the window lacks it. The swapchain keeps its SDR composition. report->present_mode says what
-   was taken, from the next frame on. Switching may wait for the GPU to finish the frames in
-   flight; a request that resolves to the mode in use changes nothing. Call it between frames:
+   the window lacks it. The swapchain keeps its composition (SDR, or HDR: btbh_gpu_window_set_hdr).
+   report->present_mode says what was taken, from the next frame on. Switching may wait for the GPU
+   to finish the frames in flight; a request that resolves to the mode in use changes nothing. Call it between frames:
    while a frame is pending (a scene presented, its canvas not yet) it changes nothing and returns
    BTBH_GPU_INVALID_ARGUMENT. Before the claim it sets the mode the claim asks for. An unknown
    mode returns BTBH_GPU_INVALID_ARGUMENT without touching the report. */
@@ -1982,6 +1993,150 @@ BTBHGPUResult btbh_gpu_window_poll_events(
     BTBHGPUWindow *window,
     BTBHGPUPlatformSnapshot *snapshot
 );
+
+/* HDR output (RFC 0017, since 0.17.0, asked for by Be The Bullet Hell v2). A window is SDR until the host turns HDR on
+   with btbh_gpu_window_set_hdr; its SDR frames are as before, byte for byte. In HDR:
+   - the scene is tone mapped and graded exactly as in SDR, then highlights above the tone map's knee are lifted toward
+     the peak, keeping their SDR hue;
+   - the SDR range of the picture and the canvas (the UI) show at paper white;
+   - the swapchain is HDR10 (BT.2020, PQ) or extended linear (scRGB; EDR on Apple). The renderer picks: HDR10 first,
+     extended linear first on Apple.
+   - The window's frame is drawn in RGBA16_FLOAT (its frame format) and an encode pass writes the swapchain image.
+     Render targets and render_to_target stay in the SDR target format.
+   SDL 3.4.2 sends no HDR metadata (metadata_set stays 0), and does not update a window's HDR properties when it moves
+   to another display (SDL issue #16068): os_hdr_enabled, sdr_white_level and hdr_headroom may be the old display's
+   until SDL 3.6; `available` follows the swapchain's colour spaces there. */
+typedef enum BTBHGPUHDRMode {
+    BTBH_GPU_HDR_MODE_OFF = 0,    /* SDR, as before (the zero value) */
+    /* HDR while BTBHGPUWindowHDRState.available is 1, SDR otherwise, following the OS and the display: a change is
+       taken at the next frame's start (the first present with no frame pending), which then waits for the GPU once.
+       Besides SDL's events, the frame start asks SDL again once a second (every frame while a change is pending), for
+       lists that change with no event (Wine); that re-check doesn't undo a fallback, an event does. */
+    BTBH_GPU_HDR_MODE_AUTO = 1,
+    /* HDR whenever the swapchain offers an HDR composition, whatever the OS reports (for tests). */
+    BTBH_GPU_HDR_MODE_FORCE = 2
+} BTBHGPUHDRMode;
+
+/* Why a mode that asks for HDR is not in HDR now (BTBHGPUWindowHDRState.fallback). */
+typedef enum BTBHGPUHDRFallback {
+    BTBH_GPU_HDR_FALLBACK_NONE = 0,           /* HDR is active, or the mode is OFF */
+    BTBH_GPU_HDR_FALLBACK_UNSUPPORTED = 1,    /* the swapchain offers no HDR composition (or not the one named) */
+    BTBH_GPU_HDR_FALLBACK_OS_SDR = 2,         /* AUTO: offered, but the OS reports the display SDR */
+    /* SDL refused or failed the switch, or the HDR encode pass can't be made (message "The HDR encode is
+       unavailable ..."); the window went back to SDR until the next set_hdr switch. */
+    BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED = 3,
+    /* The swapchain lost its HDR composition (the display or the OS changed), or 3 swapchain acquires in a row failed
+       in HDR; the window went back to SDR (logged). */
+    BTBH_GPU_HDR_FALLBACK_LOST = 4,
+    BTBH_GPU_HDR_FALLBACK_PENDING = 5         /* AUTO: waiting for the next frame's start to switch */
+} BTBHGPUHDRFallback;
+
+/* 32 bytes on 64-bit: mode 0, composition 1, flags 2, paper_white_nits 4, peak_nits 8, reserved 12. */
+typedef struct BTBHGPUWindowHDRSettings {
+    uint8_t mode;               /* BTBHGPUHDRMode */
+    /* 0: the renderer's pick (HDR10, then extended linear; extended linear first on Apple). Else
+       BTBH_GPU_SWAPCHAIN_HDR10_ST2084 or BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR. */
+    uint8_t composition;
+    uint16_t flags;             /* 0 */
+    /* The UI's and the SDR picture's white. 0: BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS. Clamped to 80..1000. */
+    float paper_white_nits;
+    /* The brightest highlight. 0: the display's reported peak when it is above paper white, else
+       BTBH_GPU_HDR_DEFAULT_PEAK_NITS. Clamped to paper_white_nits..10000. */
+    float peak_nits;
+    uint32_t reserved[5];       /* 0 */
+} BTBHGPUWindowHDRSettings;
+
+#define BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS 203.0f
+#define BTBH_GPU_HDR_DEFAULT_PEAK_NITS 1000.0f
+
+/* What the window can do and is doing. 224 bytes on 64-bit: serial 0, composition 4, swapchain_format 8,
+   frame_format 12, target_format 16, mode 20, active 21, available 22, os_hdr_enabled 23, supported 24, under_wine 28,
+   relative_luminance 29, metadata_set 30, fallback 31, sdr_white_level 32, hdr_headroom 36, display_sdr_white_nits 40,
+   display_peak_nits 44, paper_white_nits 48, peak_nits 52, highlight_ratio 56, switch_count 60,
+   last_switch_milliseconds 64, display_id 72, reserved 76, message 96. */
+typedef struct BTBHGPUWindowHDRState {
+    uint32_t serial;                           /* from 1; changes whenever anything below changes, when seen */
+    BTBHGPUSwapchainComposition composition;   /* in use: SDR, or one of the HDR compositions */
+    BTBHGPUTextureFormat swapchain_format;     /* the swapchain image's (RGB10A2_UNORM or RGBA16_FLOAT in HDR) */
+    /* What the window's scene ends in, the canvas's screen passes draw in, and captures are: the swapchain's in SDR,
+       RGBA16_FLOAT in HDR. */
+    BTBHGPUTextureFormat frame_format;
+    /* Render targets' (btbh_gpu_window_render_target_create) and what render_to_target writes: the SDR swapchain's, in
+       SDR and HDR alike. */
+    BTBHGPUTextureFormat target_format;
+    uint8_t mode;                              /* the settings' BTBHGPUHDRMode */
+    uint8_t active;                            /* 1: the window's frames are HDR */
+    /* 1: HDR can be shown here. An HDR composition is offered (the one named, if the settings name one) and: on
+       Windows, Wayland and X11 the OS reports HDR on; under Wine/Proton nothing more (gamescope offers HDR only while
+       its output is HDR, and SDL's flag there depends on DXVK_HDR); on Apple the headroom is above 1. */
+    uint8_t available;
+    uint8_t os_hdr_enabled;                    /* SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN */
+    /* SDL_WindowSupportsGPUSwapchainComposition for SDL's SDR, SDR_LINEAR, HDR_EXTENDED_LINEAR and HDR10_ST2084, in
+       that order. */
+    uint8_t supported[4];
+    uint8_t under_wine;                        /* 1: running under Wine/Proton */
+    uint8_t relative_luminance;                /* 1 on Apple: paper white is the system's SDR white, nits are ratios */
+    uint8_t metadata_set;                      /* 1: HDR metadata reached the swapchain. 0 with SDL 3.4.2 (no call) */
+    uint8_t fallback;                          /* BTBHGPUHDRFallback */
+    float sdr_white_level;                     /* SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT (1.0 = 80 nits) */
+    float hdr_headroom;                        /* SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT */
+    float display_sdr_white_nits;              /* sdr_white_level * 80; 0 on Apple */
+    /* hdr_headroom * display_sdr_white_nits; 0 when the headroom is 1 (SDR, or not reported: Wine without DXVK_HDR). */
+    float display_peak_nits;
+    float paper_white_nits;                    /* in use (the settings', resolved and clamped) */
+    float peak_nits;                           /* in use */
+    float highlight_ratio;                     /* the tone map's peak over paper white; 1 in SDR */
+    uint32_t switch_count;                     /* composition switches since the claim */
+    double last_switch_milliseconds;           /* the last switch's CPU time (SDL waits for the GPU in it) */
+    uint32_t display_id;                       /* SDL_GetDisplayForWindow */
+    uint32_t reserved[5];
+    char message[128];                         /* the last refusal or fallback, in words; empty otherwise */
+} BTBHGPUWindowHDRState;
+
+/* Fills `state`, asking SDL again (the window's HDR properties and the compositions it offers). Call it on the thread
+   that made the window, at any time, between frames or not; it never touches the GPU device's state. When what it
+   reports changed since the last state (SDL changed a list with no event, say), it takes a new serial (and the HDR
+   line, with BTBH_GPU_HDR_LOG=1); the switch, if AUTO needs one, is the next frame's. Returns
+   BTBH_GPU_INVALID_ARGUMENT for NULL or a window not claimed. */
+BTBHGPUResult btbh_gpu_window_hdr_state(
+    BTBHGPUWindow *window,
+    BTBHGPUWindowHDRState *state
+);
+/* Takes HDR settings, and fills `state` with the result.
+   - A mode or composition change switches the swapchain now. That waits for the GPU once, and makes the frame texture,
+     the encode and fold passes and the canvas's screen pipelines (once a present has given the renderer its shader
+     paths), so that the next frame makes little: call btbh_gpu_window_scene_prewarm after it for the scene's HDR post
+     pipelines and its targets at the render size (while HDR is on, that prewarm makes the passes above too).
+   - A change of nits only takes effect from the next frame, with no wait: a calibration screen can call it every
+     frame. A frame pending keeps the numbers it started with (its gain, its encode and its fold agree). It takes a new
+     serial but doesn't raise BTBHGPUPlatformSnapshot.hdr_changed.
+   - Returns BTBH_GPU_OK when the settings are taken, even when HDR could not become active: state->active is then 0,
+     state->fallback and state->message say why, and the window is SDR and works.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, nothing taken, `state` filled with the current state where it can be:
+     NULL window, settings or state; a window not claimed; a mode above 2; a composition not 0, 2 or 3; non-zero flags
+     or reserved words; nits that aren't finite or are below 0; a mode or composition change while a frame is pending
+     (a scene presented, its canvas not yet), with message "A frame is pending: switch HDR between frames".
+   The debug switch BTBH_GPU_HDR (off, auto, force, hdr10, scrgb) overrides the mode and composition the host asks for;
+   BTBH_GPU_HDR_NITS=<paper>,<peak> the nits. */
+BTBHGPUResult btbh_gpu_window_set_hdr(
+    BTBHGPUWindow *window,
+    const BTBHGPUWindowHDRSettings *settings,
+    BTBHGPUWindowHDRState *state
+);
+/* Writes the window's HDR line into `buffer`, NUL-terminated and truncated to capacity - 1, and returns the characters
+   written (0 for NULL arguments). For the host's own log. With BTBH_GPU_HDR_LOG=1 the renderer prints the same line
+   through SDL_Log at the claim and at every change; it prints a fall back to SDR the host didn't ask for (event lost or
+   encode) always. One line of key=value fields: event, serial, gpu, wine, simulate,
+   display, os_hdr, sdr_white, headroom, peak_reported, supported, available, mode, composition, swapchain, colorspace,
+   frame, target, paper, peak, P, metadata, fallback (with reason="..." when not none), switch_ms. */
+#define BTBH_GPU_HDR_DESCRIBE_CAPACITY 512u
+uint32_t btbh_gpu_window_hdr_describe(
+    BTBHGPUWindow *window,
+    char *buffer,
+    uint32_t capacity
+);
+/* Defined when the HDR declarations above exist (since 0.17.0). */
+#define BTBH_GPU_HAS_HDR_OUTPUT 1
 /* The single-pad view: the snapshot of the roster's lowest occupied slot (see
  * BTBH_GPU_GAMEPAD_CAPACITY), all zeros without a pad. It falls over to the next pad when that one
  * leaves; btbh_gpu_window_gamepad_snapshot_at holds one pad per player. */
@@ -2113,6 +2268,22 @@ BTBHGPUTexture *btbh_gpu_window_render_target_create(
     BTBHGPUTextureFilter filter,
     BTBHGPUTextureReport *report
 );
+/* btbh_gpu_window_render_target_create with flags (since 0.17.0, RFC 0017). A render target is made in the window's
+   target format: the SDR swapchain's, in SDR and HDR alike. BTBH_GPU_RENDER_TARGET_FRAME_FORMAT makes it in the
+   window's frame format at the call instead (RGBA16_FLOAT while HDR is on, else the target format), for a copy of the
+   scene that keeps its highlights (btbh_gpu_window_copy_pending_scene_texture: a pause backdrop). flags 0 is
+   btbh_gpu_window_render_target_create. Other bits are refused (NULL, report->result BTBH_GPU_INVALID_ARGUMENT). */
+enum {
+    BTBH_GPU_RENDER_TARGET_FRAME_FORMAT = 1u << 0
+};
+BTBHGPUTexture *btbh_gpu_window_render_target_create_ex(
+    BTBHGPUWindow *window,
+    uint32_t width,
+    uint32_t height,
+    BTBHGPUTextureFilter filter,
+    uint32_t flags,
+    BTBHGPUTextureReport *report
+);
 void btbh_gpu_texture_destroy(BTBHGPUTexture *texture);
 BTBHGPUFont *btbh_gpu_window_font_load(
     BTBHGPUWindow *window,
@@ -2200,12 +2371,16 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
 );
+/* A texture holding the finished scene. It is in the window's frame format (since 0.17.0: RGBA16_FLOAT while HDR is
+   on, the highlights kept). */
 BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
     BTBHGPUWindow *window,
     BTBHGPUTextureReport *report
 );
 /* Copies the finished scene into a capture of the same size and format and releases the frame,
-   so another scene can render before the canvas presents. */
+   so another scene can render before the canvas presents. Since 0.17.0 (RFC 0017) `destination` may be in the target
+   format or the frame format: the same format is copied exactly; an SDR frame into an RGBA16_FLOAT target is blitted;
+   an HDR frame into an SDR target has its highlights folded under paper white. */
 BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
     BTBHGPUWindow *window,
     BTBHGPUTexture *destination,
@@ -2214,9 +2389,20 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
 void btbh_gpu_window_request_presented_frame_readback(
     BTBHGPUWindow *window
 );
+/* The presented frame as RGBA8. While HDR is on (RFC 0017) it is the frame before the HDR encode, clamped to 0-1 and
+   rounded: the UI and the SDR range as in SDR, highlights clipped at paper white. */
 BTBHGPUResult btbh_gpu_window_readback_presented_frame(
     BTBHGPUWindow *window,
     uint8_t *rgba8,
+    uint32_t byte_capacity,
+    BTBHGPUCanvasReport *report
+);
+/* The presented frame as RGBA16F halves, 8 bytes a pixel (since 0.17.0, RFC 0017; request it as for the RGBA8
+   read-back). While HDR is on it is the frame before the encode: sRGB-encoded, 1.0 = paper white, highlights above 1
+   (the HDR encode decodes it with gamma 2.2). In SDR it is the 8-bit frame widened. */
+BTBHGPUResult btbh_gpu_window_readback_presented_frame_rgba16f(
+    BTBHGPUWindow *window,
+    uint16_t *rgba16f,
     uint32_t byte_capacity,
     BTBHGPUCanvasReport *report
 );

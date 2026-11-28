@@ -1009,6 +1009,7 @@ void btbh_gpu_lazy_creation_call_timed(BTBHGPULazyTimedCall timed_call, uint64_t
         "SDL_WaitAndAcquireGPUSwapchainTexture",
         "SDL_MapGPUTransferBuffer (canvas upload)",
         "SDL_SubmitGPUCommandBuffer (frame)",
+        "SDL_SetGPUSwapchainParameters (HDR switch)",
     };
     double *usual = &window->lazy_creation->usual_call_milliseconds[timed_call];
     const double usual_before = *usual;

@@ -4,6 +4,9 @@ Texture2D<float4> lut_texture : register(t1, space2);
 SamplerState lut_sampler : register(s1, space2);
 
 #include "production_tonemap.hlsli"
+#if BTBH_HDR_OUTPUT
+#include "production_hdr.hlsli"
+#endif
 
 cbuffer PostUniforms : register(b0, space3)
 {
@@ -90,5 +93,10 @@ float3 post_lut(float2 uv)
 
 float4 main(FragmentInput input) : SV_Target0
 {
+#if BTBH_HDR_OUTPUT
+    const float3 scene_value = scene_sample(input.texture_coordinate);
+    return float4(grade_lut(scene_value), btbh_hdr_heat(scene_value, exposure));
+#else
     return float4(post_lut(input.texture_coordinate), 1.0f);
+#endif
 }

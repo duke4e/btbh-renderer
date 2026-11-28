@@ -6,6 +6,109 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **HDR output** (RFC 0017 phase 1, `BTBH_GPU_HAS_HDR_OUTPUT`; asked for by Be The Bullet Hell v2 after the owner's
+  seventeenth play-test, on a 4K TV and the Steam Machine). A window is SDR until its host turns HDR on; SDR frames are
+  byte for byte 0.16.1's (below).
+  - **API:** **`btbh_gpu_window_set_hdr`** with **`BTBHGPUWindowHDRSettings`** (32 bytes: a mode, a composition, paper
+    white and peak in nits), **`btbh_gpu_window_hdr_state`** with **`BTBHGPUWindowHDRState`** (224 bytes: what SDL
+    reports, whether HDR is available, what is in use, why not), **`btbh_gpu_window_hdr_describe`** (one log line),
+    **`BTBHGPUHDRMode`** (off, auto, force), **`BTBHGPUHDRFallback`**, `BTBH_GPU_HDR_DEFAULT_PAPER_WHITE_NITS` (203),
+    `BTBH_GPU_HDR_DEFAULT_PEAK_NITS` (1000), `BTBH_GPU_HDR_DESCRIBE_CAPACITY` (512).
+    `BTBHGPUSwapchainComposition` gains `BTBH_GPU_SWAPCHAIN_HDR10_ST2084` (2) and
+    `BTBH_GPU_SWAPCHAIN_HDR_EXTENDED_LINEAR` (3), appended. `BTBHGPUPlatformSnapshot.hdr_changed` takes its first
+    reserved byte (offset 47; the size stays 56).
+  - **Captures and read-backs:** **`btbh_gpu_window_render_target_create_ex`** with
+    `BTBH_GPU_RENDER_TARGET_FRAME_FORMAT` (a target in the frame format, RGBA16F while HDR is on: v2's pause backdrop)
+    and **`btbh_gpu_window_readback_presented_frame_rgba16f`**. `capture_pending_scene_texture` gives the frame format;
+    `copy_pending_scene_texture` copies the same format, blits an SDR frame into an RGBA16F colour target, and folds an
+    HDR frame's highlights under paper white into an SDR target. The RGBA8 read-back of an HDR frame is clamped at paper
+    white.
+  - **The tone map:** the scene is tone mapped and graded exactly as in SDR (the LUT never sees a value above 1), then
+    a gain lifts highlights toward the peak: 1 at and below the tone map's knee (0.6 of the SDR curve's output, 0.76 for
+    PBR Neutral), C1 there, toward peak / paper white, from the scene's heat (exposure times its largest channel); the
+    SDR hue kept. At peak = paper white the HDR picture is the SDR one. `BTBH_GPU_HDR_KNEE` and `BTBH_GPU_HDR_SHOULDER`
+    tune it.
+  - **The frame:** while HDR is on the window's post tail, the canvas's screen passes and the frame are RGBA16F,
+    sRGB-encoded with highlights above 1; an encode pass writes HDR10 (BT.2020, PQ, dithered at 10 bits) or scRGB
+    (linear, 1.0 = 80 nits; Apple's EDR: 1.0 = the system's SDR white), decoding the SDR range with gamma 2.2 at paper
+    white. The UI shows at paper white. Render targets and `render_to_target` stay SDR. The renderer picks HDR10, else
+    extended linear (extended linear first on Apple).
+  - **Availability and changes:** HDR is available where the swapchain offers an HDR composition and the OS reports HDR
+    (under Wine/Proton the swapchain alone: gamescope offers HDR only while its output is HDR; on Apple a headroom above
+    1). Auto follows SDL's HDR and display events at the next frame's start, and asks SDL again there once a second
+    (every frame while a change is pending) for lists that change with no event. A swapchain that loses its HDR
+    composition, or fails 3 acquires in a row in HDR, drops those frames and goes on in SDR (fallback `lost`, logged);
+    an encode pass that can't be made sends the window to SDR at the next frame (fallback `switch_failed`, logged), and
+    no HDR swapchain is ever given unencoded values. A frame's paper white and peak are latched at its start: a change
+    of nits reaches the next frame and raises no `hdr_changed`. A switch waits for the GPU once and resets the temporal
+    history; switching back and forth makes nothing anew after the first time (two classes of the post tail's
+    pipelines). `set_hdr`, and the window's scene prewarm while HDR is on, make the frame texture, the encode and fold
+    passes and the canvas's RGBA16F pipelines; the prewarm makes the HDR post tail.
+  - **Shaders:** seven new built files: `production_post_hdr.frag`, `production_tilt_shift_hdr.frag`,
+    `production_lut_hdr.frag`, `production_cas_hdr.frag`, `production_upscale_fsr_rcas_hdr.frag` (their SDR sources
+    with `BTBH_HDR_OUTPUT`), `production_hdr_encode.frag` and `production_hdr_fold.frag`; and `production_hdr.hlsli`.
+    The SDR sources gain preprocessor blocks only. 86 shaders are built (0.16.1's 79 and the seven new); the 79's SPIR-V
+    is byte for byte 0.16.1's, and so is their MSL, but for an atomic buffer index SPIRV-Cross numbers differently in
+    three FSR 3 compute shaders whose SPIR-V is unchanged (they don't build for Metal, which runs FSR 1).
+  - **Debug switches** (read at the claim): `BTBH_GPU_HDR_LOG=1` (the HDR line at the claim and every change),
+    `BTBH_GPU_HDR=off|auto|force|hdr10|scrgb`, `BTBH_GPU_HDR_NITS=<paper>,<peak>`, `BTBH_GPU_HDR_SIMULATE=hdr10|scrgb`
+    (the HDR path with the swapchain left SDR, encoding into a simulated swapchain: how HDR is tested on an SDR
+    display), `BTBH_GPU_HDR_DITHER=0`, `BTBH_GPU_HDR_DEBUG=heat`.
+  - **Tests:** `btbh_gpu_hdr_test` (the curves on the CPU, `src/gpu/btbh_gpu_hdr.h`, huge and infinite heat, and the
+    structs' layout) and `btbh_gpu_hdr_smoke` (simulated HDR10 and scRGB: the encode against the CPU, the gain, P = 1
+    against SDR, the toggle, a change of nits during a frame, Auto with and without SDL events, an encode that can't be
+    made, refusals, captures, copies, the tail at an exposure past the largest half). The views bench takes
+    `BTBH_VIEWS_BENCH_SHOWN=1` and prints its CPU frames.
+  - **The Steam Machine test** v2 deploys and the owner runs: `docs/handoff/v2-hdr-steam-machine-test.md`.
+
+### Known
+- **SDL 3.4.2 sends no HDR metadata** (it never calls `vkSetHdrMetadataEXT`); `metadata_set` stays 0 and the TV uses
+  its own or gamescope's values.
+- **SDL 3.4.2 doesn't update a window's HDR properties when it moves to another display** (SDL issue #16068, fixed for
+  3.6.0): `os_hdr_enabled`, `sdr_white_level` and `hdr_headroom` may be the old display's; `available` follows the
+  swapchain's colour spaces there.
+- **Under Proton, SDL reports HDR only with `DXVK_HDR=1`, and an SDR white of 80 nits** (Wine has none); the renderer
+  trusts the swapchain there and paper white defaults to 203.
+- **gamescope fixes the HDR colour spaces when the surface is made:** HDR turned on in SteamOS while the game runs
+  probably needs a restart (the Machine test's step 6 decides whether phase 2 adds a surface re-make).
+- **Not run on an HDR display:** this PC's monitor connection has no HDR. Everything above is verified offscreen
+  (simulated) on Windows/Vulkan; Metal compiles only; the Steam Machine path is researched, not run.
+- **FSR 3 keeps its LDR build** and receives values up to the tail's peak in HDR; whether highlights ghost is phase 2's
+  check on real content.
+- **An additive canvas batch whose sum passes 1** shows above paper white in HDR (no 8-bit clip).
+
+### Measured
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on `feature/0.17.0-hdr`: `check.ps1` 48/48 (the 46 and the two new
+tests), the Swift suite 306 tests (2 skipped, 0 failures), and identity against 0.16.0's build (one-view images equal
+0.16.1's) in four modes (plain, shared meshes, no runs, runs verified): 421 images a mode, 0 px different, 0 run-verify
+mismatches; the same through `present_views` with one view (`BTBH_SMOKE_PRESENT_VIEWS=1`), and in plain and verify with
+the cost log and its pass frames (`BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`; 1,425 and 1,427 `BTBH_GPU_COST` lines);
+the views smoke passes in the four modes.
+
+HDR, offscreen (`BTBH_GPU_HDR_SIMULATE`; this PC's monitor connection has no HDR), in `btbh_gpu_hdr_smoke`:
+- **The encode** against the CPU reference, every pixel: HDR10 within 0.56 of a 10-bit code (dither off), scRGB within
+  1e-3 relative (halves), at P = 1 and P = 1000/203.
+- **The gain:** the P = 4.93 frame over the P = 1 frame, in display light, is the CPU gain of the heat the output pass
+  wrote: within 0.19 % over 8,089 lifted pixels; no value at or below the knee moved.
+- **P = 1 against SDR,** no anti-aliasing or upscaling: within 1 code (12,451 channels one apart: SDR's dither). The
+  identity smokes forced into simulated HDR at P = 1: of 54.6 million channels 97.8 % equal, 2.0 % one apart, 0.25 %
+  more (up to 43 codes, on edges of the prewarm smoke's SMAA and FSR 1 frames: the tail filters unquantized values);
+  render-to-target and canvas-target scenes byte for byte.
+- **The toggle:** SDR and HDR 10 times with a prewarm after each switch: no pipeline made after the first round, every
+  SDR frame the first one's to the byte. Auto followed a simulated OS change both ways at the next frame's start.
+
+The cost at 4K (the views bench's city, 3840 x 2160, its window shown so that the canvas and the encode run; under the
+machine's perf lock, 04:34:52 to 04:39, pairs interleaved, 3 runs a side, 228 frames each; medians with the 10th and
+90th percentiles). GPU by the cost log, CPU the scene present's (36 frames a side):
+- **SMAA medium:** a frame 7.860 ms (7.801-7.939) in SDR, 8.159 (8.112-8.267) in HDR: +0.30 ms. `post` 0.969 and 1.011;
+  `ui` 0.155 and 0.427 (the scene's blit into the RGBA16F frame, the encode, and the simulation's extra blit to the SDR
+  image). CPU 0.414 ms (0.384-0.451) and 0.425 (0.371-0.484).
+- **FSR 3 at scale 1** (v2's 4K High): 10.971 ms (10.934-11.014) and 11.247 (11.210-11.321): +0.28 ms. `post` 3.506 and
+  3.546; `ui` 0.174 and 0.429. CPU 0.476 (0.444-0.564) and 0.489 (0.421-0.577).
+- So HDR costs about 0.3 ms at 4K here (3-4 %), below the RFC's estimate of 0.5-0.7; a real HDR swapchain has no extra
+  blit, so somewhat less.
+
 ## [0.16.1] — 2026-11-28
 
 0.16.1: the reflections by the split line that Be The Bullet Hell v2 asked for after its 0.16.0 test, and RFC 0015
