@@ -1,6 +1,7 @@
 # RFC 0018: Screen-space distortion: rings, discs and strips that bend the scene, applied in the HDR composite
 
-- **Status:** Draft (2026-11-28): the questions at the end go to v2
+- **Status:** Accepted on 2026-11-28: v2 answered all 13 questions, each as recommended (see "Decisions"). Phase 1
+  follows HDR output's phase 1 (RFC 0017)
 - **Requested by:** Be The Bullet Hell v2. Its coordinator asked after the owner's seventeenth play-test (2026-11-28):
   "A screen-space distortion pass: v2 draws distortion sources (rings, blobs, strips with a strength/offset) into a
   buffer and post applies the offset." It went to the renderer with HDR and the lit smoke
@@ -579,3 +580,29 @@ Each has the renderer's recommendation; v2 answers per number.
     edge), and no read crosses it. v2's divider covers 2 render pixels or more each side. Recommended: accept.
 12. **The haze's clock.** Recommended: v2's game time, so the haze stops with the pause. Any growing seconds work.
 13. **The order.** Recommended: after HDR's phase 1, as v2 asked. Its cost step is then 21.
+
+## Decisions (v2, 2026-11-28)
+
+v2 took the recommendation on all 13 questions:
+
+1. **Shapes set each frame;** no authored offset sprites now (phase 2 only if asked).
+2. **Strength in pixels of a 1080-line frame,** clamped at the fold. Starting values rings 10-20, orbs 6-12, haze
+   1.5-3, tuned by v2 in a play-test.
+3. **Everything in the scene bends, the UI never.** v2 keeps sources short-lived and off the kaiju's own lane, and judges
+   bullet readability inside rings in a play-test before asking for a bullet mask.
+4. **FSR 3: reactive by refraction's rule.** v2 checks a stomp's ring and a fire's haze for trails at 4K High and
+   Medium with `BTBH_DEBUG_MOTION_VECTORS=2`.
+5. **On in every preset,** with the same sources.
+6. **A "Screen distortion: on / off" row** in v2's options, on by default.
+7. **The desert's haze:** a few large flat HAZE discs following the camera's target; no stronger-with-distance flag for
+   now.
+8. **Not depth-tested in phase 1;** `DEPTH_TESTED` only if a play-test shows towers bending in front of a fire.
+9. **Chroma** on for rings (0.2-0.4) and orbs (0.4-0.6), off for haze.
+10. **240 sources are enough:** v2 lenses only big orbs and portals, not orb bullets, and ranks and culls its rings and
+    hazes.
+11. **The split's 8-pixel fade** is accepted.
+12. **The haze's clock** is v2's game time, so it stops on pause.
+13. **After HDR output's phase 1.**
+
+Order (v2): HDR output (0.17.0), this RFC's phase 1, volumetrics phase 1 (RFC 0019), then half-resolution SSR and the
+rest of v2's list.
