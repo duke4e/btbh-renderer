@@ -414,10 +414,11 @@ int main(void)
         /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer (RFC 0008: with the
            world detail's after it, in the scene shaders; the scene shaders' samplers above end with the dig mask,
            the world detail's three and RFC 0009's table array). RFC 0009: the table's entries are the scene
-           shaders' third; the fast unlit and RC source shaders keep two. */
+           shaders' third; the fast unlit and RC source shaders keep two. RFC 0020 (0.18.0): the cover's block is the
+           scene shaders' fourth. */
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 3"
+            "\"uniform_buffers\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNLIT_FRAGMENT_REFLECTION_PATH,
@@ -429,15 +430,15 @@ int main(void)
         ) ||
         !require_text(
             BTBH_PRODUCTION_2D_SHADOW_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 3"
+            "\"uniform_buffers\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_UNSHADOWED_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 3"
+            "\"uniform_buffers\": 4"
         ) ||
         !require_text(
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
-            "\"uniform_buffers\": 3"
+            "\"uniform_buffers\": 4"
         ) ||
         /* RFC 0010: the trace's and the finish's last texture is the sources' tops. */
         !require_text(

@@ -1853,14 +1853,15 @@ static void check_refusals(SmokeWindow *smoke) {
         expect_refused(smoke, &scene, what, needle);
         expect_refused(smoke, &scene, what, "GPU scene batch 0: flags INSTANCE_UV_RECT: ");
     }
-    /* Bit 7 and variant 12 are unknown (bit 4 is phase 2's particle shadow since 0.14.0). */
+    /* Bit 7 and variant 13 are unknown (bit 4 is phase 2's particle shadow since 0.14.0, variant 12 RFC 0020's still ice
+       since 0.18.0). */
     scene_begin(&scene, "refusal", front_eye);
     BTBHGPUSceneGeometryBatch *puff = add_puff(&scene, smoke, 0.0f, 0.0f, 0.0f, 0.5f);
     puff->flags = 1u << 7;
     expect_refused(smoke, &scene, "batch flag bit 7", "Invalid GPU model instance scene submission");
     puff->flags = 0u;
-    puff->surface_variant = (BTBHGPUSceneSurfaceVariant)12;
-    expect_refused(smoke, &scene, "surface variant 12", "Invalid GPU model instance scene submission");
+    puff->surface_variant = BTBH_GPU_SCENE_SURFACE_COUNT;
+    expect_refused(smoke, &scene, "surface variant 13", "Invalid GPU model instance scene submission");
     /* A lit particle that is a billboard, with the UV rect, a normal map, both fades and the transmission draws. */
     puff->surface_variant = BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE;
     puff->flags = BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT;

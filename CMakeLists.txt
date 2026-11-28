@@ -352,6 +352,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_surface.hlsli"
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_dig_mask.hlsli"
             "${BTBH_RENDERER_ROOT}/shaders/gpu/production_world_detail.hlsli"
+            # RFC 0020 (since 0.18.0): the cover and still ice, which the scene fragment shaders include.
+            "${BTBH_RENDERER_ROOT}/shaders/gpu/production_cover.hlsli"
         )
         if(
             _shader_name STREQUAL "production_model_unshadowed.frag" OR
@@ -809,6 +811,29 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(
             NAME btbh_gpu_distortion
             COMMAND btbh_gpu_distortion_test
+        )
+
+        # RFC 0020: the cover laid by facing and still ice on the CPU (btbh_gpu_cover.h: the setter's checks, the block,
+        # the facing, the noise, the relief, MUD's puddles, the ice's plates, cracks and frost) and the public structs'
+        # layout, without a GPU.
+        add_executable(btbh_gpu_cover_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_cover_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_cover_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(btbh_gpu_cover_test PRIVATE btbh_gpu)
+        if(MSVC)
+            target_compile_options(btbh_gpu_cover_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_cover_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(
+            NAME btbh_gpu_cover
+            COMMAND btbh_gpu_cover_test
         )
 
         # RFC 0008: the world detail's projection, frame and seed (the C copy of production_world_detail.hlsli),
@@ -1343,6 +1368,39 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(NAME btbh_gpu_scene_distortion_smoke COMMAND btbh_gpu_scene_distortion_smoke)
         set_tests_properties(btbh_gpu_scene_distortion_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
+        # The cover laid by facing and still ice (btbh_gpu_window_scene_set_cover, BTBH_GPU_SCENE_SURFACE_ICE, RFC 0020,
+        # since 0.18.0): identity without them, each pattern and COARSE against the CPU reference, the targets the
+        # screen-space passes and the radiance cascades read, SSR, see-through batches, still ice, runs, scene views, a
+        # render into a target, prewarm, the refusals and old shaders; hidden windows.
+        add_executable(btbh_gpu_scene_cover_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_cover_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_cover_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_cover_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_cover_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_cover_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_cover_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_cover_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_cover_smoke COMMAND btbh_gpu_scene_cover_smoke)
+        set_tests_properties(btbh_gpu_scene_cover_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).
         add_executable(btbh_gpu_font_smoke
@@ -1623,7 +1681,8 @@ if(BTBH_BUILD_GPU_SPIKE)
         # (Tests/btbh_gpu_smoke_runs_verify.h). The runs smoke's waterfront has runs of every kind of batch added since
         # 0.10.0 (lifted, light factor, UV rect, flags2, lit particles); the others add tables, dig masks, the
         # cascades' sources with tops, queued mesh updates and the lazy creation log's scenes, and (0.14.0) the lit
-        # particle smoke runs of lit particles with RFC 0013 phase 2's particle shadow, interleaved with unflagged ones.
+        # particle smoke runs of lit particles with RFC 0013 phase 2's particle shadow, interleaved with unflagged ones,
+        # and (0.18.0) the cover smoke runs of covered batches.
         # (The height lift and prewarm smokes draw no run.)
         foreach(_verify_smoke
             btbh_gpu_scene_runs_smoke
@@ -1635,6 +1694,7 @@ if(BTBH_BUILD_GPU_SPIKE)
             btbh_gpu_scene_target_smoke
             btbh_gpu_lazy_creation_smoke
             btbh_gpu_lit_particle_smoke
+            btbh_gpu_scene_cover_smoke
         )
             add_test(NAME ${_verify_smoke}_runs_verify COMMAND ${_verify_smoke})
             set_tests_properties(${_verify_smoke}_runs_verify PROPERTIES

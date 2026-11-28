@@ -334,6 +334,10 @@ struct BTBHGPUWindow {
     uint32_t distortion_source_count;
     double distortion_time;
     bool distortion_pending;
+    /* The cover laid by facing (RFC 0020, since 0.18.0; btbh_gpu_scene.c): what btbh_gpu_window_scene_set_cover set
+       (copied), kept until the next call, for every scene present and render into a target; cover_set false: none. */
+    BTBHGPUSceneCover cover;
+    bool cover_set;
 };
 
 struct BTBHGPUTexture {
@@ -650,6 +654,19 @@ void btbh_gpu_window_scene_distortion_textures(
     uint32_t *field_width,
     uint32_t *field_height,
     SDL_GPUTexture **reactive
+);
+/* RFC 0020 (the cover, since 0.18.0), for the smokes: the window's opaque targets the screen-space passes read, at the
+   render size: ambient (RGBA, the scene colour's format: the ambient light, or under the radiance cascades the albedo
+   and metalness), ambient_specular (rgb the ambient specular or F0, a the roughness) and normal (RGBA8: the normal,
+   a the occlusion), color_format the first two's; NULL and 0 where the window's runtime hasn't made them. */
+void btbh_gpu_window_scene_material_targets(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **ambient,
+    SDL_GPUTexture **ambient_specular,
+    SDL_GPUTexture **normal,
+    SDL_GPUTextureFormat *color_format,
+    uint32_t *width,
+    uint32_t *height
 );
 /* RFC 0014 (scene views, since 0.16.0): a view's half of the frame (BTBHGPUSceneView.clip, in output_width x
    output_height pixels) widened by a quarter of a render pixel (render_width x render_height), as the planes its passes

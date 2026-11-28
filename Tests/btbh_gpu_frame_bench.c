@@ -67,6 +67,12 @@
  *   frame; dist-worst a flat haze disc over the whole frame (radius 160, 2 px) and 20 overlapping flat rings (radius
  *   24, width 10, 18 px, chroma 0.3): 91 % of the frame, 1.8 layers on average. With BTBH_GPU_COST_PASSES=1 the pass frames give the source pass
  *   (distortion_ms) and the composite (composite_ms) apart. Before 0.18.0 the dist modes draw as dist-none.
+ * - RFC 0020's cover and still ice (0.18.0's bench): cover-off, cover-full, cover-coarse and cover-ice add a river
+ *   across the city (a lit strip on the ground, 200 x 12 units, Be The Bullet Hell v2's water material: roughness 0.07)
+ *   and: cover-off nothing more; cover-full a snow layer (v2's starting values: amount 0.8, slope 55, edge 6, noise 14
+ *   degrees at 1.6 cells a unit, bump 0.4) on every kit piece and the ground (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+ *   cover-coarse the same with BTBH_GPU_SCENE_COVER_LAYER_COARSE; cover-ice the river as still ice (frost 0.35, the
+ *   other parameters their defaults) and no cover. Before 0.18.0 they all draw as cover-off.
  * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
  *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
  *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
@@ -169,6 +175,9 @@ typedef struct BenchWindow {
     int light;
     /* RFC 0018's distortion: 0 none, 1 dist-none (bloom), 2 dist-off (and the flag), 3 dist-typical, 4 dist-worst. */
     int distortion;
+    /* RFC 0020's cover: 0 none, 1 cover-off (the river), 2 cover-full, 3 cover-coarse, 4 cover-ice. */
+    int cover;
+    BTBHGPUCustomMesh *river;
     BTBHGPUTexture *smoke_atlas;
     BTBHGPUTexture *smoke_normals;
     BTBHGPUCustomMesh *puff;
@@ -454,7 +463,7 @@ static void fill_batch(BTBHGPUSceneGeometryBatch *batch, BTBHGPUCustomMesh *mesh
 static void build_frame(BenchWindow *bench, uint32_t draws) {
     const char *mode = bench->mode;
     uint32_t state = 12345u;
-    bench->instances = calloc(((size_t)draws * 5u + 1u + SMOKE_PUFFS) * BENCH_FLOATS, sizeof(float));
+    bench->instances = calloc(((size_t)draws * 5u + 2u + SMOKE_PUFFS) * BENCH_FLOATS, sizeof(float));
     bench->batches = calloc((size_t)draws + 1u + 2u * RING_PIECES + 1u + 16u, sizeof(BTBHGPUSceneGeometryBatch));
     if (bench->instances == NULL || bench->batches == NULL) {
         fprintf(stderr, "out of memory\n");
@@ -469,6 +478,11 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->normal_texture = bench->normal;
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+        if (bench->cover == 2 || bench->cover == 3) {
+            batch->flags2 = (uint8_t)(batch->flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+        }
+#endif
         if (bench->light != 0) {
             /* v2's lit kit at night: a glow on every piece, glass on every fourth. */
             batch->emission_red = 255u;
@@ -550,6 +564,36 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
     instance[18] = 0.42f;
     instance[19] = 1.0f;
     bench->triangles += 12u;
+    if (bench->cover != 0) {
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+        if (bench->cover == 2 || bench->cover == 3) {
+            ground->flags2 = (uint8_t)(ground->flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+        }
+#endif
+        /* The river: v2's water material (lit, roughness 0.07, receive-only, no shadow), or still ice. */
+        BTBHGPUSceneGeometryBatch *river = &bench->batches[bench->batch_count++];
+        fill_batch(river, bench->river, bench->instance_count, 1u);
+        river->roughness = 0.07f;
+        river->flags = BTBH_GPU_SCENE_BATCH_NO_SUN_SHADOW;
+        river->spot_shadow_visible = 0u;
+        river->ssao_mode = BTBH_GPU_SCENE_SSAO_RECEIVE_ONLY;
+#if defined(BTBH_GPU_SCENE_HAS_SURFACE_ICE)
+        if (bench->cover == 4) {
+            river->surface_variant = BTBH_GPU_SCENE_SURFACE_ICE;
+            river->surface_parameters1[0] = 0.35f;
+        }
+#endif
+        float *water = &bench->instances[(size_t)bench->instance_count++ * BENCH_FLOATS];
+        water[0] = 1.0f;
+        water[5] = 1.0f;
+        water[10] = 1.0f;
+        water[15] = 1.0f;
+        water[16] = 0.55f;
+        water[17] = 0.68f;
+        water[18] = 0.78f;
+        water[19] = 1.0f;
+        bench->triangles += 12u;
+    }
 }
 
 /* Whether a '+'-separated mode has `option`. */
@@ -1089,6 +1133,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
     bench->distortion = strncmp(bench->mode, "dist-none", 9) == 0 ? 1 :
         (strncmp(bench->mode, "dist-off", 8) == 0 ? 2 : (strncmp(bench->mode, "dist-typical", 12) == 0 ? 3 :
         (strncmp(bench->mode, "dist-worst", 10) == 0 ? 4 : 0)));
+    bench->cover = strncmp(bench->mode, "cover-off", 9) == 0 ? 1 :
+        (strncmp(bench->mode, "cover-full", 10) == 0 ? 2 : (strncmp(bench->mode, "cover-coarse", 12) == 0 ? 3 :
+        (strncmp(bench->mode, "cover-ice", 9) == 0 ? 4 : 0)));
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -1144,6 +1191,47 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
             fprintf(stderr, "ground: %s\n", mesh_report.message);
             exit(1);
         }
+    }
+    if (bench->cover != 0) {
+        /* RFC 0020: the river, a thin strip on the ground across the city. */
+        float vertices[24u * BENCH_FLOATS];
+        uint32_t indices[36];
+        uint32_t vertex_count = 0u;
+        uint32_t index_count = 0u;
+        const float centre[3] = { 0.0f, 0.02f, 14.0f };
+        const float half[3] = { 100.0f, 0.02f, 6.0f };
+        add_box(vertices, &vertex_count, indices, &index_count, centre, half, 255.0f);
+        BTBHGPUCustomMeshReport mesh_report;
+        memset(&mesh_report, 0, sizeof(mesh_report));
+        bench->river = btbh_gpu_window_custom_mesh_create(bench->window, vertices, (uint32_t)sizeof(vertices),
+            vertex_count, indices, index_count, &mesh_report);
+        if (bench->river == NULL) {
+            fprintf(stderr, "river: %s\n", mesh_report.message);
+            exit(1);
+        }
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+        BTBHGPUSceneCover cover;
+        memset(&cover, 0, sizeof(cover));
+        if (bench->cover == 2 || bench->cover == 3) {
+            BTBHGPUSceneCoverLayer *snow = &cover.layers[0];
+            snow->color[0] = 0.034f;
+            snow->color[1] = 0.036f;
+            snow->color[2] = 0.041f;
+            snow->amount = 0.8f;
+            snow->slope_degrees = 55.0f;
+            snow->edge_degrees = 6.0f;
+            snow->edge_noise_degrees = 14.0f;
+            snow->noise_scale = 1.6f;
+            snow->bump = 0.4f;
+            snow->pattern = BTBH_GPU_SCENE_COVER_SNOW;
+            snow->flags = bench->cover == 3 ? (uint8_t)BTBH_GPU_SCENE_COVER_LAYER_COARSE : 0u;
+        }
+        BTBHGPUSceneReport cover_report;
+        if (btbh_gpu_window_scene_set_cover(bench->window, &cover, &cover_report) != BTBH_GPU_OK) {
+            fprintf(stderr, "set_cover: %s\n", cover_report.message);
+            exit(1);
+        }
+#endif
     }
     if (bench->smoke != 0) {
         bench->smoke_atlas = smoke_texture(bench->window, false);

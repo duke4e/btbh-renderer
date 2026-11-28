@@ -6,13 +6,68 @@
  * From 0.18.0, BTBH_SMOKE_DISTORTION=1 sets BTBH_GPU_SCENE_POST_DISTORTION in the post and, before each present, two
  * distortion sources that draw nothing (one of strength 0, one far off to the camera's side: skipped and culled, RFC
  * 0018): the frames must stay byte for byte as without them. Before 0.18.0 (no BTBH_GPU_SCENE_HAS_DISTORTION) it does
- * nothing. */
+ * nothing.
+ * From 0.18.0, BTBH_SMOKE_COVER=1 sets a cover whose two layers lay nothing (amount 0, every other field set) and
+ * BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 on every batch that may take it (RFC 0020; not a lit particle, a refracting batch
+ * or one the fast unlit shader draws; up to SMOKE_COVER_BATCHES batches, none past that): the frames must stay byte for
+ * byte as without them. Before 0.18.0 (no BTBH_GPU_SCENE_HAS_COVER) it does nothing. */
 #ifndef BTBH_GPU_SMOKE_PRESENT_H
 #define BTBH_GPU_SMOKE_PRESENT_H
 
 #include "btbh_gpu/btbh_gpu.h"
 
 #include <SDL3/SDL_stdinc.h>
+
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+#define SMOKE_COVER_BATCHES 2048u
+
+/* BTBH_SMOKE_COVER=1 (see above): the batches with the cover's bit where they may take it, in a copy. */
+static inline const BTBHGPUSceneGeometryBatch *smoke_cover_batches(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count
+) {
+    static BTBHGPUSceneGeometryBatch copies[SMOKE_COVER_BATCHES];
+    const char *cover = SDL_getenv("BTBH_SMOKE_COVER");
+    if (cover == NULL || cover[0] != '1') {
+        return batches;
+    }
+    BTBHGPUSceneCover inert;
+    SDL_zero(inert);
+    for (uint32_t layer = 0u; layer < BTBH_GPU_SCENE_COVER_LAYER_COUNT; ++layer) {
+        inert.layers[layer].color[0] = 1.0f;
+        inert.layers[layer].color[1] = 0.5f;
+        inert.layers[layer].slope_degrees = 80.0f;
+        inert.layers[layer].edge_degrees = 20.0f;
+        inert.layers[layer].edge_noise_degrees = 30.0f;
+        inert.layers[layer].noise_scale = 2.0f;
+        inert.layers[layer].roughness = 0.3f;
+        inert.layers[layer].bump = 1.0f;
+        inert.layers[layer].normal_influence = 1.0f;
+        inert.layers[layer].pattern = (uint8_t)(layer == 0u ? BTBH_GPU_SCENE_COVER_SNOW : BTBH_GPU_SCENE_COVER_MUD);
+    }
+    (void)btbh_gpu_window_scene_set_cover(window, &inert, NULL);
+    if (batches == NULL || batch_count > SMOKE_COVER_BATCHES) {
+        return batches;
+    }
+    for (uint32_t index = 0u; index < batch_count; ++index) {
+        BTBHGPUSceneGeometryBatch *batch = &copies[index];
+        *batch = batches[index];
+        const bool see_through = batch->transparency_enabled != 0u || batch->blend_mode != BTBH_GPU_SCENE_BLEND_ALPHA;
+        const BTBHGPUSceneWorldDetail *detail = batch->world_detail;
+        const bool detailed = detail != NULL &&
+            (detail->albedo_texture != NULL || detail->normal_texture != NULL || detail->orm_texture != NULL);
+        const bool tabled = batch->world_detail_table != NULL && batch->world_detail_table->map_layers != NULL;
+        const bool fast_unlit = batch->unlit_enabled != 0u && batch->surface_variant == BTBH_GPU_SCENE_SURFACE_NONE &&
+            !detailed && !tabled && see_through;
+        if (!fast_unlit && batch->surface_variant != BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE &&
+            batch->surface_variant != BTBH_GPU_SCENE_SURFACE_REFRACT) {
+            batch->flags2 = (uint8_t)(batch->flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+        }
+    }
+    return copies;
+}
+#endif
 
 static inline BTBHGPUResult smoke_present_instances(
     BTBHGPUWindow *window,
@@ -67,6 +122,9 @@ static inline BTBHGPUResult smoke_present_instances(
         }
         (void)btbh_gpu_window_scene_set_distortion(window, sources, 2u, 0.0f, NULL);
     }
+#endif
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+    batches = smoke_cover_batches(window, batches, batch_count);
 #endif
 #if defined(BTBH_GPU_SCENE_HAS_VIEWS)
     const char *views = SDL_getenv("BTBH_SMOKE_PRESENT_VIEWS");

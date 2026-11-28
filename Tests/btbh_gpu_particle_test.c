@@ -475,7 +475,8 @@ int main(void) {
     _Static_assert(offsetof(BTBHGPUSceneParticleFrameUniforms, controls) == 64u, "controls");
     _Static_assert(offsetof(BTBHGPUSceneParticleFrameUniforms, cascade_field) == 160u, "cascade_field");
     _Static_assert(offsetof(BTBHGPUSceneParticleFrameUniforms, shadow_controls) == 176u, "shadow_controls");
-    _Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11 && BTBH_GPU_SCENE_SURFACE_COUNT == 12,
+    /* (RFC 0020, 0.18.0: ICE is 12, the count 13.) */
+    _Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11 && BTBH_GPU_SCENE_SURFACE_COUNT == 13,
         "LIT_PARTICLE is 11");
     _Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT == 8u, "the UV rect is batch bit 3");
     check_phase();

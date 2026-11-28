@@ -98,6 +98,51 @@ All notable changes to this project are documented here. The format follows
     reference; scene views by the line; FSR 3's reactive mask; refusals; prewarm; a missing shader). The smokes'
     presents take `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing) for the identity runs; the
     frame bench takes the modes `dist-none`, `dist-off`, `dist-typical`, `dist-worst` and the preset `4k`.
+- **A cover by facing** (RFC 0020 phase 1, `BTBH_GPU_SCENE_HAS_COVER`; asked for by Be The Bullet Hell v2 for its
+  biomes after the owner's seventeenth play-test: snow on every ledge, sill and roof by its slope, sand, mud). A window
+  that sets no cover, or a batch without the bits, draws byte for byte as before (below).
+  - **API:** **`btbh_gpu_window_scene_set_cover`** keeps a **`BTBHGPUSceneCover`** (136 bytes: two
+    **`BTBHGPUSceneCoverLayer`**s of 64 bytes) on the window until the next call (NULL clears it), for every scene
+    present and render into a target. A layer: a linear colour, an amount, the steepest slope it holds, the edge's width
+    and the noise's reach in degrees, the noise's scale, a roughness, a relief (`bump`), how far normal maps lean its
+    facing (`normal_influence`), a **`BTBHGPUSceneCoverPattern`** (`SNOW`, `SAND`, `MUD`) and
+    `BTBH_GPU_SCENE_COVER_LAYER_COARSE` (one noise octave, no relief: the Deck-class setting); `base_height`,
+    `base_fade` and `wind` are phase 2's and refused unless 0. A batch takes a layer by
+    **`BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0`** or **`_COVER_1`** (`flags2` bits 2 and 3; bit 1 stays RFC 0019's).
+    Refused: both bits, a lit particle, a refracting batch, a batch the fast unlit shader draws.
+  - **What it does:** in the scene fragment shader, after the normal is composed and before F0, a uniform branch lays
+    the layer where the face turns up: by the slope of the vertex normal (leaning toward the shading normal by
+    `normal_influence`), within amount x slope (plus or minus the noise's reach, which grows with the amount up to
+    0.25), fading over the edge, shaped by the pattern (SNOW crisp, SAND a dusting, MUD blotchy with glossy puddles that
+    `surface_wetness` makes glossier). It replaces the albedo, the roughness, the metalness (0), the occlusion (1), a
+    glass detail's reflectance and the normal (the vertex normal tilted by the cover's own relief), so the lighting,
+    SSR, the HBAO and SSAO and the radiance cascades see snow as snow; a see-through batch takes it opaque. The emission,
+    shadows, depth and motion stay. Value noise over the flat world x-z on the procedural detail's integer hash, faded by
+    the footprint. No texture, no pass, no pipeline: a covered batch draws with the pipeline it has without the bits.
+  - **Shaders:** `production_model.frag` and its five siblings gain the branch and a fourth uniform buffer (b3, the
+    two layers, 128 bytes, pushed before a pass's first covered batch); `production_cover.hlsli` is new. No new built
+    file: 90 shaders. A frame that draws a covered batch with scene shaders that don't name the cover's block fails,
+    naming the shader.
+  - **Debug:** `BTBH_DEBUG_COVER=1` draws c in place of a covered pixel's colour (red the first layer, green the
+    second).
+- **Still ice** (RFC 0020, `BTBH_GPU_SCENE_HAS_SURFACE_ICE`; v2's frozen rivers): **`BTBH_GPU_SCENE_SURFACE_ICE`**
+  (12; the count is 13), a case of the scene shader's surface variants (no pipeline). Plates in a world-space Voronoi
+  pattern parted by bevelled cracks that catch the light, a tilt per plate, a finer craze of hairline cracks, frost in
+  patches; the surface's colour lifted in the cracks and frost; its own roughness (clear 0.06 by default, frost 0.6:
+  the batch's roughness factor doesn't scale it), so SSR reflects the city in the clear plates. Thin cracks fade out
+  rather than alias. `surface_parameters0`: plate size, crack width, the lift, plate tilt; `surface_parameters1`: frost
+  share and patch size, the two roughnesses; zero values default; refused when not finite, negative, or a share or
+  roughness past 1. Needs this release's scene shaders (checked as for the cover).
+  - **Tests:** `btbh_gpu_cover_test` (the structs' layout, the setter's checks, the CPU reference
+    `src/gpu/btbh_gpu_cover.h`: the block, the facing, the noise and its gradient, the relief, MUD's puddles, the ice's
+    plates, cracks and frost) and `btbh_gpu_scene_cover_smoke` (identity without a cover or with layers at amount 0;
+    SNOW, SAND, MUD, COARSE, the second layer, `normal_influence` and the debug view against the CPU reference, pixel by
+    pixel; the roughness, occlusion and normal the screen-space passes read and the albedo the radiance cascades read;
+    SSR on a glossy floor gone under rough snow; see-through batches; still ice unlit and lit; runs and the run
+    verifier; scene views; a render into a target; prewarm; refusals; old shaders), also run as
+    `btbh_gpu_scene_cover_smoke_runs_verify`. The smokes' presents take `BTBH_SMOKE_COVER=1` (a cover that lays nothing
+    and the bit on every batch that may take one) for the identity runs; the frame bench takes the modes `cover-off`,
+    `cover-full`, `cover-coarse` and `cover-ice`.
 
 ### Known
 - **SDL 3.4.2 sends no HDR metadata** (it never calls `vkSetHdrMetadataEXT`); `metadata_set` stays 0 and the TV uses

@@ -210,8 +210,37 @@ _Static_assert(BTBH_GPU_INSTANCE_BUFFER_UPLOAD_NO_CYCLE == 2u, "the in-place upl
 /* RFC 0013 phase 1 (0.11.0): the lit particle is variant 11 (the count 12), the UV rect batch bit 3. Phase 2 (0.14.0):
    the particle shadow is batch bit 4 and the lighting's byte 3,337 (particle_shadow, which was
    directional_shadow_reserved[0]). No struct grows. */
-_Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11 && BTBH_GPU_SCENE_SURFACE_COUNT == 12,
-    "LIT_PARTICLE is variant 11");
+_Static_assert(BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE == 11, "LIT_PARTICLE is variant 11");
+/* RFC 0020 (0.18.0): still ice is variant 12 (the count 13); the cover's bits are flags2 bits 2 and 3 (bit 1 is RFC
+   0019's); a layer is 64 bytes and the cover 136, with no pointer. No struct grows. */
+_Static_assert(BTBH_GPU_SCENE_SURFACE_ICE == 12 && BTBH_GPU_SCENE_SURFACE_COUNT == 13, "ICE is variant 12");
+_Static_assert(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 == 4u && BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1 == 8u,
+    "the cover's bits are flags2 bits 2 and 3");
+_Static_assert(sizeof(BTBHGPUSceneCoverLayer) == 64u, "a cover layer is 64 bytes");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, amount) == 12u, "amount");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, slope_degrees) == 16u, "slope_degrees");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, edge_degrees) == 20u, "edge_degrees");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, edge_noise_degrees) == 24u, "edge_noise_degrees");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, noise_scale) == 28u, "noise_scale");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, roughness) == 32u, "roughness");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, bump) == 36u, "bump");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, normal_influence) == 40u, "normal_influence");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, base_height) == 44u, "base_height");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, base_fade) == 48u, "base_fade");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, wind) == 52u, "wind");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, pattern) == 60u, "pattern");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, flags) == 61u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneCoverLayer, reserved) == 62u, "reserved");
+_Static_assert(sizeof(BTBHGPUSceneCover) == 136u, "the cover is 136 bytes");
+_Static_assert(offsetof(BTBHGPUSceneCover, layers) == 0u && sizeof(((BTBHGPUSceneCover *)0)->layers) == 128u,
+    "the two layers at 0 and 64");
+_Static_assert(offsetof(BTBHGPUSceneCover, flags) == 128u, "flags");
+_Static_assert(offsetof(BTBHGPUSceneCover, reserved) == 132u, "reserved");
+_Static_assert(BTBH_GPU_SCENE_COVER_LAYER_COUNT == 2u && BTBH_GPU_SCENE_COVER_PATTERN_COUNT == 3 &&
+    BTBH_GPU_SCENE_COVER_MUD == 2 && BTBH_GPU_SCENE_COVER_LAYER_COARSE == 1u, "the cover's enums");
+#if !defined(BTBH_GPU_SCENE_HAS_COVER) || !defined(BTBH_GPU_SCENE_HAS_SURFACE_ICE)
+#error "RFC 0020 phase 1 defines its HAS_ macros"
+#endif
 _Static_assert(BTBH_GPU_SCENE_SURFACE_REFRACT == 10, "the variants before it keep their numbers");
 _Static_assert(BTBH_GPU_SCENE_BATCH_INSTANCE_UV_RECT == 8, "INSTANCE_UV_RECT is batch bit 3");
 #if UINTPTR_MAX == UINT64_MAX

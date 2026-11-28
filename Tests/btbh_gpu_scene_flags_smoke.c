@@ -2840,8 +2840,14 @@ static void check_refusals(SmokeWindow *smoke) {
     uint8_t *image = render_scene(smoke, &scene, BTBH_GPU_OK, &report);
     free(image);
 #if defined(SMOKE_HAS_0120)
-    /* 0.12.0: flags2's bits 1 to 7 are unknown (present and prewarm); its bit 0 alone is taken. */
+    /* 0.12.0: flags2's bits 1 to 7 are unknown (present and prewarm); its bit 0 alone is taken. 0.18.0: bits 2 and 3
+       are RFC 0020's cover (btbh_gpu_scene_cover_smoke), so 1 and 4 to 7 stay unknown. */
     for (uint32_t bit = 1u; bit < 8u; ++bit) {
+#if defined(BTBH_GPU_SCENE_HAS_COVER)
+        if (bit == 2u || bit == 3u) {
+            continue;
+        }
+#endif
         build_scene(smoke, &options, &scene);
         scene.batches[1].flags2 = (uint8_t)((1u << bit) | BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK);
         assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);

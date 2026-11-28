@@ -725,11 +725,33 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      * no motion and is never a source of the radiance cascades' light, with an emission or without (as if it had
      * BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
     BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE = 11,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 12
+    /* Still ice: frozen water (RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its ice biome's rivers).
+     * Plates in a Voronoi pattern over the flat world x and z (before world_curvature; it never repeats), parted by
+     * bevelled cracks that catch the light, each plate tilted a little so its reflection breaks from its neighbours',
+     * a finer craze of hairline cracks, and frost in patches. The colour is the surface's (its albedo texture, colour,
+     * vertex and instance colours); the cracks and the frost lift it. It replaces the normal map and the ORM texture,
+     * as WATER does (occlusion 1, metalness 0); the emission stays. surface_time is unused: the ice is still. Lit or
+     * unlit, opaque or see-through; on anything that moves its pattern slides. Thin cracks fade out where they would
+     * be under a pixel wide instead of aliasing.
+     * surface_parameters0: x a plate's size (world units across; 0 means 1.2), y a crack's width (world units; 0 means
+     *   0.025), z the cracks' and the frost's lift (their albedo is the surface's times 1 + z, each channel at most 1;
+     *   0 means 0.5), w a plate's largest tilt (radians; 0 means 0.035).
+     * surface_parameters1: x the frost, 0..1 (the share of the surface it covers; 0: none), y a frost patch's size
+     *   (world units; 0 means 3), z the clear ice's roughness, 0..1 (0 means 0.06), w the cracks' and the frost's
+     *   roughness, 0..1 (0 means 0.6).
+     * A parameter that isn't finite or is below 0, or one of the 0..1 above outside it, fails the present with
+     * BTBH_GPU_INVALID_ARGUMENT, naming the batch. Needs this release's scene fragment shaders: an older one draws it
+     * as NONE, so a present that draws it with a scene fragment shader that doesn't name the cover's block
+     * (cover_color_roughness, of the same release) fails, naming the shader. Adds no pipeline: the batch draws with
+     * the pipeline it has without the variant. */
+    BTBH_GPU_SCENE_SURFACE_ICE = 12,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 13
 } BTBHGPUSceneSurfaceVariant;
 
 /* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (RFC 0013, since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
+/* Defined when BTBH_GPU_SCENE_SURFACE_ICE exists (RFC 0020, since 0.18.0). */
+#define BTBH_GPU_SCENE_HAS_SURFACE_ICE 1
 
 /* How a batch takes part in the horizon-based ambient occlusion (BTBHGPUScenePost.ssao_enabled 2; the
  * occlusion of ssao_enabled 1 takes every batch fully). */
@@ -1369,7 +1391,21 @@ enum {
      *   already), and on opaque or lit batches.
      * - The batch takes the pipeline it takes under the cascades without KEEP_HBAO: no new one, and
      *   btbh_gpu_window_scene_prewarm makes it for a batch with the bit. Needs no new shader. */
-    BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK = 1u << 0
+    BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK = 1u << 0,
+    /* (Bit 1 is RFC 0019's, volumetrics; not yet in this release, and refused.) */
+    /* The batch takes the window's first (COVER_0) or second (COVER_1) cover layer where its faces turn up
+     * (btbh_gpu_window_scene_set_cover, RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its biomes).
+     * Every pass that draws it with the scene's fragment shader takes it: opaque and transparent, lit and unlit,
+     * static, skinned and lifted, with or without a world detail or a table. The cover is laid in the world: on
+     * anything that moves its noise slides, and it stays on whatever faces up. Without a layer set, or with that
+     * layer's amount 0, the bit changes nothing (to the byte). Refused (the present fails with
+     * BTBH_GPU_INVALID_ARGUMENT, naming the batch): both bits; a LIT_PARTICLE or REFRACT batch (their shaders draw no
+     * material); a batch the fast unlit shader draws (unlit, drawn in the transparent pass, no surface variant, no
+     * world detail with a texture, no table with map_layers). Adds no pipeline: the batch draws with the pipeline it
+     * has without the bit. Needs this release's scene fragment shaders: a present that draws a covered batch with one
+     * that doesn't name the cover's block (cover_color_roughness) fails, naming the shader. */
+    BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 = 1u << 2,
+    BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1 = 1u << 3
 };
 
 /* Defined when BTBHGPUSceneGeometryBatch.flags2 and BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK exist (since
@@ -3393,6 +3429,121 @@ BTBHGPUResult btbh_gpu_window_scene_set_distortion(
 /* Defined when btbh_gpu_window_scene_set_distortion, BTBHGPUSceneDistortionSource, its enums,
    BTBH_GPU_SCENE_POST_DISTORTION and BTBHGPUSceneReport.distortion_sources_drawn exist (since 0.18.0). */
 #define BTBH_GPU_SCENE_HAS_DISTORTION 1
+
+/* A cover laid by facing (RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its biomes): snow, sand or mud
+   on whatever faces up, with a noisy edge, on the batches that ask for it. The window keeps two layers
+   (btbh_gpu_window_scene_set_cover); a batch takes one by BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 or _COVER_1. Where
+   it lies it replaces the surface's albedo, roughness, metalness, occlusion and normal by its own, before the
+   lighting, so the reflections, the ambient occlusion and the radiance cascades see it as they see the surface. It is
+   worked out from the world position and the normal alone: no texture, no pass, no pipeline. A window that never sets
+   a layer, or a batch without the bits, draws byte for byte as before.
+
+   What a layer does, at a fragment of a batch that takes it (angles in degrees; slopes from level: 0 a face looking
+   straight up, 90 a wall, 180 a face looking straight down):
+   - the slope theta it reads is that of the vertex normal turned to the side seen, leaning toward the shading normal
+     (the normal map's, the world detail's and the procedural detail's tilts) by normal_influence;
+   - N, in -1..1, is value noise over the flat world x and z times noise_scale: two octaves (the second at 2.03 times
+     the first's frequency, half as strong, fading out where its cells shrink under two pixels; COARSE: the first
+     alone); 0 when edge_noise_degrees is 0;
+   - the cover reaches theta_max = amount x slope_degrees + edge_noise_degrees x min(1, 4 x amount) x N (the noise's
+     reach grows with the amount up to 0.25, so a thin cover thins out to nothing), and lies by
+     c = saturate((theta_max - theta) / edge_degrees), shaped by the pattern's edge (SNOW smoothstep(0.3, 0.7, c),
+     SAND c, MUD smoothstep(0.15, 0.55, c));
+   - by c, the albedo moves to color (times 1 + grain x N: SNOW 0.04, SAND 0.10, MUD 0.15), the roughness to the
+     layer's (MUD: down to 0.12 in its puddles, where N is low, the more so with BTBHGPUSceneLighting.surface_wetness),
+     the metalness to 0, the occlusion to 1, a glass detail's reflectance to a dielectric's, and the normal to the
+     vertex normal tilted by the cover's own relief (bump: SNOW soft lumps from the first octave, SAND a fine grain
+     from the second, MUD both; COARSE or bump 0: none); a see-through batch's alpha rises to c (snow on a glass roof
+     is opaque);
+   - the emission stays, and so do shadows, depth, coverage and motion. The radiance cascades' material sources (an
+     unlit batch's colour projected from above) don't take it. */
+
+/* How many layers a window keeps. */
+#define BTBH_GPU_SCENE_COVER_LAYER_COUNT 2u
+
+/* BTBHGPUSceneCoverLayer.pattern: the cover's edge and relief. */
+typedef enum BTBHGPUSceneCoverPattern {
+    BTBH_GPU_SCENE_COVER_SNOW = 0,   /* a crisp edge, soft lumps; roughness 0 means 0.85 */
+    BTBH_GPU_SCENE_COVER_SAND = 1,   /* a soft edge that thins into a dusting, a fine grain; roughness 0 means 0.95 */
+    /* a blotchy edge, glossy puddles where the noise is low (glossier with BTBHGPUSceneLighting.surface_wetness);
+       roughness 0 means 0.55 */
+    BTBH_GPU_SCENE_COVER_MUD = 2,
+    BTBH_GPU_SCENE_COVER_PATTERN_COUNT = 3
+} BTBHGPUSceneCoverPattern;
+
+/* BTBHGPUSceneCoverLayer.flags. */
+enum {
+    /* One octave of noise and no relief (bump is ignored): about half the cost, for a Deck-class preset. */
+    BTBH_GPU_SCENE_COVER_LAYER_COARSE = 1u << 0
+};
+
+/* One cover layer. 64 bytes, no pointer (the same on 32-bit): color 0, amount 12, slope_degrees 16, edge_degrees 20,
+   edge_noise_degrees 24, noise_scale 28, roughness 32, bump 36, normal_influence 40, base_height 44, base_fade 48,
+   wind 52, pattern 60, flags 61, reserved 62. A zeroed layer lays nothing (its amount is 0). */
+typedef struct BTBHGPUSceneCoverLayer {
+    float color[3];             /* linear albedo, each 0..1 */
+    /* 0..1. 0: nothing (the layer is off). Above it, faces up to amount x slope_degrees from level take it: patches on
+       level faces near 0.1, every level face by about 0.3, steep roofs near 1. */
+    float amount;
+    float slope_degrees;        /* the steepest slope it holds at amount 1, 0..90; 0 means 60 */
+    float edge_degrees;         /* the slopes over which it thins out past that, 0..90; 0 means 8 */
+    /* How far the noise moves the edge either way, 0..90 degrees of slope (scaled down below amount 0.25). 0: a clean
+       line, and no noise is worked out (the cheapest). On level faces under a thin cover it is what breaks the cover
+       into patches. */
+    float edge_noise_degrees;
+    float noise_scale;          /* noise cells per world unit, 0 or more; 0 means 1 */
+    float roughness;            /* 0..1; 0: the pattern's */
+    float bump;                 /* 0..1: its own relief's strength (0: flat, and no gradient is worked out) */
+    /* 0..1: how far the surface's normal map, world detail and procedural detail tilt the slope the cover reads (snow
+       caught in roof tiles' ridges). 0: the vertex normal alone. */
+    float normal_influence;
+    /* RFC 0020 phase 2 (not in this release; refused unless 0): below base_height (world y), every face takes the
+       layer, walls and undersides too, fading out over base_fade above it: mud splashed up a wall's foot, a flood's
+       line, sand drifted against walls. */
+    float base_height;
+    float base_fade;
+    /* RFC 0020 phase 2 (not in this release; refused unless 0): the wind, x and z, its length 0..1: faces turned into it
+       hold the layer steeper, and SAND's ripples lie across it. */
+    float wind[2];
+    uint8_t pattern;            /* BTBHGPUSceneCoverPattern */
+    uint8_t flags;              /* BTBH_GPU_SCENE_COVER_LAYER_* bits */
+    uint8_t reserved[2];        /* 0 */
+} BTBHGPUSceneCoverLayer;
+
+/* The window's cover (btbh_gpu_window_scene_set_cover). 136 bytes, no pointer: layers 0 and 64, flags 128, reserved
+   132. */
+typedef struct BTBHGPUSceneCover {
+    BTBHGPUSceneCoverLayer layers[BTBH_GPU_SCENE_COVER_LAYER_COUNT];
+    uint32_t flags;             /* 0 */
+    uint32_t reserved;          /* 0 */
+} BTBHGPUSceneCover;
+
+/* Sets the cover the window's following scene presents draw (present_instances, _with_visibility, present_views,
+   render_to_target and its target views). It is copied at the call and kept until the next call; NULL clears it.
+   - A layer whose amount is 0 is off: the batches that take it draw as without the bit, to the byte.
+   - Prewarms need nothing for it: a covered batch draws with the pipeline it has without the cover.
+   - Needs this release's scene fragment shaders (they name the cover's block, cover_color_roughness): a present that
+     draws a covered batch with older ones fails with BTBH_GPU_INVALID_ARGUMENT, naming the shader.
+   - BTBH_DEBUG_COVER=1 (read at each present) draws each covered pixel's c in place of its colour, the first layer's in
+     red and the second's in green, for tuning.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, keeping the setting it had:
+     - a NULL window; the cover's flags or reserved not 0;
+     - in a layer: a field that isn't finite; a colour, amount, roughness, bump or normal_influence outside 0..1;
+       slope_degrees, edge_degrees or edge_noise_degrees outside 0..90; noise_scale below 0; a pattern at or past
+       BTBH_GPU_SCENE_COVER_PATTERN_COUNT; an unknown flag; reserved not 0; base_height, base_fade or wind not 0 (phase
+       2's).
+     report may be NULL. Otherwise only its result and message are written; the message names the layer and the field.
+   Call it on the thread that presents, between presents. */
+BTBHGPUResult btbh_gpu_window_scene_set_cover(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneCover *cover,
+    BTBHGPUSceneReport *report
+);
+
+/* Defined when btbh_gpu_window_scene_set_cover, BTBHGPUSceneCover, BTBHGPUSceneCoverLayer, BTBHGPUSceneCoverPattern,
+   BTBH_GPU_SCENE_COVER_LAYER_COARSE and BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 and _1 exist (RFC 0020 phase 1, since
+   0.18.0). */
+#define BTBH_GPU_SCENE_HAS_COVER 1
 
 /* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
    a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls
