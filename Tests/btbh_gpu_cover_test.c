@@ -321,8 +321,10 @@ static void check_noise(void) {
         for (int x = 0; x < 400; ++x) {
             float g1[2];
             float g2[2];
+            float spread;
             const float noise = btbh_cover_noise(-37.3f + 0.137f * (float)x, 911.0f + 0.211f * (float)y, 0.01f, false,
-                g1, g2);
+                g1, g2, &spread);
+            assert(spread == 0.0f);
             assert(noise >= -1.0f && noise <= 1.0f);
             low = noise < low ? noise : low;
             high = noise > high ? noise : high;
@@ -349,12 +351,38 @@ static void check_noise(void) {
     /* The footprint fades the octaves: at 0.4 cells a pixel the second is gone, at 0.6 both (N is 0). */
     float g1[2];
     float g2[2];
-    const float coarse = btbh_cover_noise(12.7f, -3.1f, 0.01f, true, g1, g2);
-    assert(g2[0] == 0.0f && g2[1] == 0.0f);
-    const float faded = btbh_cover_noise(12.7f, -3.1f, 0.4f, false, g1, g2);
+    float spread;
+    const float coarse = btbh_cover_noise(12.7f, -3.1f, 0.01f, true, g1, g2, &spread);
+    assert(g2[0] == 0.0f && g2[1] == 0.0f && spread == 0.0f);
+    const float faded = btbh_cover_noise(12.7f, -3.1f, 0.4f, false, g1, g2, &spread);
     assert(fabsf(faded - coarse * 0.5f) < 1.0e-5f);
     assert(g2[0] == 0.0f && g2[1] == 0.0f);
-    assert(btbh_cover_noise(12.7f, -3.1f, 0.6f, false, g1, g2) == 0.0f);
+    /* What faded out comes back as the spread: the first octave's three quarters, the second's whole. */
+    assert(fabsf(spread - sqrtf(0.75f * BTBH_COVER_OCTAVE1_SPREAD * BTBH_COVER_OCTAVE1_SPREAD +
+        BTBH_COVER_OCTAVE2_SPREAD * BTBH_COVER_OCTAVE2_SPREAD)) < 1.0e-5f);
+    assert(btbh_cover_noise(12.7f, -3.1f, 0.6f, false, g1, g2, &spread) == 0.0f);
+    assert(fabsf(spread - sqrtf(BTBH_COVER_OCTAVE1_SPREAD * BTBH_COVER_OCTAVE1_SPREAD +
+        BTBH_COVER_OCTAVE2_SPREAD * BTBH_COVER_OCTAVE2_SPREAD)) < 1.0e-5f);
+    (void)btbh_cover_noise(12.7f, -3.1f, 0.6f, true, g1, g2, &spread);
+    assert(fabsf(spread - BTBH_COVER_OCTAVE1_SPREAD) < 1.0e-6f);
+    /* The spreads are the octaves' standard deviations times sqrt(3), measured. */
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+    for (int index = 0; index < 160000; ++index) {
+        float unused[2];
+        const float at_x = -900.0f + 0.0137f * (float)(index % 400) + 3.1f * (float)(index / 400);
+        const float at_y = 400.0f + 0.0211f * (float)(index / 400) + 1.7f * (float)(index % 400);
+        const double a1 = (btbh_cover_value_noise(at_x, at_y, unused) - 0.5) * (4.0 / 3.0);
+        const double a2 = 0.5 * (btbh_cover_value_noise(at_x * 2.03f + 17.31f, at_y * 2.03f + 17.31f, unused) - 0.5) *
+            (4.0 / 3.0);
+        sum1 += a1 * a1;
+        sum2 += a2 * a2;
+    }
+    const double measured1 = sqrt(3.0 * sum1 / 160000.0);
+    const double measured2 = sqrt(3.0 * sum2 / 160000.0);
+    printf("noise: the octaves' box half-widths measured %.4f and %.4f (52/105 = %.4f, 26/105 = %.4f)\n", measured1,
+        measured2, (double)BTBH_COVER_OCTAVE1_SPREAD, (double)BTBH_COVER_OCTAVE2_SPREAD);
+    assert(fabs(measured1 - BTBH_COVER_OCTAVE1_SPREAD) < 0.01 && fabs(measured2 - BTBH_COVER_OCTAVE2_SPREAD) < 0.005);
     /* The hash is btbh_detail_hash's 24 bits. */
     assert(btbh_cover_hash01(0.0f, 0.0f) == (float)(btbh_cover_hash(0.0f, 0.0f) & 0x00ffffffu) / 16777216.0f);
     assert(btbh_cover_hash(-1.0f, 5.0f) != btbh_cover_hash(1.0f, 5.0f));
@@ -405,7 +433,92 @@ static void check_relief_and_puddles(void) {
     printf("MUD's roughness: dry %.3f..%.3f, wet down to %.3f\n", (double)lowest_dry, (double)highest,
         (double)lowest_wet);
     assert(fabsf(highest - BTBH_COVER_MUD_ROUGHNESS) < 1.0e-4f && lowest_wet < lowest_dry && lowest_wet < 0.2f);
-    printf("relief: flat without bump, tilted and unit with it; MUD's puddles glossier when wet\n");
+    /* Without noise (edge_noise_degrees 0) MUD has no puddles: the layer's roughness, wet or dry. */
+    cover.layers[0].edge_noise_degrees = 0.0f;
+    btbh_cover_pack(&cover, false, &block);
+    for (int index = 0; index < 40; ++index) {
+        const float at[3] = {0.113f * (float)index, 0.0f, 7.0f - 0.071f * (float)index};
+        const BTBHCoverSample wet = btbh_cover_sample(&block, 0u, at, 0.01f, up, up, albedo, 0.5f, 0.0f, 1.0f, 1.0f);
+        assert(wet.roughness == BTBH_COVER_MUD_ROUGHNESS);
+    }
+    printf("relief: flat without bump, tilted and unit with it; MUD's puddles glossier when wet, none without noise\n");
+}
+
+/* The mean over a grid of points of a layer's coverage (and, with `roughness`, of its roughness) at a slope (degrees)
+   with a pixel footprint (world units). */
+static double mean_cover(const BTBHGPUCoverUniforms *block, float slope_degrees, float pixel, bool roughness) {
+    const float angle = slope_degrees * BTBH_COVER_PI / 180.0f;
+    const float normal[3] = {0.0f, cosf(angle), sinf(angle)};
+    const float albedo[3] = {0.1f, 0.2f, 0.3f};
+    double sum = 0.0;
+    for (int y = 0; y < 150; ++y) {
+        for (int x = 0; x < 150; ++x) {
+            const float at[3] = {-400.0f + 0.731f * (float)x + 0.0173f * (float)y, 2.0f,
+                250.0f + 0.677f * (float)y + 0.0119f * (float)x};
+            const BTBHCoverSample sample = btbh_cover_sample(block, 0u, at, pixel, normal, normal, albedo, 0.5f,
+                0.0f, 1.0f, 1.0f);
+            sum += roughness ? sample.roughness : sample.c;
+        }
+    }
+    return sum / (150.0 * 150.0);
+}
+
+/* Where the noise's cells shrink under a pixel, a face keeps the coverage it averages to near by (a thin cover's far
+   level faces as patchy as its near ones, not solid), and MUD's puddles their share of the gloss. */
+static void check_far_coverage(void) {
+    BTBHGPUSceneCover cover;
+    memset(&cover, 0, sizeof(cover));
+    cover.layers[0] = layer_valid();
+    cover.layers[0].amount = 0.1f;
+    cover.layers[0].slope_degrees = 60.0f;
+    cover.layers[0].edge_degrees = 8.0f;
+    cover.layers[0].edge_noise_degrees = 14.0f;
+    cover.layers[0].noise_scale = 1.0f;
+    cover.layers[0].bump = 0.0f;
+    double worst = 0.0;
+    double worst_old = 0.0;
+    for (uint32_t pattern = 0u; pattern < 3u; ++pattern) {
+        cover.layers[0].pattern = (uint8_t)pattern;
+        for (int coarse = 0; coarse < 2; ++coarse) {
+            cover.layers[0].flags = coarse != 0 ? (uint8_t)BTBH_GPU_SCENE_COVER_LAYER_COARSE : 0u;
+            BTBHGPUCoverUniforms block;
+            btbh_cover_pack(&cover, false, &block);
+            for (float slope = 0.0f; slope <= 9.5f; slope += 3.0f) {
+                const double near = mean_cover(&block, slope, 0.01f, false);
+                /* Every footprint from resolved to faded out: within a few hundredths of the near mean. */
+                for (float pixel = 0.1f; pixel <= 1.05f; pixel += 0.1f) {
+                    const double far = mean_cover(&block, slope, pixel, false);
+                    const double off = fabs(far - near);
+                    worst = off > worst ? off : worst;
+                }
+                /* What the noise-free line would give (0.18.0's first build far away). */
+                const float x = (block.facing[0][0] - slope * BTBH_COVER_PI / 180.0f) * block.facing[0][1];
+                const double old = btbh_cover_edge(pattern, x, 0.0f);
+                worst_old = fabs(old - near) > worst_old ? fabs(old - near) : worst_old;
+            }
+        }
+    }
+    printf("far coverage: within %.3f of the near mean at every footprint (the noise-free line: %.3f off)\n", worst,
+        worst_old);
+    assert(worst < 0.06 && worst_old > 0.2);
+    /* MUD's puddles, wet, on level ground fully covered: the far roughness is the near mean's. */
+    cover.layers[0] = layer_valid();
+    cover.layers[0].amount = 1.0f;
+    cover.layers[0].bump = 0.0f;
+    cover.layers[0].pattern = BTBH_GPU_SCENE_COVER_MUD;
+    BTBHGPUCoverUniforms block;
+    btbh_cover_pack(&cover, false, &block);
+    const double near = mean_cover(&block, 0.0f, 0.01f, true);
+    double puddle_worst = 0.0;
+    for (float pixel = 0.05f; pixel <= 1.0f; pixel += 0.05f) {
+        const double off = fabs(mean_cover(&block, 0.0f, pixel, true) - near);
+        puddle_worst = off > puddle_worst ? off : puddle_worst;
+    }
+    const double old = BTBH_COVER_MUD_ROUGHNESS + (BTBH_COVER_PUDDLE_ROUGHNESS - BTBH_COVER_MUD_ROUGHNESS) *
+        (1.0 - btbh_cover_smoothstep(-0.4f, 0.2f, 0.0f));
+    printf("far puddles: MUD's wet roughness %.3f near, within %.3f at every footprint (N = 0's: %.3f)\n", near,
+        puddle_worst, old);
+    assert(puddle_worst < 0.02 && fabs(old - near) > 0.03);
 }
 
 static void check_ice(void) {
@@ -453,6 +566,67 @@ static void check_ice(void) {
     printf("ice: border distance %.4f..%.3f world units, %.1f %% of a line cracked\n", (double)lowest,
         (double)highest, 100.0 * cracked / samples);
     assert(lowest < 0.01f && highest > 0.2f && highest < 1.2f && cracked > 0u && cracked < samples / 4u);
+    /* The border distance is the nearest border's, near a corner where three plates meet too: against every border
+       of the nearest seed with the seeds of the 7 x 7 cells round it, at points within 0.3 cells of one. */
+    uint32_t near_border = 0u;
+    float worst_border = 0.0f;
+    for (int index = 0; index < 60000; ++index) {
+        const float px = -300.0f + 0.01731f * (float)index;
+        const float py = 120.0f + 0.00947f * (float)index + 0.37f * (float)(index % 97);
+        float across[2];
+        float cell[2];
+        const float distance = btbh_ice_voronoi(px, py, across, cell);
+        float nearest[2];
+        btbh_ice_seed(cell[0], cell[1], nearest);
+        float exact = 1.0e9f;
+        for (int y = -3; y <= 3; ++y) {
+            for (int x = -3; x <= 3; ++x) {
+                if (x == 0 && y == 0) {
+                    continue;
+                }
+                float seed[2];
+                btbh_ice_seed(cell[0] + (float)x, cell[1] + (float)y, seed);
+                const float lx = seed[0] - nearest[0];
+                const float ly = seed[1] - nearest[1];
+                const float length = sqrtf(lx * lx + ly * ly);
+                const float border = ((0.5f * (nearest[0] + seed[0]) - px) * lx +
+                    (0.5f * (nearest[1] + seed[1]) - py) * ly) / length;
+                exact = border < exact ? border : exact;
+            }
+        }
+        if (exact < 0.3f) {
+            near_border += 1u;
+            const float off = fabsf(distance - (exact > 0.0f ? exact : 0.0f));
+            worst_border = off > worst_border ? off : worst_border;
+        }
+    }
+    printf("ice: the border distance at %u points within 0.3 cells of a border, off the exact one by %.2g at most\n",
+        near_border, (double)worst_border);
+    assert(near_border > 10000u && worst_border < 1.0e-4f);
+    /* The craze fades as a pixel grows from its width to twice it: no step at the cutoff. */
+    float worst_step = 0.0f;
+    float lifted_before = 0.0f;
+    for (int index = 0; index < 3000; ++index) {
+        const float x = 3.0f + 0.0071f * (float)index;
+        const float z = -4.0f + 0.0043f * (float)index;
+        float previous = -1.0f;
+        const float fine_width = 0.5f * p0[1];
+        for (int step = 0; step <= 240; ++step) {
+            const float footprint = fine_width * (0.5f + 2.5f * (float)step / 240.0f);
+            const BTBHIceSample ice = btbh_ice_sample(x, z, footprint, p0, p1);
+            if (previous >= 0.0f) {
+                const float jump = fabsf(ice.lift_share - previous);
+                worst_step = jump > worst_step ? jump : worst_step;
+            }
+            if (step == 96) {
+                lifted_before += ice.lift_share;
+            }
+            previous = ice.lift_share;
+        }
+    }
+    printf("ice: the craze over footprints 0.5 to 3 times its width, the largest step %.4f (of 240)\n",
+        (double)worst_step);
+    assert(worst_step < 0.02f && lifted_before > 0.0f);
     /* A crack is 1 on its line while it is wider than half a pixel, and loses strength with its share of a pixel. */
     assert(btbh_ice_crack(0.0f, 0.05f, 0.01f) == 1.0f);
     assert(btbh_ice_crack(0.05f, 0.05f, 0.01f) == 0.0f);
@@ -491,6 +665,7 @@ int main(void) {
     check_facing();
     check_noise();
     check_relief_and_puddles();
+    check_far_coverage();
     check_ice();
     printf("btbh_gpu_cover_test: ok\n");
     return 0;

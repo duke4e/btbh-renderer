@@ -2430,6 +2430,7 @@ void apply_cover(
         return;
     }
     float noise = 0.0f;
+    float spread = 0.0f;
     float2 gradient1 = float2(0.0f, 0.0f);
     float2 gradient2 = float2(0.0f, 0.0f);
     [branch]
@@ -2444,10 +2445,17 @@ void apply_cover(
             footprint,
             (flags & btbh_cover_flag_coarse) != 0u,
             gradient1,
-            gradient2
+            gradient2,
+            spread
         );
     }
-    const float c = btbh_cover_edge(pattern, saturate((facing.x + facing.z * noise - slope) * facing.y));
+    // Where the noise is finer than a pixel the edge is averaged over what it lost (a far roof as patchy as a near
+    // one, not solid).
+    const float c = btbh_cover_edge(
+        pattern,
+        (facing.x + facing.z * noise - slope) * facing.y,
+        facing.z * facing.y * spread
+    );
     float3 cover_normal = vertex_normal;
     [branch]
     if (relief.x > 0.0f)
@@ -2462,10 +2470,11 @@ void apply_cover(
         );
     }
     float cover_roughness = color_roughness.w;
-    if (pattern == btbh_cover_pattern_mud)
+    if (pattern == btbh_cover_pattern_mud && facing.z > 0.0f)
     {
-        // Puddles where the noise is low, glossier when the streets are wet.
-        const float puddle = 1.0f - smoothstep(-0.4f, 0.2f, noise);
+        // Puddles where the noise is low (their share where it is finer than a pixel), glossier when the streets are
+        // wet. Without noise (edge_noise_degrees 0) there are none.
+        const float puddle = btbh_cover_puddle(noise, spread);
         cover_roughness = lerp(cover_roughness, 0.12f, puddle * (0.5f + 0.5f * saturate(surface_wetness.x)));
     }
     albedo.rgb = lerp(albedo.rgb, color_roughness.rgb * (1.0f + btbh_cover_grain(pattern) * noise), c);

@@ -580,11 +580,12 @@ bool btbh_gpu_scene_prepare_bones_for_test(
 /* RFC 0011 phase 1b, the run key (btbh_gpu_scene.c): whether `batch` continues the run of `previous`, the batch the
    pass drew before it, so that it binds and pushes nothing but its vertex and index buffers. True when the two are
    equal, byte for byte, in every field but kind, model, custom_mesh, material_slot, first_instance and
-   instance_count (padding isn't compared; a float compares by its bits). The passes also require both geometries to
-   be unskinned. */
+   instance_count (padding isn't compared; a float compares by its bits), but flags2's cover bits, which compare as
+   the cover `cover` makes of them (RFC 0020; NULL: none). The passes also require both geometries to be unskinned. */
 bool btbh_gpu_scene_batch_continues_run(
     const BTBHGPUSceneGeometryBatch *previous,
-    const BTBHGPUSceneGeometryBatch *batch
+    const BTBHGPUSceneGeometryBatch *batch,
+    const BTBHGPUSceneCover *cover
 );
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters as the present accepts them: finite; a pattern in [0, 7], rounded

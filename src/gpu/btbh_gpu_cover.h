@@ -29,6 +29,9 @@
 /* The second octave's frequency over the first's, and its offset. */
 #define BTBH_COVER_OCTAVE_SCALE 2.03f
 #define BTBH_COVER_OCTAVE_OFFSET 17.31f
+/* Each octave's share of N as a box of the same variance (production_cover.hlsli): 52/105 and 26/105. */
+#define BTBH_COVER_OCTAVE1_SPREAD (52.0f / 105.0f)
+#define BTBH_COVER_OCTAVE2_SPREAD (26.0f / 105.0f)
 /* production_model.frag's cover_pattern[].y bits. */
 #define BTBH_COVER_FLAG_COARSE 1u
 #define BTBH_COVER_FLAG_DEBUG 2u
@@ -290,14 +293,16 @@ static inline float btbh_cover_value_noise(float x, float y, float gradient[2]) 
 }
 
 /* The cover's noise N (-1..1) at noise-cell position (x, y), footprint the first octave's cells per pixel; each
-   octave's gradient (faded) out. */
+   octave's gradient (faded) out, and the spread (the half-width of a box with the variance the fading took out, at
+   most 1 - |N|). */
 static inline float btbh_cover_noise(
     float x,
     float y,
     float footprint,
     bool coarse,
     float gradient1[2],
-    float gradient2[2]
+    float gradient2[2],
+    float *spread
 ) {
     float g1[2];
     const float n1 = btbh_cover_value_noise(x, y, g1);
@@ -305,6 +310,7 @@ static inline float btbh_cover_noise(
     gradient1[0] = g1[0] * fade1;
     gradient1[1] = g1[1] * fade1;
     float sum = (n1 - 0.5f) * fade1;
+    float lost = (1.0f - fade1 * fade1) * (BTBH_COVER_OCTAVE1_SPREAD * BTBH_COVER_OCTAVE1_SPREAD);
     gradient2[0] = 0.0f;
     gradient2[1] = 0.0f;
     if (!coarse) {
@@ -318,18 +324,49 @@ static inline float btbh_cover_noise(
         gradient2[0] = g2[0] * fade2;
         gradient2[1] = g2[1] * fade2;
         sum += 0.5f * (n2 - 0.5f) * fade2;
+        lost += (1.0f - fade2 * fade2) * (BTBH_COVER_OCTAVE2_SPREAD * BTBH_COVER_OCTAVE2_SPREAD);
     }
-    return sum * (4.0f / 3.0f);
+    const float noise = sum * (4.0f / 3.0f);
+    const float room = 1.0f - fabsf(noise);
+    const float box = sqrtf(lost);
+    *spread = box < room ? box : room;
+    return noise;
 }
 
-static inline float btbh_cover_edge(uint32_t pattern, float c) {
+/* A ramp from lo to hi (smoothed: smoothstep; else linear) averaged over a box of half-width `spread` about x. */
+static inline float btbh_cover_ramp_integral(float lo, float hi, bool smoothed, float x) {
+    const float t = btbh_cover_saturate((x - lo) / (hi - lo));
+    return (hi - lo) * (smoothed ? t * t * t * (1.0f - 0.5f * t) : 0.5f * t * t) + (x > hi ? x - hi : 0.0f);
+}
+
+static inline float btbh_cover_filtered_ramp(float lo, float hi, bool smoothed, float x, float spread) {
+    if (spread < 1.0e-3f) {
+        return smoothed ? btbh_cover_smoothstep(lo, hi, x) : btbh_cover_saturate((x - lo) / (hi - lo));
+    }
+    if (x + spread <= lo) {
+        return 0.0f;
+    }
+    if (x - spread >= hi) {
+        return 1.0f;
+    }
+    return (btbh_cover_ramp_integral(lo, hi, smoothed, x + spread) -
+        btbh_cover_ramp_integral(lo, hi, smoothed, x - spread)) / (2.0f * spread);
+}
+
+/* The pattern's edge at x (how far inside the reach, in edge widths), averaged over a box of half-width spread. */
+static inline float btbh_cover_edge(uint32_t pattern, float x, float spread) {
     if (pattern == (uint32_t)BTBH_GPU_SCENE_COVER_SNOW) {
-        return btbh_cover_smoothstep(0.3f, 0.7f, c);
+        return btbh_cover_filtered_ramp(0.3f, 0.7f, true, x, spread);
     }
     if (pattern == (uint32_t)BTBH_GPU_SCENE_COVER_MUD) {
-        return btbh_cover_smoothstep(0.15f, 0.55f, c);
+        return btbh_cover_filtered_ramp(0.15f, 0.55f, true, x, spread);
     }
-    return c;
+    return btbh_cover_filtered_ramp(0.0f, 1.0f, false, x, spread);
+}
+
+/* MUD's puddles at N (spread in N). */
+static inline float btbh_cover_puddle(float noise, float spread) {
+    return 1.0f - btbh_cover_filtered_ramp(-0.4f, 0.2f, true, noise, spread);
 }
 
 static inline float btbh_cover_grain(uint32_t pattern) {
@@ -410,6 +447,7 @@ static inline BTBHCoverSample btbh_cover_sample(
     float gradient1[2] = {0.0f, 0.0f};
     float gradient2[2] = {0.0f, 0.0f};
     float noise = 0.0f;
+    float spread = 0.0f;
     if (facing[2] > 0.0f) {
         noise = btbh_cover_noise(
             position[0] * facing[3],
@@ -417,12 +455,14 @@ static inline BTBHCoverSample btbh_cover_sample(
             facing[3] * pixel,
             coarse,
             gradient1,
-            gradient2
+            gradient2,
+            &spread
         );
     }
     const float c = btbh_cover_edge(
         pattern,
-        btbh_cover_saturate((facing[0] + facing[2] * noise - slope) * facing[1])
+        (facing[0] + facing[2] * noise - slope) * facing[1],
+        facing[2] * facing[1] * spread
     );
     float cover_normal[3] = {vertex_normal[0], vertex_normal[1], vertex_normal[2]};
     if (relief[0] > 0.0f) {
@@ -446,8 +486,8 @@ static inline BTBHCoverSample btbh_cover_sample(
         btbh_cover_normalize(cover_normal, vertex_normal);
     }
     float cover_roughness = color_roughness[3];
-    if (pattern == (uint32_t)BTBH_GPU_SCENE_COVER_MUD) {
-        const float puddle = 1.0f - btbh_cover_smoothstep(-0.4f, 0.2f, noise);
+    if (pattern == (uint32_t)BTBH_GPU_SCENE_COVER_MUD && facing[2] > 0.0f) {
+        const float puddle = btbh_cover_puddle(noise, spread);
         cover_roughness = btbh_cover_lerp(
             cover_roughness,
             BTBH_COVER_PUDDLE_ROUGHNESS,
@@ -482,54 +522,71 @@ static inline void btbh_ice_defaults(const float in0[4], const float in1[4], flo
     p1[3] = in1[3] > 0.0f ? in1[3] : BTBH_ICE_DEFAULT_FROST_ROUGHNESS;
 }
 
-/* btbh_ice_voronoi: the distance from p to the border between the nearest seed and the second nearest (cells), the
-   direction across it, the nearest seed's cell. */
+/* btbh_ice_seed: a Voronoi cell's seed (jitter 0.85, the hash's two 16-bit halves). */
+static inline void btbh_ice_seed(float cell_x, float cell_y, float seed[2]) {
+    const uint32_t hash = btbh_cover_hash(cell_x, cell_y);
+    const float jitter_x = (float)(hash & 0xffffu) * (1.0f / 65536.0f);
+    const float jitter_y = (float)(hash >> 16) * (1.0f / 65536.0f);
+    seed[0] = cell_x + 0.5f + (jitter_x - 0.5f) * 0.85f;
+    seed[1] = cell_y + 0.5f + (jitter_y - 0.5f) * 0.85f;
+}
+
+/* The distance from p to the nearest seed's cell's border (cells; the nearest seed over the 3 x 3 cells round p, its
+   border over the seeds of the 4 x 4 cells from its cell toward p), the direction across that border, the nearest
+   seed's cell. */
 static inline float btbh_ice_voronoi(float px, float py, float across[2], float nearest_cell[2]) {
     const float base_x = floorf(px);
     const float base_y = floorf(py);
     float best = 1.0e9f;
-    float second = 1.0e9f;
     float best_seed[2] = {0.0f, 0.0f};
-    float second_seed[2] = {0.0f, 0.0f};
     nearest_cell[0] = base_x;
     nearest_cell[1] = base_y;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const float cell_x = base_x + (float)x;
             const float cell_y = base_y + (float)y;
-            const uint32_t hash = btbh_cover_hash(cell_x, cell_y);
-            const float jitter_x = (float)(hash & 0xffffu) * (1.0f / 65536.0f);
-            const float jitter_y = (float)(hash >> 16) * (1.0f / 65536.0f);
-            const float seed_x = cell_x + 0.5f + (jitter_x - 0.5f) * 0.85f;
-            const float seed_y = cell_y + 0.5f + (jitter_y - 0.5f) * 0.85f;
-            const float dx = seed_x - px;
-            const float dy = seed_y - py;
+            float seed[2];
+            btbh_ice_seed(cell_x, cell_y, seed);
+            const float dx = seed[0] - px;
+            const float dy = seed[1] - py;
             const float distance2 = dx * dx + dy * dy;
             if (distance2 < best) {
-                second = best;
-                second_seed[0] = best_seed[0];
-                second_seed[1] = best_seed[1];
                 best = distance2;
-                best_seed[0] = seed_x;
-                best_seed[1] = seed_y;
+                best_seed[0] = seed[0];
+                best_seed[1] = seed[1];
                 nearest_cell[0] = cell_x;
                 nearest_cell[1] = cell_y;
-            } else if (distance2 < second) {
-                second = distance2;
-                second_seed[0] = seed_x;
-                second_seed[1] = seed_y;
             }
         }
     }
-    const float link_x = second_seed[0] - best_seed[0];
-    const float link_y = second_seed[1] - best_seed[1];
-    float link_length = sqrtf(link_x * link_x + link_y * link_y);
-    link_length = link_length > 1.0e-6f ? link_length : 1.0e-6f;
-    across[0] = link_x / link_length;
-    across[1] = link_y / link_length;
-    const float distance = (0.5f * (best_seed[0] + second_seed[0]) - px) * across[0] +
-        (0.5f * (best_seed[1] + second_seed[1]) - py) * across[1];
-    return distance > 0.0f ? distance : 0.0f;
+    const float toward_x = px >= best_seed[0] ? 1.0f : -1.0f;
+    const float toward_y = py >= best_seed[1] ? 1.0f : -1.0f;
+    float border = 1.0e9f;
+    across[0] = 1.0f;
+    across[1] = 0.0f;
+    for (int y = -1; y <= 2; ++y) {
+        for (int x = -1; x <= 2; ++x) {
+            if (x == 0 && y == 0) {
+                continue;
+            }
+            float seed[2];
+            btbh_ice_seed(nearest_cell[0] + (float)x * toward_x, nearest_cell[1] + (float)y * toward_y, seed);
+            const float link_x = seed[0] - best_seed[0];
+            const float link_y = seed[1] - best_seed[1];
+            float link_length = sqrtf(link_x * link_x + link_y * link_y);
+            link_length = link_length > 1.0e-6f ? link_length : 1.0e-6f;
+            const float direction_x = link_x / link_length;
+            const float direction_y = link_y / link_length;
+            const float distance = (0.5f * (best_seed[0] + seed[0]) - px) * direction_x +
+                (0.5f * (best_seed[1] + seed[1]) - py) * direction_y;
+            if (distance < border) {
+                border = distance;
+                across[0] = direction_x;
+                across[1] = direction_y;
+            }
+        }
+    }
+    return border > 0.0f ? border : 0.0f;
 }
 
 static inline float btbh_ice_crack(float distance, float width, float footprint) {
@@ -563,14 +620,16 @@ static inline BTBHIceSample btbh_ice_sample(float x, float z, float footprint, c
     ice.gradient[0] = tilt_x - bevel * across[0];
     ice.gradient[1] = tilt_y - bevel * across[1];
     float share = crack;
+    /* The craze fades out as a pixel grows from its width to twice it. */
     const float fine_width = 0.5f * width;
-    if (fine_width * 2.0f >= footprint) {
+    const float fine_fade = btbh_cover_saturate(2.0f - footprint / fine_width);
+    if (fine_fade > 0.0f) {
         float fine_across[2];
         float fine_cell[2];
         const float fine_plate = plate / 2.6f;
         const float fine_distance =
             btbh_ice_voronoi(x / fine_plate + 7.1f, z / fine_plate + 3.3f, fine_across, fine_cell) * fine_plate;
-        const float fine = 0.6f * btbh_ice_crack(fine_distance, fine_width, footprint);
+        const float fine = 0.6f * fine_fade * btbh_ice_crack(fine_distance, fine_width, footprint);
         share = share > fine ? share : fine;
     }
     const float frost = p1[0];

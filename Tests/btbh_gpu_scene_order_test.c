@@ -6,7 +6,8 @@
  * (btbh_gpu_scene_batch_continues_run): every byte of the batch flipped in turn, which fields break a run and which
  * don't, and the shared-mesh flag's constants. And RFC 0012's height lift: its struct's layout, the batch's pointer
  * at 280 (288 bytes), the queued mesh updates' constants, and a lifted batch's sort key. And RFC 0013's variant, batch
- * bit and macros. And 0.12.0's second batch flags byte (flags2, byte 254), in the run key. */
+ * bit and macros. And 0.12.0's second batch flags byte (flags2, byte 254), in the run key, whose cover bits (RFC 0020)
+ * compare as the window's layers make them. */
 #undef NDEBUG
 
 #include "btbh_gpu_internal.h"
@@ -499,9 +500,9 @@ static void check_run_key(void) {
     assert(covered + padding == sizeof(BTBHGPUSceneGeometryBatch));
 
     const BTBHGPUSceneGeometryBatch base = run_batch();
-    assert(btbh_gpu_scene_batch_continues_run(&base, &base));
+    assert(btbh_gpu_scene_batch_continues_run(&base, &base, NULL));
     BTBHGPUSceneGeometryBatch copy = base;
-    assert(btbh_gpu_scene_batch_continues_run(&base, &copy));
+    assert(btbh_gpu_scene_batch_continues_run(&base, &copy, NULL));
 
     /* Every byte flipped in turn, either way round. */
     uint32_t breaking = 0u;
@@ -517,8 +518,8 @@ static void check_run_key(void) {
         }
         BTBHGPUSceneGeometryBatch flipped = base;
         ((uint8_t *)&flipped)[byte] ^= 0xa5u;
-        const bool forward = btbh_gpu_scene_batch_continues_run(&base, &flipped);
-        const bool backward = btbh_gpu_scene_batch_continues_run(&flipped, &base);
+        const bool forward = btbh_gpu_scene_batch_continues_run(&base, &flipped, NULL);
+        const bool backward = btbh_gpu_scene_batch_continues_run(&flipped, &base, NULL);
         if (forward != expected || backward != expected) {
             fprintf(stderr, "run key: byte %u (%s): %s, expected %s\n", (unsigned)byte, name,
                 forward ? "continues" : "breaks", expected ? "continues" : "breaks");
@@ -539,20 +540,46 @@ static void check_run_key(void) {
     moved.material_slot = 3;
     moved.first_instance = 900u;
     moved.instance_count = 77u;
-    assert(btbh_gpu_scene_batch_continues_run(&base, &moved));
+    assert(btbh_gpu_scene_batch_continues_run(&base, &moved, NULL));
     moved.stencil_reference ^= 1u;
-    assert(!btbh_gpu_scene_batch_continues_run(&base, &moved));
+    assert(!btbh_gpu_scene_batch_continues_run(&base, &moved, NULL));
 
     /* Floats compare by their bits: -0 and +0 differ (conservatively), the same NaN is the same. */
     BTBHGPUSceneGeometryBatch zero = base;
     BTBHGPUSceneGeometryBatch negative_zero = base;
     zero.roughness = 0.0f;
     negative_zero.roughness = -0.0f;
-    assert(!btbh_gpu_scene_batch_continues_run(&zero, &negative_zero));
+    assert(!btbh_gpu_scene_batch_continues_run(&zero, &negative_zero, NULL));
     zero.roughness = NAN;
     negative_zero.roughness = zero.roughness;
-    assert(btbh_gpu_scene_batch_continues_run(&zero, &negative_zero));
-    printf("run key: %u fields over %u bytes (%u of padding); %u bytes break a run, %u keep it (the six fields "
+    assert(btbh_gpu_scene_batch_continues_run(&zero, &negative_zero, NULL));
+    /* RFC 0020: the cover bits compare as the cover the window's layers make of them. With no cover, or the bit's
+       layer off, a batch with a bit continues one without; with it on, they part, and so do the two layers. */
+    BTBHGPUSceneGeometryBatch plain = base;
+    plain.flags2 = (uint8_t)(base.flags2 &
+        ~(uint32_t)(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1));
+    BTBHGPUSceneGeometryBatch covered0 = plain;
+    BTBHGPUSceneGeometryBatch covered1 = plain;
+    covered0.flags2 = (uint8_t)(plain.flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+    covered1.flags2 = (uint8_t)(plain.flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1);
+    BTBHGPUSceneCover cover;
+    memset(&cover, 0, sizeof(cover));
+    assert(btbh_gpu_scene_batch_continues_run(&plain, &covered0, NULL));
+    assert(btbh_gpu_scene_batch_continues_run(&covered0, &covered1, &cover));
+    cover.layers[0].amount = 0.5f;
+    assert(!btbh_gpu_scene_batch_continues_run(&plain, &covered0, &cover));
+    assert(btbh_gpu_scene_batch_continues_run(&plain, &covered1, &cover));
+    assert(!btbh_gpu_scene_batch_continues_run(&covered0, &covered1, &cover));
+    cover.layers[1].amount = 0.5f;
+    assert(!btbh_gpu_scene_batch_continues_run(&plain, &covered1, &cover));
+    assert(!btbh_gpu_scene_batch_continues_run(&covered0, &covered1, &cover));
+    assert(btbh_gpu_scene_batch_continues_run(&covered0, &covered0, &cover));
+    /* The other flags2 bits still part them. */
+    covered1 = plain;
+    covered1.flags2 = (uint8_t)(plain.flags2 ^ BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK);
+    assert(!btbh_gpu_scene_batch_continues_run(&plain, &covered1, NULL));
+    printf("run key: the cover bits as the layers make them (a bit whose layer is off continues a run)\n");
+    printf("run key:%u fields over %u bytes (%u of padding); %u bytes break a run, %u keep it (the six fields "
         "and padding)\n", (unsigned)RUN_FIELD_COUNT, (unsigned)sizeof(BTBHGPUSceneGeometryBatch), (unsigned)padding,
         breaking, keeping);
 }

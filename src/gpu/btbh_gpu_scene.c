@@ -5905,13 +5905,20 @@ static bool btbh_gpu_scene_batch_uses_geometry(
    +0 differ), and padding isn't compared. Everything a pass binds or pushes for a batch other than its vertex and
    index buffers and its draw comes from those fields, from the pass and from what the fields point at (which a
    present doesn't change), so a batch that continues a run binds and pushes nothing new. The passes never let a
-   skinned geometry start or continue a run: its bone offsets are its own. */
+   skinned geometry start or continue a run: its bone offsets are its own. RFC 0020: flags2's cover bits compare as
+   the cover the window's layers make of them (btbh_cover_batch_mode with `cover`; NULL: none), so a batch whose layer
+   is off joins the run of one without the bits: it draws with the same pipeline and pushes the same. */
 bool btbh_gpu_scene_batch_continues_run(
     const BTBHGPUSceneGeometryBatch *previous,
-    const BTBHGPUSceneGeometryBatch *batch
+    const BTBHGPUSceneGeometryBatch *batch,
+    const BTBHGPUSceneCover *cover
 ) {
 #define BTBH_GPU_SCENE_RUN_SAME(field) (memcmp(&previous->field, &batch->field, sizeof(batch->field)) == 0)
+    const uint8_t cover_bits =
+        (uint8_t)(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1);
     return
+        (previous->flags2 & (uint8_t)~cover_bits) == (batch->flags2 & (uint8_t)~cover_bits) &&
+        btbh_cover_batch_mode(cover, previous, false) == btbh_cover_batch_mode(cover, batch, false) &&
         BTBH_GPU_SCENE_RUN_SAME(instance_buffer) &&
         BTBH_GPU_SCENE_RUN_SAME(albedo_texture) &&
         BTBH_GPU_SCENE_RUN_SAME(normal_texture) &&
@@ -5961,7 +5968,6 @@ bool btbh_gpu_scene_batch_continues_run(
         BTBH_GPU_SCENE_RUN_SAME(detail_parameters) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_mode) &&
         BTBH_GPU_SCENE_RUN_SAME(flags) &&
-        BTBH_GPU_SCENE_RUN_SAME(flags2) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_reserved) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_library) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_pose) &&
@@ -8098,8 +8104,8 @@ static bool btbh_gpu_scene_check_particle_shadow_shaders(
    fragment shader), which must name cover_color_roughness, the cover's block: a file that doesn't (a stale or foreign
    one) would draw them without the cover, and shaders from before 0.18.0 have no such file. A prewarm checks it also
    for a batch with a cover bit whose layer is off (it makes that batch's cover pipelines too). Each path is read once;
-   Metal libraries aren't checked. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path), when the file
-   doesn't name the block or is missing. */
+   a Metal library is only checked for being there. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path),
+   when the file doesn't name the block or is missing. */
 static bool btbh_gpu_scene_check_cover_shaders(
     BTBHGPUSceneRuntime *runtime,
     const BTBHGPUSceneCover *cover,
@@ -8114,8 +8120,8 @@ static bool btbh_gpu_scene_check_cover_shaders(
     bool radiance_cascades_active,
     BTBHGPUSceneReport *report
 ) {
-    if (shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV || fragment_shader_path == NULL ||
-        unshadowed_fragment_shader_path == NULL || batches == NULL) {
+    if ((shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV && shader_format != BTBH_GPU_SHADER_FORMAT_METALLIB) ||
+        fragment_shader_path == NULL || unshadowed_fragment_shader_path == NULL || batches == NULL) {
         return true;
     }
     bool needed = false;
@@ -8142,7 +8148,9 @@ static bool btbh_gpu_scene_check_cover_shaders(
         )) {
         return false;
     }
-    const BTBHGPUSceneShaderCheck *checked = btbh_gpu_scene_shader_check(runtime, variant_path);
+    const BTBHGPUSceneShaderCheck *checked = shader_format == BTBH_GPU_SHADER_FORMAT_SPIRV
+        ? btbh_gpu_scene_shader_check(runtime, variant_path)
+        : NULL;
     const bool missing = checked == NULL && !SDL_GetPathInfo(variant_path, NULL);
     if (missing || (checked != NULL && !checked->has_cover)) {
         char message[sizeof(report->message)];
@@ -8759,7 +8767,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, NULL));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
@@ -9216,7 +9224,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, NULL));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
@@ -13450,7 +13458,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, setup.cover));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && run_verify != NULL;
             if (continues_run) {

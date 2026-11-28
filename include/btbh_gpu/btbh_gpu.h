@@ -3459,9 +3459,12 @@ BTBHGPUResult btbh_gpu_window_scene_set_distortion(
    - the cover reaches theta_max = amount x slope_degrees + edge_noise_degrees x min(1, 4 x amount) x N (the noise's
      reach grows with the amount up to 0.25, so a thin cover thins out to nothing), and lies by
      c = saturate((theta_max - theta) / edge_degrees), shaped by the pattern's edge (SNOW smoothstep(0.3, 0.7, c),
-     SAND c, MUD smoothstep(0.15, 0.55, c));
+     SAND c, MUD smoothstep(0.15, 0.55, c)). Where an octave fades, its share of N is taken as a box of the same spread
+     and c as the edge's average over it, so a face far away has the coverage it averages to near by (a thin cover's
+     far level faces as patchy as its near ones, not solid);
    - by c, the albedo moves to color (times 1 + grain x N: SNOW 0.04, SAND 0.10, MUD 0.15), the roughness to the
-     layer's (MUD: down to 0.12 in its puddles, where N is low, the more so with BTBHGPUSceneLighting.surface_wetness),
+     layer's (MUD: down to 0.12 in its puddles, where N is low, the more so with BTBHGPUSceneLighting.surface_wetness,
+     and by their share of the ground where the noise fades; with edge_noise_degrees 0, no puddles),
      the metalness to 0, the occlusion to 1, a glass detail's reflectance to a dielectric's, and the normal to the
      vertex normal tilted by the cover's own relief (bump: SNOW soft lumps from the first octave, SAND a fine grain
      from the second, MUD both; COARSE or bump 0: none); a see-through batch's alpha rises to c (snow on a glass roof
@@ -3501,8 +3504,8 @@ typedef struct BTBHGPUSceneCoverLayer {
     float slope_degrees;        /* the steepest slope it holds at amount 1, 0..90; 0 means 60 */
     float edge_degrees;         /* the slopes over which it thins out past that, 0..90; 0 means 8 */
     /* How far the noise moves the edge either way, 0..90 degrees of slope (scaled down below amount 0.25). 0: a clean
-       line, and no noise is worked out (the cheapest). On level faces under a thin cover it is what breaks the cover
-       into patches. */
+       line, and no noise is worked out (the cheapest; no grain, and MUD has no puddles). On level faces under a thin
+       cover it is what breaks the cover into patches. */
     float edge_noise_degrees;
     float noise_scale;          /* noise cells per world unit, 0 or more; 0 means 1 */
     float roughness;            /* 0..1; 0: the pattern's */

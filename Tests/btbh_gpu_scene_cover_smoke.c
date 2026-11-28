@@ -4,8 +4,9 @@
  *   byte as no cover at all.
  * - The patterns, unlit (the frame holds sRGB of the covered albedo): eight facets at 0 to 120 degrees from level; SNOW
  *   without noise (each facet one c), SNOW, SAND and MUD with noise, SNOW COARSE, the second layer through COVER_1, a
- *   normal map leaning the facing (normal_influence), BTBH_DEBUG_COVER, and SNOW under the sun's shadow and under the
- *   sun's and an omni light's (the cover variants of each shadow set). Each pixel against the reference at the
+ *   normal map leaning the facing (normal_influence), noise finer than a pixel (the edge averaged over it),
+ *   BTBH_DEBUG_COVER, and SNOW under the sun's shadow and under the sun's and an omni light's (the cover variants of
+ *   each shadow set). Each pixel against the reference at the
  *   point its ray hits: within 3 levels in 99.5 % of the pixels, 8 everywhere.
  * - The targets the screen-space passes read (lit; the SSAO resolve's reflections and occlusion read the normal target
  *   and the specular target's alpha, the HBAO the normal target): MUD with puddles (wet) and SNOW with relief, the
@@ -15,8 +16,8 @@
  * - A see-through batch takes the cover opaque where it lies.
  * - Still ice, unlit and lit: the cracks' and the frost's lift against the reference, the roughness (its own, not the
  *   batch's factor) and the plates' and bevels' normal in the targets; the zero values draw.
- * - Runs: covered batches sharing a material draw in as many runs as uncovered ones, and BTBH_GPU_SCENE_RUNS=verify
- *   finds no mismatch.
+ * - Runs: covered batches sharing a material draw in as many runs as uncovered ones, so do batches with a bit whose
+ *   layer is off among ones without (and the same frame), and BTBH_GPU_SCENE_RUNS=verify finds no mismatch.
  * - Scene views (two halves equal the one-view frame) and a render into a target take the cover.
  * - Prewarm: a prewarm with the cover's bits and still ice, the layers off, covers a first frame with them on and one
  *   with them off (nothing made); a prewarm without them leaves the cover variants' pipelines to the first covered
@@ -770,8 +771,6 @@ static BTBHGPUSceneCoverLayer snow_layer(void) {
     return layer;
 }
 
-/* The covered unlit frame of the facets against the reference. layer_index: which layer the batches take. tilt: the
-   facets' normal map leans their shading normal by asin(0.2) toward +x (tilt_map). debug: BTBH_DEBUG_COVER. */
 /* The frame's shadows in check_unlit_case (0 none, 1 the sun's, 2 the sun's and an omni light's): unlit facets draw
    the same under each, through the cover variant of the scene shader each picks (_unshadowed, _2d_shadows and the
    plain one). */
@@ -782,6 +781,8 @@ static void identity4(float matrix[16]) {
     matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1.0f;
 }
 
+/* The covered unlit frame of the facets against the reference. layer_index: which layer the batches take. tilt: the
+   facets' normal map leans their shading normal by asin(0.2) toward +x (tilt_map). debug: BTBH_DEBUG_COVER. */
 static void check_unlit_case(SmokeWindow *smoke, const char *name, const BTBHGPUSceneCover *cover, uint32_t layer_index,
     bool tilt, bool debug) {
     set_cover(smoke, cover);
@@ -904,6 +905,17 @@ static void check_patterns(SmokeWindow *smoke) {
     cover.layers[0].noise_scale = 1.2f;
     cover.layers[0].flags = BTBH_GPU_SCENE_COVER_LAYER_COARSE;
     check_unlit_case(smoke, "snow-coarse", &cover, 0u, false, false);
+    /* Noise finer than a pixel (its octaves fading, then gone): the edge averaged over what they lost. */
+    cover.layers[0].flags = 0u;
+    cover.layers[0].noise_scale = 12.0f;
+    check_unlit_case(smoke, "snow-fine-noise", &cover, 0u, false, false);
+    cover.layers[0].noise_scale = 60.0f;
+    check_unlit_case(smoke, "snow-finer-noise", &cover, 0u, false, false);
+    cover.layers[0].pattern = BTBH_GPU_SCENE_COVER_SAND;
+    check_unlit_case(smoke, "sand-finer-noise", &cover, 0u, false, false);
+    cover.layers[0].pattern = BTBH_GPU_SCENE_COVER_SNOW;
+    cover.layers[0].flags = BTBH_GPU_SCENE_COVER_LAYER_COARSE;
+    cover.layers[0].noise_scale = 1.2f;
     /* The second layer through COVER_1 (the first, different, unused). */
     cover.layers[1] = cover.layers[0];
     cover.layers[1].flags = 0u;
@@ -1357,6 +1369,30 @@ static void check_runs(SmokeWindow *smoke, bool verify_requested) {
     }
     printf("runs: %u run draws uncovered, %u covered (the eight facets share a material)\n", runs[0], runs[1]);
     assert(runs[0] > 0u && runs[1] == runs[0]);
+    /* A bit whose layer is off joins the run of a batch without one: every other facet with COVER_0, the first layer
+       off (the second on), draws in as many runs as without the bits, and the same frame. */
+    BTBHGPUSceneCover second_only;
+    memset(&second_only, 0, sizeof(second_only));
+    second_only.layers[1] = snow_layer();
+    set_cover(smoke, &second_only);
+    Scene mixed = facets_scene(smoke, false, 0u);
+    for (uint32_t index = 1u; index < FACETS; index += 2u) {
+        mixed.batches[index].flags2 = (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0;
+    }
+    uint8_t *mixed_frame = frame_of(smoke, &mixed, NULL);
+    BTBHGPUSceneTelemetryReport mixed_telemetry;
+    memset(&mixed_telemetry, 0, sizeof(mixed_telemetry));
+    assert(btbh_gpu_window_scene_read_telemetry(smoke->window, &mixed_telemetry) != 0u);
+    Scene bare = facets_scene(smoke, false, 0u);
+    uint8_t *bare_frame = frame_of(smoke, &bare, NULL);
+    printf("runs: every other facet with a bit whose layer is off: %u run draws, the frame %s the bare one's\n",
+        mixed_telemetry.geometry_run_draw_count,
+        memcmp(mixed_frame, bare_frame, (size_t)WIDTH * HEIGHT * 4u) == 0 ? "byte for byte" : "NOT");
+    assert(mixed_telemetry.geometry_run_draw_count == runs[0]);
+    assert(memcmp(mixed_frame, bare_frame, (size_t)WIDTH * HEIGHT * 4u) == 0);
+    free(mixed_frame);
+    free(bare_frame);
+    set_cover(smoke, &cover);
     /* The same in the run verifier's mode (unless the whole smoke runs in it). */
     if (!verify_requested) {
         (void)SDL_SetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS", "verify", true);
@@ -1366,11 +1402,16 @@ static void check_runs(SmokeWindow *smoke, bool verify_requested) {
         Scene scene = facets_scene(smoke, false, (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
         uint8_t *frame = frame_of(smoke, &scene, NULL);
         free(frame);
+        /* And the mixed runs, the first layer off. */
+        set_cover(smoke, &second_only);
+        frame = frame_of(smoke, &mixed, NULL);
+        free(frame);
+        set_cover(smoke, &cover);
         BTBHGPUSceneRunVerifyReport after;
         memset(&after, 0, sizeof(after));
         assert(btbh_gpu_window_scene_read_run_verify(smoke->window, &after) != 0u);
         (void)SDL_UnsetEnvironmentVariable(SDL_GetEnvironment(), "BTBH_GPU_SCENE_RUNS");
-        printf("runs: verified %llu covered run draws, %llu mismatches\n",
+        printf("runs: verified %llu covered and mixed run draws, %llu mismatches\n",
             (unsigned long long)(after.checked_draw_count - before.checked_draw_count),
             (unsigned long long)(after.mismatch_count - before.mismatch_count));
         assert(after.checked_draw_count > before.checked_draw_count && after.mismatch_count == before.mismatch_count);

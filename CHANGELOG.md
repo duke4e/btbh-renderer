@@ -131,8 +131,10 @@ All notable changes to this project are documented here. The format follows
     metalness (0), the occlusion (1), a glass detail's reflectance and the normal (the vertex normal tilted by the
     cover's own relief), so the lighting, SSR, the HBAO and SSAO and the radiance cascades see snow as snow; a
     see-through batch takes it opaque. The emission, shadows, depth and motion stay. Value noise over the flat world x-z
-    on the procedural detail's integer hash, faded by the footprint. A face past the farthest the layer reaches (a wall)
-    returns before the noise. No texture, no pass.
+    on the procedural detail's integer hash, faded by the footprint; where it fades, the edge is averaged over what it
+    lost (a far face as patchy as a near one), and MUD's puddles fade to their share of the gloss (with
+    `edge_noise_degrees` 0 there are none). A face past the farthest the layer reaches (a wall) returns before the
+    noise. No texture, no pass.
   - **Shaders: cover variants** (RFC 0020's question 14 fallback: the branch in the shared shaders was not provably
     free with the cover off). Six new files, `production_model_cover.frag` and its `_2d_shadows`, `_unshadowed`, `_rc`,
     `_rc_2d_shadows` and `_rc_unshadowed` siblings, are `production_model.frag` with `BTBH_COVER` (a fourth uniform
@@ -150,17 +152,22 @@ All notable changes to this project are documented here. The format follows
   Voronoi pattern parted by bevelled cracks that catch the light, a tilt per plate, a finer craze of hairline cracks,
   frost in patches; the surface's colour lifted in the cracks and frost; its own roughness (clear 0.06 by default, frost
   0.6: the batch's roughness factor doesn't scale it), so SSR reflects the city in the clear plates. Thin cracks fade
-  out rather than alias. `surface_parameters0`: plate size, crack width, the lift, plate tilt; `surface_parameters1`:
-  frost share and patch size, the two roughnesses; zero values default; refused when not finite, negative, or a share or
-  roughness past 1. Drawn with the cover variants, so it needs this release's shaders (checked as for the cover).
+  out rather than alias, the craze too as a pixel outgrows it; the border distance is the nearest border's (a second
+  pass over the neighbours), so the cracks don't notch where three plates meet. `surface_parameters0`: plate size, crack
+  width, the lift, plate tilt; `surface_parameters1`: frost share and patch size, the two roughnesses; zero values
+  default; refused when not finite, negative, or a share or roughness past 1. Drawn with the cover variants, so it needs
+  this release's shaders (checked as for the cover).
   - **Tests:** `btbh_gpu_cover_test` (the structs' layout, the setter's checks, the CPU reference
     `src/gpu/btbh_gpu_cover.h`: the block, the facing, the noise and its gradient, the relief, MUD's puddles, the ice's
     plates, cracks and frost) and `btbh_gpu_scene_cover_smoke` (identity without a cover or with layers at amount 0;
     SNOW, SAND, MUD, COARSE, the second layer, `normal_influence` and the debug view against the CPU reference, pixel by
-    pixel, also under each shadow set; the roughness, occlusion and normal the screen-space passes read and the albedo
-    the radiance cascades read; SSR on a glossy floor gone under rough snow; see-through batches; still ice unlit and
-    lit; runs and the run verifier; scene views; a render into a target; prewarm with and without the bits; refusals;
-    cover variants without the block or missing), also run as `btbh_gpu_scene_cover_smoke_runs_verify`. The smokes'
+    pixel, also under each shadow set and with noise finer than a pixel; the roughness, occlusion and normal the
+    screen-space passes read and the albedo the radiance cascades read; SSR on a glossy floor gone under rough snow;
+    see-through batches; still ice unlit and lit; runs (a bit whose layer is off joins a run of batches without one)
+    and the run verifier; scene views; a render into a target; prewarm with and without the bits; refusals; cover
+    variants without the block or missing), also run as `btbh_gpu_scene_cover_smoke_runs_verify`. The native test also
+    checks the far coverage against the near mean, the craze's fade, and the border distance against an exact one;
+    the order test the run key's cover cases. The smokes'
     presents take `BTBH_SMOKE_COVER=1` (a cover that lays nothing and the bit on every batch that may take one) for the
     identity runs; the frame bench takes the modes `cover-off`, `cover-bits`, `cover-full`, `cover-coarse` and
     `cover-ice`. `btbh_gpu_phase2_shader_test` checks the cover variants' reflection (16, 15 and 10 samplers, four
@@ -187,9 +194,9 @@ All notable changes to this project are documented here. The format follows
   leaves trails in v2's scenes is v2's check at 4K High and Medium (`BTBH_DEBUG_MOTION_VECTORS=2`, RFC 0018 decision 4).
 - **Distortion is not depth-tested** (RFC 0018 decision 8): what stands in front of a source is displaced with the rest,
   bullets too (decision 3).
-- **The cover costs more than RFC 0020 estimated at 4K:** 0.33 ms on the main pass with noise and relief and 0.23 with
-  `COARSE` over the frame bench's whole city (the estimate was 0.10 and 0.05); about 0.02 ms and nothing measurable at
-  the Deck preset. v2's own cost log on its ice stage decides whether High takes `COARSE`.
+- **The cover costs more than RFC 0020 estimated:** over the frame bench's whole city, 0.33 ms on the main pass with
+  noise and relief and 0.23 with `COARSE` at 4K (the estimate was 0.10 and 0.05), 0.09 and 0.06 at the Deck preset
+  (0.016 estimated; 7 % of its 1.3 ms frame). v2's own cost log on its ice stage decides where `COARSE` goes.
 - **A host that turns a layer on mid-game** makes the cover variants' pipelines at that frame unless it prewarmed with
   the bits on its batches (the lazy creation log names them).
 - **The cover on skinned, lifted and table batches** is drawn through pipelines picked as the plain ones are, but no
@@ -265,26 +272,31 @@ Ti):
   verify with the cost log and its pass frames (54 frame lines and 8 pass frames each). The views smoke passes in the
   four modes, and so do HDR's and distortion's smokes.
 - **The cover variants:** the 90 shaders built before compile to 0.18.0-distortion's SPIR-V byte for byte.
-- **The cover smoke:** each pattern's frame within 1 level of the CPU reference at every pixel (the debug view within
-  3), the targets' roughness within 0.001 and normal within 0.008, and the ice within 3 levels but 2 of 38,354 pixels.
+- **The cover smoke:** each pattern's frame within 1 level of the CPU reference at every pixel (noise finer than a
+  pixel too; the debug view within 3), the targets' roughness within 0.001 and normal within 0.008, the ice within 1
+  level. A bit whose layer is off draws in as many runs as no bit, and the same frame.
+- **The native test:** the far coverage within 0.025 of the near mean at every footprint (the noise-free line was 0.22
+  off), MUD's far wet roughness within 0.005, the craze's largest step 0.006 over a footprint sweep (it was 0.6), and
+  the crack distance within 6e-8 of the exact one at 50,631 points near a border.
 - **A prewarm** with the bits and still ice (the layers off) leaves nothing to make for a first frame with the layers
   on or off.
 
-The cost (the frame bench under the machine's perf lock, 09:54 to 09:56; five windows interleaved over 80 rounds; v2's
-snow at its starting values on every kit piece and the ground; the main pass paired by round against the cover off on
-0.18.0-distortion's shaders; medians with the 10th and 90th percentiles):
-- **The cover off:** with the bits set, the main pass moves -0.002 ms (-0.017..+0.012) at the Deck preset and +0.001
-  (-0.033..+0.033) at 4K High; without them the shaders are the same bytes. The first build, with the branch in the
+The cost (the frame bench under the machine's perf lock, 10:39 to 10:40, with the review's fixes; five windows
+interleaved over 80 rounds; v2's snow at its starting values on every kit piece and the ground; the main pass paired by
+round against the cover off on 0.18.0-distortion's shaders; medians with the 10th and 90th percentiles):
+- **The cover off:** with the bits set, the main pass moves -0.002 ms (-0.023..+0.015) at the Deck preset and -0.003
+  (-0.040..+0.031) at 4K High; without them the shaders are the same bytes. The first build, with the branch in the
   shared shaders, measured +0.0014 (-0.017..+0.051) and +0.014 (-0.044..+0.126), hence the variants.
-- **The Deck preset** (960 x 600 to 1280 x 800): a frame 1.396 ms (1.334-1.433) off, 1.415 (1.390-1.464) full, 1.389
-  (1.365-1.437) `COARSE`, 1.407 (1.355-1.443) ice; the main pass +0.018 ms (-0.002..+0.128) full, -0.011
-  (-0.024..+0.087) `COARSE`, +0.007 (-0.008..+0.022) ice.
-- **4K High** (2560 x 1440 to 3840 x 2160): a frame 5.264 ms (5.223-5.373) off, 5.636 (5.602-5.852) full, 5.510
-  (5.474-5.593) `COARSE`, 5.283 (5.240-5.520) ice; the main pass +0.330 ms (+0.297..+0.398) full, +0.231
-  (+0.203..+0.266) `COARSE`, +0.016 (-0.009..+0.063) ice.
-- So the cover costs nothing when off, about 0.02 ms at the Deck preset, and 0.33 ms (`COARSE` 0.23) at 4K over a
-  fully covered city: three to five times RFC 0020's estimate there (Known). The early-out for faces past the reach
-  took about 0.1 ms off 4K (the first build: +0.432 and +0.309). The ice costs 0.01-0.02 ms, as estimated.
+- **The Deck preset** (960 x 600 to 1280 x 800): a frame 1.294 ms (1.275-1.325) off, 1.391 (1.354-1.453) full, 1.361
+  (1.330-1.416) `COARSE`, 1.302 (1.283-1.338) ice; the main pass +0.087 ms (+0.057..+0.140) full, +0.057
+  (+0.037..+0.120) `COARSE`, +0.006 (-0.013..+0.024) ice.
+- **4K High** (2560 x 1440 to 3840 x 2160): a frame 5.243 ms (5.179-5.313) off, 5.621 (5.587-5.812) full, 5.495
+  (5.459-5.697) `COARSE`, 5.275 (5.221-5.449) ice; the main pass +0.325 ms (+0.284..+0.417) full, +0.225
+  (+0.190..+0.310) `COARSE`, +0.023 (-0.013..+0.069) ice.
+- So the cover costs nothing when off, and over a fully covered city 0.09 ms (`COARSE` 0.06) at the Deck preset and
+  0.33 ms (0.23) at 4K: three to five times RFC 0020's estimates (Known). The early-out for faces past the reach took
+  about 0.1 ms off 4K (the first build: +0.432 and +0.309) and nothing measurable off the Deck preset (+0.086 and
+  +0.062). The ice costs 0.01-0.02 ms, as estimated.
 
 ## [0.16.1] — 2026-11-28
 
