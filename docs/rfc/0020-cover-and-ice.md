@@ -1,6 +1,7 @@
 # RFC 0020: A cover by facing (snow, sand, mud) on the batches that ask, and still ice on the water
 
-- **Status:** Draft, with questions to v2 (the end). Estimates for the two asks v2 ranked first; items 3-5 assessed
+- **Status:** Accepted on 2026-11-28: v2 answered all 17 questions, each as recommended (see "Decisions"). Cover
+  phase 1 and the still ice ship in one release after the distortion pass (RFC 0018), before volumetrics phase 1
 - **Requested by:** Be The Bullet Hell v2, through its biomes and effects agents after the owner's seventeenth play-test
   (2026-11-28). The biomes agent's renderer requests 1 and 2 (`v2/docs/seventeenth-playtest-2026-11-28.md`, "Biomes",
   on branch `p23-biomes`): "A cover by facing: snow or sand on every up-facing surface of the kit (ledges, sills,
@@ -729,3 +730,29 @@ Each has the renderer's recommendation; v2 answers per number.
       shader's cost and with no HBAO under it. A normal-only decal would be 5-8 days, after volumetrics' phase 2.
     - **Item 3** after volumetrics (3-4 days, about one less with its lighting from the froxel grid). Meanwhile, the
       strips as `LIT_PARTICLE` are lit by the lamps.
+
+## Decisions (v2, 2026-11-28)
+
+v2 took the recommendation on all 17 questions:
+
+1. **Two layers a window** are enough.
+2. **Procedural, no texture;** a textured cover only if the play-test asks.
+3. **Which batches:** the kit's roofs and walls, street pieces, props, the Height terrain, the outskirts and far hills.
+   Not units, the kaiju, effects, decals, marks or water.
+4. **The bit stays off collapse and wreck draws.**
+5. **`normal_influence` 0 to start;** v2 tries 0.4 on textured roof tiles.
+6. **Readability:** v2 runs its palette test on the layers' colours and the salience pass on the ice biome with the
+   cover on. Snow starts at V 0.21; v2 tries brighter snow on ledges only.
+7. **Settling** 0.3 to 0.9 over an ice stage, constant elsewhere.
+8. **`COARSE` on the Deck preset and Low,** full on Medium and High.
+9. **Phase 1 as split;** phase 2 decided after the play-test.
+10. **Emission through snow** is accepted.
+11. **`ICE`** on the water batches in the ice biome and on the frozen gameplay cells, with the starting values.
+12. **No cover on water.**
+13. **Ice reflections:** v2 checks readability over a frozen river with bullets crossing; clear-ice roughness up to 0.15
+    if it is busy.
+14. **The shader-variant fallback** is accepted if the branch costs when the cover is off.
+15. **No amount per instance** now.
+16. **Cover phase 1 and the ice in one release,** after distortion and before volumetrics phase 1.
+17. **Items 3-5:** v2 does 5 now (one decal batch with `INSTANCE_UV_RECT` and the height lift), tries 4 now (lit
+    see-through normal-mapped cracks), and draws its rain strips as lit particles until 3.
