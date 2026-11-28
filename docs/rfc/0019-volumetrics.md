@@ -1,6 +1,7 @@
 # RFC 0019: Lit volumetrics: one froxel grid for fog, fog of war and local volumes, lit by the scene's own lights
 
-- **Status:** Draft (2026-11-28)
+- **Status:** Draft (2026-11-28). v2 answered its 13 questions on 2026-11-28, each as recommended (see "Decisions
+  (v2)"); CHIMERA's answers are pending
 - **Requested by:** the owner, through Be The Bullet Hell v2's coordinator (2026-11-28): recent SIGGRAPH volumetric
   work as one shared feature for both games, for fog and mist, weapons and fog of war, "and surely more places". The
   owner confirmed the source to build on: IO Interactive's Smolder (SIGGRAPH 2026). The Volumetric Gaussian Primitives
@@ -1136,6 +1137,34 @@ Each has a recommended answer; v2's session answers through the coordinator.
     - **Recommended:** decide after phase 1's 4K numbers.
 13. **Renders into targets** (the V1 cards' pictures).
     - **Recommended:** no volumes there.
+
+## Decisions (v2, 2026-11-28)
+
+v2 took the recommendation on all 13 questions:
+
+1. **Fog of war:** one renderer field replaces the five sheets, unlit with today's colour, the profile matched to 0.045
+   / 0.09 / 0.2. v2 re-measures salience before it switches over, and tries a lit night version in a play-test.
+2. **Khamsin:** Egypt's fog field turns dust-coloured and lit, with wind noise. No second field for now.
+3. **Tiers:** High = HIGH, Medium = MEDIUM, Low and Deck = LOW, never off in a run. There is no Steam Deck to measure
+   on: v2 deploys a bench build to the Steam Machine once phase 1 lands and the owner starts it, so the device number is
+   the Machine at the Deck preset (and at its own), not a real Deck.
+4. **Over or in:** shots, telegraphs, discs and pickups draw over the volumes; lit smoke and flamethrower and plasma
+   puffs opt in; soft particles wait for phase 2.
+5. **Gas Leak:** a second channel of the same texture. Until then v2's stopgap is a soft low haze of smoke sprites.
+6. **128 volumes a frame.** v2 ranks its sources (nearest the kaiju, largest and newest first) and culls past 128
+   itself, and counts its peak in a late stage-5 fight with a heavy build.
+7. **Biome atmosphere** is v2's, per biome and time of day; the renderer ships no presets. v2's biomes (jungle and mud,
+   desert, ice, monsoon flood) move their mist, haze, storms and blizzard onto volumes when phase 1 lands.
+8. **Salience:** per-source density, an opacity cap and a light scale for phase 1; a stencil exemption for enemy bodies
+   only if salience drops.
+9. **Split screen:** a grid per view, no radiance cascades in split frames.
+10. **FSR 3:** reactive scale 0.3 from local volumes, history blend 0.1, tuned in the play-test.
+11. **Distance haze:** the composite's distance fog is off where volumes run, the lit global fog instead; v2 checks the
+    far city's haze still reads the same in captures.
+12. **Hero volumes:** decided after phase 1's 4K numbers.
+13. **No volumes in renders into targets.**
+
+Order (v2): HDR output (0.17.0), the distortion pass (RFC 0018), then this RFC's phase 1.
 
 ## Open questions for CHIMERA
 
