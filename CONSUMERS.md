@@ -49,9 +49,9 @@ drawn before it. `opaque_sort` and the floored snap are wired but off. `build.rs
 `BTBH_GPU_SCENE_HAS_OPAQUE_SORT` and `BTBH_GPU_HAS_FONT_FLAGS`. From v0.14.2 (straight from v0.5.1): no new opt-in, and the
 32 MiB upload staging default applies. Its own shadow-only mark sits in the batch's last byte (`ssao_reserved[0]`,
 byte 255; it was `ssao_reserved[1]` up to 0.11.0), which the renderer keeps reserved and in the run key. Giving that
-byte a meaning needs CHIMERA to move its mark first. Not used yet: terrain, `_with_visibility`. Requested (drafts in
-`docs/rfc/`): layered terrain (0001), height fog and water at RTS scale (0002), light regions (0003); its
-lamps should move to `lamp_*` (in v0.1.0).
+byte a meaning needs CHIMERA to move its mark first. It presents through `_with_visibility` (`gpu.rs:2607`). Not
+used yet: terrain. Requested (drafts in `docs/rfc/`): layered terrain (0001), height fog and water at RTS scale
+(0002), light regions (0003); its lamps should move to `lamp_*` (in v0.1.0).
 
 **Be The Bullet Hell v2** (`v2/crates/v2-platform/src/gpu.rs`, bindgen; it took over CHIMERA's sys crate):
 instanced model batches with vertex colours, one albedo/normal/ORM set per batch (kit detail maps since BTBH
