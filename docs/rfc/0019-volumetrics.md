@@ -1,7 +1,9 @@
 # RFC 0019: Lit volumetrics: one froxel grid for fog, fog of war and local volumes, lit by the scene's own lights
 
-- **Status:** Draft (2026-11-28). v2 answered its 13 questions on 2026-11-28, each as recommended (see "Decisions
-  (v2)"); CHIMERA's answers are pending
+- **Status:** Accepted on 2026-11-28 for phase 1: v2 answered its 13 questions as recommended, and CHIMERA's session
+  agreed on the technical side with one added requirement (the fog field interpolated between writes). CHIMERA's
+  look (its questions 1, 3, 5) and its pin bump (9) wait for its author. See "Decisions". Phase 1 follows HDR
+  output and the distortion pass
 - **Requested by:** the owner, through Be The Bullet Hell v2's coordinator (2026-11-28): recent SIGGRAPH volumetric
   work as one shared feature for both games, for fog and mist, weapons and fog of war, "and surely more places". The
   owner confirmed the source to build on: IO Interactive's Smolder (SIGGRAPH 2026). The Volumetric Gaussian Primitives
@@ -1212,3 +1214,31 @@ Each has a recommended answer; CHIMERA's session answers through the coordinator
 9. **Adopting.**
    - It means a pin past 0.16.1 and three more shader names in its list.
    - **Recommended:** adopt with phase 1's release, at the fog of war and the abyss first.
+
+## Decisions (CHIMERA, 2026-11-28)
+
+CHIMERA's session agreed technically to 1-4 and 6-8; the look (1, 3, 5) and the pin bump (9) are its author's call,
+asked by its session.
+
+1. **Fog of war in the renderer: yes, with constraints** (from `crates/chimera-render/src/fog.rs`):
+   - The values stay: seen `[0.012, 0.022, 0.045]` at 0.48, never seen `[0.014, 0.017, 0.028]` at 0.8, unlit.
+   - CHIMERA eases per cell on the CPU (fast into sight, slow out of it) and writes at 10 Hz. **Phase 1 keeps the
+     field's last two writes and blends them by a factor the game passes each frame**, so edges don't step; without
+     it CHIMERA keeps writing at 30 Hz.
+   - Every line of sight crosses the field once, so cliff faces and rim props dim alike (today's slope 0.55 and
+     `DEPTH_ALWAYS`); the along-ray read gives it.
+   - The 500 m frame round the map stays a mesh with its depth test (the outskirts' land, stacks and walls draw over
+     it); margin texels only if they keep that.
+2. **The game keeps vision** (`Fog::clear`, "only what the player sees"): it is lockstep simulation state.
+3. **Height fog replaces the three abyss sheets and canal mist becomes box volumes**, RFC 0002 part A superseded and
+   part B kept, technically agreed; CHIMERA's author decides from before/after shots of the abyss and canals.
+4. **The local volumes' list is agreed;** combat smoke stays sprites; under 20 a view is plausible.
+5. **Presets:** the author's call. The mapping (Low and Medium = LOW, High = MEDIUM, Ultra = HIGH, never off in a match;
+   the Atmosphere toggle zeroes the lit fog and noise) is fine from the session's side.
+6. **The simulation decides sight blocking;** the renderer only draws, and a spectate switch rewrites the field.
+7. **One lighting a frame** until RFC 0003.
+8. **Lamps: nothing to move.** CHIMERA's map lanterns and its structures' night lights already go through `lamp_*`
+   (`crates/chimera-render/src/lanterns.rs`, `scene.rs`'s lamps, `LAMP_CORE` 2.5), so they light the fog as they are.
+9. **Adopting:** the author decides the bump past 0.14.2 (which also brings HDR output and the distortion pass) and
+   wants screenshots of contrast and the night look before and after. CHIMERA would adopt in one step after phase 1:
+   the fog of war and the abyss first, plus the three shader names.
