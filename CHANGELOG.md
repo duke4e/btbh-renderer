@@ -6,6 +6,199 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Screen-space distortion** (RFC 0018 phase 1, `BTBH_GPU_SCENE_HAS_DISTORTION`; asked for by Be The Bullet Hell v2
+  after the owner's seventeenth play-test: shockwave rings on blasts and kaiju stomps, heat haze over fires, beams and
+  the desert, lensing energy orbs). A frame that draws no source is byte for byte as before (below).
+  - **API:** **`btbh_gpu_window_scene_set_distortion`** sets up to `BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES` (240)
+    sources for the window's next scene present (`present_instances`, `_with_visibility`, `present_views`), copied at
+    the call; that present takes them, drawn or not. **`BTBHGPUSceneDistortionSource`** (64 bytes): a world position,
+    a radius, a strip's second end, a ring's width, a strength in pixels of a 1080-line frame (so it reads the same at
+    any resolution and render scale), chroma 0..1, the haze's scale and speed, a **`BTBHGPUSceneDistortionShape`**
+    (ring, disc, strip), a **`BTBHGPUSceneDistortionMode`** (push: the scene moves out from the shape, or in with a
+    negative strength; haze: an animated noise) and `BTBH_GPU_SCENE_DISTORTION_FLAT` (lying on the ground; else facing
+    the camera). **`BTBH_GPU_SCENE_POST_DISTORTION`** (post flags, bit 3) draws them; without it they are dropped (a
+    preset's or a player's switch), and with it the prewarm makes the distortion's pipelines and field.
+    `BTBHGPUSceneReport.distortion_sources_drawn` takes the byte after `upscale_mode` (the report keeps its size;
+    `upscale_reserved` is two bytes now). Refusals name the source and the field.
+  - **What it does:** each view draws the sources that meet its frustum and its half of the frame, into an offset
+    field (RGBA16F at half the render size, added up), and the HDR composite shows the scene displaced by it:
+    fog and bloom read at the displaced point, the vignette on the pixel, red and blue apart by the chroma, the sum
+    clamped to 64 pixels of a 1080-line frame. That is before the grading, the tone map, the anti-aliasing and the
+    upscaling (HDR output reads the displaced picture); the canvas is never displaced. A frame with sources runs the
+    composite whatever fog, bloom and the vignette say; a pixel with no displacement reads itself. Renders into targets
+    draw none and leave them for the frame. A frame whose sources all draw nothing (skipped, culled, a pushing source
+    whose centre is behind the camera) is as without them, to the byte.
+  - **The fold clamp:** a pushing source's strength is clamped so that no colour's picture (red's at 1 + 0.35 chroma
+    times the displacement) folds anywhere on the shape: the Jacobian of p -> p - k d(p) stays positive, from the
+    profile's steepest slopes and the shape's projection where it is thinnest and most slanted on screen. About 0.26
+    of a facing disc's or strip's radius on screen and 0.29 of a ring's width without chroma, less with chroma and for
+    flat shapes under a tilted camera.
+  - **FSR 3:** the displaced composite also writes the reactive mask, min(1, the length of the displacement the pixel
+    shows (summed, clamped) / 6 render pixels) times `temporal_reactive_scale` (refraction's rule), blended with max;
+    the motion vectors stay the scene's.
+  - **Scene views:** each view culls its sources by its half and clips them to it; the displacement fades to nothing
+    within 8 render pixels of a view's edge, and no displaced read crosses the line (it stops at the reflections'
+    margin).
+  - **The clock:** `time_seconds` is a float: past about 36 hours of game time its steps pass a 60 Hz frame and the haze
+    moves in steps; a `haze_speed` changed between frames moves the pattern at once.
+  - **Shaders:** four new built files, `production_distortion.vert`, `production_distortion.frag`,
+    `production_hdr_composite_distort.frag` and `production_hdr_composite_distort_reactive.frag` (the composite's
+    source with `BTBH_DISTORTION` 1 and 2), and `production_distortion.hlsli`. The composite's source gains preprocessor
+    blocks only; its SPIR-V and MSL are byte for byte 0.17.0's. 90 shaders are built.
+  - **The cost log:** a pass frame that draws sources prints `distortion_ms` (the source pass; the displaced composite
+    stays in `composite_ms`); the others print as before.
+  - **Debug:** `BTBH_DEBUG_DISTORTION=1` shows the field instead of the scene.
+  - **Tests:** `btbh_gpu_distortion_test` (the struct's layout, the setter's checks, the CPU reference
+    `src/gpu/btbh_gpu_distortion.h`: profiles, the fold clamp's Jacobian at every pixel of 84 cases, the haze, culling
+    by the frustum, the half and behind the camera, the views' rules) and `btbh_gpu_scene_distortion_smoke` (identity
+    without sources; each shape and mode's field and frame against the CPU reference; scene views by the line, the band
+    by it untouched by a far source, a source on the other view's side culled to the byte; FSR 3's reactive mask;
+    refusals; prewarm; a missing shader). The smokes'
+    presents take `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing) for the identity runs; the
+    frame bench takes the modes `dist-none`, `dist-off`, `dist-typical`, `dist-worst` and the preset `4k`.
+- **A cover by facing** (RFC 0020 phase 1, `BTBH_GPU_SCENE_HAS_COVER`; asked for by Be The Bullet Hell v2 for its
+  biomes after the owner's seventeenth play-test: snow on every ledge, sill and roof by its slope, sand, mud). A window
+  that sets no cover, or a batch without the bits, draws byte for byte as before (below).
+  - **API:** **`btbh_gpu_window_scene_set_cover`** keeps a **`BTBHGPUSceneCover`** (136 bytes: two
+    **`BTBHGPUSceneCoverLayer`**s of 64 bytes) on the window until the next call (NULL clears it), for every scene
+    present and render into a target. A layer: a linear colour, an amount, the steepest slope it holds, the edge's width
+    and the noise's reach in degrees, the noise's scale, a roughness, a relief (`bump`), how far normal maps lean its
+    facing (`normal_influence`), a **`BTBHGPUSceneCoverPattern`** (`SNOW`, `SAND`, `MUD`) and
+    `BTBH_GPU_SCENE_COVER_LAYER_COARSE` (one noise octave, no relief: the Deck-class setting); `base_height`,
+    `base_fade` and `wind` are phase 2's and refused unless 0. A batch takes a layer by
+    **`BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0`** or **`_COVER_1`** (`flags2` bits 2 and 3; bit 1 stays RFC 0019's).
+    Refused: both bits, a lit particle, a refracting batch, a batch the fast unlit shader draws.
+  - **What it does:** in the cover variants of the scene fragment shader (below), after the normal is composed and
+    before F0, a uniform branch lays the layer where the face turns up: by the slope of the vertex normal (leaning
+    toward the shading normal by `normal_influence`), within amount x slope (plus or minus the noise's reach, which
+    grows with the amount up to 0.25), fading over the edge, shaped by the pattern (SNOW crisp, SAND a dusting, MUD
+    blotchy with glossy puddles that `surface_wetness` makes glossier). It replaces the albedo, the roughness, the
+    metalness (0), the occlusion (1), a glass detail's reflectance and the normal (the vertex normal tilted by the
+    cover's own relief), so the lighting, SSR, the HBAO and SSAO and the radiance cascades see snow as snow; a
+    see-through batch takes it opaque. The emission, shadows, depth and motion stay. Value noise over the flat world x-z
+    on the procedural detail's integer hash, faded by the footprint; where it fades, the edge is averaged over what it
+    lost (a far face as patchy as a near one), and MUD's puddles fade to their share of the gloss (with
+    `edge_noise_degrees` 0 there are none). A face past the farthest the layer reaches (a wall) returns before the
+    noise. No texture, no pass.
+  - **Shaders: cover variants** (RFC 0020's question 14 fallback: the branch in the shared shaders was not provably
+    free with the cover off). Six new files, `production_model_cover.frag` and its `_2d_shadows`, `_unshadowed`, `_rc`,
+    `_rc_2d_shadows` and `_rc_unshadowed` siblings, are `production_model.frag` with `BTBH_COVER` (a fourth uniform
+    buffer, b3: the two layers, 128 bytes, pushed before a pass's first covered batch); `production_cover.hlsli` is
+    new. 96 shaders. The 90 before compile to the same SPIR-V, byte for byte, as 0.18.0-distortion's. A batch whose
+    layer is on, and a still-ice batch, draw with the cover variant of the shader the frame picks, on pipelines of
+    their own. Every other batch, a batch whose layer is off included, draws with the shaders and pipelines it had.
+    `btbh_gpu_window_scene_prewarm` makes both for a batch with a bit, and the cover variant's for still ice. A frame
+    that draws a covered or still-ice batch where the cover variant is missing (shaders from before 0.18.0) or doesn't
+    name the cover's block fails, naming the file.
+  - **Debug:** `BTBH_DEBUG_COVER=1` draws c in place of a covered pixel's colour (red the first layer, green the
+    second).
+- **Still ice** (RFC 0020, `BTBH_GPU_SCENE_HAS_SURFACE_ICE`; v2's frozen rivers): **`BTBH_GPU_SCENE_SURFACE_ICE`** (12;
+  the count is 13), a case of the surface variants in the cover variants of the scene shader. Plates in a world-space
+  Voronoi pattern parted by bevelled cracks that catch the light, a tilt per plate, a finer craze of hairline cracks,
+  frost in patches; the surface's colour lifted in the cracks and frost; its own roughness (clear 0.06 by default, frost
+  0.6: the batch's roughness factor doesn't scale it), so SSR reflects the city in the clear plates. Thin cracks fade
+  out rather than alias, the craze too as a pixel outgrows it; the border distance is the nearest border's (a second
+  pass over the neighbours), so the cracks don't notch where three plates meet. `surface_parameters0`: plate size, crack
+  width, the lift, plate tilt; `surface_parameters1`: frost share and patch size, the two roughnesses; zero values
+  default; refused when not finite, negative, or a share or roughness past 1. Drawn with the cover variants, so it needs
+  this release's shaders (checked as for the cover).
+  - **Tests:** `btbh_gpu_cover_test` (the structs' layout, the setter's checks, the CPU reference
+    `src/gpu/btbh_gpu_cover.h`: the block, the facing, the noise and its gradient, the relief, MUD's puddles, the ice's
+    plates, cracks and frost) and `btbh_gpu_scene_cover_smoke` (identity without a cover or with layers at amount 0;
+    SNOW, SAND, MUD, COARSE, the second layer, `normal_influence` and the debug view against the CPU reference, pixel by
+    pixel, also under each shadow set and with noise finer than a pixel; the roughness, occlusion and normal the
+    screen-space passes read and the albedo the radiance cascades read; SSR on a glossy floor gone under rough snow;
+    see-through batches; still ice unlit and lit; runs (a bit whose layer is off joins a run of batches without one)
+    and the run verifier; scene views; a render into a target; prewarm with and without the bits; refusals; cover
+    variants without the block or missing), also run as `btbh_gpu_scene_cover_smoke_runs_verify`. The native test also
+    checks the far coverage against the near mean, the craze's fade, and the border distance against an exact one;
+    the order test the run key's cover cases. The smokes'
+    presents take `BTBH_SMOKE_COVER=1` (a cover that lays nothing and the bit on every batch that may take one) for the
+    identity runs; the frame bench takes the modes `cover-off`, `cover-bits`, `cover-full`, `cover-coarse` and
+    `cover-ice`. `btbh_gpu_phase2_shader_test` checks the cover variants' reflection (16, 15 and 10 samplers, four
+    uniform buffers) and the scene shaders' three.
+
+### Known
+- **Distortion, not run on Metal:** its shaders build to MSL (and the Mac's metallibs come from its `check.sh`); the
+  smoke runs on Windows/Vulkan only.
+- **Distortion under FSR 3** marks displaced pixels reactive by refraction's rule; whether a growing ring or boiling haze
+  leaves trails in v2's scenes is v2's check at 4K High and Medium (`BTBH_DEBUG_MOTION_VECTORS=2`, RFC 0018 decision 4).
+- **Distortion is not depth-tested** (RFC 0018 decision 8): what stands in front of a source is displaced with the rest,
+  bullets too (decision 3).
+- **The cover costs more than RFC 0020 estimated:** over the frame bench's whole city, 0.33 ms on the main pass with
+  noise and relief and 0.23 with `COARSE` at 4K (the estimate was 0.10 and 0.05), 0.09 and 0.06 at the Deck preset
+  (0.016 estimated; 7 % of its 1.3 ms frame). v2's own cost log on its ice stage decides where `COARSE` goes.
+- **A host that turns a layer on mid-game** makes the cover variants' pipelines at that frame unless it prewarmed with
+  the bits on its batches (the lazy creation log names them).
+- **The cover on skinned, lifted and table batches** is drawn through pipelines picked as the plain ones are, but no
+  smoke draws them covered; nor does one pan a camera over the ice at the Deck preset's size for crack aliasing.
+- **Cover and ice, not run on Metal:** their shaders build to MSL (the Mac's metallibs come from its `check.sh`); the
+  smoke runs on Windows/Vulkan only.
+
+### Measured
+Screen-space distortion, on `feature/0.18.0-distortion` with the review's fixes (Windows, Vulkan, RTX 3070 Ti):
+`check.ps1` 50/50 (the 48 and the two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures),
+identity against 0.16.0's build in the four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same
+through `present_views` with one view and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing),
+and in plain and verify with the cost log and its pass frames (54 frame lines and 8 pass frames each, none with
+`distortion_ms`); the views smoke passes in the four modes and HDR's smoke with the rest. `btbh_gpu_distortion_test`
+checks the fold clamp at 2.2 million pixels of 84 cases: each colour's Jacobian determinant stays above 0 (the lowest
+0.010), and 2.5 times the clamp folds a flat disc (-0.26). In `btbh_gpu_scene_distortion_smoke` the field read back
+matches the CPU reference within 0.023 px at every covered texel (peaks 1.2-9.4 px) and the frame the undisplaced one
+resampled within 1 level, for 13 cases of every shape and mode; with the split, a disc far from the line leaves the band
+by it byte for byte (3,946 pixels changed elsewhere), and one just past the line on the other view's side draws nothing
+and changes no pixel; FSR 3's reactive mask matches min(1, |d| / 6) x 0.8 to the level (1,254 pixels).
+The distortion's cost (the frame bench on the first commit, before the review's fixes, which change no pass's work on
+the GPU: the clamp and the culling run in the pack, 57 microseconds of CPU for 240 sources in two views; under the
+machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
+rounds; medians with the 10th and 90th percentiles; `dist-typical` covers 15 % of the frame, `dist-worst` 91 % at 1.8
+layers, both with v2's bloom as is `dist-none`):
+- **The Deck preset** (960 x 600 to 1280 x 800, FSR 1, HBAO, FXAA): a frame 1.432 ms (1.396-1.482) with no source,
+  1.432 (1.395-1.517) with the flag alone, 1.438 (1.407-1.500) typical, 1.451 (1.415-1.512) worst; `post` 0.279, 0.280,
+  0.287 and 0.298 ms.
+- **4K High** (2560 x 1440 to 3840 x 2160, FSR 3): a frame 5.475 ms (5.429-5.694), 5.476, 5.495 and 5.469 (within
+  noise); the source pass 0.010 ms (-0.012-0.034) typical and 0.051 (0.027-0.075) worst, the composite 0.072, 0.080 and
+  0.105 ms.
+- So about 0.01 / 0.02 ms (typical / worst) at the Deck preset and 0.02 / 0.08 ms at 4K here, under RFC 0018's
+  estimates; nothing measurable without a source.
+
+The cover and still ice, on `feature/0.18.0-cover-ice` with distortion's review fixes merged (Windows, Vulkan, RTX 3070
+Ti):
+- **Checks:** `check.ps1` 53/53 (the 50, `btbh_gpu_cover_test`, `btbh_gpu_scene_cover_smoke` and its `_runs_verify`;
+  96 shaders) and the Swift suite 306 tests (2 skipped, 0 failures).
+- **Identity** against 0.16.0's build in the four modes (plain, shared meshes, no runs, runs verified): 421 images a
+  mode, 0 px different, 0 run-verify mismatches. The same through `present_views` with one view, with
+  `BTBH_SMOKE_COVER=1` (a cover that lays nothing and the bit on every batch that may take one), and in plain and
+  verify with the cost log and its pass frames (54 frame lines and 8 pass frames each). The views smoke passes in the
+  four modes, and so do HDR's and distortion's smokes.
+- **The cover variants:** the 90 shaders built before compile to 0.18.0-distortion's SPIR-V byte for byte.
+- **The cover smoke:** each pattern's frame within 1 level of the CPU reference at every pixel (noise finer than a
+  pixel too; the debug view within 3), the targets' roughness within 0.001 and normal within 0.008, the ice within 1
+  level. A bit whose layer is off draws in as many runs as no bit, and the same frame.
+- **The native test:** the far coverage within 0.025 of the near mean at every footprint (the noise-free line was 0.22
+  off), MUD's far wet roughness within 0.005, the craze's largest step 0.006 over a footprint sweep (it was 0.6), and
+  the crack distance within 6e-8 of the exact one at 50,631 points near a border.
+- **A prewarm** with the bits and still ice (the layers off) leaves nothing to make for a first frame with the layers
+  on or off.
+
+The cost (the frame bench under the machine's perf lock, 10:39 to 10:40, with the review's fixes; five windows
+interleaved over 80 rounds; v2's snow at its starting values on every kit piece and the ground; the main pass paired by
+round against the cover off on 0.18.0-distortion's shaders; medians with the 10th and 90th percentiles):
+- **The cover off:** with the bits set, the main pass moves -0.002 ms (-0.023..+0.015) at the Deck preset and -0.003
+  (-0.040..+0.031) at 4K High; without them the shaders are the same bytes. The first build, with the branch in the
+  shared shaders, measured +0.0014 (-0.017..+0.051) and +0.014 (-0.044..+0.126), hence the variants.
+- **The Deck preset** (960 x 600 to 1280 x 800): a frame 1.294 ms (1.275-1.325) off, 1.391 (1.354-1.453) full, 1.361
+  (1.330-1.416) `COARSE`, 1.302 (1.283-1.338) ice; the main pass +0.087 ms (+0.057..+0.140) full, +0.057
+  (+0.037..+0.120) `COARSE`, +0.006 (-0.013..+0.024) ice.
+- **4K High** (2560 x 1440 to 3840 x 2160): a frame 5.243 ms (5.179-5.313) off, 5.621 (5.587-5.812) full, 5.495
+  (5.459-5.697) `COARSE`, 5.275 (5.221-5.449) ice; the main pass +0.325 ms (+0.284..+0.417) full, +0.225
+  (+0.190..+0.310) `COARSE`, +0.023 (-0.013..+0.069) ice.
+- So the cover costs nothing when off, and over a fully covered city 0.09 ms (`COARSE` 0.06) at the Deck preset and
+  0.33 ms (0.23) at 4K: three to five times RFC 0020's estimates (Known). The early-out for faces past the reach took
+  about 0.1 ms off 4K (the first build: +0.432 and +0.309) and nothing measurable off the Deck preset (+0.086 and
+  +0.062). The ice costs 0.01-0.02 ms, as estimated.
+
 ## [0.17.0] — 2026-11-28
 
 0.17.0: HDR output, which the owner asked Be The Bullet Hell v2 for after its seventeenth play-test (RFC 0017 phase 1).

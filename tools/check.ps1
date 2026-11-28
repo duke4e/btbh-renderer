@@ -1,7 +1,7 @@
 # Local release check for the renderer on Windows: builds the C core, every production shader (SPIR-V, MSL)
 # and the native tests with the vendored SDL_shadercross, runs the tests (the device, window, scene-target,
 # scene target view, scene views, model-texture-share, font, SDF terrain, world detail, scene prewarm, scene flags, scene runs, RC tops, height lift,
-# mesh queue, lit particle and lazy creation smoke tests need a GPU and a display, which this machine has; those whose
+# mesh queue, lit particle, lazy creation, HDR, distortion and cover smoke tests need a GPU and a display, which this machine has; those whose
 # scenes have same-material runs run again with BTBH_GPU_SCENE_RUNS=verify, the *_runs_verify tests) and compiles the
 # public headers on their own.
 #
@@ -47,7 +47,7 @@ if ($missing) { throw "missing shader artifacts: $($missing -join ', ')" }
 Write-Host "$($names.Count) shaders: SPIR-V and MSL present"
 
 Write-Host "== native tests"
-$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_texture_mips_smoke|btbh_gpu_scene_target_view_smoke|btbh_gpu_scene_views_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lit_particle_smoke|btbh_gpu_lazy_creation_smoke`"" } else { "" }
+$exclude = if ($SkipGpuTests) { "-E `"btbh_gpu_device_smoke|btbh_gpu_window_smoke|btbh_gpu_scene_target_smoke|btbh_gpu_model_texture_share_smoke|btbh_gpu_texture_mips_smoke|btbh_gpu_scene_target_view_smoke|btbh_gpu_scene_views_smoke|btbh_gpu_font_smoke|btbh_gpu_sdf_terrain_smoke|btbh_gpu_world_detail_smoke|btbh_gpu_scene_prewarm_smoke|btbh_gpu_scene_flags_smoke|btbh_gpu_scene_runs_smoke|btbh_gpu_rc_tops_smoke|btbh_gpu_height_lift_smoke|btbh_gpu_mesh_queue_smoke|btbh_gpu_lit_particle_smoke|btbh_gpu_lazy_creation_smoke|btbh_gpu_hdr_smoke|btbh_gpu_scene_distortion_smoke|btbh_gpu_scene_cover_smoke`"" } else { "" }
 Invoke-Msvc "ctest --test-dir `"$BuildDir`" --output-on-failure $exclude"
 
 Write-Host "== public headers on their own (C11, C++17, /W4 /WX)"

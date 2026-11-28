@@ -1,7 +1,8 @@
 # RFC 0018: Screen-space distortion: rings, discs and strips that bend the scene, applied in the HDR composite
 
 - **Status:** Accepted on 2026-11-28: v2 answered all 13 questions, each as recommended (see "Decisions"). Phase 1
-  follows HDR output's phase 1 (RFC 0017)
+  implemented on `feature/0.18.0-distortion` (from `release/0.17.0`, after HDR output's phase 1) for 0.18.0, not yet
+  released; where it departs from this text, see "Phase 1 as built"
 - **Requested by:** Be The Bullet Hell v2. Its coordinator asked after the owner's seventeenth play-test (2026-11-28):
   "A screen-space distortion pass: v2 draws distortion sources (rings, blobs, strips with a strength/offset) into a
   buffer and post applies the offset." It went to the renderer with HDR and the lit smoke
@@ -15,7 +16,7 @@
 - **Issue:** none; v2 answers through its session
 - **Depends on:** nothing. It only has to be ordered with:
   - **RFC 0017 (HDR output, accepted, phase 1 next).** HDR starts after the composite, so its gain reads the displaced
-    picture and neither RFC changes the other. 0017 takes cost step 20, so this one's is 21.
+    picture and neither RFC changes the other. Its phase 1 took no cost step, so this one's is 20 (as built).
   - **RFC 0014's scene views (0.16.0) and 0.16.1's margin by the line.** They are the base for the split.
   - **RFC 0015 phase 1b (the frame thread).** When it lands, the sources set for a frame travel with `frame_submit`'s
     copy of it.
@@ -302,10 +303,11 @@ does nothing where `|x| >= 1` or `u >= 1`.
   - two octaves, the second at twice the frequency, drifting 1.7 times as fast and turned, so it doesn't read as a
     scrolling texture;
   - an integer hash with a period of 256 cells, so the CPU reference reproduces it exactly.
-- **The fold clamp:** a PUSH source's `|strength|` is clamped on screen to 0.3 of its width (a ring) or 0.28 of its
-  radius (a disc, a strip). Each is measured along the shape's narrowest axis on screen.
-  - Below the clamp, `p -> p - d(p)` stays one-to-one (the profiles' steepest slopes are `3.08 / width` and
-    `3.49 / radius`), except in a ring whose radius is still under its width.
+- **The fold clamp** (as built: "Phase 1 as built", 10): a PUSH source's `|strength|` is clamped so that the Jacobian of
+  `p -> p - k d(p)` stays positive over the whole shape for every colour (red's `k = 1 + 0.35 chroma`), from the profile's
+  steepest slopes and the shape's projection where it is thinnest and most slanted on screen.
+  - Without chroma that is about 0.26 of a facing disc's or strip's radius on screen and 0.29 of a ring's width (0.32
+    of the radius pulling a disc in); less with chroma and for a flat shape under a tilted camera.
   - Past it the picture would mirror over itself.
 - **Sources add.** The sum is clamped to 64 pixels at 1080 lines, so a pile-up never tears the frame.
 
@@ -316,9 +318,9 @@ does nothing where `|x| >= 1` or `u >= 1`.
   chroma, weighted by their displacement). Elsewhere there is one read.
 - **Fog and bloom** are read at the displaced point (green's); **the vignette** at p. A read outside the frame clamps
   to its edge.
-- **The reactive mask, under FSR 3:** `min(1, a / 6)` times `temporal_reactive_scale`, written with blend max over the
-  transparent pass's mask. a is the field's length channel in render pixels (REFRACT's rule). The motion vectors stay
-  the scene's.
+- **The reactive mask, under FSR 3:** `min(1, |d| / 6)` times `temporal_reactive_scale`, written with blend max over the
+  transparent pass's mask, d the displacement the pixel shows (summed and clamped) in render pixels (REFRACT's rule;
+  as built, "Phase 1 as built", 11). The motion vectors stay the scene's.
 - **Scene views:**
   - Within 8 render pixels of a view's edge the displacement fades to nothing at `0.5 + 2(|nx| + |ny|)` pixels from it
     (2.5 for an upright or level line, 3.3 on a diagonal). Nearer than that, the half-size field's bilinear read could
@@ -419,7 +421,8 @@ In `scene.c`:
 - **The prewarm** (`btbh_gpu_scene_prewarm_internal`, `:14274`): with the flag, it makes the source pipeline, the
   composite variants the settings use, and the field. The lazy creation log marks them `prewarm_covers` 1.
 - **The report:** `distortion_sources_drawn`.
-- **The cost log:** the step `DISTORTION` (21, after RFC 0017's `HDR_ENCODE` 20; `COUNT` 22), in the post group, before
+- **The cost log:** the step `DISTORTION` (20, the next free one: RFC 0017's phase 1 took none; `COUNT` 21), in the post
+  group, before
   bloom. The composite keeps `COMPOSITE`. A frame without sources prints no distortion step.
 - **Debug:** `BTBH_DEBUG_DISTORTION=1` shows the field instead of the frame (red and green `0.5 + d / 32 px`, blue the
   chroma), for tuning.
@@ -526,7 +529,7 @@ field; "worst" is a frame-wide haze with 20 overlapping rings.
     - Each half must equal its own one-view render (joined on the CPU) farther than 8 render pixels from the line.
     - With view 0 seeing a red ground and view 1 a blue one, no pixel of view 0's half takes any blue.
   - **FSR 3.**
-    - The reactive mask (`BTBH_DEBUG_MOTION_VECTORS=1` shows FSR 3's inputs) holds `min(1, a / 6)` inside the ring and
+    - The reactive mask (`BTBH_DEBUG_MOTION_VECTORS=1` shows FSR 3's inputs) holds `min(1, |d| / 6)` inside the ring and
       the transparent pass's values elsewhere.
     - A ring growing over 30 frames under a panning camera: no NaN; its trail is checked by eye with
       `BTBH_DEBUG_MOTION_VECTORS=2`.
@@ -579,7 +582,8 @@ Each has the renderer's recommendation; v2 answers per number.
 11. **The split.** The displacement fades within 8 render pixels of the line (to nothing 2.5-3.3 pixels from the view's
     edge), and no read crosses it. v2's divider covers 2 render pixels or more each side. Recommended: accept.
 12. **The haze's clock.** Recommended: v2's game time, so the haze stops with the pause. Any growing seconds work.
-13. **The order.** Recommended: after HDR's phase 1, as v2 asked. Its cost step is then 21.
+13. **The order.** Recommended: after HDR's phase 1, as v2 asked. Its cost step is then 21 (as built: 20, HDR took
+    none).
 
 ## Decisions (v2, 2026-11-28)
 
@@ -606,3 +610,80 @@ v2 took the recommendation on all 13 questions:
 
 Order (v2): HDR output (0.17.0), this RFC's phase 1, volumetrics phase 1 (RFC 0019), then half-resolution SSR and the
 rest of v2's list.
+
+## Phase 1 as built (feature/0.18.0-distortion)
+
+Where the implementation departs from the text above, and why.
+
+1. **The cost step is 20, not 21.** RFC 0017's phase 1 added no step (its encode is in the UI group), so
+   `BTBH_GPU_COST_STEP_DISTORTION` takes the next free value (`BTBH_GPU_COST_STEP_COUNT` 21). A pass frame prints
+   `distortion_ms` only when it drew the source pass, so lines without distortion keep 0.17.0's fields.
+2. **The haze's second octave drifts three of its cells for each of the first's** (1.5 times as fast in world units),
+   not 1.7 times: with a whole number of cells both octaves repeat when the drift wraps at the lattice's 256 cells, so
+   a growing clock never jumps.
+3. **The CPU works out each source's plane per view** (its origin and unit axes, the fold clamp in render pixels, the
+   wrapped drift: `btbh_distortion_pack` in `src/gpu/btbh_gpu_distortion.h`), so the vertex shader only places a quad.
+   The pending sources and their records live on the window and its runtime; the setter is in `scene.c` (not
+   `window.c`).
+4. **The outward direction** is r's gradient in the plane carried to the screen by the plane coordinates' derivatives
+   (`ddx`, `ddy` of the local point, which are smooth), not r's own derivatives, which kink at a disc's centre and a
+   strip's axis.
+5. **The identity runs' third way** is `BTBH_SMOKE_DISTORTION=1` in the smokes' presents
+   (`Tests/btbh_gpu_smoke_present.h`): the flag and two sources that draw nothing, one skipped and one culled, on every
+   frame of every smoke that presents through it.
+6. **"A refused present leaves them set"** is precise as: a present refused before it begins (its arguments, batches,
+   views or cameras invalid, or a scene waiting for its canvas) leaves them set; one that fails later (a missing shader
+   file included) has taken them.
+7. **The flags smoke's unknown post bit** moves from bit 3 (now `BTBH_GPU_SCENE_POST_DISTORTION`, which a render into a
+   target takes and draws nothing with) to bit 4.
+8. **The frame bench** (`Tests/btbh_gpu_frame_bench.c`) gained the modes `dist-none`, `dist-off`, `dist-typical` and
+   `dist-worst` and the preset `4k` (v2's 4K High: 3840 x 2160 from 2560 x 1440 with FSR 3) for the cost below.
+9. **The cost, measured** (the frame bench on this PC's RTX 3070 Ti, under the machine's perf lock, four windows
+   interleaved over 120 rounds of 8 frames: `dist-none` with v2's bloom, `dist-off` the flag and no source,
+   `dist-typical` 15 % of the frame, `dist-worst` 91 % at 1.8 layers; medians with the 10th and 90th percentiles):
+
+   | | Deck preset (960 x 600 to 1280 x 800, FSR 1) | 4K High (2560 x 1440 to 3840 x 2160, FSR 3) |
+   | --- | --- | --- |
+   | Frame, no source / flag alone | 1.432 ms (1.396-1.482) / 1.432 (1.395-1.517) | 5.475 (5.429-5.694) / 5.476 (5.425-5.704) |
+   | Frame, typical / worst | 1.438 (1.407-1.500) / 1.451 (1.415-1.512) | 5.495 (5.437-5.724) / 5.469 (5.421-5.698) |
+   | `post` group, none / typical / worst | 0.279 / 0.287 / 0.298 ms | 2.510 / 2.521 / 2.507 |
+   | Source pass (`distortion_ms`), typical / worst | 0.000 / 0.010 ms (floor noise, about +-0.02) | 0.010 (-0.012-0.034) / 0.051 (0.027-0.075) |
+   | Composite (`composite_ms`), none / typical / worst | 0.005 / 0.005 / 0.013 ms | 0.072 / 0.080 / 0.105 |
+
+   So the distortion costs about 0.01 ms typical and 0.02 ms worst at the Deck preset here (the frames' and the post
+   group's medians), and about 0.02 ms typical and 0.08 ms worst at 4K (the source pass and the composite's steps; the
+   whole frames' medians move within their noise there), under the estimates above (0.02 / 0.03 and 0.06 / 0.15). With
+   no source it costs nothing measurable, and its frames are 0.17.0's to the byte.
+
+The review of `8e036913` (an independent pass) found five things, fixed in the next commit:
+
+10. **The fold clamp now holds over the whole shape for every colour.** The first clamp measured the shape's shorter
+    screen axis at its centre and ignored chroma: a flat disc under a 45 degree camera folded along its long axis (the
+    tangential stretch grows with the ellipse's aspect), red's 1 + 0.35 chroma passed the limit for v2's chroma, and
+    the far side of a large flat shape is thinner. With the projection locally A (singular values a >= b) and the
+    displacement m(r) along r's gradient on screen, the Jacobian's determinant is det(A) (1 - k m' / l)(1 - k (m / r)
+    l^3 / (a b)^2), l in [b, a]: one-to-one while k max(m') < b and k max(m / r) < b^2 / a (a pull: k max(-m') < b).
+    `btbh_distortion_pack` takes a and b at the shape's centre and at its quad's corners and edges (the thinnest and most
+    slanted), the profile's slopes analytically (a disc, a strip) or sampled over the band (a ring, a newborn one too),
+    k = 1 + 0.35 chroma, at 0.9 of the limit. `btbh_gpu_distortion_test` checks the determinant at every pixel of 84
+    cases (each shape and a large one, facing and flat under a 45 degree camera, pushed and pulled, chroma 0, 0.6 and 1,
+    each colour), and that 2.5 times the clamp folds a flat disc.
+11. **The reactive mask** takes the length of the displacement the pixel shows (summed, clamped), as refraction does,
+    not the sum of each source's length: sources that cancel aren't reactive.
+12. **Culling by the view's half:** each view culls a source by its frustum and by its half of the frame (the clip
+    line as a world plane through the camera, a sphere test), so a source in view A's frustum that lands wholly on B's
+    side is neither drawn nor counted, and a frame whose sources all land nowhere is 0.17.0's. A PUSH source whose
+    centre is behind the camera isn't drawn either (its clamp has no scale there).
+13. **A pixel with no displacement reads itself.** The composite moved every read off the line to the reflections'
+    margin, the pixel's own too, so on a split frame with a source the column each side of the line blended with its
+    neighbour; now only a displaced read is kept inside.
+14. **Two clock notes in the header:** `time_seconds` is a float, so past about 36 hours (2^17 s) its steps pass a
+    60 Hz frame and the haze moves in steps (a game that runs longer restarts its clock); and the drift is time times
+    `haze_speed`, so a speed changed between frames moves the pattern at once.
+
+After the fixes the checks pass as before (identity in every mode, 0 px different), the fold check's lowest determinant
+is 0.010 over 2.2 million pixel checks, and the smoke's band by the line and its source past the line are byte for byte
+the frames without them. The cost in 9 was measured before the fixes and not again: they change no pass's work on the
+GPU (the clamp and the culling run in the pack, 57 microseconds of CPU for 240 sources in two views; the composite only
+skips the keep-inside for undisplaced pixels).
+

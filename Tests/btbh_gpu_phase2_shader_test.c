@@ -56,6 +56,9 @@
 #ifndef BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH
 #error "BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH must be defined"
 #endif
+#ifndef BTBH_PRODUCTION_COVER_FRAGMENT_REFLECTION_PATH
+#error "the cover variants' reflection paths (RFC 0020) must be defined"
+#endif
 #ifndef BTBH_PRODUCTION_SSAO_REFLECTION_PATH
 #error "BTBH_PRODUCTION_SSAO_REFLECTION_PATH must be defined"
 #endif
@@ -414,7 +417,8 @@ int main(void)
         /* RFC 0007: the dig mask's placement is the fragment stage's second uniform buffer (RFC 0008: with the
            world detail's after it, in the scene shaders; the scene shaders' samplers above end with the dig mask,
            the world detail's three and RFC 0009's table array). RFC 0009: the table's entries are the scene
-           shaders' third; the fast unlit and RC source shaders keep two. */
+           shaders' third; the fast unlit and RC source shaders keep two. RFC 0020 (0.18.0): the scene shaders keep
+           three; their cover variants add the cover's block as the fourth, with the same samplers. */
         !require_text(
             BTBH_PRODUCTION_FRAGMENT_REFLECTION_PATH,
             "\"uniform_buffers\": 3"
@@ -439,6 +443,18 @@ int main(void)
             BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH,
             "\"uniform_buffers\": 3"
         ) ||
+        !require_text(BTBH_PRODUCTION_COVER_FRAGMENT_REFLECTION_PATH, "\"samplers\": 16") ||
+        !require_text(BTBH_PRODUCTION_COVER_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
+        !require_text(BTBH_PRODUCTION_COVER_2D_SHADOW_FRAGMENT_REFLECTION_PATH, "\"samplers\": 15") ||
+        !require_text(BTBH_PRODUCTION_COVER_2D_SHADOW_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
+        !require_text(BTBH_PRODUCTION_COVER_UNSHADOWED_FRAGMENT_REFLECTION_PATH, "\"samplers\": 10") ||
+        !require_text(BTBH_PRODUCTION_COVER_UNSHADOWED_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_FRAGMENT_REFLECTION_PATH, "\"samplers\": 16") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH, "\"samplers\": 15") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH, "\"samplers\": 10") ||
+        !require_text(BTBH_PRODUCTION_COVER_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH, "\"uniform_buffers\": 4") ||
         /* RFC 0010: the trace's and the finish's last texture is the sources' tops. */
         !require_text(
             BTBH_PRODUCTION_HRC_TRACE_REFLECTION_PATH,

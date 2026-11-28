@@ -6,6 +6,8 @@
 #include "btbh_gpu_world_detail.h"
 #include "btbh_gpu_height_lift.h"
 #include "btbh_gpu_particle.h"
+#include "btbh_gpu_distortion.h"
+#include "btbh_gpu_cover.h"
 
 #include <float.h>
 #include <math.h>
@@ -65,6 +67,9 @@ typedef struct BTBHGPUSceneShaderCheck {
     /* RFC 0014: a vertex shader writes a clip distance (its SPIR-V declares the ClipDistance capability;
        btbh_gpu_scene_check_view_shaders). */
     bool has_clip_distance;
+    /* RFC 0020: a scene fragment shader takes the cover and still ice (it names the cover's block;
+       btbh_gpu_scene_check_cover_shaders). */
+    bool has_cover;
 } BTBHGPUSceneShaderCheck;
 
 typedef enum BTBHGPUSceneStencilVariant {
@@ -292,6 +297,37 @@ typedef struct BTBHGPUSceneCompositeUniforms {
     float fog_edge[4];
 } BTBHGPUSceneCompositeUniforms;
 
+/* RFC 0018 (screen-space distortion, since 0.18.0): the displaced composite's block (production_hdr_composite.frag with
+   BTBH_DISTORTION): the composite's, then 1 / the render size, the sum's clamp (render pixels) and the reactive mask's
+   scale; the view's half as a plane in UV units (RFC 0014's, zero with one view); the debug view. */
+typedef struct BTBHGPUSceneDistortionCompositeUniforms {
+    BTBHGPUSceneCompositeUniforms composite;
+    float distortion_frame[4];
+    float distortion_view_plane[4];
+    float distortion_debug[4];
+} BTBHGPUSceneDistortionCompositeUniforms;
+
+/* RFC 0018: the source pass's vertex block (production_distortion.vert), 3,968 bytes: the view's matrix and its half's
+   clip-space plane, then up to BTBH_DISTORTION_SOURCES_PER_DRAW records. Pushed whole (zeros past the draw's
+   sources), so no read of the block passes what was pushed. */
+typedef struct BTBHGPUSceneDistortionPassUniforms {
+    float view_projection[16];
+    float clip_plane[4];
+    float reserved[12];
+    BTBHDistortionRecord sources[BTBH_DISTORTION_SOURCES_PER_DRAW];
+} BTBHGPUSceneDistortionPassUniforms;
+_Static_assert(sizeof(BTBHDistortionRecord) == 64u, "a distortion record is four float4");
+_Static_assert(sizeof(BTBHGPUSceneDistortionPassUniforms) == 3968u, "the source pass's block stays under 4 KiB");
+
+/* The displaced composite's pipelines: production_post.vert with production_hdr_composite_distort.frag, with
+   _distort_reactive.frag (FSR 3: two targets), and production_post_view.vert with the first (scene views). */
+enum {
+    BTBH_GPU_SCENE_DISTORTION_COMPOSITE_PLAIN = 0,
+    BTBH_GPU_SCENE_DISTORTION_COMPOSITE_REACTIVE = 1,
+    BTBH_GPU_SCENE_DISTORTION_COMPOSITE_VIEWS = 2,
+    BTBH_GPU_SCENE_DISTORTION_COMPOSITE_COUNT = 3
+};
+
 /* One skinned pose's bone palette as a temporal frame drew it (the next frame's previous palette). */
 typedef struct BTBHGPUSceneTemporalPalette {
     const BTBHGPUAnimationPose *pose;
@@ -317,6 +353,15 @@ typedef SDL_GPUGraphicsPipeline *BTBHGPUSceneModelPipelineSet[
 typedef struct BTBHGPUSceneLiftPipelines {
     BTBHGPUSceneModelPipelineSet sets[2][3];
 } BTBHGPUSceneLiftPipelines;
+
+/* RFC 0020: the cover variants' pipelines (production_model_cover*.frag, drawn by a batch whose cover layer is on and
+   by a still-ice batch), [0 static, 1 skinned, 2 with a world-detail table, 3 lifted, 4 lifted with a table][0 the
+   sun's and the omni shadow, 1 the sun's only, 2 unshadowed], indexed within as model_pipelines (never fast unlit).
+   Made by the first such batch, or a prewarm with a batch that has a cover bit or is still ice, so a host that covers
+   nothing never holds them. */
+typedef struct BTBHGPUSceneCoverPipelines {
+    BTBHGPUSceneModelPipelineSet sets[5][3];
+} BTBHGPUSceneCoverPipelines;
 
 typedef struct BTBHGPUSceneRunVerify BTBHGPUSceneRunVerify;
 
@@ -422,6 +467,7 @@ struct BTBHGPUSceneRuntime {
     [BTBH_GPU_SCENE_STENCIL_VARIANT_COUNT]
     [BTBH_GPU_SCENE_UNLIT_VARIANT_COUNT];
     BTBHGPUSceneLiftPipelines *lift_pipelines;
+    BTBHGPUSceneCoverPipelines *cover_pipelines;
     /* RFC 0013: the lit particles' pipelines (production_model.vert with production_particle_lit.frag, its
        _2d_shadows or its _unshadowed sibling), [0 the sun's and the omni shadow, 1 the sun's only, 2 unshadowed]
        [1 while the temporal upscaler runs][depth][cull][stencil]: always transparent with straight alpha, so their
@@ -642,6 +688,18 @@ struct BTBHGPUSceneRuntime {
     uint32_t *view_opaque_order;
     uint8_t *view_visibility;
     uint32_t view_order_capacity;
+    /* RFC 0018 (screen-space distortion, since 0.18.0), made by the first frame that draws a source (or a prewarm with
+       BTBH_GPU_SCENE_POST_DISTORTION): the offset field (RGBA16F at half the render size, rounded up), the source
+       pass's pipeline and the displaced composite's (BTBH_GPU_SCENE_DISTORTION_COMPOSITE_*). Per frame: each view's
+       records (btbh_distortion_pack) and their count. debug_view: BTBH_DEBUG_DISTORTION=1, read once. */
+    SDL_GPUTexture *distortion_field;
+    uint32_t distortion_field_width;
+    uint32_t distortion_field_height;
+    SDL_GPUGraphicsPipeline *distortion_source_pipeline;
+    SDL_GPUGraphicsPipeline *distortion_composite_pipelines[BTBH_GPU_SCENE_DISTORTION_COMPOSITE_COUNT];
+    BTBHDistortionRecord distortion_records[BTBH_GPU_SCENE_MAX_VIEWS][BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES];
+    uint32_t distortion_record_counts[BTBH_GPU_SCENE_MAX_VIEWS];
+    int distortion_debug_view;
 };
 
 /* A target view's rect (BTBHGPUSceneTargetView, since 0.15.0): the part of the target a scene rendered into it shades,
@@ -994,8 +1052,11 @@ static const char *const btbh_gpu_cost_step_names[BTBH_GPU_COST_STEP_COUNT] = {
     "ao", "ssr", "bloom", "composite", "lut", "cas", "output", "fxaa", "smaa",
     "fsr3_prepare_inputs", "fsr3_luma_pyramid", "fsr3_shading_change_pyramid", "fsr3_shading_change",
     "fsr3_prepare_reactivity", "fsr3_luma_instability", "fsr3_accumulate", "fsr3_rcas",
-    "fsr1_easu", "fsr1_rcas", "lanczos"
+    "fsr1_easu", "fsr1_rcas", "lanczos", "distortion"
 };
+/* RFC 0018: whether the current pass frame drew the distortion's source pass (its step is printed only then, so a line
+   without distortion keeps 0.17.0's fields). */
+static bool btbh_gpu_cost_distortion_step;
 static int btbh_gpu_cost_passes_state = -1;
 static uint64_t btbh_gpu_cost_split_serial;
 static bool btbh_gpu_cost_pass_frame;
@@ -1189,6 +1250,7 @@ void btbh_gpu_cost_begin_frame(SDL_GPUDevice *device) {
         }
         if (btbh_gpu_cost_pass_frame) {
             SDL_zeroa(btbh_gpu_cost_step_milliseconds);
+            btbh_gpu_cost_distortion_step = false;
             btbh_gpu_cost_pieces = 0u;
             btbh_gpu_cost_pieces_milliseconds = 0.0;
             btbh_gpu_cost_floor_milliseconds = btbh_gpu_cost_measure_floor(device);
@@ -1241,6 +1303,9 @@ bool btbh_gpu_cost_step(SDL_GPUCommandBuffer **command, BTBHGPUCostStep step, bo
         (int)step == btbh_gpu_cost_current_step) {
         return true;
     }
+    if (step == BTBH_GPU_COST_STEP_DISTORTION) {
+        btbh_gpu_cost_distortion_step = true;
+    }
     if (btbh_gpu_cost_current_step == BTBH_GPU_COST_STEP_NONE) {
         /* A group's first step: it began at the group's split, with nothing recorded since. */
         btbh_gpu_cost_current_step = (int)step;
@@ -1262,6 +1327,9 @@ static void btbh_gpu_cost_emit_passes(double canvas_milliseconds) {
     int length = 0;
     steps[0] = '\0';
     for (uint32_t step = 0u; step < BTBH_GPU_COST_STEP_COUNT; ++step) {
+        if (step == BTBH_GPU_COST_STEP_DISTORTION && !btbh_gpu_cost_distortion_step) {
+            continue;
+        }
         if (length >= 0 && (size_t)length < sizeof(steps)) {
             length += snprintf(
                 steps + length,
@@ -3506,7 +3574,8 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
     bool omni_shadows_active,
     bool animated,
     const BTBHGPUSceneGeometryBatch *batch,
-    BTBHGPUSceneStencilVariant stencil_variant
+    BTBHGPUSceneStencilVariant stencil_variant,
+    bool cover
 ) {
     const uint32_t blend = (uint32_t)batch->blend_mode;
     const uint32_t depth = (uint32_t)batch->depth_compare;
@@ -3527,6 +3596,21 @@ static SDL_GPUGraphicsPipeline **btbh_gpu_scene_pipeline_slot(
         /* RFC 0013: a lit particle's pipeline (always transparent, straight alpha, never lifted or with a table). */
         const uint32_t shadow_set = !shadows_active ? 2u : (omni_shadows_active ? 0u : 1u);
         return &runtime->lit_particle_pipelines[shadow_set][temporal ? 1u : 0u][depth][cull][stencil];
+    }
+    if (cover) {
+        /* RFC 0020: the cover variants' pipelines; NULL until the first batch that draws one made their sets
+           (btbh_gpu_scene_ensure_model_pipeline). */
+        if (runtime->cover_pipelines == NULL) {
+            return NULL;
+        }
+        const bool table = !animated && btbh_gpu_world_detail_table_active(batch);
+        const uint32_t kind = animated
+            ? 1u
+            : (btbh_gpu_height_lift_active(batch) ? (table ? 4u : 3u) : (table ? 2u : 0u));
+        const uint32_t shadow_set = !shadows_active ? 2u : (omni_shadows_active ? 0u : 1u);
+        return &runtime->cover_pipelines->sets[kind][shadow_set]
+            [color_target_variant][blend][depth][transparent]
+            [cull][stencil][fast_unlit];
     }
     if (!animated && btbh_gpu_height_lift_active(batch)) {
         /* RFC 0012: production_model_lift.vert's and production_model_detail_table_lift.vert's pipelines; NULL until
@@ -3593,6 +3677,7 @@ static bool btbh_gpu_scene_variant_fragment_shader_path(
     bool shadows_active,
     bool omni_shadows_active,
     bool radiance_cascades_active,
+    bool cover,
     char path[BTBH_GPU_SCENE_PATH_CAPACITY],
     BTBHGPUSceneReport *report
 ) {
@@ -3600,6 +3685,24 @@ static bool btbh_gpu_scene_variant_fragment_shader_path(
         project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
             ? "metallib"
             : "spv";
+    if (cover) {
+        /* RFC 0020: the cover variant of the shader the frame's shadows and cascades pick, beside the host's fragment
+           shader. */
+        const char *cover_name = radiance_cascades_active
+            ? (!shadows_active
+                ? "production_model_cover_rc_unshadowed"
+                : (omni_shadows_active ? "production_model_cover_rc" : "production_model_cover_rc_2d_shadows"))
+            : (!shadows_active
+                ? "production_model_cover_unshadowed"
+                : (omni_shadows_active ? "production_model_cover" : "production_model_cover_2d_shadows"));
+        char filename[128];
+        (void)snprintf(filename, sizeof(filename), "%s.frag.%s", cover_name, extension);
+        if (!btbh_gpu_scene_sibling_path(fragment_shader_path, filename, path)) {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "Cover fragment shader path is too long");
+            return false;
+        }
+        return true;
+    }
     const char *selected_fragment_shader_path =
         shadows_active
             ? fragment_shader_path
@@ -3770,6 +3873,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
     bool omni_shadows_active,
     bool animated,
     const BTBHGPUSceneGeometryBatch *batch,
+    bool cover,
     BTBHGPUSceneReport *report
 ) {
     BTBHGPUSceneStencilVariant stencil_variant;
@@ -3791,7 +3895,8 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         omni_shadows_active,
         animated,
         batch,
-        stencil_variant
+        stencil_variant,
+        cover
     );
     if (slot != NULL && *slot != NULL) {
         return true;
@@ -3841,6 +3946,32 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
         );
     }
     const bool lifted = !animated && btbh_gpu_height_lift_active(batch);
+    if (slot == NULL && cover) {
+        /* RFC 0020: the first batch that draws a cover variant makes their sets. */
+        window->scene_runtime->cover_pipelines =
+            (BTBHGPUSceneCoverPipelines *)calloc(1u, sizeof(BTBHGPUSceneCoverPipelines));
+        if (window->scene_runtime->cover_pipelines == NULL) {
+            btbh_gpu_scene_error(
+                report,
+                BTBH_GPU_PLATFORM_FAILURE,
+                "Could not allocate the cover variants' pipelines"
+            );
+            return false;
+        }
+        slot = btbh_gpu_scene_pipeline_slot(
+            window->scene_runtime,
+            auxiliary_geometry_outputs,
+            temporal,
+            radiance_cascades_active,
+            cascades_fast_unlit,
+            shadows_active,
+            omni_shadows_active,
+            animated,
+            batch,
+            stencil_variant,
+            cover
+        );
+    }
     if (slot == NULL) {
         /* RFC 0012: the first lifted batch makes the lifted pipelines' sets (only a lifted batch finds none). */
         window->scene_runtime->lift_pipelines =
@@ -3863,7 +3994,8 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             omni_shadows_active,
             animated,
             batch,
-            stencil_variant
+            stencil_variant,
+            cover
         );
     }
     const bool fast_unlit = btbh_gpu_scene_batch_fast_unlit(
@@ -3881,6 +4013,7 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             shadows_active,
             omni_shadows_active,
             radiance_cascades_active,
+            cover,
             variant_fragment_shader_path,
             report
         )) {
@@ -3977,7 +4110,8 @@ static bool btbh_gpu_scene_ensure_model_pipeline(
             : (shadows_active
                 ? (omni_shadows_active ? 16u : 15u)
                 : 10u),
-        fast_unlit ? 2u : 3u,
+        /* (RFC 0020: the cover variants' fourth, the cover's block.) */
+        fast_unlit ? 2u : (cover ? 4u : 3u),
         auxiliary_geometry_outputs,
         temporal,
         batch,
@@ -5453,7 +5587,11 @@ static bool btbh_gpu_scene_validate_batches(
                 BTBH_GPU_SCENE_BATCH_RECEIVES_NO_SPOT_SHADOW |
                 BTBH_GPU_SCENE_BATCH_INSTANCE_LIGHT_FACTOR
             )) == 0u &&
-            (batch->flags2 & ~(uint32_t)BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK) == 0u &&
+            (batch->flags2 & ~(uint32_t)(
+                BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK |
+                BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 |
+                BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1
+            )) == 0u &&
             btbh_gpu_scene_detail_parameters_valid(batch->detail_parameters) &&
             (batch->albedo_texture == NULL ||
              (batch->albedo_texture->owner == window &&
@@ -5532,6 +5670,41 @@ static void btbh_gpu_scene_refuse_batch(
     btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
 }
 
+/* RFC 0020: whether a batch draws with the cover variant of the scene shader (production_model_cover*.frag) this
+   frame: its bit's layer is on, or it is still ice. Every other batch draws with the shaders as before. */
+static bool btbh_gpu_scene_batch_cover_variant(
+    const BTBHGPUSceneCover *cover,
+    const BTBHGPUSceneGeometryBatch *batch
+) {
+    return batch->surface_variant == BTBH_GPU_SCENE_SURFACE_ICE || btbh_cover_batch_mode(cover, batch, false) != 0u;
+}
+
+/* RFC 0020: why a batch can't take the cover's bits it has (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 or _1), or NULL: both
+   bits; a lit particle or a refracting batch (their shaders draw no material); a batch the fast unlit shader draws,
+   which has no cover variant (so a covered batch always draws with the scene shader, whose cover variant it takes
+   while its layer is on). */
+static const char *btbh_gpu_scene_cover_problem(const BTBHGPUSceneGeometryBatch *batch) {
+    const uint32_t bits =
+        batch->flags2 & (uint32_t)(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1);
+    if (bits == 0u) {
+        return NULL;
+    }
+    if (bits == (uint32_t)(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1)) {
+        return "COVER_0 and COVER_1 are both set; a batch takes one layer";
+    }
+    if (btbh_gpu_particle_lit(batch)) {
+        return "a lit particle takes no cover (its shader draws no material)";
+    }
+    if (batch->surface_variant == BTBH_GPU_SCENE_SURFACE_REFRACT) {
+        return "a refracting batch takes no cover (it draws no material)";
+    }
+    if (btbh_gpu_scene_uses_fast_unlit_pipeline(batch)) {
+        return "the fast unlit shader draws this batch (unlit, in the transparent pass, no surface variant, no world "
+            "detail texture, no table with map_layers), which has no cover";
+    }
+    return NULL;
+}
+
 /* RFC 0008: each batch's world detail, and RFC 0009: its world-detail table, and no array texture in a 2D slot.
    RFC 0012: its height lift, and no heightfield in any other slot. RFC 0013: what a lit particle and a batch with the
    UV rect may be; and (0.11.0) one with the light factor; and (phase 2, 0.14.0) one with the particle shadow. Batches
@@ -5595,6 +5768,21 @@ static bool btbh_gpu_scene_validate_world_details(
             const char *problem = btbh_gpu_particle_shadow_problem(batch);
             if (problem != NULL) {
                 btbh_gpu_scene_refuse_batch(report, index, "flags PARTICLE_SHADOW", problem);
+                return false;
+            }
+        }
+        /* RFC 0020: what may take the cover's bits, and still ice's parameters. */
+        if ((batch->flags2 & (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1)) != 0u) {
+            const char *problem = btbh_gpu_scene_cover_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "flags2 COVER", problem);
+                return false;
+            }
+        }
+        if (batch->surface_variant == BTBH_GPU_SCENE_SURFACE_ICE) {
+            const char *problem = btbh_ice_parameters_problem(batch);
+            if (problem != NULL) {
+                btbh_gpu_scene_refuse_batch(report, index, "surface_variant ICE", problem);
                 return false;
             }
         }
@@ -5717,13 +5905,20 @@ static bool btbh_gpu_scene_batch_uses_geometry(
    +0 differ), and padding isn't compared. Everything a pass binds or pushes for a batch other than its vertex and
    index buffers and its draw comes from those fields, from the pass and from what the fields point at (which a
    present doesn't change), so a batch that continues a run binds and pushes nothing new. The passes never let a
-   skinned geometry start or continue a run: its bone offsets are its own. */
+   skinned geometry start or continue a run: its bone offsets are its own. RFC 0020: flags2's cover bits compare as
+   the cover the window's layers make of them (btbh_cover_batch_mode with `cover`; NULL: none), so a batch whose layer
+   is off joins the run of one without the bits: it draws with the same pipeline and pushes the same. */
 bool btbh_gpu_scene_batch_continues_run(
     const BTBHGPUSceneGeometryBatch *previous,
-    const BTBHGPUSceneGeometryBatch *batch
+    const BTBHGPUSceneGeometryBatch *batch,
+    const BTBHGPUSceneCover *cover
 ) {
 #define BTBH_GPU_SCENE_RUN_SAME(field) (memcmp(&previous->field, &batch->field, sizeof(batch->field)) == 0)
+    const uint8_t cover_bits =
+        (uint8_t)(BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1);
     return
+        (previous->flags2 & (uint8_t)~cover_bits) == (batch->flags2 & (uint8_t)~cover_bits) &&
+        btbh_cover_batch_mode(cover, previous, false) == btbh_cover_batch_mode(cover, batch, false) &&
         BTBH_GPU_SCENE_RUN_SAME(instance_buffer) &&
         BTBH_GPU_SCENE_RUN_SAME(albedo_texture) &&
         BTBH_GPU_SCENE_RUN_SAME(normal_texture) &&
@@ -5773,7 +5968,6 @@ bool btbh_gpu_scene_batch_continues_run(
         BTBH_GPU_SCENE_RUN_SAME(detail_parameters) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_mode) &&
         BTBH_GPU_SCENE_RUN_SAME(flags) &&
-        BTBH_GPU_SCENE_RUN_SAME(flags2) &&
         BTBH_GPU_SCENE_RUN_SAME(ssao_reserved) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_library) &&
         BTBH_GPU_SCENE_RUN_SAME(animation_pose) &&
@@ -5818,7 +6012,7 @@ static BTBHGPUSceneRunsMode btbh_gpu_scene_runs_mode(void) {
    is the frame with runs on: a checking draw pushes and binds nothing. */
 #define BTBH_GPU_SCENE_RUN_VERIFY_BLOCK_CAPACITY 4096u
 #define BTBH_GPU_SCENE_RUN_VERIFY_VERTEX_SLOTS 2u
-#define BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS 3u
+#define BTBH_GPU_SCENE_RUN_VERIFY_FRAGMENT_SLOTS 4u
 #define BTBH_GPU_SCENE_RUN_VERIFY_SAMPLERS 16u
 #define BTBH_GPU_SCENE_RUN_VERIFY_STORAGE_BUFFERS 4u
 #define BTBH_GPU_SCENE_RUN_VERIFY_LOG_LIMIT 64u
@@ -5960,6 +6154,14 @@ static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_table_fields[] = {
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUWorldDetailTableUniforms, count),
 };
 
+/* (RFC 0020, 0.18.0: the cover's block, fragment slot 3.) */
+static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_cover_fields[] = {
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUCoverUniforms, color_roughness),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUCoverUniforms, facing),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUCoverUniforms, relief),
+    BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUCoverUniforms, pattern),
+};
+
 static const BTBHGPUSceneRunVerifyField btbh_gpu_scene_run_particle_fields[] = {
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, inverse_view_projection),
     BTBH_GPU_SCENE_RUN_FIELD(BTBHGPUSceneParticleFrameUniforms, controls),
@@ -5989,6 +6191,8 @@ static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_table_layout =
     BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUWorldDetailTableUniforms", btbh_gpu_scene_run_table_fields);
 static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_particle_layout =
     BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUSceneParticleFrameUniforms", btbh_gpu_scene_run_particle_fields);
+static const BTBHGPUSceneRunVerifyLayout btbh_gpu_scene_run_cover_layout =
+    BTBH_GPU_SCENE_RUN_LAYOUT("BTBHGPUCoverUniforms", btbh_gpu_scene_run_cover_fields);
 
 #undef BTBH_GPU_SCENE_RUN_LAYOUT
 #undef BTBH_GPU_SCENE_RUN_FIELD
@@ -7398,7 +7602,8 @@ static bool btbh_gpu_scene_post_valid(
         (post->flags & ~(uint32_t)(
             BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO |
             BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY |
-            BTBH_GPU_SCENE_POST_SSR_FACING_HITS
+            BTBH_GPU_SCENE_POST_SSR_FACING_HITS |
+            BTBH_GPU_SCENE_POST_DISTORTION
         )) == 0u &&
         (post->upscale_mode != BTBH_GPU_SCENE_UPSCALE_FSR3 ||
          (isfinite(post->temporal_camera_near) &&
@@ -7570,6 +7775,7 @@ static const BTBHGPUSceneShaderCheck *btbh_gpu_scene_shader_check(BTBHGPUSceneRu
     fresh.has_instance_uv_rect = btbh_gpu_scene_bytes_name(bytes, byte_count, "instance_uv_rect");
     fresh.has_particle_transmittance = btbh_gpu_scene_bytes_name(bytes, byte_count, "particle_transmittance_texture");
     fresh.has_clip_distance = btbh_gpu_scene_spirv_has_clip_distance(bytes, byte_count);
+    fresh.has_cover = btbh_gpu_scene_bytes_name(bytes, byte_count, "cover_color_roughness");
     SDL_free(bytes);
     const size_t path_length = strlen(path);
     fresh.path = (char *)malloc(path_length + 1u);
@@ -7630,6 +7836,7 @@ static bool btbh_gpu_scene_check_scene_shader(
             shadows_active,
             omni_shadows_active,
             radiance_cascades_active,
+            false,
             variant_path,
             report
         )) {
@@ -7866,6 +8073,7 @@ static bool btbh_gpu_scene_check_particle_shadow_shaders(
             shadows_active,
             omni_shadows_active,
             radiance_cascades_active,
+            false,
             variant_path,
             report
         )) {
@@ -7884,6 +8092,74 @@ static bool btbh_gpu_scene_check_particle_shadow_shaders(
             "particle_shadow is 2, and a scene shader doesn't read its map (build the shaders from 0.14.0 or later): "
             "%s",
             paths[which]
+        );
+        btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
+        return false;
+    }
+    return true;
+}
+
+/* RFC 0020: a frame that draws a covered batch (its bit's layer on) or a still-ice one draws them with the cover
+   variant of the scene fragment shader its shadows and cascades pick (production_model_cover*.frag, beside the host's
+   fragment shader), which must name cover_color_roughness, the cover's block: a file that doesn't (a stale or foreign
+   one) would draw them without the cover, and shaders from before 0.18.0 have no such file. A prewarm checks it also
+   for a batch with a cover bit whose layer is off (it makes that batch's cover pipelines too). Each path is read once;
+   a Metal library is only checked for being there. False, with the report set (BTBH_GPU_INVALID_ARGUMENT, the path),
+   when the file doesn't name the block or is missing. */
+static bool btbh_gpu_scene_check_cover_shaders(
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneCover *cover,
+    const BTBHGPUSceneGeometryBatch *batches,
+    uint32_t batch_count,
+    bool prewarm,
+    const char *fragment_shader_path,
+    const char *unshadowed_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    bool shadows_active,
+    bool omni_shadows_active,
+    bool radiance_cascades_active,
+    BTBHGPUSceneReport *report
+) {
+    if ((shader_format != BTBH_GPU_SHADER_FORMAT_SPIRV && shader_format != BTBH_GPU_SHADER_FORMAT_METALLIB) ||
+        fragment_shader_path == NULL || unshadowed_fragment_shader_path == NULL || batches == NULL) {
+        return true;
+    }
+    bool needed = false;
+    for (uint32_t index = 0u; index < batch_count && !needed; ++index) {
+        needed = btbh_cover_batch_mode(cover, &batches[index], false) != 0u ||
+            batches[index].surface_variant == BTBH_GPU_SCENE_SURFACE_ICE ||
+            (prewarm && (batches[index].flags2 &
+                (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1)) != 0u);
+    }
+    if (!needed) {
+        return true;
+    }
+    char variant_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (!btbh_gpu_scene_variant_fragment_shader_path(
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            shadows_active,
+            omni_shadows_active,
+            radiance_cascades_active,
+            true,
+            variant_path,
+            report
+        )) {
+        return false;
+    }
+    const BTBHGPUSceneShaderCheck *checked = shader_format == BTBH_GPU_SHADER_FORMAT_SPIRV
+        ? btbh_gpu_scene_shader_check(runtime, variant_path)
+        : NULL;
+    const bool missing = checked == NULL && !SDL_GetPathInfo(variant_path, NULL);
+    if (missing || (checked != NULL && !checked->has_cover)) {
+        char message[sizeof(report->message)];
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "A covered or still-ice batch's cover shader %s (build the shaders from 0.18.0 or later): %s",
+            missing ? "is missing" : "doesn't name the cover's block",
+            variant_path
         );
         btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, message);
         return false;
@@ -8491,7 +8767,7 @@ static bool btbh_gpu_scene_render_directional_shadow(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, NULL));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
@@ -8948,7 +9224,7 @@ static bool btbh_gpu_scene_encode_rc_material_sources(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, NULL));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && verify != NULL;
             if (continues_run) {
@@ -9195,6 +9471,17 @@ typedef struct BTBHGPUSceneFrameSetup {
     /* RFC 0014: a clipped frame of scene views asked for the radiance cascades, and runs without them
        (BTBH_GPU_SCENE_RC_FALLBACK_VIEWS). */
     bool radiance_cascades_held_for_views;
+    /* RFC 0014: the frame is drawn clipped (two views, or one with a clip). */
+    bool views_clipped;
+    /* RFC 0018 (since 0.18.0): the distortion's source pass and displaced composite run. Set by
+       btbh_gpu_scene_prepare_frame where the post has BTBH_GPU_SCENE_POST_DISTORTION (the window's frame only, not in
+       the cascades' debug views): a prewarm makes what they need. The present keeps it only when the frame draws a
+       source. */
+    bool distortion_active;
+    /* RFC 0020 (since 0.18.0): the window's cover (NULL: none) and its block (btbh_cover_pack, BTBH_DEBUG_COVER read
+       once a present), the same for every pass and view of the frame. */
+    const BTBHGPUSceneCover *cover;
+    BTBHGPUCoverUniforms cover_uniforms;
 } BTBHGPUSceneFrameSetup;
 
 /* The horizon-based occlusion's passes (BTBHGPUScenePost.ssao_enabled 2): the HBAO at half resolution, its denoise,
@@ -10583,6 +10870,14 @@ static bool btbh_gpu_scene_prepare_frame(
         !radiance_cascades_active &&
         (post->flags & BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY) != 0u;
     setup->radiance_cascades_held_for_views = radiance_cascades_held;
+    setup->views_clipped = views_clipped;
+    setup->distortion_active =
+        (post->flags & BTBH_GPU_SCENE_POST_DISTORTION) != 0u &&
+        output_width == 0u &&
+        !radiance_cascades_debug_output;
+    setup->cover = window->cover_set ? &window->cover : NULL;
+    const char *cover_debug = SDL_getenv("BTBH_DEBUG_COVER");
+    btbh_cover_pack(setup->cover, cover_debug != NULL && cover_debug[0] == '1', &setup->cover_uniforms);
     return true;
 }
 
@@ -10604,6 +10899,7 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
     const uint32_t *bone_offsets,
     uint32_t prepared_geometry_count,
     uint32_t *opaque_geometry_base,
+    bool prewarm,
     BTBHGPUSceneReport *report
 ) {
     uint32_t pipeline_geometry_cursor = 0u;
@@ -10619,6 +10915,15 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
             opaque_geometry_base[batch_index] =
                 pipeline_geometry_cursor;
         }
+        /* RFC 0020: the pipelines a batch draws with: the cover variant's where its layer is on or it is still ice, the
+           plain one otherwise. A prewarm makes both for a batch with a cover bit (its layer may be on or off by the
+           frame), and the cover variant's alone for still ice. */
+        const bool ice = batch->surface_variant == BTBH_GPU_SCENE_SURFACE_ICE;
+        const bool cover_bits =
+            (batch->flags2 & (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1)) != 0u;
+        const bool cover_drawn = btbh_gpu_scene_batch_cover_variant(setup->cover, batch);
+        const bool want_cover = cover_drawn || (prewarm && cover_bits);
+        const bool want_plain = !ice && (!cover_drawn || prewarm);
         for (uint32_t geometry_index = 0u;
              geometry_index < geometry_count;
              ++geometry_index) {
@@ -10631,50 +10936,58 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
             const bool animated =
                 bone_offsets[pipeline_geometry_cursor] != UINT32_MAX;
             pipeline_geometry_cursor += 1u;
-            if (!btbh_gpu_scene_ensure_model_pipeline(
-                    window,
-                    vertex_shader_path,
-                    animated_vertex_shader_path,
-                    fragment_shader_path,
-                    unshadowed_fragment_shader_path,
-                    shader_format,
-                    setup->auxiliary_geometry_outputs,
-                    setup->temporal_active,
-                    setup->radiance_cascades_active,
-                    setup->cascades_fast_unlit,
-                    setup->shadows_active,
-                    setup->omni_shadows_active,
-                    animated,
-                    batch,
-                    report
-                )) {
-                return false;
-            }
-            if (
-                setup->auxiliary_geometry_outputs &&
-                btbh_gpu_scene_uses_transparent_pass(
-                    batch->blend_mode,
-                    batch->transparency_enabled != 0u
-                ) &&
-                !btbh_gpu_scene_ensure_model_pipeline(
-                    window,
-                    vertex_shader_path,
-                    animated_vertex_shader_path,
-                    fragment_shader_path,
-                    unshadowed_fragment_shader_path,
-                    shader_format,
-                    false,
-                    setup->temporal_active,
-                    setup->radiance_cascades_active,
-                    setup->cascades_fast_unlit,
-                    setup->shadows_active,
-                    setup->omni_shadows_active,
-                    animated,
-                    batch,
-                    report
-                )
-            ) {
-                return false;
+            for (uint32_t variant = 0u; variant < 2u; ++variant) {
+                const bool cover = variant == 1u;
+                if (cover ? !want_cover : !want_plain) {
+                    continue;
+                }
+                if (!btbh_gpu_scene_ensure_model_pipeline(
+                        window,
+                        vertex_shader_path,
+                        animated_vertex_shader_path,
+                        fragment_shader_path,
+                        unshadowed_fragment_shader_path,
+                        shader_format,
+                        setup->auxiliary_geometry_outputs,
+                        setup->temporal_active,
+                        setup->radiance_cascades_active,
+                        setup->cascades_fast_unlit,
+                        setup->shadows_active,
+                        setup->omni_shadows_active,
+                        animated,
+                        batch,
+                        cover,
+                        report
+                    )) {
+                    return false;
+                }
+                if (
+                    setup->auxiliary_geometry_outputs &&
+                    btbh_gpu_scene_uses_transparent_pass(
+                        batch->blend_mode,
+                        batch->transparency_enabled != 0u
+                    ) &&
+                    !btbh_gpu_scene_ensure_model_pipeline(
+                        window,
+                        vertex_shader_path,
+                        animated_vertex_shader_path,
+                        fragment_shader_path,
+                        unshadowed_fragment_shader_path,
+                        shader_format,
+                        false,
+                        setup->temporal_active,
+                        setup->radiance_cascades_active,
+                        setup->cascades_fast_unlit,
+                        setup->shadows_active,
+                        setup->omni_shadows_active,
+                        animated,
+                        batch,
+                        cover,
+                        report
+                    )
+                ) {
+                    return false;
+                }
             }
         }
     }
@@ -10702,6 +11015,296 @@ static bool btbh_gpu_scene_ensure_model_pipelines(
    window's in pixels (the frame context's) when output_width is 0. scene_distance_ready says whether the soft
    particles' and the refraction's distance pass can run (a missing pass never fails the frame). False when a target or
    a pipeline is missing, with the report set where it said why. */
+/* RFC 0018: a pipeline of the distortion's: its vertex and fragment shaders with these resources, into these targets
+   (no depth). A shader that can't be loaded fails with BTBH_GPU_INVALID_ARGUMENT naming it. */
+static bool btbh_gpu_scene_create_distortion_pipeline(
+    BTBHGPUWindow *window,
+    const char *vertex_shader_path,
+    uint32_t vertex_uniform_count,
+    const char *fragment_shader_path,
+    uint32_t fragment_sampler_count,
+    uint32_t fragment_uniform_count,
+    BTBHGPUShaderFormat project_format,
+    const SDL_GPUColorTargetDescription *targets,
+    uint32_t target_count,
+    SDL_GPUGraphicsPipeline **pipeline,
+    BTBHGPUSceneReport *report
+) {
+    SDL_GPUDevice *device = window->device->gpu;
+    const SDL_GPUShaderFormat format = btbh_gpu_scene_shader_format(project_format);
+    const char *entrypoint = project_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "main0" : "main";
+    SDL_GPUShader *vertex_shader = btbh_gpu_scene_load_shader(device, vertex_shader_path, entrypoint, format,
+        SDL_GPU_SHADERSTAGE_VERTEX, 0u, 0u, vertex_uniform_count, report);
+    if (vertex_shader == NULL) {
+        return false;
+    }
+    SDL_GPUShader *fragment_shader = btbh_gpu_scene_load_shader(device, fragment_shader_path, entrypoint, format,
+        SDL_GPU_SHADERSTAGE_FRAGMENT, 0u, fragment_sampler_count, fragment_uniform_count, report);
+    if (fragment_shader == NULL) {
+        SDL_ReleaseGPUShader(device, vertex_shader);
+        return false;
+    }
+    SDL_GPUGraphicsPipelineCreateInfo info;
+    SDL_zero(info);
+    info.vertex_shader = vertex_shader;
+    info.fragment_shader = fragment_shader;
+    info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.target_info.color_target_descriptions = targets;
+    info.target_info.num_color_targets = target_count;
+    *pipeline = btbh_gpu_create_graphics_pipeline(device, &info);
+    SDL_ReleaseGPUShader(device, fragment_shader);
+    SDL_ReleaseGPUShader(device, vertex_shader);
+    if (*pipeline == NULL) {
+        btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+/* RFC 0018: what a frame that draws distortion sources needs, made where missing: the offset field at half the render
+   size (rounded up; made anew when that changes), the source pass's pipeline (production_distortion.vert beside the
+   post vertex shader, production_distortion.frag beside the post fragment shader; additive into the field) and the
+   displaced composite's in the frame's form (clipped for scene views, FSR 3's with the reactive mask, else the plain
+   one). Shared by the present (a frame with sources) and the prewarm (the post's BTBH_GPU_SCENE_POST_DISTORTION). */
+static bool btbh_gpu_scene_ensure_distortion(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneFrameSetup *setup,
+    const char *post_vertex_shader_path,
+    const char *post_fragment_shader_path,
+    BTBHGPUShaderFormat shader_format,
+    uint32_t render_width,
+    uint32_t render_height,
+    BTBHGPUSceneReport *report
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    SDL_GPUDevice *device = window->device->gpu;
+    const uint32_t field_width = (render_width + 1u) / 2u;
+    const uint32_t field_height = (render_height + 1u) / 2u;
+    if (runtime->distortion_field != NULL &&
+        (runtime->distortion_field_width != field_width || runtime->distortion_field_height != field_height)) {
+        SDL_ReleaseGPUTexture(device, runtime->distortion_field);
+        runtime->distortion_field = NULL;
+    }
+    if (runtime->distortion_field == NULL) {
+        SDL_GPUTextureCreateInfo info;
+        SDL_zero(info);
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        info.width = field_width;
+        info.height = field_height;
+        info.layer_count_or_depth = 1u;
+        info.num_levels = 1u;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        runtime->distortion_field = SDL_CreateGPUTexture(device, &info);
+        if (runtime->distortion_field == NULL) {
+            runtime->distortion_field_width = 0u;
+            runtime->distortion_field_height = 0u;
+            btbh_gpu_scene_error(report, BTBH_GPU_DEVICE_FAILURE, SDL_GetError());
+            return false;
+        }
+        runtime->distortion_field_width = field_width;
+        runtime->distortion_field_height = field_height;
+    }
+    const char *extension = shader_format == BTBH_GPU_SHADER_FORMAT_METALLIB ? "metallib" : "spv";
+    char filename[128];
+    char vertex_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    char fragment_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (runtime->distortion_source_pipeline == NULL) {
+        SDL_GPUColorTargetDescription target;
+        SDL_zero(target);
+        target.format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        target.blend_state.enable_blend = true;
+        target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        target.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        target.blend_state.color_write_mask = 0x0fu;
+        char vertex_name[128];
+        (void)snprintf(vertex_name, sizeof(vertex_name), "production_distortion.vert.%s", extension);
+        (void)snprintf(filename, sizeof(filename), "production_distortion.frag.%s", extension);
+        if (!btbh_gpu_scene_sibling_path(post_vertex_shader_path, vertex_name, vertex_path) ||
+            !btbh_gpu_scene_sibling_path(post_fragment_shader_path, filename, fragment_path)) {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "The distortion's shader path is too long");
+            return false;
+        }
+        if (!btbh_gpu_scene_create_distortion_pipeline(window, vertex_path, 1u, fragment_path, 0u, 0u, shader_format,
+                &target, 1u, &runtime->distortion_source_pipeline, report)) {
+            return false;
+        }
+    }
+    const uint32_t form = setup->views_clipped
+        ? (uint32_t)BTBH_GPU_SCENE_DISTORTION_COMPOSITE_VIEWS
+        : (setup->temporal_active
+            ? (uint32_t)BTBH_GPU_SCENE_DISTORTION_COMPOSITE_REACTIVE
+            : (uint32_t)BTBH_GPU_SCENE_DISTORTION_COMPOSITE_PLAIN);
+    if (runtime->distortion_composite_pipelines[form] == NULL) {
+        SDL_GPUColorTargetDescription targets[2];
+        SDL_zeroa(targets);
+        targets[0].format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+        targets[0].blend_state.color_write_mask = 0x0fu;
+        /* FSR 3's reactive mask keeps the strongest value written over each pixel (as the transparent pass's). */
+        targets[1].format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+        targets[1].blend_state.enable_blend = true;
+        targets[1].blend_state.color_blend_op = SDL_GPU_BLENDOP_MAX;
+        targets[1].blend_state.alpha_blend_op = SDL_GPU_BLENDOP_MAX;
+        targets[1].blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        targets[1].blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        targets[1].blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        targets[1].blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        targets[1].blend_state.color_write_mask = 0x01u;
+        const bool reactive = form == (uint32_t)BTBH_GPU_SCENE_DISTORTION_COMPOSITE_REACTIVE;
+        const bool views = form == (uint32_t)BTBH_GPU_SCENE_DISTORTION_COMPOSITE_VIEWS;
+        (void)snprintf(
+            filename,
+            sizeof(filename),
+            reactive ? "production_hdr_composite_distort_reactive.frag.%s" : "production_hdr_composite_distort.frag.%s",
+            extension
+        );
+        const char *composite_vertex_path = post_vertex_shader_path;
+        if (views) {
+            char view_name[128];
+            (void)snprintf(view_name, sizeof(view_name), "production_post_view.vert.%s", extension);
+            if (!btbh_gpu_scene_sibling_path(post_vertex_shader_path, view_name, vertex_path)) {
+                btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "The distortion's shader path is too long");
+                return false;
+            }
+            composite_vertex_path = vertex_path;
+        }
+        if (!btbh_gpu_scene_sibling_path(post_fragment_shader_path, filename, fragment_path)) {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "The distortion's shader path is too long");
+            return false;
+        }
+        if (!btbh_gpu_scene_create_distortion_pipeline(window, composite_vertex_path, views ? 1u : 0u, fragment_path,
+                4u, 1u, shader_format, targets, reactive ? 2u : 1u, &runtime->distortion_composite_pipelines[form],
+                report)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* RFC 0018: each view's records of the window's taken sources (btbh_distortion_pack: culled by the view's frustum and
+   by its half of the frame, clamped, at this render size), into the runtime's; the sources drawn in any view. The halves
+   are the planes the passes clip to (btbh_gpu_scene_view_planes at the frame's drawable size: the window's frame). */
+static uint32_t btbh_gpu_scene_pack_distortion(
+    const BTBHGPUWindow *window,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneViewFrame *views,
+    uint32_t view_count,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
+    uint32_t render_width,
+    uint32_t render_height
+) {
+    uint32_t drawn = 0u;
+    float clip_planes[BTBH_GPU_SCENE_MAX_VIEWS][4];
+    SDL_zeroa(clip_planes);
+    for (uint32_t view = 0u; view < view_count; ++view) {
+        float uv_plane[4];
+        btbh_gpu_scene_view_planes(views[view].view->clip, drawable_width, drawable_height, render_width,
+            render_height, clip_planes[view], uv_plane);
+    }
+    SDL_zeroa(runtime->distortion_record_counts);
+    for (uint32_t index = 0u; index < window->distortion_source_count; ++index) {
+        bool any = false;
+        for (uint32_t view = 0u; view < view_count; ++view) {
+            BTBHDistortionRecord *record =
+                &runtime->distortion_records[view][runtime->distortion_record_counts[view]];
+            if (btbh_distortion_pack(&window->distortion_sources[index], views[view].view_projection,
+                    clip_planes[view], views[view].view->right, views[view].view->up, render_width, render_height,
+                    window->distortion_time, record)) {
+                runtime->distortion_record_counts[view] += 1u;
+                any = true;
+            }
+        }
+        drawn += any ? 1u : 0u;
+    }
+    return drawn;
+}
+
+/* RFC 0018: the source pass, one render pass that clears the field and draws each view's records, a draw per
+   BTBH_DISTORTION_SOURCES_PER_DRAW of them, clipped to its half. False when the pass could not begin. */
+static bool btbh_gpu_scene_encode_distortion_sources(
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUSceneRuntime *runtime,
+    const BTBHGPUSceneViewFrame *views,
+    uint32_t view_count
+) {
+    SDL_InsertGPUDebugLabel(command, "BTBH Distortion Sources");
+    SDL_GPUColorTargetInfo target;
+    SDL_zero(target);
+    target.texture = runtime->distortion_field;
+    target.load_op = SDL_GPU_LOADOP_CLEAR;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &target, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    SDL_BindGPUGraphicsPipeline(pass, runtime->distortion_source_pipeline);
+    BTBHGPUSceneDistortionPassUniforms block;
+    for (uint32_t view = 0u; view < view_count; ++view) {
+        const uint32_t count = runtime->distortion_record_counts[view];
+        for (uint32_t first = 0u; first < count; first += BTBH_DISTORTION_SOURCES_PER_DRAW) {
+            const uint32_t draw_count = SDL_min(count - first, BTBH_DISTORTION_SOURCES_PER_DRAW);
+            SDL_zero(block);
+            (void)memcpy(block.view_projection, views[view].view_projection, sizeof(block.view_projection));
+            (void)memcpy(block.clip_plane, views[view].clip_plane, sizeof(block.clip_plane));
+            (void)memcpy(block.sources, &runtime->distortion_records[view][first],
+                sizeof(BTBHDistortionRecord) * draw_count);
+            SDL_PushGPUVertexUniformData(command, 0u, &block, (uint32_t)sizeof(block));
+            SDL_DrawGPUPrimitives(pass, 6u, draw_count, 0u, 0u);
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+/* RFC 0018: btbh_gpu_scene_render_fullscreen with FSR 3's reactive mask as a second target, loaded (the transparent
+   pass's values) and blended by the pipeline (max). */
+static bool btbh_gpu_scene_render_fullscreen_reactive(
+    SDL_GPUCommandBuffer *command,
+    const char *debug_label,
+    SDL_GPUGraphicsPipeline *pipeline,
+    SDL_GPUTexture *target,
+    SDL_GPUTexture *reactive,
+    const void *uniforms,
+    uint32_t uniform_size,
+    SDL_GPUTextureSamplerBinding *samplers,
+    uint32_t sampler_count,
+    const SDL_Rect *scissor
+) {
+    SDL_InsertGPUDebugLabel(command, debug_label);
+    SDL_GPUColorTargetInfo color_targets[2];
+    SDL_zeroa(color_targets);
+    color_targets[0].texture = target;
+    color_targets[0].clear_color.a = 1.0f;
+    color_targets[0].load_op = SDL_GPU_LOADOP_CLEAR;
+    color_targets[0].store_op = SDL_GPU_STOREOP_STORE;
+    color_targets[1].texture = reactive;
+    color_targets[1].load_op = SDL_GPU_LOADOP_LOAD;
+    color_targets[1].store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, color_targets, 2u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    if (scissor != NULL) {
+        SDL_SetGPUScissor(pass, scissor);
+    }
+    SDL_PushGPUFragmentUniformData(command, 0u, uniforms, uniform_size);
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    SDL_BindGPUFragmentSamplers(pass, 0u, samplers, sampler_count);
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
 static bool btbh_gpu_scene_ensure_frame_targets(
     BTBHGPUWindow *window,
     const BTBHGPUFrameContext *frame_context,
@@ -10854,6 +11457,18 @@ static bool btbh_gpu_scene_ensure_frame_targets(
         (!setup->refraction_active ||
          btbh_gpu_scene_ensure_refraction_target(
              window,
+             render_width,
+             render_height,
+             report
+         )) &&
+        /* RFC 0018: the offset field and the distortion's pipelines. */
+        (!setup->distortion_active ||
+         btbh_gpu_scene_ensure_distortion(
+             window,
+             setup,
+             post_vertex_shader_path,
+             post_fragment_shader_path,
+             shader_format,
              render_width,
              render_height,
              report
@@ -11093,6 +11708,12 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         );
         return report->result;
     }
+    /* RFC 0018: the window's frame takes the distortion sources set for it, drawn or not; a render into a target leaves
+       them for the frame. */
+    const bool distortion_taken = output_width == 0u && window->distortion_pending;
+    if (output_width == 0u) {
+        window->distortion_pending = false;
+    }
     window->radiance_cascades_telemetry_enabled =
         post->radiance_cascades.tier == BTBH_GPU_SCENE_RC_AUTO && !views_clipped;
     BTBHGPUSceneFrameSetup setup;
@@ -11301,6 +11922,17 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             (void)memcpy(frame->previous_view_projection, matrix, sizeof(frame->previous_view_projection));
         }
     }
+    /* RFC 0018: each view's distortion records (culled by its frustum, clamped), where the post asks for them; the frame
+       runs the distortion only when it draws a source. */
+    uint32_t distortion_drawn = 0u;
+    if (setup.distortion_active) {
+        distortion_drawn = distortion_taken
+            ? btbh_gpu_scene_pack_distortion(window, runtime, view_frames, view_count, frame_context->drawable_width,
+                frame_context->drawable_height, render_width, render_height)
+            : 0u;
+        setup.distortion_active = distortion_drawn > 0u;
+    }
+    const bool distortion_active = setup.distortion_active;
 
     uint32_t *bone_offsets = NULL;
     uint32_t prepared_geometry_count = 0u;
@@ -11383,6 +12015,20 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             shader_format,
             setup.particle_shadow_active,
             setup.particle_shadow,
+            setup.shadows_active,
+            setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
+        ) ||
+        !btbh_gpu_scene_check_cover_shaders(
+            runtime,
+            setup.cover,
+            batches,
+            batch_count,
+            false,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
             setup.shadows_active,
             setup.omni_shadows_active,
             setup.radiance_cascades_active,
@@ -11471,6 +12117,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             bone_offsets,
             prepared_geometry_count,
             opaque_sorted ? runtime->opaque_geometry_base : NULL,
+            false,
             report
         );
     btbh_gpu_lazy_creation_prewarm_step(false);
@@ -12688,6 +13335,9 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
            stays for the command buffer's later draws, and only table batches read the slot, so a run of batches
            sharing a table pushes its 400 bytes once. */
         const BTBHGPUSceneWorldDetailTable *pushed_table = NULL;
+        /* RFC 0020: whether fragment uniform slot 3 holds the cover's block in this pass (pushed before the first
+           covered batch; only covered batches read it). */
+        bool cover_pushed = false;
         /* RFC 0012: the height lift whose block the vertex uniform slot 1 holds in this pass, pushed as the table's
            is: once per run of lifted batches sharing it. */
         const BTBHGPUSceneHeightLift *pushed_lift = NULL;
@@ -12808,7 +13458,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 runs_enabled &&
                 !animated &&
                 run_batch != NULL &&
-                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch));
+                (run_batch == batch || btbh_gpu_scene_batch_continues_run(run_batch, batch, setup.cover));
             /* BTBH_GPU_SCENE_RUNS=verify: a draw that continues the run rebuilds its state and compares it. */
             const bool run_check = continues_run && run_verify != NULL;
             if (continues_run) {
@@ -12988,7 +13638,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         omni_shadows_active,
                         animated,
                         batch,
-                        stencil_variant
+                        stencil_variant,
+                        btbh_gpu_scene_batch_cover_variant(setup.cover, batch)
                     );
                 if (run_check) {
                     btbh_gpu_scene_run_verify_pipeline(run_verify, model_pipeline, bound_model_pipeline);
@@ -13178,6 +13829,24 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                         extension_uniforms.world_detail_controls,
                         extension_uniforms.world_detail_mode
                     );
+                    /* RFC 0020: the batch's cover in world_detail_mode.z (its layer when that layer is on, else 0:
+                       the shader runs none of the cover), and the window's layers in fragment slot 3 before the pass's
+                       first covered batch. (A covered batch never takes the fast unlit shader: refused.) */
+                    extension_uniforms.world_detail_mode[2] =
+                        btbh_cover_batch_mode(setup.cover, batch, transparent_phase);
+                    if (extension_uniforms.world_detail_mode[2] != 0u && !cover_pushed) {
+                        btbh_gpu_scene_run_push_fragment_uniforms(
+                            run_verify,
+                            command,
+                            3u,
+                            &setup.cover_uniforms,
+                            (uint32_t)sizeof(setup.cover_uniforms),
+                            &btbh_gpu_scene_run_cover_layout
+                        );
+                        if (!run_check) {
+                            cover_pushed = true;
+                        }
+                    }
                     if (!batch_fast_unlit) {
                         btbh_gpu_scene_world_detail_samplers(runtime, batch, &samplers[bound_sampler_count]);
                         bound_sampler_count += 3u;
@@ -13567,7 +14236,18 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     bool fullscreen_ok = true;
     /* (The cost log's pass frames take a step a pass, or a few (bloom's levels, SMAA's three), from here to FSR 1 or
        Lanczos: btbh_gpu_cost_step, which may replace `command`.) */
-    if (fullscreen_ok && hdr_composite_active) {
+    if (distortion_active) {
+        /* RFC 0018: the sources into the offset field, which the composite then reads (a frame with sources runs the
+           composite, whatever fog, bloom and the vignette say). */
+        fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_DISTORTION, NULL) &&
+            btbh_gpu_scene_encode_distortion_sources(command, runtime, view_frames, view_count);
+        report->distortion_sources_drawn = fullscreen_ok ? (uint8_t)SDL_min(distortion_drawn, 255u) : 0u;
+        if (runtime->distortion_debug_view == 0) {
+            const char *debug = SDL_getenv("BTBH_DEBUG_DISTORTION");
+            runtime->distortion_debug_view = debug != NULL && debug[0] == '1' ? 2 : 1;
+        }
+    }
+    if (fullscreen_ok && (hdr_composite_active || distortion_active)) {
         SDL_GPUTexture *bloom_texture = NULL;
         if (bloom_active) {
             fullscreen_ok = btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_BLOOM, NULL);
@@ -13683,7 +14363,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             (float)render_width / (float)render_height;
         composite_uniforms.vignette_parameters[3] =
             post->vignette_enabled != 0u ? 1.0f : 0.0f;
-        SDL_GPUTextureSamplerBinding composite_samplers[3];
+        SDL_GPUTextureSamplerBinding composite_samplers[4];
         SDL_zeroa(composite_samplers);
         composite_samplers[0].texture = post_input;
         composite_samplers[0].sampler = runtime->scene_color_sampler;
@@ -13695,7 +14375,76 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
         composite_samplers[2].sampler = runtime->scene_color_sampler;
         fullscreen_ok = fullscreen_ok && btbh_gpu_cost_step(&command, BTBH_GPU_COST_STEP_COMPOSITE, NULL);
         /* The LUT stage always writes post_ping, so the composite uses pong. */
-        if (fullscreen_ok && views_clipped) {
+        if (fullscreen_ok && distortion_active) {
+            /* RFC 0018: the scene displaced by the field (production_hdr_composite_distort.frag): the sum's clamp at
+               64 pixels of a 1080-line frame; under FSR 3 the reactive mask too; each view's half for scene views. */
+            composite_samplers[3].texture = runtime->distortion_field;
+            composite_samplers[3].sampler = runtime->scene_color_sampler;
+            BTBHGPUSceneDistortionCompositeUniforms distortion_uniforms;
+            SDL_zero(distortion_uniforms);
+            distortion_uniforms.composite = composite_uniforms;
+            distortion_uniforms.distortion_frame[0] = 1.0f / (float)render_width;
+            distortion_uniforms.distortion_frame[1] = 1.0f / (float)render_height;
+            distortion_uniforms.distortion_frame[2] =
+                BTBH_DISTORTION_SUM_LIMIT * (float)render_height / BTBH_DISTORTION_REFERENCE_LINES;
+            distortion_uniforms.distortion_frame[3] = temporal_active ? post->temporal_reactive_scale : 0.0f;
+            distortion_uniforms.distortion_debug[0] = runtime->distortion_debug_view == 2 ? 1.0f : 0.0f;
+            if (views_clipped) {
+                BTBHGPUSceneDistortionCompositeUniforms view_distortion_uniforms[BTBH_GPU_SCENE_MAX_VIEWS];
+                for (uint32_t view_index = 0u; view_index < view_count; ++view_index) {
+                    view_distortion_uniforms[view_index] = distortion_uniforms;
+                    (void)memcpy(
+                        view_distortion_uniforms[view_index].composite.inverse_view_projection,
+                        view_frames[view_index].inverse_view_projection,
+                        sizeof(view_distortion_uniforms[view_index].composite.inverse_view_projection)
+                    );
+                    (void)memcpy(
+                        view_distortion_uniforms[view_index].distortion_view_plane,
+                        view_frames[view_index].uv_plane,
+                        sizeof(view_distortion_uniforms[view_index].distortion_view_plane)
+                    );
+                }
+                fullscreen_ok = btbh_gpu_scene_render_fullscreen_views(
+                    command,
+                    "BTBH HDR Composite Views (distortion)",
+                    runtime->distortion_composite_pipelines[BTBH_GPU_SCENE_DISTORTION_COMPOSITE_VIEWS],
+                    runtime->post_pong_texture,
+                    false,
+                    view_distortion_uniforms,
+                    (uint32_t)sizeof(view_distortion_uniforms[0]),
+                    sizeof(view_distortion_uniforms[0]),
+                    composite_samplers,
+                    4u,
+                    view_frames,
+                    view_count
+                );
+            } else if (temporal_active) {
+                fullscreen_ok = btbh_gpu_scene_render_fullscreen_reactive(
+                    command,
+                    "BTBH HDR Composite (distortion, reactive)",
+                    runtime->distortion_composite_pipelines[BTBH_GPU_SCENE_DISTORTION_COMPOSITE_REACTIVE],
+                    runtime->post_pong_texture,
+                    runtime->reactive_texture,
+                    &distortion_uniforms,
+                    (uint32_t)sizeof(distortion_uniforms),
+                    composite_samplers,
+                    4u,
+                    render_scissor
+                );
+            } else {
+                fullscreen_ok = btbh_gpu_scene_render_fullscreen(
+                    command,
+                    "BTBH HDR Composite (distortion)",
+                    runtime->distortion_composite_pipelines[BTBH_GPU_SCENE_DISTORTION_COMPOSITE_PLAIN],
+                    runtime->post_pong_texture,
+                    &distortion_uniforms,
+                    (uint32_t)sizeof(distortion_uniforms),
+                    composite_samplers,
+                    4u,
+                    render_scissor
+                );
+            }
+        } else if (fullscreen_ok && views_clipped) {
             /* RFC 0014: each view's fog (its distance and the world-edge fade) at its own depth, from its own camera;
                bloom and the vignette are the frame's. */
             BTBHGPUSceneCompositeUniforms view_composite_uniforms[BTBH_GPU_SCENE_MAX_VIEWS];
@@ -14652,6 +15401,20 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             setup.radiance_cascades_active,
             report
         ) ||
+        !btbh_gpu_scene_check_cover_shaders(
+            window->scene_runtime,
+            setup.cover,
+            batches,
+            batch_count,
+            true,
+            fragment_shader_path,
+            unshadowed_fragment_shader_path,
+            shader_format,
+            setup.shadows_active,
+            setup.omni_shadows_active,
+            setup.radiance_cascades_active,
+            report
+        ) ||
         !btbh_gpu_scene_ensure_model_pipelines(
             window,
             vertex_shader_path,
@@ -14665,6 +15428,7 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_internal(
             bone_offsets,
             prepared_geometry_count,
             NULL,
+            true,
             report
         )) {
         free(bone_offsets);
@@ -14822,6 +15586,125 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
 }
 
 /* RFC 0014 (since 0.16.0): the present with views (btbh_gpu.h). */
+BTBHGPUResult btbh_gpu_window_scene_set_distortion(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneDistortionSource *sources,
+    uint32_t source_count,
+    float time_seconds,
+    BTBHGPUSceneReport *report
+) {
+    char message[256];
+    message[0] = '\0';
+    if (window == NULL) {
+        (void)snprintf(message, sizeof(message), "Distortion: the window is NULL");
+    } else if (sources == NULL && source_count > 0u) {
+        (void)snprintf(message, sizeof(message), "Distortion: sources is NULL with source_count %u", source_count);
+    } else if (source_count > BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES) {
+        (void)snprintf(
+            message,
+            sizeof(message),
+            "Distortion: source_count %u is above BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES (%u)",
+            source_count,
+            BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES
+        );
+    } else if (!isfinite(time_seconds)) {
+        (void)snprintf(message, sizeof(message), "Distortion: time_seconds is not finite");
+    } else {
+        for (uint32_t index = 0u; index < source_count; ++index) {
+            if (!btbh_distortion_source_check(&sources[index], index, message, sizeof(message))) {
+                break;
+            }
+        }
+    }
+    if (message[0] != '\0') {
+        if (window != NULL) {
+            window->distortion_pending = false;
+            window->distortion_source_count = 0u;
+        }
+        if (report != NULL) {
+            report->result = BTBH_GPU_INVALID_ARGUMENT;
+            (void)snprintf(report->message, sizeof(report->message), "%s", message);
+        }
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (source_count > 0u) {
+        (void)memcpy(window->distortion_sources, sources, sizeof(*sources) * source_count);
+    }
+    window->distortion_source_count = source_count;
+    window->distortion_time = (double)time_seconds;
+    window->distortion_pending = source_count > 0u;
+    if (report != NULL) {
+        report->result = BTBH_GPU_OK;
+        report->message[0] = '\0';
+    }
+    return BTBH_GPU_OK;
+}
+
+/* RFC 0020 (since 0.18.0): the cover (btbh_gpu.h). */
+BTBHGPUResult btbh_gpu_window_scene_set_cover(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneCover *cover,
+    BTBHGPUSceneReport *report
+) {
+    char message[256];
+    message[0] = '\0';
+    if (window == NULL) {
+        (void)snprintf(message, sizeof(message), "Cover: the window is NULL");
+    } else {
+        (void)btbh_cover_check(cover, message, sizeof(message));
+    }
+    if (message[0] != '\0') {
+        if (report != NULL) {
+            report->result = BTBH_GPU_INVALID_ARGUMENT;
+            (void)snprintf(report->message, sizeof(report->message), "%s", message);
+        }
+        return BTBH_GPU_INVALID_ARGUMENT;
+    }
+    if (cover != NULL) {
+        window->cover = *cover;
+    } else {
+        SDL_zero(window->cover);
+    }
+    window->cover_set = cover != NULL;
+    if (report != NULL) {
+        report->result = BTBH_GPU_OK;
+        report->message[0] = '\0';
+    }
+    return BTBH_GPU_OK;
+}
+
+void btbh_gpu_window_scene_material_targets(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **ambient,
+    SDL_GPUTexture **ambient_specular,
+    SDL_GPUTexture **normal,
+    SDL_GPUTextureFormat *color_format,
+    uint32_t *width,
+    uint32_t *height
+) {
+    const BTBHGPUSceneRuntime *runtime = window != NULL ? window->scene_runtime : NULL;
+    *color_format = runtime != NULL ? runtime->scene_color_format : SDL_GPU_TEXTUREFORMAT_INVALID;
+    *ambient = runtime != NULL ? runtime->ambient_texture : NULL;
+    *ambient_specular = runtime != NULL ? runtime->ambient_specular_texture : NULL;
+    *normal = runtime != NULL ? runtime->normal_texture : NULL;
+    *width = runtime != NULL ? runtime->scene_color_width : 0u;
+    *height = runtime != NULL ? runtime->scene_color_height : 0u;
+}
+
+void btbh_gpu_window_scene_distortion_textures(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **field,
+    uint32_t *field_width,
+    uint32_t *field_height,
+    SDL_GPUTexture **reactive
+) {
+    const BTBHGPUSceneRuntime *runtime = window != NULL ? window->scene_runtime : NULL;
+    *field = runtime != NULL ? runtime->distortion_field : NULL;
+    *field_width = runtime != NULL ? runtime->distortion_field_width : 0u;
+    *field_height = runtime != NULL ? runtime->distortion_field_height : 0u;
+    *reactive = runtime != NULL ? runtime->reactive_texture : NULL;
+}
+
 BTBHGPUResult btbh_gpu_window_scene_present_views(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -16445,6 +17328,18 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 window->scene_runtime->refraction_texture
             );
         }
+        /* RFC 0018: the offset field and the distortion's pipelines. */
+        if (window->scene_runtime->distortion_field != NULL) {
+            SDL_ReleaseGPUTexture(device, window->scene_runtime->distortion_field);
+        }
+        if (window->scene_runtime->distortion_source_pipeline != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, window->scene_runtime->distortion_source_pipeline);
+        }
+        btbh_gpu_scene_release_pipeline_array(
+            device,
+            window->scene_runtime->distortion_composite_pipelines,
+            BTBH_GPU_SCENE_DISTORTION_COMPOSITE_COUNT
+        );
         if (window->scene_runtime->post_ping_texture != NULL) {
             SDL_ReleaseGPUTexture(
                 device,
@@ -16780,6 +17675,17 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
                 }
             }
         }
+        if (window->scene_runtime->cover_pipelines != NULL) {
+            for (uint32_t kind = 0u; kind < 5u; ++kind) {
+                for (uint32_t shadow_set = 0u; shadow_set < 3u; ++shadow_set) {
+                    btbh_gpu_scene_release_pipeline_array(
+                        device,
+                        &window->scene_runtime->cover_pipelines->sets[kind][shadow_set][0][0][0][0][0][0][0],
+                        pipeline_count
+                    );
+                }
+            }
+        }
         btbh_gpu_scene_release_pipeline_array(
             device,
             &window->scene_runtime->lit_particle_pipelines[0][0][0][0][0],
@@ -16788,6 +17694,8 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
     }
     free(window->scene_runtime->lift_pipelines);
     window->scene_runtime->lift_pipelines = NULL;
+    free(window->scene_runtime->cover_pipelines);
+    window->scene_runtime->cover_pipelines = NULL;
     if (window->scene_runtime->fallback_texture != NULL) {
         btbh_gpu_texture_destroy(
             window->scene_runtime->fallback_texture

@@ -1,7 +1,9 @@
 # RFC 0020: A cover by facing (snow, sand, mud) on the batches that ask, and still ice on the water
 
 - **Status:** Accepted on 2026-11-28: v2 answered all 17 questions, each as recommended (see "Decisions"). Cover
-  phase 1 and the still ice ship in one release after the distortion pass (RFC 0018), before volumetrics phase 1
+  phase 1 and the still ice ship in one release after the distortion pass (RFC 0018), before volumetrics phase 1.
+  Both implemented on `feature/0.18.0-cover-ice` (from `feature/0.18.0-distortion`) for 0.18.0, not yet released, in
+  shader variants by decision 14; where it departs from this text, see "Phase 1 as built"
 - **Requested by:** Be The Bullet Hell v2, through its biomes and effects agents after the owner's seventeenth play-test
   (2026-11-28). The biomes agent's renderer requests 1 and 2 (`v2/docs/seventeenth-playtest-2026-11-28.md`, "Biomes",
   on branch `p23-biomes`): "A cover by facing: snow or sand on every up-facing surface of the kit (ledges, sills,
@@ -756,3 +758,137 @@ v2 took the recommendation on all 17 questions:
 16. **Cover phase 1 and the ice in one release,** after distortion and before volumetrics phase 1.
 17. **Items 3-5:** v2 does 5 now (one decal batch with `INSTANCE_UV_RECT` and the height lift), tries 4 now (lit
     see-through normal-mapped cracks), and draws its rain strips as lit particles until 3.
+
+## Phase 1 as built (feature/0.18.0-cover-ice)
+
+Where the implementation departs from the text above, and why. Cover phase 1 and still ice are built together on
+`feature/0.18.0-cover-ice` (from `feature/0.18.0-distortion`, with its review's fixes merged).
+
+1. **Shader variants: question 14's fallback, taken.** As first built, with the branch in the six scene fragment
+   shaders, the cover off cost the main pass +0.0014 ms at the Deck preset (paired by round, 10th to 90th percentile
+   -0.017 to +0.051) and +0.014 ms at 4K High (-0.044 to +0.126); whole frames 1.321 to 1.320 ms and 5.248 to 5.270
+   ms. That is no clear cost, but not a provable zero either, and the upper percentiles reached +0.05 and +0.13 ms. By
+   decision 14 the cover and the ice moved behind `#if BTBH_COVER` (0 by default) into six new files:
+   `production_model_cover.frag` and its `_2d_shadows`, `_unshadowed`, `_rc`, `_rc_2d_shadows` and `_rc_unshadowed`
+   siblings. Each is a few lines that set `BTBH_COVER 1` and include `production_model.frag.hlsl`.
+   - **Without the cover, the shaders are the old ones to the byte.** All 90 shaders built before compile to
+     0.18.0-distortion's SPIR-V byte for byte, the six scene shaders included, and those keep three uniform buffers.
+     The cover variants have four. 96 shaders.
+   - **Which shader draws which batch:** a batch whose bit's layer is on, or a still-ice batch, draws with the cover
+     variant of the shader the frame's shadows and cascades pick. Every other batch draws with the shaders and
+     pipelines it had, a batch whose layer is off included. So "a layer at amount 0 changes nothing" holds by
+     construction.
+   - **Pipelines:** the cover variants have their own sets (`BTBHGPUSceneCoverPipelines`: static, skinned, with a
+     table, lifted, lifted with a table, by shadow set; never fast unlit). The first batch that draws one allocates
+     them. So the "Pipelines added: 0" row becomes: none for a host that covers nothing, and one more for each state a
+     covered or icy batch draws in.
+   - **Prewarm:** `btbh_gpu_window_scene_prewarm` makes both pipelines for a batch with a cover bit (its layer may be on
+     or off by the frame), and only the cover variant's for still ice. So a host that turns snow on mid-stage
+     prewarms with the bits set. The lazy creation log names a cover pipeline a prewarm missed (marked
+     `prewarm_covers` 1).
+   - **The shader check** reads the cover variant the frame draws with, not the host's fragment shader. A covered or
+     still-ice batch whose cover shader is missing (shaders from before 0.18.0) or doesn't name `cover_color_roughness`
+     fails the present with `BTBH_GPU_INVALID_ARGUMENT`, naming the file. A prewarm also checks batches whose bit's
+     layer is off.
+   - **Measured with the variants** (item 9): bits on every kit piece and the ground with the cover off cost the main
+     pass -0.002 ms at the Deck preset (-0.023 to +0.015) and -0.003 ms at 4K High (-0.040 to +0.031) against
+     0.18.0-distortion's shaders. A batch without a bit draws with the same bytes.
+2. **A face past the cover's reach does no cover work.** The first build cost more than the estimate: +0.43 ms on the
+   main pass at 4K High with noise and relief and +0.31 with `COARSE`, against about 0.10 and 0.05 estimated; +0.086
+   and +0.062 at the Deck preset. The shader worked out the noise on every pixel of a covered batch, walls included.
+   Now a fragment whose slope is at or past amount x slope plus the noise's reach returns before the noise, because c
+   is 0 there whatever the noise. (`BTBH_DEBUG_COVER` draws such a fragment black, as c 0.) The CPU reference does
+   the same, and the native test checks that the surface comes back unchanged past the reach. That cut the 4K cost by
+   about 0.1 ms; at the Deck preset it moved nothing measurable (item 9).
+3. **The noise's reach grows with the amount** up to 0.25 (`edge_noise_degrees x min(1, 4 x amount)`). Without that,
+   a thin cover (amount 0.01) still laid patches up to the noise's reach, while amount 0 lays nothing.
+4. **No table-entry flags yet.** The text put them in phase 1's header, refused until phase 2. They aren't in it:
+   phase 2 adds them, additively. Bit 2 of `world_detail_mode.z` says the batch is see-through (its alpha rises to c),
+   not the table's choice; phase 2 takes another bit.
+5. **Still ice:**
+   - **Its cracks' anti-aliasing:** a crack is drawn at `max(width, half a pixel's footprint)` and loses strength in
+     step (`width / that`), so a crack thinner than a pixel keeps its share of the pixel and fades evenly. The text
+     multiplied by `saturate(2 x width / footprint)` at the true width. The bevel follows the same rule. The craze
+     fades out as a pixel grows from its width to twice it, and is skipped past that (item 11).
+   - **Its border distance** is the distance to the nearest seed's cell's border: the nearest seed over the 3 x 3
+     cells round the point, then each border with the seeds of the 4 x 4 cells from its cell toward the point (24
+     hashes a grid, not 9; item 11). The text's "F2 - F1 over two" (the border with the second-nearest seed only)
+     notches the cracks near corners where three plates meet.
+   - **Its roughness is its own:** the batch's roughness factor doesn't scale it.
+   - **Its normal** is a surface gradient added with the details' gradients, so it needs no tangent frame.
+   - **Its code** is in `production_cover.hlsli` (there is no `production_ice.hlsli`), and its CPU reference is in
+     `btbh_gpu_cover.h`.
+6. **Where it lives:** the setter and the window's setting are in `scene.c`, not `window.c`. `scene.c` sets
+   `world_detail_mode.z` from `btbh_cover_batch_mode`; `btbh_gpu_world_detail.h` is unchanged.
+7. **The identity runs' third way** is `BTBH_SMOKE_COVER=1` in the smokes' presents (`Tests/btbh_gpu_smoke_present.h`):
+   a cover whose layers lay nothing (amount 0, every other field set) and `COVER_0` on every batch that may take it.
+8. **The smoke** (`btbh_gpu_scene_cover_smoke`):
+   - **What it draws:** eight facets from 0 to 120 degrees under one camera. It checks each pattern, `COARSE`, the
+     second layer, `normal_influence`, noise finer than a pixel (12 and 60 cells a unit) and the debug view, each pixel
+     against the CPU reference. It also checks the three shadow sets (unlit facets through each cover variant), the
+     targets the screen-space passes read, the cascades' albedo target, SSR under rough snow, see-through batches, the
+     ice unlit and lit, runs (a bit whose layer is off among batches without one too) and the run verifier, views, a
+     render into a target, prewarm, the refusals, and old and missing cover shaders.
+   - **Accuracy:** the tolerance is 3 levels in 99.5 % of the pixels and 8 everywhere. The patterns and the ice land
+     within 1 level everywhere, the debug view within 3. (Before item 11's border distance, 2 of the ice's 38,354
+     pixels were off by up to 20 levels: the corner notches.)
+   - **Not covered:** skinned, lifted and table batches under the cover (their cover pipelines are picked as the plain
+     ones are), and the Deck-size camera pan for the cracks' aliasing.
+9. **The cost, measured.** The frame bench (`Tests/btbh_gpu_frame_bench.c`) gained the modes `cover-off` (a river
+   across the city, v2's water material), `cover-bits` (`COVER_0` on every kit piece and the ground, no layer set),
+   `cover-full` (that and a snow layer at v2's starting values: amount 0.8, slope 55, edge 6, noise 14 degrees at 1.6
+   cells a unit, bump 0.4), `cover-coarse` (the same, `COARSE`) and `cover-ice` (the river as still ice, frost 0.35).
+   The runs below are on this PC's RTX 3070 Ti under the machine's perf lock: five windows interleaved over 80 rounds
+   of 8 frames, at 10:39 to 10:40, on the code with item 11's fixes. They give medians with the 10th and 90th
+   percentiles, and each mode's main pass paired by round against `cover-off` on 0.18.0-distortion's shaders.
+
+   | | Deck preset (960 x 600 to 1280 x 800, FSR 1) | 4K High (2560 x 1440 to 3840 x 2160, FSR 3) |
+   | --- | --- | --- |
+   | Frame, cover off (0.18.0-distortion's shaders) | 1.294 ms (1.275-1.325) | 5.243 (5.179-5.313) |
+   | Frame, bits, cover off / full / `COARSE` / ice | 1.294 / 1.391 / 1.361 / 1.302 | 5.248 / 5.621 / 5.495 / 5.275 |
+   | Main pass against cover off: bits | -0.002 ms (-0.023..+0.015) | -0.003 (-0.040..+0.031) |
+   | Main pass: full | +0.087 (+0.057..+0.140) | +0.325 (+0.284..+0.417) |
+   | Main pass: `COARSE` | +0.057 (+0.037..+0.120) | +0.225 (+0.190..+0.310) |
+   | Main pass: ice on the river | +0.006 (-0.013..+0.024) | +0.023 (-0.013..+0.069) |
+
+   So with nothing covered, or the bits set and the cover off, the cover costs nothing: the bytes are the same. With
+   every roof, ledge and street of the bench's city covered, the full cover costs 0.09 ms at the Deck preset and 0.33
+   ms at 4K High; `COARSE` 0.06 and 0.23. That is about 7 % of the Deck preset's 1.3 ms frame and 4 % of v2's 7.5-8.2
+   ms 4K frame, five times the estimate at the Deck preset (0.016) and three to five times at 4K (0.10 and 0.05). The
+   ice costs about 0.01-0.02 ms, as estimated; item 11's second border pass moved it by less than the noise.
+   - **Earlier runs, same bench:** the first build (the branch, no early-out; 09:21 to 09:23) measured the main pass at
+     +0.086 / +0.062 ms (Deck, full / `COARSE`) and +0.432 / +0.309 (4K), and the ice at +0.003 and +0.027. A run at
+     09:54, before item 11, gave the same 4K numbers (+0.330 / +0.231). Its Deck run is not used: its cover-off
+     window's main pass was 0.935 ms, against 0.845-0.862 in the runs before and after.
+   - **Not usable:** three runs with a sixth window (`cover-off` on this branch's shaders, the same bytes). Partway
+     through each, some windows' main pass slowed by up to half, at both sizes; at 4K, six windows' targets come near
+     the card's 8 GB. The five-window runs are steady.
+10. **What doesn't change:** the cost log's groups and steps (the cover and the ice are inside the opaque and
+    transparent passes), and the scene shaders' bytes for every batch that takes neither.
+11. **The review's fixes** (an independent review of `784959e5`):
+    - **The craze no longer stops at a hard line with distance.** It was skipped once its width fell under half a
+      pixel, at full strength until then: at 4K over a frozen river in perspective, a moving line, jagged in 2 x 2
+      blocks. It now fades out as a pixel grows from its width to twice it. The native test sweeps the footprint over
+      that range at 3,000 points: the largest step of 240 is 0.006 of the lift (it was 0.6).
+    - **The cracks no longer notch near plate corners.** The border distance (item 5) is checked against every border
+      of the nearest seed with the seeds of the 7 x 7 cells round it, at 50,631 points within 0.3 cells of one: off by
+      6e-8 at most. The text's way was off at 1,269 of 40,000 random points, all within 0.15 cells of a border, by
+      up to 0.81 cells.
+    - **The noise fades to the coverage it averages to, not to the noise-free line.** Coverage isn't linear in N, so
+      fading N to 0 made a thin cover's far level faces solid where the near ones are patchy (amount 0.1, 14 degrees
+      of noise). Each octave's share of N is taken as a box of the same variance (half-widths 52/105 and 26/105: value
+      noise over independent uniform corners, smoothstep interpolated, has a standard deviation of (26/35) / sqrt(12);
+      measured 0.4949 and 0.2472). What the fading takes out widens that box, and c is the pattern's edge averaged
+      over it, in closed form (the ramp's integral at its two ends). The box is kept within 1 - |N|, so the early-out
+      stays exact. Over every footprint the mean coverage stays within 0.025 of the near mean, where the noise-free
+      line was 0.22 off. MUD's puddles fade the same way to their share of the gloss: wet roughness within 0.005 of
+      the near mean, where N = 0 gave 0.06 more. With `edge_noise_degrees` 0 no noise is worked out and MUD has no
+      puddles (it had a uniform 0.26 of them), as the header now says.
+    - **A bit whose layer is off no longer splits runs.** The run key compares the cover bits as the cover the
+      window's layers make of them (`btbh_cover_batch_mode`), not flags2's raw bits 2-3. Such batches draw with the
+      same pipeline and push the same, so they join the runs of batches without a bit. The sun's shadow and the
+      cascades' material sources ignore the bits, which they never read. The smoke draws every other facet with a bit
+      whose layer is off: as many run draws as without the bits, and the same frame to the byte. The run verifier
+      finds no mismatch, and the order test checks the key's cases.
+    - **Metal:** a missing cover variant `.metallib` is refused with the same message as a missing `.spv` (a Metal
+      library still isn't read for the block).

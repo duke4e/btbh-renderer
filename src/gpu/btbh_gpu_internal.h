@@ -327,6 +327,17 @@ struct BTBHGPUWindow {
     /* A shader path a present was given, and its format: the HDR passes' shaders are its siblings. */
     char shader_reference_path[1024];
     BTBHGPUShaderFormat shader_reference_format;
+    /* Screen-space distortion (RFC 0018, since 0.18.0; btbh_gpu_scene.c): the sources
+       btbh_gpu_window_scene_set_distortion set for the next scene present of the window's frame (copied), their count
+       and clock; pending until that present takes them. */
+    BTBHGPUSceneDistortionSource distortion_sources[BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES];
+    uint32_t distortion_source_count;
+    double distortion_time;
+    bool distortion_pending;
+    /* The cover laid by facing (RFC 0020, since 0.18.0; btbh_gpu_scene.c): what btbh_gpu_window_scene_set_cover set
+       (copied), kept until the next call, for every scene present and render into a target; cover_set false: none. */
+    BTBHGPUSceneCover cover;
+    bool cover_set;
 };
 
 struct BTBHGPUTexture {
@@ -569,11 +580,12 @@ bool btbh_gpu_scene_prepare_bones_for_test(
 /* RFC 0011 phase 1b, the run key (btbh_gpu_scene.c): whether `batch` continues the run of `previous`, the batch the
    pass drew before it, so that it binds and pushes nothing but its vertex and index buffers. True when the two are
    equal, byte for byte, in every field but kind, model, custom_mesh, material_slot, first_instance and
-   instance_count (padding isn't compared; a float compares by its bits). The passes also require both geometries to
-   be unskinned. */
+   instance_count (padding isn't compared; a float compares by its bits), but flags2's cover bits, which compare as
+   the cover `cover` makes of them (RFC 0020; NULL: none). The passes also require both geometries to be unskinned. */
 bool btbh_gpu_scene_batch_continues_run(
     const BTBHGPUSceneGeometryBatch *previous,
-    const BTBHGPUSceneGeometryBatch *batch
+    const BTBHGPUSceneGeometryBatch *batch,
+    const BTBHGPUSceneCover *cover
 );
 
 /* BTBHGPUSceneGeometryBatch.detail_parameters as the present accepts them: finite; a pattern in [0, 7], rounded
@@ -635,6 +647,28 @@ void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
    or a kept target view's (1 to BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY). -1 when that runtime doesn't exist. */
 #define BTBH_GPU_SCENE_WINDOW_RUNTIME UINT32_MAX
 int64_t btbh_gpu_window_scene_shadow_render_count(const BTBHGPUWindow *window, uint32_t view_id);
+/* RFC 0018 (screen-space distortion, since 0.18.0), for the smokes: the window's offset field (RGBA16F) and its size,
+   and its reactive mask (R8, FSR 3's); NULL and 0 where the window's runtime hasn't made them. */
+void btbh_gpu_window_scene_distortion_textures(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **field,
+    uint32_t *field_width,
+    uint32_t *field_height,
+    SDL_GPUTexture **reactive
+);
+/* RFC 0020 (the cover, since 0.18.0), for the smokes: the window's opaque targets the screen-space passes read, at the
+   render size: ambient (RGBA, the scene colour's format: the ambient light, or under the radiance cascades the albedo
+   and metalness), ambient_specular (rgb the ambient specular or F0, a the roughness) and normal (RGBA8: the normal,
+   a the occlusion), color_format the first two's; NULL and 0 where the window's runtime hasn't made them. */
+void btbh_gpu_window_scene_material_targets(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **ambient,
+    SDL_GPUTexture **ambient_specular,
+    SDL_GPUTexture **normal,
+    SDL_GPUTextureFormat *color_format,
+    uint32_t *width,
+    uint32_t *height
+);
 /* RFC 0014 (scene views, since 0.16.0): a view's half of the frame (BTBHGPUSceneView.clip, in output_width x
    output_height pixels) widened by a quarter of a render pixel (render_width x render_height), as the planes its passes
    test:
@@ -761,7 +795,10 @@ typedef enum BTBHGPUCostStep {
     BTBH_GPU_COST_STEP_FSR1_EASU = 17,
     BTBH_GPU_COST_STEP_FSR1_RCAS = 18,
     BTBH_GPU_COST_STEP_LANCZOS = 19,
-    BTBH_GPU_COST_STEP_COUNT = 20
+    BTBH_GPU_COST_STEP_DISTORTION = 20,                  /* post: RFC 0018's source pass, before bloom (printed only
+                                                            by the frames that draw it; the displaced composite stays
+                                                            in composite) */
+    BTBH_GPU_COST_STEP_COUNT = 21
 } BTBHGPUCostStep;
 /* In a pass frame: the passes recorded since the current step began go to it (submitted, waited for and the next
    command buffer acquired, as btbh_gpu_cost_split does), and `step` begins; a group's split ends the current step.

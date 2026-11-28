@@ -725,11 +725,33 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      * no motion and is never a source of the radiance cascades' light, with an emission or without (as if it had
      * BTBH_GPU_SCENE_BATCH_NO_RC_SOURCE). */
     BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE = 11,
-    BTBH_GPU_SCENE_SURFACE_COUNT = 12
+    /* Still ice: frozen water (RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its ice biome's rivers).
+     * Plates in a Voronoi pattern over the flat world x and z (before world_curvature; it never repeats), parted by
+     * bevelled cracks that catch the light, each plate tilted a little so its reflection breaks from its neighbours',
+     * a finer craze of hairline cracks, and frost in patches. The colour is the surface's (its albedo texture, colour,
+     * vertex and instance colours); the cracks and the frost lift it. It replaces the normal map and the ORM texture,
+     * as WATER does (occlusion 1, metalness 0); the emission stays. surface_time is unused: the ice is still. Lit or
+     * unlit, opaque or see-through; on anything that moves its pattern slides. Thin cracks fade out where they would
+     * be under a pixel wide instead of aliasing.
+     * surface_parameters0: x a plate's size (world units across; 0 means 1.2), y a crack's width (world units; 0 means
+     *   0.025), z the cracks' and the frost's lift (their albedo is the surface's times 1 + z, each channel at most 1;
+     *   0 means 0.5), w a plate's largest tilt (radians; 0 means 0.035).
+     * surface_parameters1: x the frost, 0..1 (the share of the surface it covers; 0: none), y a frost patch's size
+     *   (world units; 0 means 3), z the clear ice's roughness, 0..1 (0 means 0.06), w the cracks' and the frost's
+     *   roughness, 0..1 (0 means 0.6).
+     * A parameter that isn't finite or is below 0, or one of the 0..1 above outside it, fails the present with
+     * BTBH_GPU_INVALID_ARGUMENT, naming the batch. It draws with the cover variant of the scene fragment shader
+     * (production_model_cover*.frag, beside the host's fragment shader, of this release; see
+     * btbh_gpu_window_scene_set_cover): a present that draws it where that file is missing or doesn't name the cover's
+     * block (cover_color_roughness) fails, naming the file. btbh_gpu_window_scene_prewarm makes its pipelines. */
+    BTBH_GPU_SCENE_SURFACE_ICE = 12,
+    BTBH_GPU_SCENE_SURFACE_COUNT = 13
 } BTBHGPUSceneSurfaceVariant;
 
 /* Defined when BTBH_GPU_SCENE_SURFACE_LIT_PARTICLE exists (RFC 0013, since 0.11.0). */
 #define BTBH_GPU_SCENE_HAS_LIT_PARTICLE 1
+/* Defined when BTBH_GPU_SCENE_SURFACE_ICE exists (RFC 0020, since 0.18.0). */
+#define BTBH_GPU_SCENE_HAS_SURFACE_ICE 1
 
 /* How a batch takes part in the horizon-based ambient occlusion (BTBHGPUScenePost.ssao_enabled 2; the
  * occlusion of ssao_enabled 1 takes every batch fully). */
@@ -1369,7 +1391,21 @@ enum {
      *   already), and on opaque or lit batches.
      * - The batch takes the pipeline it takes under the cascades without KEEP_HBAO: no new one, and
      *   btbh_gpu_window_scene_prewarm makes it for a batch with the bit. Needs no new shader. */
-    BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK = 1u << 0
+    BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK = 1u << 0,
+    /* (Bit 1 is RFC 0019's, volumetrics; not yet in this release, and refused.) */
+    /* The batch takes the window's first (COVER_0) or second (COVER_1) cover layer where its faces turn up
+     * (btbh_gpu_window_scene_set_cover, RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its biomes).
+     * Every pass that draws it with the scene's fragment shader takes it: opaque and transparent, lit and unlit,
+     * static, skinned and lifted, with or without a world detail or a table. The cover is laid in the world: on
+     * anything that moves its noise slides, and it stays on whatever faces up. Without a layer set, or with that
+     * layer's amount 0, the bit changes nothing (to the byte). Refused (the present fails with
+     * BTBH_GPU_INVALID_ARGUMENT, naming the batch): both bits; a LIT_PARTICLE or REFRACT batch (their shaders draw no
+     * material); a batch the fast unlit shader draws (unlit, drawn in the transparent pass, no surface variant, no
+     * world detail with a texture, no table with map_layers). While its layer is on, the batch draws with the cover
+     * variant of the scene fragment shader (see btbh_gpu_window_scene_set_cover); while it is off, with the shaders
+     * and pipelines it has without the bit. btbh_gpu_window_scene_prewarm makes both for a batch with a bit. */
+    BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 = 1u << 2,
+    BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1 = 1u << 3
 };
 
 /* Defined when BTBHGPUSceneGeometryBatch.flags2 and BTBH_GPU_SCENE_BATCH_FLAGS2_KEEP_CASCADES_LOOK exist (since
@@ -1853,7 +1889,13 @@ enum {
      *   ground keeps the camera's heading, so it meets them from the front.
      * - With or without the radiance cascades, and with BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY or without; it
      *   changes nothing without SSR. Needs this release's production_ssao_resolve.frag; older ones ignore it. */
-    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2
+    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2,
+    /* Screen-space distortion (RFC 0018, since 0.18.0): the frame draws the distortion sources set for it
+     * (btbh_gpu_window_scene_set_distortion). Without it they are dropped undrawn: a preset's or a player's switch.
+     * With it, btbh_gpu_window_scene_prewarm (and _prewarm_views) also makes the distortion's pipelines and field. With
+     * it and no source drawn, the frame is as without it, to the byte. Renders into targets accept it and draw no
+     * distortion. */
+    BTBH_GPU_SCENE_POST_DISTORTION = 1u << 3
 };
 
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO exist (since 0.9.0). */
@@ -1888,7 +1930,11 @@ typedef struct BTBHGPUSceneReport {
        BTBH_GPU_SCENE_UPSCALE_LINEAR for a scene rendered to a target at its size or bigger. 0 when
        the present failed. */
     uint8_t upscale_mode;
-    uint8_t upscale_reserved[3];
+    /* RFC 0018 (since 0.18.0, in the byte that was upscale_reserved[0], so the report keeps its size): the distortion
+       sources the frame drew in any view, after skipping and culling (btbh_gpu_window_scene_set_distortion); 0 when no
+       distortion pass ran. */
+    uint8_t distortion_sources_drawn;
+    uint8_t upscale_reserved[2];
 } BTBHGPUSceneReport;
 
 typedef struct BTBHGPUFrameTelemetrySample {
@@ -3272,6 +3318,256 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
 /* Defined when btbh_gpu_window_scene_present_views, btbh_gpu_window_scene_prewarm_views and their structs exist (since
    0.16.0). */
 #define BTBH_GPU_SCENE_HAS_VIEWS 1
+
+/* Screen-space distortion (RFC 0018, since 0.18.0, asked for by Be The Bullet Hell v2): rings, discs and strips placed in
+   the world for one frame bend the scene behind them (shockwaves, heat haze, lensing orbs). They are drawn into an
+   offset field at half the render size, and the HDR composite shows the scene displaced by it, before the grading, the
+   tone map, the anti-aliasing and the upscaling (HDR output reads the displaced picture). The canvas (the UI) is never
+   displaced. A frame that draws no source is the same to the byte as without this. */
+
+/* The most sources btbh_gpu_window_scene_set_distortion takes for one frame. */
+#define BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES 240u
+
+/* BTBHGPUSceneDistortionSource.shape. r is a point's distance from position in the shape's plane (world units); for a
+   strip, from the segment between position and end. */
+typedef enum BTBHGPUSceneDistortionShape {
+    BTBH_GPU_SCENE_DISTORTION_RING = 0,    /* a band `width` wide whose middle lies `radius` from position */
+    BTBH_GPU_SCENE_DISTORTION_DISC = 1,    /* a disc of `radius`: a blob, a lens */
+    BTBH_GPU_SCENE_DISTORTION_STRIP = 2,   /* a capsule reaching `radius` each side of the segment position-end */
+    BTBH_GPU_SCENE_DISTORTION_SHAPE_COUNT = 3
+} BTBHGPUSceneDistortionShape;
+
+/* BTBHGPUSceneDistortionSource.mode. */
+typedef enum BTBHGPUSceneDistortionMode {
+    /* The scene moves along the shape's outward direction on screen (away from position, or from the strip's segment):
+       strength above 0 pushes it out (a disc magnifies, a ring's band bulges outward), below 0 pulls it in (a disc
+       pinches). With x = (r - radius) / (width / 2) for a ring and u = r / radius for a disc or a strip, the
+       displacement is strength * (1 - x^2)^2 * min(1, 2r / width) for a ring (|x| < 1) and
+       strength * 3.4938562 * u * (1 - u^2)^2 for a disc or a strip (u < 1: 0 at the centre and the edge, strength at
+       u = 0.447); nothing outside. */
+    BTBH_GPU_SCENE_DISTORTION_PUSH = 0,
+    /* Heat haze: the scene shimmers by an animated noise, strength * envelope * (N_x, N_y) on screen (x right, y up),
+       each N a value noise in -1..1 over the shape's plane, haze_scale cells per world unit, drifting at haze_speed
+       cells per second up the screen (a strip: along its segment), two octaves. The envelope is (1 - x^2)^2 *
+       min(1, 2r / width) for a ring and (1 - u^2)^2 for a disc or a strip. */
+    BTBH_GPU_SCENE_DISTORTION_HAZE = 1,
+    BTBH_GPU_SCENE_DISTORTION_MODE_COUNT = 2
+} BTBHGPUSceneDistortionMode;
+
+/* BTBHGPUSceneDistortionSource.flags. */
+enum {
+    /* The shape lies in the world's x-z plane at its height: a ring on the ground, an ellipse under a tilted camera (its
+       axes: the camera's right laid flat, and across it, up the screen; a strip: across its segment, horizontal).
+       Without it the shape faces the camera: a ring or a disc lies in the camera's plane (right and up) through
+       position, a circle on screen, and a strip is a ribbon about its segment, across it and the camera's view. */
+    BTBH_GPU_SCENE_DISTORTION_FLAT = 1u << 0
+};
+
+/* One distortion source for one frame. 64 bytes on 64-bit (no pointers): position 0, radius 12, end 16, width 28,
+   strength 32, chroma 36, haze_scale 40, haze_speed 44, shape 48, mode 52, flags 56, reserved 60. A zeroed source draws
+   nothing (its radius and strength are 0). shape and mode are uint32_t, so the layout never depends on an enum's size. */
+typedef struct BTBHGPUSceneDistortionSource {
+    float position[3];   /* world: the centre (RING, DISC), or the strip's first end */
+    float radius;        /* world units: RING to the band's middle, DISC its radius, STRIP its half-width. 0: nothing */
+    float end[3];        /* world: the strip's second end. 0 for RING and DISC */
+    float width;         /* world units: RING the band's whole width (0: nothing). 0 for DISC and STRIP */
+    /* The largest displacement, in pixels of a frame 1080 pixels high: strength / 1080 of the frame's height, so it
+       reads the same at any resolution and render scale (12: 12 px at 1080p, 24 at 2160, 8.9 on the Deck's 800 lines).
+       PUSH: signed, as above. HAZE: the largest along each axis (its sign is ignored). 0: nothing.
+       A PUSH source's displacement is clamped so that no colour's picture folds over itself anywhere on the shape (red's
+       too, at 1 + 0.35 * chroma times it), from the shape's projection where it is thinnest and most slanted on screen
+       (so the far side of a large flat shape counts): about 0.26 of a facing disc's or strip's radius on screen and 0.29
+       of a ring's width without chroma (0.32 of the radius pulling a disc in), less with chroma and for a flat shape
+       under a tilted camera. The sources' displacements add up, and their sum is clamped to 64 pixels of a 1080-line
+       frame. */
+    float strength;
+    /* 0..1: red displaced by 1 + 0.35 * chroma times the displacement, blue by 1 - 0.35 * chroma, so colours part along
+       the bend (as REFRACT's dispersion). 0: none. Where sources overlap, their chroma is averaged by displacement. */
+    float chroma;
+    float haze_scale;    /* HAZE: noise cells per world unit (0: 1). 0 for PUSH */
+    /* HAZE: cells per second the noise drifts (0: still). The drift is time_seconds times this, so a speed changed
+       between frames moves the pattern at once (keep a source's speed, and ease its strength). 0 for PUSH */
+    float haze_speed;
+    uint32_t shape;      /* BTBHGPUSceneDistortionShape */
+    uint32_t mode;       /* BTBHGPUSceneDistortionMode */
+    uint32_t flags;      /* BTBH_GPU_SCENE_DISTORTION_* bits; 0: facing the camera */
+    uint32_t reserved;   /* 0 */
+} BTBHGPUSceneDistortionSource;
+
+/* Sets the distortion sources of the window's next scene present (btbh_gpu_window_scene_present_instances,
+   _with_visibility or btbh_gpu_window_scene_present_views). They are copied at the call. That present takes them and
+   forgets them, drawn or not: the one after draws none unless this is called again.
+   - A second call before the present replaces the first; source_count 0 clears them. A present refused before it
+     begins (its arguments, batches, views or cameras invalid, or a scene waiting for its canvas) leaves them set; one
+     that fails later has taken them.
+   - They are drawn only when the present's post has BTBH_GPU_SCENE_POST_DISTORTION, and not in the radiance cascades'
+     debug views. Renders into targets and prewarms neither draw nor take them.
+   - A source is skipped (not drawn, not counted) when its radius or its strength is 0, or a ring's width is 0. In each
+     view it is drawn when its bounds meet the view's frustum and its half of the frame (present_views), projected with
+     the view's camera and clipped to its half; a PUSH source whose centre is behind the camera isn't drawn. A frame
+     whose sources all draw nothing is as without them, to the byte.
+     With two views (btbh_gpu_window_scene_present_views), the displacement fades to nothing within 8 render pixels of a
+     view's edge (from 2.5 to 3.3 pixels from it), and no displaced read crosses it.
+   - Where FSR 3 runs, displaced pixels are marked in its reactive mask by refraction's rule: min(1, the length of the
+     displacement the pixel shows (the sources' summed and clamped) / 6 render pixels) times
+     post->temporal_reactive_scale. The motion vectors stay the scene's.
+   - time_seconds is the haze's clock: any steadily growing seconds (a game's time, stopped with its pause). Each
+     source's drift (time_seconds times haze_speed) is wrapped on the CPU in double precision, but the clock itself is a
+     float: past about 36 hours (2^17 s) its steps pass a 60 Hz frame and the haze moves in steps. A game that runs
+     longer restarts its clock (the haze then jumps once).
+   - Needs production_distortion.vert, production_distortion.frag, production_hdr_composite_distort.frag and
+     production_hdr_composite_distort_reactive.frag beside the present's post fragment shader. A frame that draws a
+     source without them fails with BTBH_GPU_INVALID_ARGUMENT, naming the file; so does a prewarm with the flag.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, and nothing is kept (the next present draws none):
+     - a NULL window; sources NULL with a source_count above 0; a source_count above
+       BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES;
+     - time_seconds not finite;
+     - a source with a field that isn't finite; radius, width or haze_scale below 0; chroma outside 0..1; an unknown
+       shape, mode or flag; reserved not 0; a field its shape or mode doesn't use that isn't 0 (end for RING and DISC,
+       width for DISC and STRIP, haze_scale and haze_speed for PUSH).
+     report may be NULL. Otherwise only its result and message are written; a refusal's message names the source and
+     the field.
+   Call it on the thread that presents, at any time between presents. */
+BTBHGPUResult btbh_gpu_window_scene_set_distortion(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneDistortionSource *sources,
+    uint32_t source_count,
+    float time_seconds,
+    BTBHGPUSceneReport *report
+);
+
+/* Defined when btbh_gpu_window_scene_set_distortion, BTBHGPUSceneDistortionSource, its enums,
+   BTBH_GPU_SCENE_POST_DISTORTION and BTBHGPUSceneReport.distortion_sources_drawn exist (since 0.18.0). */
+#define BTBH_GPU_SCENE_HAS_DISTORTION 1
+
+/* A cover laid by facing (RFC 0020, since 0.18.0, asked for by Be The Bullet Hell v2 for its biomes): snow, sand or mud
+   on whatever faces up, with a noisy edge, on the batches that ask for it. The window keeps two layers
+   (btbh_gpu_window_scene_set_cover); a batch takes one by BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 or _COVER_1. Where
+   it lies it replaces the surface's albedo, roughness, metalness, occlusion and normal by its own, before the
+   lighting, so the reflections, the ambient occlusion and the radiance cascades see it as they see the surface. It is
+   worked out from the world position and the normal alone: no texture, no pass. A covered batch draws with the cover
+   variant of the scene fragment shader (btbh_gpu_window_scene_set_cover); a window that never sets a layer, or a batch
+   without the bits, draws byte for byte as before, with the shaders it had.
+
+   What a layer does, at a fragment of a batch that takes it (angles in degrees; slopes from level: 0 a face looking
+   straight up, 90 a wall, 180 a face looking straight down):
+   - the slope theta it reads is that of the vertex normal turned to the side seen, leaning toward the shading normal
+     (the normal map's, the world detail's and the procedural detail's tilts) by normal_influence;
+   - N, in -1..1, is value noise over the flat world x and z times noise_scale: two octaves (the second at 2.03 times
+     the first's frequency, half as strong, fading out where its cells shrink under two pixels; COARSE: the first
+     alone); 0 when edge_noise_degrees is 0;
+   - the cover reaches theta_max = amount x slope_degrees + edge_noise_degrees x min(1, 4 x amount) x N (the noise's
+     reach grows with the amount up to 0.25, so a thin cover thins out to nothing), and lies by
+     c = saturate((theta_max - theta) / edge_degrees), shaped by the pattern's edge (SNOW smoothstep(0.3, 0.7, c),
+     SAND c, MUD smoothstep(0.15, 0.55, c)). Where an octave fades, its share of N is taken as a box of the same spread
+     and c as the edge's average over it, so a face far away has the coverage it averages to near by (a thin cover's
+     far level faces as patchy as its near ones, not solid);
+   - by c, the albedo moves to color (times 1 + grain x N: SNOW 0.04, SAND 0.10, MUD 0.15), the roughness to the
+     layer's (MUD: down to 0.12 in its puddles, where N is low, the more so with BTBHGPUSceneLighting.surface_wetness,
+     and by their share of the ground where the noise fades; with edge_noise_degrees 0, no puddles),
+     the metalness to 0, the occlusion to 1, a glass detail's reflectance to a dielectric's, and the normal to the
+     vertex normal tilted by the cover's own relief (bump: SNOW soft lumps from the first octave, SAND a fine grain
+     from the second, MUD both; COARSE or bump 0: none); a see-through batch's alpha rises to c (snow on a glass roof
+     is opaque);
+   - the emission stays, and so do shadows, depth, coverage and motion. The radiance cascades' material sources (an
+     unlit batch's colour projected from above) don't take it;
+   - past the farthest it can reach (amount x slope_degrees + the noise's reach) a face is left as it is, and costs
+     next to nothing (walls under a roof's snow). */
+
+/* How many layers a window keeps. */
+#define BTBH_GPU_SCENE_COVER_LAYER_COUNT 2u
+
+/* BTBHGPUSceneCoverLayer.pattern: the cover's edge and relief. */
+typedef enum BTBHGPUSceneCoverPattern {
+    BTBH_GPU_SCENE_COVER_SNOW = 0,   /* a crisp edge, soft lumps; roughness 0 means 0.85 */
+    BTBH_GPU_SCENE_COVER_SAND = 1,   /* a soft edge that thins into a dusting, a fine grain; roughness 0 means 0.95 */
+    /* a blotchy edge, glossy puddles where the noise is low (glossier with BTBHGPUSceneLighting.surface_wetness);
+       roughness 0 means 0.55 */
+    BTBH_GPU_SCENE_COVER_MUD = 2,
+    BTBH_GPU_SCENE_COVER_PATTERN_COUNT = 3
+} BTBHGPUSceneCoverPattern;
+
+/* BTBHGPUSceneCoverLayer.flags. */
+enum {
+    /* One octave of noise and no relief (bump is ignored): about half the cost, for a Deck-class preset. */
+    BTBH_GPU_SCENE_COVER_LAYER_COARSE = 1u << 0
+};
+
+/* One cover layer. 64 bytes, no pointer (the same on 32-bit): color 0, amount 12, slope_degrees 16, edge_degrees 20,
+   edge_noise_degrees 24, noise_scale 28, roughness 32, bump 36, normal_influence 40, base_height 44, base_fade 48,
+   wind 52, pattern 60, flags 61, reserved 62. A zeroed layer lays nothing (its amount is 0). */
+typedef struct BTBHGPUSceneCoverLayer {
+    float color[3];             /* linear albedo, each 0..1 */
+    /* 0..1. 0: nothing (the layer is off). Above it, faces up to amount x slope_degrees from level take it: patches on
+       level faces near 0.1, every level face by about 0.3, steep roofs near 1. */
+    float amount;
+    float slope_degrees;        /* the steepest slope it holds at amount 1, 0..90; 0 means 60 */
+    float edge_degrees;         /* the slopes over which it thins out past that, 0..90; 0 means 8 */
+    /* How far the noise moves the edge either way, 0..90 degrees of slope (scaled down below amount 0.25). 0: a clean
+       line, and no noise is worked out (the cheapest; no grain, and MUD has no puddles). On level faces under a thin
+       cover it is what breaks the cover into patches. */
+    float edge_noise_degrees;
+    float noise_scale;          /* noise cells per world unit, 0 or more; 0 means 1 */
+    float roughness;            /* 0..1; 0: the pattern's */
+    float bump;                 /* 0..1: its own relief's strength (0: flat, and no gradient is worked out) */
+    /* 0..1: how far the surface's normal map, world detail and procedural detail tilt the slope the cover reads (snow
+       caught in roof tiles' ridges). 0: the vertex normal alone. */
+    float normal_influence;
+    /* RFC 0020 phase 2 (not in this release; refused unless 0): below base_height (world y), every face takes the
+       layer, walls and undersides too, fading out over base_fade above it: mud splashed up a wall's foot, a flood's
+       line, sand drifted against walls. */
+    float base_height;
+    float base_fade;
+    /* RFC 0020 phase 2 (not in this release; refused unless 0): the wind, x and z, its length 0..1: faces turned into
+       it hold the layer steeper, and SAND's ripples lie across it. */
+    float wind[2];
+    uint8_t pattern;            /* BTBHGPUSceneCoverPattern */
+    uint8_t flags;              /* BTBH_GPU_SCENE_COVER_LAYER_* bits */
+    uint8_t reserved[2];        /* 0 */
+} BTBHGPUSceneCoverLayer;
+
+/* The window's cover (btbh_gpu_window_scene_set_cover). 136 bytes, no pointer: layers 0 and 64, flags 128, reserved
+   132. */
+typedef struct BTBHGPUSceneCover {
+    BTBHGPUSceneCoverLayer layers[BTBH_GPU_SCENE_COVER_LAYER_COUNT];
+    uint32_t flags;             /* 0 */
+    uint32_t reserved;          /* 0 */
+} BTBHGPUSceneCover;
+
+/* Sets the cover the window's following scene presents draw (present_instances, _with_visibility, present_views,
+   render_to_target and its target views). It is copied at the call and kept until the next call; NULL clears it.
+   - A layer whose amount is 0 is off: the batches that take it draw as without the bit, to the byte, with the shaders
+     and pipelines they have without it.
+   - A batch whose layer is on, and a BTBH_GPU_SCENE_SURFACE_ICE batch, draw with the cover variant of the scene
+     fragment shader the frame's shadows and cascades pick, a file beside the host's fragment shader:
+     production_model_cover.frag or its _2d_shadows, _unshadowed, _rc, _rc_2d_shadows or _rc_unshadowed sibling (.spv
+     or .metallib, of this release; the shaders without the cover don't change). A present that draws one where that
+     file is missing (shaders from before 0.18.0) or doesn't name the cover's block (cover_color_roughness; a Metal
+     library isn't read for it) fails with BTBH_GPU_INVALID_ARGUMENT, naming the file.
+   - The cover variants have their own pipelines, made by the first frame that draws one or by
+     btbh_gpu_window_scene_prewarm: it makes both a batch's pipelines when the batch has a cover bit (whether its layer
+     is on or off then), and the cover variant's for still ice. A host that turns a layer on mid-game prewarms with the
+     bits on its batches.
+   - BTBH_DEBUG_COVER=1 (read at each present) draws each covered pixel's c in place of its colour, the first layer's in
+     red and the second's in green, for tuning.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, keeping the setting it had:
+     - a NULL window; the cover's flags or reserved not 0;
+     - in a layer: a field that isn't finite; a colour, amount, roughness, bump or normal_influence outside 0..1;
+       slope_degrees, edge_degrees or edge_noise_degrees outside 0..90; noise_scale below 0; a pattern at or past
+       BTBH_GPU_SCENE_COVER_PATTERN_COUNT; an unknown flag; reserved not 0; base_height, base_fade or wind not 0 (phase
+       2's).
+     report may be NULL. Otherwise only its result and message are written; the message names the layer and the field.
+   Call it on the thread that presents, between presents. */
+BTBHGPUResult btbh_gpu_window_scene_set_cover(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneCover *cover,
+    BTBHGPUSceneReport *report
+);
+
+/* Defined when btbh_gpu_window_scene_set_cover, BTBHGPUSceneCover, BTBHGPUSceneCoverLayer, BTBHGPUSceneCoverPattern,
+   BTBH_GPU_SCENE_COVER_LAYER_COARSE and BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 and _1 exist (RFC 0020 phase 1, since
+   0.18.0). */
+#define BTBH_GPU_SCENE_HAS_COVER 1
 
 /* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
    a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls
