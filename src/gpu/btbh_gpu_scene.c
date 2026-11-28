@@ -1,4 +1,5 @@
 #include "btbh_gpu_internal.h"
+#include "btbh_gpu_hdr.h"
 #include "btbh_gpu_radiance_cascades_runtime.h"
 #include "btbh_gpu_fsr3.h"
 #include "btbh_gpu_sdf_terrain_internal.h"
@@ -219,6 +220,17 @@ typedef struct BTBHGPUPostUniforms {
     float ssr_hit_options[4];
 } BTBHGPUPostUniforms;
 
+/* RFC 0017: the HDR post tail's block (production_post.frag.hlsl and production_tilt_shift.frag.hlsl with
+   BTBH_HDR_OUTPUT): the post block, then the highlight gain's numbers (hdr_tone: P, the knee m_k, the shoulder tau, the
+   tail's peak P^(1/2.2); hdr_misc: x 1 to write the scene's heat into alpha). The shaders read hdr_tone at byte 272. */
+typedef struct BTBHGPUPostHDRUniforms {
+    BTBHGPUPostUniforms post;
+    float hdr_tone[4];
+    float hdr_misc[4];
+} BTBHGPUPostHDRUniforms;
+SDL_COMPILE_TIME_ASSERT(btbh_gpu_post_uniforms_size, sizeof(BTBHGPUPostUniforms) == 272u);
+SDL_COMPILE_TIME_ASSERT(btbh_gpu_post_hdr_uniforms_size, sizeof(BTBHGPUPostHDRUniforms) == 304u);
+
 /* The horizon-based ambient occlusion's passes (BTBHGPUScenePost.ssao_enabled 2, production_hbao.hlsli). */
 typedef struct BTBHGPUSceneHBAOUniforms {
     float inverse_view_projection[16];
@@ -235,6 +247,26 @@ typedef struct BTBHGPUSceneHBAOUniforms {
 typedef struct BTBHGPUSceneSMAAUniforms {
     float metrics[4];
 } BTBHGPUSceneSMAAUniforms;
+
+/* RFC 0017: RCAS's HDR variant (production_upscale_fsr_rcas_hdr.frag): the metrics, then x the HDR tail's peak. */
+typedef struct BTBHGPUSceneRCASHDRUniforms {
+    float metrics[4];
+    float hdr_peak[4];
+} BTBHGPUSceneRCASHDRUniforms;
+
+/* RFC 0017: the post tail's pipelines that write the frame format, one set a class (SDR, HDR): output, tilt-shift,
+   LUT, CAS, FSR 1's EASU and RCAS, Lanczos, SMAA's blend, FXAA. */
+typedef struct BTBHGPUSceneTailPipelines {
+    SDL_GPUGraphicsPipeline *post;
+    SDL_GPUGraphicsPipeline *lut;
+    SDL_GPUGraphicsPipeline *cas;
+    SDL_GPUGraphicsPipeline *tilt_shift;
+    SDL_GPUGraphicsPipeline *lanczos;
+    SDL_GPUGraphicsPipeline *easu;
+    SDL_GPUGraphicsPipeline *rcas;
+    SDL_GPUGraphicsPipeline *smaa_blend;
+    SDL_GPUGraphicsPipeline *fxaa;
+} BTBHGPUSceneTailPipelines;
 
 /* Bloom mip chain below the render resolution: level 0 is half size. */
 #define BTBH_GPU_SCENE_BLOOM_LEVELS 6u
@@ -442,6 +474,13 @@ struct BTBHGPUSceneRuntime {
     SDL_GPUGraphicsPipeline *bloom_upsample_pipeline;
     SDL_GPUGraphicsPipeline *hdr_composite_pipeline;
     SDL_GPUGraphicsPipeline *scene_distance_pipeline;
+    /* RFC 0017 (since 0.17.0): the post tail's frame-format pipelines above (BTBHGPUSceneTailPipelines) are the class
+       tail_hdr says (the HDR variants into RGBA16F when true); tail_stash holds the other class's, so switching back
+       and forth makes nothing anew. tail_format: the format the tail's targets and pipelines were made in (invalid
+       until the first frame). */
+    bool tail_hdr;
+    SDL_GPUTextureFormat tail_format;
+    BTBHGPUSceneTailPipelines tail_stash;
     /* Per batch of the scene being drawn: its dug_by terrain's dig mask, or a NULL texture (RFC 0007). */
     BTBHGPUSdfTerrainMaskBinding *dig_bindings;
     uint32_t dig_binding_capacity;
@@ -2002,6 +2041,12 @@ static bool btbh_gpu_scene_create_model_pipeline(
     return true;
 }
 
+static bool btbh_gpu_scene_sibling_path(
+    const char *reference,
+    const char *filename,
+    char output[BTBH_GPU_SCENE_PATH_CAPACITY]
+);
+
 static bool btbh_gpu_scene_ensure_post_pipeline(
     BTBHGPUWindow *window,
     const char *vertex_shader_path,
@@ -2013,6 +2058,21 @@ static bool btbh_gpu_scene_ensure_post_pipeline(
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
     if (runtime->post_pipeline != NULL) {
         return true;
+    }
+    /* RFC 0017: the HDR class's output pass is production_post_hdr.frag, the host's output shader's sibling. */
+    char hdr_fragment_path[BTBH_GPU_SCENE_PATH_CAPACITY];
+    if (runtime->tail_hdr) {
+        if (!btbh_gpu_scene_sibling_path(
+                fragment_shader_path,
+                project_format == BTBH_GPU_SHADER_FORMAT_METALLIB
+                    ? "production_post_hdr.frag.metallib"
+                    : "production_post_hdr.frag.spv",
+                hdr_fragment_path
+            )) {
+            btbh_gpu_scene_error(report, BTBH_GPU_INVALID_ARGUMENT, "The HDR output shader's path is too long");
+            return false;
+        }
+        fragment_shader_path = hdr_fragment_path;
     }
     SDL_GPUDevice *device = window->device->gpu;
     const SDL_GPUShaderFormat format =
@@ -2272,7 +2332,7 @@ static bool btbh_gpu_scene_ensure_post_stage_pipelines(
         (void)snprintf(
             filename,
             sizeof(filename),
-            "production_lut.frag.%s",
+            runtime->tail_hdr ? "production_lut_hdr.frag.%s" : "production_lut.frag.%s",
             extension
         );
         if (!btbh_gpu_scene_sibling_path(
@@ -2297,7 +2357,7 @@ static bool btbh_gpu_scene_ensure_post_stage_pipelines(
         (void)snprintf(
             filename,
             sizeof(filename),
-            "production_cas.frag.%s",
+            runtime->tail_hdr ? "production_cas_hdr.frag.%s" : "production_cas.frag.%s",
             extension
         );
         if (!btbh_gpu_scene_sibling_path(
@@ -2322,7 +2382,7 @@ static bool btbh_gpu_scene_ensure_post_stage_pipelines(
         (void)snprintf(
             filename,
             sizeof(filename),
-            "production_tilt_shift.frag.%s",
+            runtime->tail_hdr ? "production_tilt_shift_hdr.frag.%s" : "production_tilt_shift.frag.%s",
             extension
         );
         if (!btbh_gpu_scene_sibling_path(
@@ -2476,7 +2536,8 @@ static bool btbh_gpu_scene_ensure_upscale_pipelines(
             shader_format, swapchain_format, report
         ) &&
         btbh_gpu_scene_ensure_upscale_pipeline(
-            window, "production_upscale_fsr_rcas",
+            window,
+            runtime->tail_hdr ? "production_upscale_fsr_rcas_hdr" : "production_upscale_fsr_rcas",
             &runtime->upscale_fsr_rcas_pipeline,
             post_vertex_shader_path, post_fragment_shader_path,
             shader_format, swapchain_format, report
@@ -10144,6 +10205,91 @@ static void btbh_gpu_scene_frame_uniforms(
    output_width: 0 for the window's frame, else a render target's width (never temporal). views_clipped (RFC 0014): a
    frame of two scene views, or one clipped, which runs neither the radiance cascades nor FSR 3. False, with the report
    set, when it failed (a failed shadow setup releases the window's scene). */
+/* RFC 0017: swaps the runtime's tail pipelines with its stash. */
+static void btbh_gpu_scene_swap_tail_pipelines(BTBHGPUSceneRuntime *runtime) {
+    BTBHGPUSceneTailPipelines held;
+    held.post = runtime->post_pipeline;
+    held.lut = runtime->post_lut_pipeline;
+    held.cas = runtime->post_cas_pipeline;
+    held.tilt_shift = runtime->post_tilt_shift_pipeline;
+    held.lanczos = runtime->upscale_lanczos_pipeline;
+    held.easu = runtime->upscale_fsr_easu_pipeline;
+    held.rcas = runtime->upscale_fsr_rcas_pipeline;
+    held.smaa_blend = runtime->smaa_blend_pipeline;
+    held.fxaa = runtime->fxaa_pipeline;
+    runtime->post_pipeline = runtime->tail_stash.post;
+    runtime->post_lut_pipeline = runtime->tail_stash.lut;
+    runtime->post_cas_pipeline = runtime->tail_stash.cas;
+    runtime->post_tilt_shift_pipeline = runtime->tail_stash.tilt_shift;
+    runtime->upscale_lanczos_pipeline = runtime->tail_stash.lanczos;
+    runtime->upscale_fsr_easu_pipeline = runtime->tail_stash.easu;
+    runtime->upscale_fsr_rcas_pipeline = runtime->tail_stash.rcas;
+    runtime->smaa_blend_pipeline = runtime->tail_stash.smaa_blend;
+    runtime->fxaa_pipeline = runtime->tail_stash.fxaa;
+    runtime->tail_stash = held;
+}
+
+static void btbh_gpu_scene_release_tail_set(SDL_GPUDevice *device, BTBHGPUSceneTailPipelines *set) {
+    SDL_GPUGraphicsPipeline **pipelines[9] = {
+        &set->post, &set->lut, &set->cas, &set->tilt_shift, &set->lanczos, &set->easu, &set->rcas,
+        &set->smaa_blend, &set->fxaa
+    };
+    for (uint32_t index = 0u; index < 9u; ++index) {
+        if (*pipelines[index] != NULL) {
+            SDL_ReleaseGPUGraphicsPipeline(device, *pipelines[index]);
+            *pipelines[index] = NULL;
+        }
+    }
+}
+
+/* RFC 0017: the post tail in the frame's class and format. An SDR window's first frame sets them and changes nothing.
+   A switch between SDR and HDR swaps the pipelines with the stash and drops the frame-format targets (final, post,
+   upscaled, sharpened colour, the motion-error copy), which the frame makes again. */
+static void btbh_gpu_scene_select_tail_class(
+    BTBHGPUWindow *window,
+    bool hdr,
+    SDL_GPUTextureFormat frame_format
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (runtime->tail_format == frame_format && runtime->tail_hdr == hdr) {
+        return;
+    }
+    if (runtime->tail_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        SDL_GPUDevice *device = window->device->gpu;
+        if (runtime->tail_hdr != hdr) {
+            btbh_gpu_scene_swap_tail_pipelines(runtime);
+        } else {
+            /* The same class in another format (an SDR swapchain that changed format): its pipelines anew. The class's
+               set goes to the stash and is released there; the other class's comes back to the stash. */
+            btbh_gpu_scene_swap_tail_pipelines(runtime);
+            btbh_gpu_scene_release_tail_set(device, &runtime->tail_stash);
+            btbh_gpu_scene_swap_tail_pipelines(runtime);
+        }
+        SDL_GPUTexture **targets[5] = {
+            &runtime->final_color_texture,
+            &runtime->post_color_texture,
+            &runtime->upscaled_color_texture,
+            &runtime->sharpened_color_texture,
+            &runtime->temporal_previous_color
+        };
+        for (uint32_t index = 0u; index < 5u; ++index) {
+            if (*targets[index] != NULL) {
+                SDL_ReleaseGPUTexture(device, *targets[index]);
+                *targets[index] = NULL;
+            }
+        }
+        runtime->composite_color_texture = NULL;
+        runtime->smaa_width = 0u;
+        runtime->smaa_height = 0u;
+        runtime->upscale_width = 0u;
+        runtime->upscale_height = 0u;
+        runtime->temporal_previous_color_width = 0u;
+        runtime->temporal_previous_color_height = 0u;
+    }
+    runtime->tail_hdr = hdr;
+    runtime->tail_format = frame_format;
+}
+
 static bool btbh_gpu_scene_prepare_frame(
     BTBHGPUWindow *window,
     const BTBHGPUFrameContext *frame_context,
@@ -10182,6 +10328,8 @@ static bool btbh_gpu_scene_prepare_frame(
         return false;
     }
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    /* RFC 0017: the tail in this frame's class and format (an SDR frame: as before). */
+    btbh_gpu_scene_select_tail_class(window, frame_context->hdr_active, frame_context->frame_format);
     char radiance_cascades_message[256];
     radiance_cascades_message[0] = '\0';
     /* RFC 0014: a clipped frame of views runs no cascades. Their state and resources stay as they were; their history
@@ -10365,7 +10513,7 @@ static bool btbh_gpu_scene_prepare_frame(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            frame_context->frame_format,
             anti_aliasing,
             report
         )) {
@@ -10377,7 +10525,7 @@ static bool btbh_gpu_scene_prepare_frame(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            frame_context->frame_format,
             report
         )) {
         return false;
@@ -10613,7 +10761,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             setup->anti_aliasing >= 1u &&
                 setup->anti_aliasing <=
                     BTBH_GPU_SCENE_SMAA_QUALITY_COUNT,
-            frame_context->swapchain_format,
+            frame_context->frame_format,
             report
         ) &&
         (!setup->temporal_active ||
@@ -10635,7 +10783,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
               post_vertex_shader_path,
               post_fragment_shader_path,
               shader_format,
-              frame_context->swapchain_format,
+              frame_context->frame_format,
               report
           ) &&
           btbh_gpu_scene_ensure_upscaled_color_target(
@@ -10644,7 +10792,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
               drawable_height,
               setup->upscale_mode == BTBH_GPU_SCENE_UPSCALE_FSR1 ||
                   setup->temporal_active,
-              frame_context->swapchain_format,
+              frame_context->frame_format,
               report
           ))) &&
         (!setup->ssao_resolve_active ||
@@ -10674,7 +10822,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            frame_context->frame_format,
             report
         ) &&
         (!setup->hdr_composite_active ||
@@ -10697,7 +10845,7 @@ static bool btbh_gpu_scene_ensure_frame_targets(
             post_vertex_shader_path,
             post_fragment_shader_path,
             shader_format,
-            frame_context->swapchain_format,
+            frame_context->frame_format,
             report
         ) &&
         /* The refracting batches' copy of the scene. */
@@ -10751,6 +10899,19 @@ static bool btbh_gpu_scene_camera_view(
     (void)memcpy(view->up, camera_up, sizeof(view->up));
     (void)memcpy(view->position, camera_position, sizeof(view->position));
     return true;
+}
+
+/* RFC 0017: RCAS's block, with the HDR tail's peak while the frame is HDR. */
+static const void *btbh_gpu_scene_rcas_uniforms(
+    const BTBHGPUFrameContext *frame_context,
+    const BTBHGPUSceneSMAAUniforms *rcas,
+    BTBHGPUSceneRCASHDRUniforms *hdr
+) {
+    if (!frame_context->hdr_active) {
+        return rcas;
+    }
+    (void)memcpy(hdr->metrics, rcas->metrics, sizeof(hdr->metrics));
+    return hdr;
 }
 
 static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
@@ -13377,6 +13538,29 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     }
 
     const uint64_t post_started_ticks = SDL_GetTicksNS();
+    /* RFC 0017: an HDR frame's LUT, CAS, tilt-shift and output passes take the post block followed by the highlight
+       gain's numbers (P, the knee, the shoulder, the tail's peak; the heat into alpha for BTBH_GPU_HDR_DEBUG); RCAS
+       takes the tail's peak. An SDR frame's take the post block, as before. */
+    BTBHGPUPostHDRUniforms post_hdr_uniforms;
+    const void *post_stage_uniforms = &post_uniforms;
+    uint32_t post_stage_uniform_size = (uint32_t)sizeof(post_uniforms);
+    BTBHGPUSceneRCASHDRUniforms rcas_hdr_uniforms;
+    SDL_zero(rcas_hdr_uniforms);
+    if (frame_context->hdr_active) {
+        SDL_zero(post_hdr_uniforms);
+        post_hdr_uniforms.post = post_uniforms;
+        const float ratio = frame_context->hdr_highlight_ratio > 1.0f ? frame_context->hdr_highlight_ratio : 1.0f;
+        const float knee_output = btbh_hdr_knee_output(post->tonemap_mode, frame_context->hdr_knee_override);
+        const float knee_input = btbh_hdr_knee_input(post->tonemap_mode, post->tonemap_white, knee_output);
+        post_hdr_uniforms.hdr_tone[0] = ratio;
+        post_hdr_uniforms.hdr_tone[1] = knee_input;
+        post_hdr_uniforms.hdr_tone[2] = frame_context->hdr_shoulder_scale * knee_input;
+        post_hdr_uniforms.hdr_tone[3] = powf(ratio, 1.0f / BTBH_HDR_DISPLAY_GAMMA);
+        post_hdr_uniforms.hdr_misc[0] = frame_context->hdr_debug_heat ? 1.0f : 0.0f;
+        post_stage_uniforms = &post_hdr_uniforms;
+        post_stage_uniform_size = (uint32_t)sizeof(post_hdr_uniforms);
+        rcas_hdr_uniforms.hdr_peak[0] = post_hdr_uniforms.hdr_tone[3];
+    }
     SDL_GPUTexture *post_input = radiance_cascades_post_input;
     bool fullscreen_ok = true;
     /* (The cost log's pass frames take a step a pass, or a few (bloom's levels, SMAA's three), from here to FSR 1 or
@@ -13564,8 +13748,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             "BTBH Post LUT",
             runtime->post_lut_pipeline,
             runtime->post_ping_texture,
-            &post_uniforms,
-            (uint32_t)sizeof(post_uniforms),
+            post_stage_uniforms,
+            post_stage_uniform_size,
             lut_samplers,
             2u,
             render_scissor
@@ -13587,8 +13771,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             "BTBH Post CAS",
             runtime->post_cas_pipeline,
             cas_target,
-            &post_uniforms,
-            (uint32_t)sizeof(post_uniforms),
+            post_stage_uniforms,
+            post_stage_uniform_size,
             &cas_sampler,
             1u,
             render_scissor
@@ -13611,8 +13795,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             "BTBH Post Tilt Shift + Output",
             runtime->post_tilt_shift_pipeline,
             tilt_shift_target,
-            &post_uniforms,
-            (uint32_t)sizeof(post_uniforms),
+            post_stage_uniforms,
+            post_stage_uniform_size,
             &tilt_shift_sampler,
             1u,
             render_scissor
@@ -13635,8 +13819,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             "BTBH Production Output",
             runtime->post_pipeline,
             post_target,
-            &post_uniforms,
-            (uint32_t)sizeof(post_uniforms),
+            post_stage_uniforms,
+            post_stage_uniform_size,
             &post_sampler,
             1u,
             render_scissor
@@ -13836,8 +14020,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                 "BTBH FSR3 RCAS",
                 runtime->upscale_fsr_rcas_pipeline,
                 runtime->sharpened_color_texture,
-                &rcas_uniforms,
-                (uint32_t)sizeof(rcas_uniforms),
+                btbh_gpu_scene_rcas_uniforms(frame_context, &rcas_uniforms, &rcas_hdr_uniforms),
+                frame_context->hdr_active
+                    ? (uint32_t)sizeof(rcas_hdr_uniforms)
+                    : (uint32_t)sizeof(rcas_uniforms),
                 &rcas_sampler,
                 1u,
                 output_scissor
@@ -13866,7 +14052,7 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
                     device,
                     render_width,
                     render_height,
-                    frame_context->swapchain_format
+                    frame_context->frame_format
                 );
                 runtime->temporal_previous_color_width = render_width;
                 runtime->temporal_previous_color_height = render_height;
@@ -13958,8 +14144,10 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
             "BTBH FSR1 RCAS",
             runtime->upscale_fsr_rcas_pipeline,
             runtime->sharpened_color_texture,
-            &rcas_uniforms,
-            (uint32_t)sizeof(rcas_uniforms),
+            btbh_gpu_scene_rcas_uniforms(frame_context, &rcas_uniforms, &rcas_hdr_uniforms),
+            frame_context->hdr_active
+                ? (uint32_t)sizeof(rcas_hdr_uniforms)
+                : (uint32_t)sizeof(rcas_uniforms),
             &rcas_sampler,
             1u,
             output_scissor
@@ -14134,6 +14322,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
+    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
+    btbh_gpu_window_hdr_frame_start(window);
+    btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
@@ -14217,6 +14408,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
+    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
+    btbh_gpu_window_hdr_frame_start(window);
+    btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
@@ -14585,6 +14779,13 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
+    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
+    btbh_gpu_window_hdr_frame_start(window);
+    btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
+    if (window != NULL && window->hdr_active) {
+        /* RFC 0017: an HDR window's frame texture, encode, fold and canvas RGBA16F pipelines too. */
+        btbh_gpu_window_hdr_prewarm(window);
+    }
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
     return btbh_gpu_scene_prewarm_internal(
@@ -14651,6 +14852,9 @@ BTBHGPUResult btbh_gpu_window_scene_present_views(
     BTBHGPUSceneViewReport *view_reports,
     BTBHGPUSceneReport *report
 ) {
+    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
+    btbh_gpu_window_hdr_frame_start(window);
+    btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
@@ -14730,6 +14934,13 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
     (void)memset(report, 0, sizeof(*report));
     if (!btbh_gpu_scene_views_valid(views, view_count, 0u, report)) {
         return report->result;
+    }
+    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
+    btbh_gpu_window_hdr_frame_start(window);
+    btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
+    if (window != NULL && window->hdr_active) {
+        /* RFC 0017: an HDR window's frame texture, encode, fold and canvas RGBA16F pipelines too. */
+        btbh_gpu_window_hdr_prewarm(window);
     }
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
@@ -15120,6 +15331,8 @@ static BTBHGPUResult btbh_gpu_scene_prewarm_to_target_internal(
     );
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
+    /* RFC 0017: a render into a target is SDR, in the target format. */
+    btbh_gpu_frame_context_for_target(&frame_context);
     BTBHGPUSceneAsideSwap swap;
     btbh_gpu_scene_enter_aside(window, btbh_gpu_scene_target_view_slot(window, view), &swap);
     BTBHGPUResult result = btbh_gpu_scene_prewarm_internal(
@@ -15352,6 +15565,8 @@ static BTBHGPUResult btbh_gpu_scene_render_to_target_internal(
     const bool kept = view != NULL && view->view_id != 0u;
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
+    /* RFC 0017: a render into a target is SDR, in the target format. */
+    btbh_gpu_frame_context_for_target(&frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_RENDER_TO_TARGET, &lazy_scope);
     BTBHGPUSceneAsideSwap swap;
@@ -15719,8 +15934,11 @@ BTBHGPUTexture *btbh_gpu_window_capture_pending_scene_texture(
 
     BTBHGPUSceneRuntime *runtime = window->scene_runtime;
     SDL_GPUDevice *device = window->device->gpu;
+    /* The composite's format: the frame format the tail was made in (RFC 0017: RGBA16F while HDR is on). */
     const SDL_GPUTextureFormat capture_format =
-        SDL_GetGPUSwapchainTextureFormat(device, window->window);
+        runtime->tail_format != SDL_GPU_TEXTUREFORMAT_INVALID
+            ? runtime->tail_format
+            : SDL_GetGPUSwapchainTextureFormat(device, window->window);
     BTBHGPUTexture *capture = btbh_gpu_window_texture_create_empty(
         window,
         runtime->composite_width,
@@ -15837,6 +16055,90 @@ bool btbh_gpu_window_blit_pending_scene(
     return true;
 }
 
+/* RFC 0017: the composite's format (the frame format the window's tail was made in). */
+static SDL_GPUTextureFormat btbh_gpu_scene_composite_format(const BTBHGPUWindow *window) {
+    return window->scene_runtime->tail_format != SDL_GPU_TEXTUREFORMAT_INVALID
+        ? window->scene_runtime->tail_format
+        : SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window);
+}
+
+/* RFC 0017: a copy's destination format: the composite's (copied), the target format under an HDR frame (folded), or
+   RGBA16F under an SDR frame (blitted). */
+static bool btbh_gpu_scene_copy_format_allowed(const BTBHGPUWindow *window, SDL_GPUTextureFormat format) {
+    const SDL_GPUTextureFormat composite = btbh_gpu_scene_composite_format(window);
+    if (format == composite) {
+        return true;
+    }
+    if (composite == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+        return format == window->sdr_format;
+    }
+    return format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+}
+
+/* RFC 0017: the composite into `destination` of another format: the fold (production_hdr_fold.frag) for an HDR frame
+   into an SDR target, a blit for an SDR frame into RGBA16F. */
+static bool btbh_gpu_scene_convert_composite(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    BTBHGPUTexture *destination,
+    SDL_GPUTextureFormat composite_format
+) {
+    BTBHGPUSceneRuntime *runtime = window->scene_runtime;
+    if (composite_format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+        SDL_GPUBlitInfo blit;
+        SDL_zero(blit);
+        blit.source.texture = runtime->composite_color_texture;
+        blit.source.w = destination->width;
+        blit.source.h = destination->height;
+        blit.destination.texture = destination->texture;
+        blit.destination.w = destination->width;
+        blit.destination.h = destination->height;
+        blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+        blit.filter = SDL_GPU_FILTER_NEAREST;
+        SDL_BlitGPUTexture(command, &blit);
+        return true;
+    }
+    if (window->hdr_fold_pipeline == NULL) {
+        char message[256];
+        window->hdr_fold_pipeline = btbh_gpu_window_hdr_create_pass_pipeline(
+            window,
+            "production_hdr_fold.frag",
+            window->sdr_format,
+            message,
+            sizeof(message)
+        );
+        if (window->hdr_fold_pipeline == NULL) {
+            SDL_SetError("%s", message);
+            return false;
+        }
+    }
+    SDL_GPUColorTargetInfo color_target;
+    SDL_zero(color_target);
+    color_target.texture = destination->texture;
+    color_target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    color_target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(command, &color_target, 1u, NULL);
+    if (pass == NULL) {
+        return false;
+    }
+    const float fold_parameters[4] = {
+        BTBH_HDR_FOLD_KNEE,
+        window->hdr_state.highlight_ratio > 1.0f ? window->hdr_state.highlight_ratio : 1.0f,
+        0.0f,
+        0.0f
+    };
+    SDL_PushGPUFragmentUniformData(command, 0u, fold_parameters, (uint32_t)sizeof(fold_parameters));
+    SDL_BindGPUGraphicsPipeline(pass, window->hdr_fold_pipeline);
+    SDL_GPUTextureSamplerBinding sampler;
+    SDL_zero(sampler);
+    sampler.texture = runtime->composite_color_texture;
+    sampler.sampler = runtime->scene_color_sampler;
+    SDL_BindGPUFragmentSamplers(pass, 0u, &sampler, 1u);
+    SDL_DrawGPUPrimitives(pass, 3u, 1u, 0u, 0u);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
 /* Copies the finished scene into `destination` (a capture of the same size and format) and
    releases the frame, so another scene can render before the canvas presents. The frame is
    submitted here; the canvas then composites only what renders after it. */
@@ -15864,10 +16166,7 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         btbh_gpu_texture_is_heightfield(destination) ||
         destination->width != window->scene_runtime->composite_width ||
         destination->height != window->scene_runtime->composite_height ||
-        destination->format != SDL_GetGPUSwapchainTextureFormat(
-            window->device->gpu,
-            window->window
-        )
+        !btbh_gpu_scene_copy_format_allowed(window, destination->format)
     ) {
         report->result = BTBH_GPU_INVALID_ARGUMENT;
         (void)snprintf(
@@ -15900,7 +16199,17 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         return report->result;
     }
     SDL_InsertGPUDebugLabel(command, "BTBH Scene Copy");
-    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(command);
+    const SDL_GPUTextureFormat composite_format = btbh_gpu_scene_composite_format(window);
+    bool copy_recorded = true;
+    SDL_GPUCopyPass *copy = NULL;
+    if (destination->format != composite_format) {
+        /* RFC 0017: an HDR frame into an SDR target is folded under paper white; an SDR frame into RGBA16F is blitted
+           (the same values). */
+        copy_recorded = btbh_gpu_scene_convert_composite(window, command, destination, composite_format);
+    } else {
+        copy = SDL_BeginGPUCopyPass(command);
+        copy_recorded = copy != NULL;
+    }
     if (copy != NULL) {
         SDL_GPUTextureLocation source;
         SDL_GPUTextureLocation target;
@@ -15928,7 +16237,7 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         (void)btbh_gpu_bone_palette_cache_begin(&window->bone_palette_cache, true, false);
     }
     btbh_gpu_window_scene_submission_finished(window, submitted);
-    if (copy == NULL || !submitted) {
+    if (!copy_recorded || !submitted) {
         report->result = BTBH_GPU_DEVICE_FAILURE;
         (void)snprintf(
             report->message,
@@ -15977,6 +16286,7 @@ void btbh_gpu_window_release_scene(BTBHGPUWindow *window) {
         btbh_gpu_fsr3_release(device, &window->scene_runtime->fsr3);
         btbh_gpu_scene_release_hbao_pipelines(window->scene_runtime, device);
         btbh_gpu_scene_release_hbao_targets(window->scene_runtime, device);
+        btbh_gpu_scene_release_tail_set(device, &window->scene_runtime->tail_stash);
         if (window->scene_runtime->temporal_previous_color != NULL) {
             SDL_ReleaseGPUTexture(
                 device,

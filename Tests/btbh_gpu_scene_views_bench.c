@@ -40,6 +40,10 @@
  * and a line "BENCH sample <configuration> <round>" comes before each sample's frames, so that the log's lines can be
  * told apart. The log waits for every frame, so the bench's own timings mean nothing then, and are not printed.
  *
+ * BTBH_VIEWS_BENCH_SHOWN=1 (0.17.0) shows the window: a hidden one has no swapchain image, so its canvas present draws
+ * no screen pass (no scene blit, no HDR encode); shown, the cost log's ui group holds them (RFC 0017's 4K cost, with
+ * BTBH_GPU_HDR_SIMULATE and BTBH_GPU_HDR set for the HDR runs).
+ *
  * Output: one line a configuration (median, 10th and 90th percentiles, min, max in ms a frame), the CPU a frame and the
  * draws (each view's, or each call's). With no device it is skipped (77). */
 #include "btbh_gpu/btbh_gpu.h"
@@ -624,11 +628,13 @@ int main(void) {
         fprintf(stderr, "skipped: no device (%s)\n", device_report.message);
         return BENCH_SKIP;
     }
+    const char *shown_text = SDL_getenv("BTBH_VIEWS_BENCH_SHOWN");
+    const bool shown = shown_text != NULL && shown_text[0] == '1';
     const BTBHGPUWindowDescriptor descriptor = {
         .title = "BTBH scene views bench",
         .width = (int)width,
         .height = (int)height,
-        .hidden = 1,
+        .hidden = shown ? 0u : 1u,
         .high_pixel_density = 0,
     };
     BTBHGPUWindowReport window_report;
@@ -1008,6 +1014,12 @@ int main(void) {
         }
         qsort(values, 12u, sizeof(double), compare_doubles);
         cpu_milliseconds[config] = values[6];
+        /* (0.17.0) The 12 frames' CPU times, sorted, for pooling across runs. */
+        printf("BENCH cpu-frames %s", names[config]);
+        for (uint32_t index = 0u; index < 12u; ++index) {
+            printf(" %.4f", values[index]);
+        }
+        printf("\n");
     }
     double *samples = calloc((size_t)CONFIGS * rounds, sizeof(double));
     for (uint32_t round = 0u; round < rounds; ++round) {

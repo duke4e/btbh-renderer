@@ -150,10 +150,34 @@ typedef struct BTBHGPUFrameContext {
        then projects in the swapchain image's size). */
     uint32_t logical_width;
     uint32_t logical_height;
-    /* SDL_GetGPUSwapchainTextureFormat: the format of the scene's last post targets and pipelines, the canvas's
-       pipelines, its target passes and a read-back frame. */
+    /* SDL_GetGPUSwapchainTextureFormat: the swapchain image's format (with BTBH_GPU_HDR_SIMULATE, the simulated
+       swapchain's while HDR is on). */
     SDL_GPUTextureFormat swapchain_format;
+    /* RFC 0017 (since 0.17.0). frame_format: the window scene's last post targets and pipelines, the canvas's screen
+       passes, a read-back frame and captures: the swapchain's in SDR, RGBA16F while HDR is on; a render into a target
+       sets it to target_format (btbh_gpu_frame_context_for_target). target_format: render targets' (the SDR
+       swapchain's, kept from the claim), which render_to_target writes and the canvas's target passes draw into. In SDR
+       the three formats are equal. */
+    SDL_GPUTextureFormat frame_format;
+    SDL_GPUTextureFormat target_format;
+    /* HDR: the window's frame is HDR (false for a render into a target); the peak over paper white (1 in SDR); the
+       scene's heat into alpha (BTBH_GPU_HDR_DEBUG=heat); the knee's output override (BTBH_GPU_HDR_KNEE, 0: none) and
+       the shoulder's scale over the knee (BTBH_GPU_HDR_SHOULDER). */
+    bool hdr_active;
+    bool hdr_debug_heat;
+    float hdr_highlight_ratio;
+    float hdr_knee_override;
+    float hdr_shoulder_scale;
 } BTBHGPUFrameContext;
+
+/* A render into a target (render_to_target and its prewarm): the target format, no HDR (RFC 0017). */
+static inline void btbh_gpu_frame_context_for_target(BTBHGPUFrameContext *frame_context)
+{
+    frame_context->frame_format = frame_context->target_format;
+    frame_context->hdr_active = false;
+    frame_context->hdr_debug_heat = false;
+    frame_context->hdr_highlight_ratio = 1.0f;
+}
 
 struct BTBHGPUDevice {
     SDL_GPUDevice *gpu;
@@ -240,6 +264,50 @@ struct BTBHGPUWindow {
     BTBHGPULazyCreationLog *lazy_creation;
     /* The frames submitted so far (btbh_gpu_window_finish_pending_frame): the log's frame_index. */
     uint64_t submitted_frame_count;
+    /* HDR output (RFC 0017, since 0.17.0; btbh_gpu_window.c). sdr_format: the SDR swapchain's format, kept from the
+       claim (the target format). hdr_settings: as taken, after the debug switches. hdr_state: the last state filled.
+       hdr_composition: the HDR composition in use (or simulated), SDR while HDR is off. */
+    SDL_GPUTextureFormat sdr_format;
+    BTBHGPUWindowHDRSettings hdr_settings;
+    BTBHGPUWindowHDRState hdr_state;
+    BTBHGPUSwapchainComposition hdr_composition;
+    bool hdr_active;
+    /* An SDL HDR or display event since the last frame start (AUTO re-checks there); hdr_changed: for the next poll's
+       snapshot. */
+    bool hdr_dirty;
+    bool hdr_changed;
+    /* The debug switches, read at the claim: BTBH_GPU_HDR_LOG, BTBH_GPU_HDR_DITHER (on unless 0), BTBH_GPU_HDR_DEBUG,
+       BTBH_GPU_HDR_SIMULATE (0, or the composition it names), BTBH_GPU_HDR (-1: none, else the mode, with the
+       composition hdr10/scrgb name), BTBH_GPU_HDR_NITS (0: none), BTBH_GPU_HDR_KNEE and BTBH_GPU_HDR_SHOULDER. */
+    bool hdr_log;
+    bool hdr_dither;
+    bool hdr_debug_heat;
+    bool under_wine;
+    uint8_t hdr_simulate;
+    /* BTBH_GPU_HDR_SIMULATE's display reports SDR (a test's knob, for Auto following an OS change). */
+    bool hdr_simulate_os_sdr;
+    int8_t hdr_override_mode;
+    uint8_t hdr_override_composition;
+    float hdr_override_paper_white;
+    float hdr_override_peak;
+    float hdr_knee_override;
+    float hdr_shoulder_scale;
+    uint32_t hdr_serial;
+    uint32_t hdr_switch_count;
+    double hdr_last_switch_milliseconds;
+    /* A fallback that holds until the next switch (SWITCH_FAILED, LOST; else NONE), its words, and the event the last
+       log line named. */
+    uint8_t hdr_sticky_fallback;
+    char hdr_message[128];
+    char hdr_event[16];
+    /* BTBH_GPU_HDR_SIMULATE: the encode's target in place of the swapchain image, at the drawable size. */
+    BTBHGPUTexture *hdr_virtual_swapchain;
+    /* The encode into RGB10A2 [0] and RGBA16F [1]; the fold of an HDR capture into sdr_format. */
+    SDL_GPUGraphicsPipeline *hdr_encode_pipelines[2];
+    SDL_GPUGraphicsPipeline *hdr_fold_pipeline;
+    /* A shader path a present was given, and its format: the HDR passes' shaders are its siblings. */
+    char shader_reference_path[1024];
+    BTBHGPUShaderFormat shader_reference_format;
 };
 
 struct BTBHGPUTexture {
@@ -703,6 +771,50 @@ void btbh_gpu_window_frame_context_fill(
     const BTBHGPUWindow *window,
     BTBHGPUFrameContext *frame_context
 );
+/* HDR output (RFC 0017, since 0.17.0). */
+/* At a frame's start (a present with no frame pending): an AUTO window takes a change of availability that an SDL HDR
+   or display event flagged (btbh_gpu_window.c). Nothing for a window with no event since. */
+void btbh_gpu_window_hdr_frame_start(BTBHGPUWindow *window);
+/* After a failed swapchain acquire while HDR is on: true when the swapchain no longer offers its HDR composition, the
+   window then back in SDR (fallback LOST, logged); false otherwise (btbh_gpu_window.c). */
+bool btbh_gpu_window_hdr_acquire_failed(BTBHGPUWindow *window);
+/* Keeps `path` as the reference for the HDR passes' shaders (their siblings), from a present's shader paths. */
+void btbh_gpu_window_hdr_remember_shaders(BTBHGPUWindow *window, const char *path, BTBHGPUShaderFormat format);
+/* A full-screen pass's pipeline (production_post.vert and `fragment_name`, both siblings of the shader reference) into
+   target_format with one sampler and one fragment uniform block (btbh_gpu_canvas.c). NULL, with SDL's error or the
+   reason in `message`, when there is no reference yet or the device refuses it. */
+SDL_GPUGraphicsPipeline *btbh_gpu_window_hdr_create_pass_pipeline(
+    BTBHGPUWindow *window,
+    const char *fragment_name,
+    SDL_GPUTextureFormat target_format,
+    char *message,
+    size_t message_capacity
+);
+/* Makes what an HDR frame's canvas present needs that doesn't depend on its batches: the frame texture at the drawable
+   size, the encode pipeline, the canvas's RGBA16F pipelines (once the canvas has its shaders). For set_hdr's switch. */
+void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window);
+/* Records the encode of the HDR frame `frame` into `destination` (the swapchain image, or the simulated one), both
+   width x height (btbh_gpu_canvas.c). */
+bool btbh_gpu_window_hdr_record_encode(
+    BTBHGPUWindow *window,
+    SDL_GPUCommandBuffer *command,
+    SDL_GPUTexture *frame,
+    SDL_GPUTexture *destination,
+    SDL_GPUTextureFormat destination_format,
+    uint32_t width,
+    uint32_t height
+);
+/* BTBH_GPU_HDR_SIMULATE's encoded output, read back for the tests: width x height pixels of `bytes_per_pixel` (4 for
+   HDR10's RGB10A2, 8 for scRGB's RGBA16F), rows packed (btbh_gpu_canvas.c). */
+BTBHGPUResult btbh_gpu_window_readback_hdr_output(
+    BTBHGPUWindow *window,
+    void *pixels,
+    uint32_t byte_capacity,
+    uint32_t *width,
+    uint32_t *height,
+    uint32_t *bytes_per_pixel
+);
+void btbh_gpu_window_release_hdr(BTBHGPUWindow *window);
 uint32_t btbh_gpu_animation_library_skin_joint_count(
     const BTBHGPUAnimationLibrary *library,
     uint32_t skin_index

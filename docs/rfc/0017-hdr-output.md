@@ -1,7 +1,9 @@
 # RFC 0017: HDR output: an HDR swapchain where the display has one, highlights above the SDR look, the UI at paper white
 
 - **Status:** Accepted on 2026-11-28: v2 answered all 14 questions through its session, each as recommended (see
-  "Decisions"). Phase 1 is next
+  "Decisions"). Phase 1 implemented on `feature/0.17.0-hdr` for 0.17.0, not yet released; where it departs from this
+  text, see "Phase 1 as built". Phase 2 waits for v2's Steam Machine run
+  (`docs/handoff/v2-hdr-steam-machine-test.md`)
 - **Requested by:** Be The Bullet Hell v2. Its coordinator asked after the owner's seventeenth play-test (2026-11-28),
   and the owner asked for it directly. He plays on a 4K TV and on the Steam Machine, where the game is a Windows Vulkan
   app under Proton in gamescope
@@ -465,9 +467,9 @@ paper white, P, the encode's scale). The window remembers its SDR format at the 
 - **The scene's tail targets are kept per format.** The `ensure_*` functions compare format as well as size and make
   them again on a switch. **The tail pipelines are kept per format class** (SDR, HDR), so switching back and forth makes
   nothing new after the first time.
-- **`render_to_target` stays SDR.** It writes `target_format` with the SDR shaders, as today. A frame-format RGBA16F
-  target is refused there in phase 1 ("render a scene into an SDR render target"); an HDR scene into a target is
-  phase 3, if a game asks.
+- **`render_to_target` stays SDR.** It writes `target_format` with the SDR shaders, as today. Into a frame-format
+  RGBA16F target it writes the same SDR picture (its blit converts the format); as built, rather than refused. An HDR
+  scene into a target is phase 3, if a game asks.
 
 ### The HDR tone map
 
@@ -583,15 +585,17 @@ one) and:
    - the window scene runtime's tail pipelines in the new class, if a scene has presented. The window keeps the last
      post and canvas fragment-shader paths it was given; the HDR shaders are loaded as their siblings, like every post
      shader today (`scene.c:9540-9588`).
-4. Warms SDL's blit pipeline for the frame format with a 1 x 1 blit. SDL makes blit pipelines per destination format
-   on first use.
-5. Logs the line, bumps `serial`, and sets `hdr_changed` for the next poll.
+4. Logs the line, bumps `serial`, and sets `hdr_changed` for the next poll.
+
+(As built, the scene's HDR tail pipelines come from the next `btbh_gpu_window_scene_prewarm` or present, not from
+`set_hdr`: they are made by the frame's own preparation, which needs the frame's settings. And there is no 1 x 1 blit
+warm-up: SDL's blit pipelines are SDL's, outside the renderer's creation counts.)
 
 - **Targets that depend on the render size** (the tail at the new format) are made by the next present, or by
   `btbh_gpu_window_scene_prewarm`. That prewarm builds the window's current frame format and should be called after
   enabling.
-- The lazy creation log names anything still made in a frame, under its existing scopes. New kinds: `hdr_encode`,
-  `post_hdr`, `canvas_hdr`.
+- The lazy creation log names anything still made in a frame, under its existing scopes: the HDR shaders and pipelines
+  are ordinary shader and pipeline creations there (as built; no new kinds).
 - The CPU time is in `last_switch_milliseconds`; expect a GPU wait plus a few pipelines the first time.
 - **No restart is needed on Windows or Apple.** Under gamescope, a mode switch works only if the surface already had
   HDR pairs; see "Display and OS changes".
@@ -641,11 +645,11 @@ one) and:
 | --- | --- | --- |
 | `capture_pending_scene_texture` | as today | a texture in the frame format (RGBA16F), an exact copy: highlights kept |
 | `copy_pending_scene_texture` into a frame-format target | as today | exact copy |
-| ... into an SDR-format target (every target made before this RFC) | as today | a fold pass (`production_hdr_fold.frag`). In display light `L = v^2.2` with max channel `M`: kept at or below k = 0.6, above it scaled to `F(M) = k + (1 - k)(1 - e^-((M - k)/(1 - k)))`, hue kept, then encoded back. Highlights land under paper white, close to the SDR picture |
+| ... into an SDR-format target (every target made before this RFC) | as today | a fold pass (`production_hdr_fold.frag`). In display light `L = v^2.2` with max channel `M`: kept at or below k = 0.6, above it brought into (k, 1] by `F(M) = k + (M - k) / (1 + (P - 1)(M - k) / ((1 - k)(P - k)))`, hue kept, then encoded back. F is C1 at k, maps the peak P to 1, and is the identity at P = 1. (As built; this text first had an exponential that also moved (0.6, 1] without highlights.) |
 | ... an SDR frame into an RGBA16F target | - | a blit (exact in the encoding) |
 | `readback_presented_frame` (RGBA8) | as today, byte for byte | the frame clamped to 0-1 and rounded: UI and mid-tones as SDR, highlights clipped at paper white |
 | `readback_presented_frame_rgba16f` (new) | the 8-bit frame widened | the frame as encoded |
-| `present_clear` | as today | the colour encoded on the CPU (decode 2.2, paper white, PQ or scRGB) and cleared into the swapchain directly |
+| `present_clear` | as today | the colour (or the pending scene) into the HDR frame, then the encode, as a canvas present does (as built; this text first had a CPU-encoded clear) |
 
 **For v2's pause backdrop:** a target made with `BTBH_GPU_RENDER_TARGET_FRAME_FORMAT` at the pause (as now, once per
 pause), then `copy_pending_scene_texture`. The frozen frame then looks like the live one, highlights included. An old
@@ -655,9 +659,9 @@ SDR-format target still works, with highlights folded (question 7).
 
 - **`present_views`:** the views compose before post, so the HDR variants run once over the composed frame, as the SDR
   passes do. The per-view composites (`scene.c:13513-13537`) write RGBA16F already.
-- **The cost log:** one internal step, `BTBH_GPU_COST_STEP_HDR_ENCODE` (20; `BTBH_GPU_COST_STEP_COUNT` becomes 21), in
-  the UI group (`internal.h:633`), so the encode shows apart from the scene's blit and the UI. The post group keeps its
-  steps; their HDR variants report under the same names.
+- **The cost log:** the encode is in the UI group (`internal.h:633`) with the scene's blit and the UI. The post group
+  keeps its steps; their HDR variants report under the same names. (As built: no separate step. A step would change
+  `BTBH_GPU_COST_PASSES`' line, which v2 parses, and the canvas's piece isn't split.)
 - **RFC 0015 phase 1b:**
   - The frame texture becomes "always on" there. In HDR it is this RFC's frame, and the window thread's present step
     runs the encode instead of the blit.
@@ -703,6 +707,8 @@ Read once, at the claim. Like `BTBH_GPU_COST_LOG`, not API.
 | `BTBH_GPU_HDR=off\|auto\|force\|hdr10\|scrgb` | Overrides the host's mode at the claim and on every `set_hdr` (`hdr10` and `scrgb` force that composition). For tests and the Machine, before v2's option exists |
 | `BTBH_GPU_HDR_NITS=<paper>,<peak>` | Overrides the nits |
 | `BTBH_GPU_HDR_KNEE`, `BTBH_GPU_HDR_SHOULDER` | The tone map's `k` and `tau / m_k` |
+| `BTBH_GPU_HDR_DITHER=0` | No dither in the HDR10 encode (as built, for the tests) |
+| `BTBH_GPU_HDR_DEBUG=heat` | The output pass writes the scene's heat into the frame's alpha (as built, for the tests) |
 | `BTBH_GPU_HDR_SIMULATE=hdr10\|scrgb` | Runs the whole HDR path with the swapchain left SDR. The encode writes an offscreen "virtual swapchain" of that format, which tests read back; the screen shows the frame clamped to SDR. How HDR is tested on an SDR PC |
 
 ## Minimal example
@@ -752,7 +758,7 @@ while (running) {
   - the submit runs the encode instead of the read-back blit;
   - pipelines per target format;
   - the read-backs (RGBA8 clamp, new RGBA16F);
-  - `present_clear`'s CPU encode.
+  - `present_clear` through the HDR frame and the encode.
 - **`scene.c`:**
   - the HDR tail-pipeline class (output, tilt-shift, LUT, CAS, RCAS variants; FXAA, SMAA blend, EASU and Lanczos at
     RGBA16F);
@@ -806,6 +812,11 @@ in phase 2.
 | Memory | the frame (66 MB) and the tail targets doubled | +130-200 MB in HDR, freed in SDR |
 | The Steam Machine | | Not known here: expect roughly the PC's milliseconds times the bandwidth ratio. Measure with the cost log |
 
+**Measured (phase 1):** +0.30 ms at native 4K with SMAA (7.860 -> 8.159 ms a frame) and +0.28 ms with FSR 3 at scale 1
+(10.971 -> 11.247), the views bench's city with its window shown and HDR10 simulated (which adds one blit the real
+swapchain doesn't have). The post group took +0.04 ms, the UI group (the blit into the frame and the encode) +0.26-0.27.
+Below the estimate above; see the CHANGELOG's 0.17.0 entry for the percentiles.
+
 ## Compatibility
 
 - **Versioning: minor (0.17.0).**
@@ -845,7 +856,9 @@ in phase 2.
   log's pass frames. And the hash check of the SDR shaders' compiled files.
 - **`btbh_gpu_hdr_smoke` (new), with `BTBH_GPU_HDR_SIMULATE`:**
   - **The SDR picture through the HDR path:** at P = 1, every identity scene's RGBA16F frame, clamped and rounded to 8
-    bits, equals its SDR frame within ±1 code (SDR dithers, HDR doesn't).
+    bits, equals its SDR frame within ±1 code (SDR dithers, HDR doesn't). (As built: true without anti-aliasing or
+    upscaling, in `btbh_gpu_hdr_smoke`; with SMAA, FXAA or FSR in the tail, edge pixels differ more, because the tail
+    filters unquantized values where SDR filters 8-bit dithered ones. See "Phase 1 as built", 13.)
   - **The mid-tones at P = 4.93:** pixels whose `m` is at or below `m_k` equal SDR within ±1 code; the others are at
     least as bright. That needs a debug output of `m`, available in simulate mode.
   - **The encode:** the virtual swapchain (RGB10A2 and RGBA16F) read back against the CPU reference applied to the
@@ -960,6 +973,44 @@ Each has the renderer's recommendation; v2 answers per number.
     measurement, and its present step then runs the encode.
 14. **The Machine run.** Recommended: one session with the owner for steps 1-9 at 4K60 over HDMI, on a build from
     phase 1's candidate. v2 sends the files back on the issue, and phase 2 starts from them.
+
+## Phase 1 as built (feature/0.17.0-hdr)
+
+Where the implementation departs from the text above, and why. The text above is marked "as built" at each place.
+
+1. **The fold** (copies of an HDR frame into an SDR target) is `F(M) = k + (M - k) / (1 + (P - 1)(M - k) / ((1 - k)(P -
+   k)))`, not the exponential: it is the identity at P = 1, so an HDR frame at peak = paper white copies as the SDR
+   picture (the identity runs through the HDR path need that), and it maps the peak to 1.
+2. **`present_clear`** draws into the HDR frame and goes through the encode, as the canvas does, instead of encoding
+   its colour on the CPU: one path, and the pending scene it may blit is HDR too.
+3. **`render_to_target`** into a frame-format target writes the SDR picture (its blit converts) instead of refusing.
+4. **The LUT pass carries the scene's heat** (exposure times its largest channel), not the gain, in alpha; the output
+   pass computes the gain. Tilt-shift's HDR variant blurs the heat with the colour, by the same kernel and weights.
+5. **`set_hdr`** makes the frame texture, the encode and fold pipelines and the canvas's RGBA16F pipelines; the scene's
+   HDR tail pipelines come from the next prewarm or present (v2 calls the prewarm after enabling, decision 9).
+6. **The post tail's two classes** (SDR, HDR) are swapped with a stash on a switch, so switching back and forth makes
+   nothing anew; a switch drops the frame-format targets, which the next frame makes again.
+7. **The HDR uniforms** are `BTBHGPUPostUniforms` (272 bytes) followed by two vectors (304 bytes in all), pushed to the
+   same slot, rather than a second uniform block: the shaders keep one block. RCAS's HDR variant takes its metrics and
+   then the tail's peak.
+8. **The cost log** has no separate encode step (it is in the UI group), and the lazy creation log no new kinds.
+9. **Two more debug switches** for the tests: `BTBH_GPU_HDR_DITHER=0` (no HDR10 dither) and `BTBH_GPU_HDR_DEBUG=heat`
+   (the output pass writes the scene's heat into the frame's alpha).
+10. **Without any present's shader paths** (a `present_clear` before the first present) the encode can't be made: the
+    HDR frame is then blitted to the swapchain as it is, for that frame.
+11. **`hdr_changed`** is not raised by the claim; a frame-start re-check raises it only when it switches (the SDL event
+    itself raised it at the poll).
+12. **`BTBH_GPU_HDR_SIMULATE`** keeps the real swapchain SDR: `BTBHGPUWindowReport` reports SDR, and the HDR state the
+    simulated composition and format (`simulate=` in the line). Like an SDR window, a window with no swapchain image
+    (hidden, minimized) draws no screen passes, so the encode needs a shown window; captures and copies work hidden.
+13. **P = 1 against SDR is exact only without anti-aliasing or upscaling.** The HDR tail filters RGBA16F values where
+    the SDR tail filters 8-bit dithered ones, so SMAA's edge decisions, FXAA and FSR 1 and 3 land a little differently.
+    The identity smokes forced into simulated HDR at P = 1 (copied into SDR targets through the fold, the identity
+    there): of 54.6 million channels 97.8 % equal, 2.0 % one code apart, 0.25 % more (up to 43 codes, on edges in the
+    prewarm smoke's SMAA and FSR 1 frames); render-to-target and canvas-target scenes stay byte for byte. The SDR mode
+    itself is byte for byte 0.16.1's.
+14. **The window's scene prewarm makes the HDR passes too** while HDR is on (the frame texture, the encode, the fold,
+    the canvas's RGBA16F pipelines), as `set_hdr` does once a present has given the renderer its shader paths.
 
 ## Decisions (v2, 2026-11-28)
 
