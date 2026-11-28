@@ -51,7 +51,8 @@ drawn before it. `opaque_sort` and the floored snap are wired but off. `build.rs
 byte 255; it was `ssao_reserved[1]` up to 0.11.0), which the renderer keeps reserved and in the run key. Giving that
 byte a meaning needs CHIMERA to move its mark first. It presents through `_with_visibility` (`gpu.rs:2607`). Not
 used yet: terrain. Requested (drafts in `docs/rfc/`): layered terrain (0001), height fog and water at RTS scale
-(0002), light regions (0003); its lamps should move to `lamp_*` (in v0.1.0).
+(0002), light regions (0003). Its map lanterns and its structures' night lights go through `lamp_*`. Lit volumes
+(RFC 0019): agreed technically, its author's look and pin bump pending.
 
 **Be The Bullet Hell v2** (`v2/crates/v2-platform/src/gpu.rs`, bindgen; it took over CHIMERA's sys crate):
 instanced model batches with vertex colours, one albedo/normal/ORM set per batch (kit detail maps since BTBH
