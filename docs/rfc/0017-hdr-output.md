@@ -1,6 +1,7 @@
 # RFC 0017: HDR output: an HDR swapchain where the display has one, highlights above the SDR look, the UI at paper white
 
-- **Status:** Draft, 2026-11-28. Waiting for v2's answers to the open questions at the end
+- **Status:** Accepted on 2026-11-28: v2 answered all 14 questions through its session, each as recommended (see
+  "Decisions"). Phase 1 is next
 - **Requested by:** Be The Bullet Hell v2. Its coordinator asked after the owner's seventeenth play-test (2026-11-28),
   and the owner asked for it directly. He plays on a 4K TV and on the Steam Machine, where the game is a Windows Vulkan
   app under Proton in gamescope
@@ -959,6 +960,30 @@ Each has the renderer's recommendation; v2 answers per number.
     measurement, and its present step then runs the encode.
 14. **The Machine run.** Recommended: one session with the owner for steps 1-9 at 4K60 over HDMI, on a build from
     phase 1's candidate. v2 sends the files back on the issue, and phase 2 starts from them.
+
+## Decisions (v2, 2026-11-28)
+
+v2 took the recommendation on all 14 questions:
+
+1. **The renderer picks the composition** (HDR10 first on Windows and the Machine, extended linear on the Mac). v2 keeps
+   only a hidden environment override for debugging.
+2. **v2's Display option is HDR: Off / On, and On is `BTBH_GPU_HDR_MODE_AUTO`.** v2's default stays Off until the
+   owner's Machine run approves the look; then it becomes On.
+3. **Paper white 203 nits; peak** the display's reported peak when above paper white, else 1000. v2's calibration screen
+   adjusts both; on Windows the OS's SDR white is shown only as a hint.
+4. **Phase 1 keeps SDR's hue and shoulder desaturation.** More saturated highlights only if the owner asks after
+   seeing it.
+5. **Knee and shoulder are constants,** tuned with `BTBH_GPU_HDR_KNEE` / `BTBH_GPU_HDR_SHOULDER`, not in v2's options.
+6. **SDR values are decoded with gamma 2.2.**
+7. **The pause backdrop** is made in `BTBH_GPU_RENDER_TARGET_FRAME_FORMAT`.
+8. **Screenshots:** PNGs from the RGBA8 read-back for now.
+9. **The toggle's GPU wait is fine;** v2 calls `btbh_gpu_window_scene_prewarm` after enabling.
+10. **The deploy sets nothing for players.**
+11. **"Restart to apply"** in v2's text until test step 6 shows otherwise; the surface re-make flag only if needed.
+12. **The HUD's additive glows** are checked on the Machine; a UI ceiling only if they are too bright.
+13. **HDR phase 1 comes before RFC 0015 phase 1b.**
+14. **One Machine session with the owner** for steps 1-9 on phase 1's candidate; v2 deploys it with the procedure
+    written out for the owner, and the files come back through v2.
 
 ## Sources
 
