@@ -1853,7 +1853,13 @@ enum {
      *   ground keeps the camera's heading, so it meets them from the front.
      * - With or without the radiance cascades, and with BTBH_GPU_SCENE_POST_SSR_SURFACE_REFLECTIVITY or without; it
      *   changes nothing without SSR. Needs this release's production_ssao_resolve.frag; older ones ignore it. */
-    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2
+    BTBH_GPU_SCENE_POST_SSR_FACING_HITS = 1u << 2,
+    /* Screen-space distortion (RFC 0018, since 0.18.0): the frame draws the distortion sources set for it
+     * (btbh_gpu_window_scene_set_distortion). Without it they are dropped undrawn: a preset's or a player's switch.
+     * With it, btbh_gpu_window_scene_prewarm (and _prewarm_views) also makes the distortion's pipelines and field. With
+     * it and no source drawn, the frame is as without it, to the byte. Renders into targets accept it and draw no
+     * distortion. */
+    BTBH_GPU_SCENE_POST_DISTORTION = 1u << 3
 };
 
 /* Defined when BTBHGPUScenePost.flags and BTBH_GPU_SCENE_POST_ADDITIVE_CASCADES_KEEP_HBAO exist (since 0.9.0). */
@@ -1888,7 +1894,11 @@ typedef struct BTBHGPUSceneReport {
        BTBH_GPU_SCENE_UPSCALE_LINEAR for a scene rendered to a target at its size or bigger. 0 when
        the present failed. */
     uint8_t upscale_mode;
-    uint8_t upscale_reserved[3];
+    /* RFC 0018 (since 0.18.0, in the byte that was upscale_reserved[0], so the report keeps its size): the distortion
+       sources the frame drew in any view, after skipping and culling (btbh_gpu_window_scene_set_distortion); 0 when no
+       distortion pass ran. */
+    uint8_t distortion_sources_drawn;
+    uint8_t upscale_reserved[2];
 } BTBHGPUSceneReport;
 
 typedef struct BTBHGPUFrameTelemetrySample {
@@ -3272,6 +3282,117 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
 /* Defined when btbh_gpu_window_scene_present_views, btbh_gpu_window_scene_prewarm_views and their structs exist (since
    0.16.0). */
 #define BTBH_GPU_SCENE_HAS_VIEWS 1
+
+/* Screen-space distortion (RFC 0018, since 0.18.0, asked for by Be The Bullet Hell v2): rings, discs and strips placed in
+   the world for one frame bend the scene behind them (shockwaves, heat haze, lensing orbs). They are drawn into an
+   offset field at half the render size, and the HDR composite shows the scene displaced by it, before the grading, the
+   tone map, the anti-aliasing and the upscaling (HDR output reads the displaced picture). The canvas (the UI) is never
+   displaced. A frame that draws no source is the same to the byte as without this. */
+
+/* The most sources btbh_gpu_window_scene_set_distortion takes for one frame. */
+#define BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES 240u
+
+/* BTBHGPUSceneDistortionSource.shape. r is a point's distance from position in the shape's plane (world units); for a
+   strip, from the segment between position and end. */
+typedef enum BTBHGPUSceneDistortionShape {
+    BTBH_GPU_SCENE_DISTORTION_RING = 0,    /* a band `width` wide whose middle lies `radius` from position */
+    BTBH_GPU_SCENE_DISTORTION_DISC = 1,    /* a disc of `radius`: a blob, a lens */
+    BTBH_GPU_SCENE_DISTORTION_STRIP = 2,   /* a capsule reaching `radius` each side of the segment position-end */
+    BTBH_GPU_SCENE_DISTORTION_SHAPE_COUNT = 3
+} BTBHGPUSceneDistortionShape;
+
+/* BTBHGPUSceneDistortionSource.mode. */
+typedef enum BTBHGPUSceneDistortionMode {
+    /* The scene moves along the shape's outward direction on screen (away from position, or from the strip's segment):
+       strength above 0 pushes it out (a disc magnifies, a ring's band bulges outward), below 0 pulls it in (a disc
+       pinches). With x = (r - radius) / (width / 2) for a ring and u = r / radius for a disc or a strip, the
+       displacement is strength * (1 - x^2)^2 * min(1, 2r / width) for a ring (|x| < 1) and
+       strength * 3.4938562 * u * (1 - u^2)^2 for a disc or a strip (u < 1: 0 at the centre and the edge, strength at
+       u = 0.447); nothing outside. */
+    BTBH_GPU_SCENE_DISTORTION_PUSH = 0,
+    /* Heat haze: the scene shimmers by an animated noise, strength * envelope * (N_x, N_y) on screen (x right, y up),
+       each N a value noise in -1..1 over the shape's plane, haze_scale cells per world unit, drifting at haze_speed
+       cells per second up the screen (a strip: along its segment), two octaves. The envelope is (1 - x^2)^2 *
+       min(1, 2r / width) for a ring and (1 - u^2)^2 for a disc or a strip. */
+    BTBH_GPU_SCENE_DISTORTION_HAZE = 1,
+    BTBH_GPU_SCENE_DISTORTION_MODE_COUNT = 2
+} BTBHGPUSceneDistortionMode;
+
+/* BTBHGPUSceneDistortionSource.flags. */
+enum {
+    /* The shape lies in the world's x-z plane at its height: a ring on the ground, an ellipse under a tilted camera (its
+       axes: the camera's right laid flat, and across it, up the screen; a strip: across its segment, horizontal).
+       Without it the shape faces the camera: a ring or a disc lies in the camera's plane (right and up) through
+       position, a circle on screen, and a strip is a ribbon about its segment, across it and the camera's view. */
+    BTBH_GPU_SCENE_DISTORTION_FLAT = 1u << 0
+};
+
+/* One distortion source for one frame. 64 bytes on 64-bit (no pointers): position 0, radius 12, end 16, width 28,
+   strength 32, chroma 36, haze_scale 40, haze_speed 44, shape 48, mode 52, flags 56, reserved 60. A zeroed source draws
+   nothing (its radius and strength are 0). shape and mode are uint32_t, so the layout never depends on an enum's size. */
+typedef struct BTBHGPUSceneDistortionSource {
+    float position[3];   /* world: the centre (RING, DISC), or the strip's first end */
+    float radius;        /* world units: RING to the band's middle, DISC its radius, STRIP its half-width. 0: nothing */
+    float end[3];        /* world: the strip's second end. 0 for RING and DISC */
+    float width;         /* world units: RING the band's whole width (0: nothing). 0 for DISC and STRIP */
+    /* The largest displacement, in pixels of a frame 1080 pixels high: strength / 1080 of the frame's height, so it
+       reads the same at any resolution and render scale (12: 12 px at 1080p, 24 at 2160, 8.9 on the Deck's 800 lines).
+       PUSH: signed, as above. HAZE: the largest along each axis (its sign is ignored). 0: nothing.
+       A PUSH source's displacement is clamped where its picture would fold over itself: to 0.3 of its width (RING) or
+       0.28 of its radius (DISC, STRIP), as long on screen as the shape's shorter axis there. The sources' displacements
+       add up, and their sum is clamped to 64 pixels of a 1080-line frame. */
+    float strength;
+    /* 0..1: red displaced by 1 + 0.35 * chroma times the displacement, blue by 1 - 0.35 * chroma, so colours part along
+       the bend (as REFRACT's dispersion). 0: none. Where sources overlap, their chroma is averaged by displacement. */
+    float chroma;
+    float haze_scale;    /* HAZE: noise cells per world unit (0: 1). 0 for PUSH */
+    float haze_speed;    /* HAZE: cells per second the noise drifts (0: still). 0 for PUSH */
+    uint32_t shape;      /* BTBHGPUSceneDistortionShape */
+    uint32_t mode;       /* BTBHGPUSceneDistortionMode */
+    uint32_t flags;      /* BTBH_GPU_SCENE_DISTORTION_* bits; 0: facing the camera */
+    uint32_t reserved;   /* 0 */
+} BTBHGPUSceneDistortionSource;
+
+/* Sets the distortion sources of the window's next scene present (btbh_gpu_window_scene_present_instances,
+   _with_visibility or btbh_gpu_window_scene_present_views). They are copied at the call. That present takes them and
+   forgets them, drawn or not: the one after draws none unless this is called again.
+   - A second call before the present replaces the first; source_count 0 clears them. A present refused before it
+     begins (its arguments, batches, views or cameras invalid, or a scene waiting for its canvas) leaves them set; one
+     that fails later has taken them.
+   - They are drawn only when the present's post has BTBH_GPU_SCENE_POST_DISTORTION, and not in the radiance cascades'
+     debug views. Renders into targets and prewarms neither draw nor take them.
+   - A source is skipped (not drawn, not counted) when its radius or its strength is 0, or a ring's width is 0. In each
+     view it is drawn when its bounds meet the view's frustum: projected with the view's camera and clipped to its half.
+     With two views (btbh_gpu_window_scene_present_views), the displacement fades to nothing within 8 render pixels of a
+     view's edge (from 2.5 to 3.3 pixels from it), and no displaced read crosses it.
+   - Where FSR 3 runs, displaced pixels are marked in its reactive mask by refraction's rule: min(1, the summed
+     displacements' length / 6 render pixels) times post->temporal_reactive_scale. The motion vectors stay the scene's.
+   - time_seconds is the haze's clock: any steadily growing seconds (a game's time, stopped with its pause). Each
+     source's drift is wrapped on the CPU, so the clock may grow without bound.
+   - Needs production_distortion.vert, production_distortion.frag, production_hdr_composite_distort.frag and
+     production_hdr_composite_distort_reactive.frag beside the present's post fragment shader. A frame that draws a
+     source without them fails with BTBH_GPU_INVALID_ARGUMENT, naming the file; so does a prewarm with the flag.
+   - Refused with BTBH_GPU_INVALID_ARGUMENT, and nothing is kept (the next present draws none):
+     - a NULL window; sources NULL with a source_count above 0; a source_count above
+       BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES;
+     - time_seconds not finite;
+     - a source with a field that isn't finite; radius, width or haze_scale below 0; chroma outside 0..1; an unknown
+       shape, mode or flag; reserved not 0; a field its shape or mode doesn't use that isn't 0 (end for RING and DISC,
+       width for DISC and STRIP, haze_scale and haze_speed for PUSH).
+     report may be NULL. Otherwise only its result and message are written; a refusal's message names the source and
+     the field.
+   Call it on the thread that presents, at any time between presents. */
+BTBHGPUResult btbh_gpu_window_scene_set_distortion(
+    BTBHGPUWindow *window,
+    const BTBHGPUSceneDistortionSource *sources,
+    uint32_t source_count,
+    float time_seconds,
+    BTBHGPUSceneReport *report
+);
+
+/* Defined when btbh_gpu_window_scene_set_distortion, BTBHGPUSceneDistortionSource, its enums,
+   BTBH_GPU_SCENE_POST_DISTORTION and BTBHGPUSceneReport.distortion_sources_drawn exist (since 0.18.0). */
+#define BTBH_GPU_SCENE_HAS_DISTORTION 1
 
 /* The lazy creation log (since 0.11.0, asked for by Be The Bullet Hell v2): what a window's scene presents, renders to
    a target and canvas presents made because nothing had made it before, with how long each took, and the SDL calls

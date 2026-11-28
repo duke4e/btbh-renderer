@@ -61,6 +61,43 @@ All notable changes to this project are documented here. The format follows
     made, refusals, captures, copies, the tail at an exposure past the largest half). The views bench takes
     `BTBH_VIEWS_BENCH_SHOWN=1` and prints its CPU frames.
   - **The Steam Machine test** v2 deploys and the owner runs: `docs/handoff/v2-hdr-steam-machine-test.md`.
+- **Screen-space distortion** (RFC 0018 phase 1, `BTBH_GPU_SCENE_HAS_DISTORTION`; asked for by Be The Bullet Hell v2
+  after the owner's seventeenth play-test: shockwave rings on blasts and kaiju stomps, heat haze over fires, beams and
+  the desert, lensing energy orbs). A frame that draws no source is byte for byte as before (below).
+  - **API:** **`btbh_gpu_window_scene_set_distortion`** sets up to `BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES` (240)
+    sources for the window's next scene present (`present_instances`, `_with_visibility`, `present_views`), copied at
+    the call; that present takes them, drawn or not. **`BTBHGPUSceneDistortionSource`** (64 bytes): a world position,
+    a radius, a strip's second end, a ring's width, a strength in pixels of a 1080-line frame (so it reads the same at
+    any resolution and render scale), chroma 0..1, the haze's scale and speed, a **`BTBHGPUSceneDistortionShape`**
+    (ring, disc, strip), a **`BTBHGPUSceneDistortionMode`** (push: the scene moves out from the shape, or in with a
+    negative strength; haze: an animated noise) and `BTBH_GPU_SCENE_DISTORTION_FLAT` (lying on the ground; else facing
+    the camera). **`BTBH_GPU_SCENE_POST_DISTORTION`** (post flags, bit 3) draws them; without it they are dropped (a
+    preset's or a player's switch), and with it the prewarm makes the distortion's pipelines and field.
+    `BTBHGPUSceneReport.distortion_sources_drawn` takes the byte after `upscale_mode` (the report keeps its size;
+    `upscale_reserved` is two bytes now). Refusals name the source and the field.
+  - **What it does:** each view draws the sources its frustum meets, clamped where the picture would fold, into an
+    offset field (RGBA16F at half the render size, added up), and the HDR composite shows the scene displaced by it:
+    fog and bloom read at the displaced point, the vignette on the pixel, red and blue apart by the chroma, the sum
+    clamped to 64 pixels of a 1080-line frame. That is before the grading, the tone map, the anti-aliasing and the
+    upscaling (HDR output reads the displaced picture); the canvas is never displaced. A frame with sources runs the
+    composite whatever fog, bloom and the vignette say. Renders into targets draw none and leave them for the frame.
+  - **FSR 3:** the displaced composite also writes the reactive mask, min(1, the displacements' length / 6 render
+    pixels) times `temporal_reactive_scale` (refraction's rule), blended with max; the motion vectors stay the scene's.
+  - **Scene views:** each view's sources are clipped to its half; the displacement fades to nothing within 8 render
+    pixels of a view's edge, and no displaced read crosses the line (it stops at the reflections' margin).
+  - **Shaders:** four new built files, `production_distortion.vert`, `production_distortion.frag`,
+    `production_hdr_composite_distort.frag` and `production_hdr_composite_distort_reactive.frag` (the composite's
+    source with `BTBH_DISTORTION` 1 and 2), and `production_distortion.hlsli`. The composite's source gains preprocessor
+    blocks only; its SPIR-V and MSL are byte for byte 0.17.0's. 90 shaders are built.
+  - **The cost log:** a pass frame that draws sources prints `distortion_ms` (the source pass; the displaced composite
+    stays in `composite_ms`); the others print as before.
+  - **Debug:** `BTBH_DEBUG_DISTORTION=1` shows the field instead of the scene.
+  - **Tests:** `btbh_gpu_distortion_test` (the struct's layout, the setter's checks, the CPU reference
+    `src/gpu/btbh_gpu_distortion.h`: profiles, the fold clamp, the haze, culling, the views' rules) and
+    `btbh_gpu_scene_distortion_smoke` (identity without sources; each shape and mode's field and frame against the CPU
+    reference; scene views by the line; FSR 3's reactive mask; refusals; prewarm; a missing shader). The smokes'
+    presents take `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing) for the identity runs; the
+    frame bench takes the modes `dist-none`, `dist-off`, `dist-typical`, `dist-worst` and the preset `4k`.
 
 ### Known
 - **SDL 3.4.2 sends no HDR metadata** (it never calls `vkSetHdrMetadataEXT`); `metadata_set` stays 0 and the TV uses
@@ -77,6 +114,12 @@ All notable changes to this project are documented here. The format follows
 - **FSR 3 keeps its LDR build** and receives values up to the tail's peak in HDR; whether highlights ghost is phase 2's
   check on real content.
 - **An additive canvas batch whose sum passes 1** shows above paper white in HDR (no 8-bit clip).
+- **Distortion, not run on Metal:** its shaders build to MSL (and the Mac's metallibs come from its `check.sh`); the
+  smoke runs on Windows/Vulkan only.
+- **Distortion under FSR 3** marks displaced pixels reactive by refraction's rule; whether a growing ring or boiling haze
+  leaves trails in v2's scenes is v2's check at 4K High and Medium (`BTBH_DEBUG_MOTION_VECTORS=2`, RFC 0018 decision 4).
+- **Distortion is not depth-tested** (RFC 0018 decision 8): what stands in front of a source is displaced with the rest,
+  bullets too (decision 3).
 
 ### Measured
 The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on `feature/0.17.0-hdr`: `check.ps1` 48/48 (the 46 and the two new
@@ -108,6 +151,27 @@ machine's perf lock, 04:34:52 to 04:39, pairs interleaved, 3 runs a side, 228 fr
   3.546; `ui` 0.174 and 0.429. CPU 0.476 (0.444-0.564) and 0.489 (0.421-0.577).
 - So HDR costs about 0.3 ms at 4K here (3-4 %), below the RFC's estimate of 0.5-0.7; a real HDR swapchain has no extra
   blit, so somewhat less.
+
+Screen-space distortion, on `feature/0.18.0-distortion` (Windows, Vulkan, RTX 3070 Ti): `check.ps1` 50/50 (the 48 and the
+two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures), identity against 0.16.0's build in the
+four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view
+and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing), and in plain and verify with the cost log
+and its pass frames (1,525 and 1,523 lines naming `BTBH_GPU_COST`, none with `distortion_ms`); the views smoke passes in
+the four modes and HDR's smoke with the rest. In `btbh_gpu_scene_distortion_smoke` the field read back matches the CPU
+reference within 0.035 px at every covered texel (peaks 2.8-10.9 px) and the frame the undisplaced one resampled within
+1 level, for 13 cases of every shape and mode; FSR 3's reactive mask matches min(1, a / 6) x 0.8 to the level.
+
+The distortion's cost (the frame bench, under the machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
+rounds; medians with the 10th and 90th percentiles; `dist-typical` covers 15 % of the frame, `dist-worst` 91 % at 1.8
+layers, both with v2's bloom as is `dist-none`):
+- **The Deck preset** (960 x 600 to 1280 x 800, FSR 1, HBAO, FXAA): a frame 1.432 ms (1.396-1.482) with no source,
+  1.432 (1.395-1.517) with the flag alone, 1.438 (1.407-1.500) typical, 1.451 (1.415-1.512) worst; `post` 0.279, 0.280,
+  0.287 and 0.298 ms.
+- **4K High** (2560 x 1440 to 3840 x 2160, FSR 3): a frame 5.475 ms (5.429-5.694), 5.476, 5.495 and 5.469 (within
+  noise); the source pass 0.010 ms (-0.012-0.034) typical and 0.051 (0.027-0.075) worst, the composite 0.072, 0.080 and
+  0.105 ms.
+- So about 0.01 / 0.02 ms (typical / worst) at the Deck preset and 0.02 / 0.08 ms at 4K here, under RFC 0018's
+  estimates; nothing measurable without a source.
 
 ## [0.16.1] — 2026-11-28
 

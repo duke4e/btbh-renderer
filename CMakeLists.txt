@@ -317,6 +317,12 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_upscale_fsr_rcas_hdr.frag|fragment"
         "production_hdr_encode.frag|fragment"
         "production_hdr_fold.frag|fragment"
+        # Screen-space distortion (RFC 0018, since 0.18.0): the source pass into the offset field, and the HDR composite
+        # displaced by it (its source with BTBH_DISTORTION 1, and 2 also writing FSR 3's reactive mask).
+        "production_distortion.vert|vertex"
+        "production_distortion.frag|fragment"
+        "production_hdr_composite_distort.frag|fragment"
+        "production_hdr_composite_distort_reactive.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
@@ -489,6 +495,21 @@ if(BTBH_BUILD_GPU_SPIKE)
                 APPEND
                 _shader_dependencies
                 "${BTBH_RENDERER_ROOT}/shaders/gpu/production_tonemap.hlsli"
+            )
+        endif()
+        # RFC 0018: the distortion's helpers, and the displaced composites' source.
+        if(_shader_name MATCHES "^production_distortion\\.")
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_distortion.hlsli"
+            )
+        endif()
+        if(_shader_name MATCHES "^production_hdr_composite_distort")
+            list(
+                APPEND
+                _shader_dependencies
+                "${BTBH_RENDERER_ROOT}/shaders/gpu/production_hdr_composite.frag.hlsl"
             )
         endif()
         # RFC 0017: an HDR variant is its SDR source with BTBH_HDR_OUTPUT, and the HDR helpers.
@@ -766,6 +787,28 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_test(
             NAME btbh_gpu_hdr
             COMMAND btbh_gpu_hdr_test
+        )
+
+        # RFC 0018: screen-space distortion's reference on the CPU (btbh_gpu_distortion.h: the setter's checks, the
+        # profiles, the fold clamp, the haze, the culling, the view rules) and the public struct's layout, without a GPU.
+        add_executable(btbh_gpu_distortion_test
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_distortion_test.c"
+        )
+        target_include_directories(
+            btbh_gpu_distortion_test
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_link_libraries(btbh_gpu_distortion_test PRIVATE btbh_gpu)
+        if(MSVC)
+            target_compile_options(btbh_gpu_distortion_test PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_distortion_test PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_test(
+            NAME btbh_gpu_distortion
+            COMMAND btbh_gpu_distortion_test
         )
 
         # RFC 0008: the world detail's projection, frame and seed (the C copy of production_world_detail.hlsli),
@@ -1267,6 +1310,38 @@ if(BTBH_BUILD_GPU_SPIKE)
         add_dependencies(btbh_gpu_hdr_smoke btbh_gpu_shaders)
         add_test(NAME btbh_gpu_hdr_smoke COMMAND btbh_gpu_hdr_smoke)
         set_tests_properties(btbh_gpu_hdr_smoke PROPERTIES SKIP_RETURN_CODE 77)
+
+        # Screen-space distortion (btbh_gpu_window_scene_set_distortion, RFC 0018, since 0.18.0): identity without
+        # sources, each source's field and frame against the CPU reference, scene views by the line, FSR 3's reactive
+        # mask, the setter's refusals, prewarm and a missing shader; hidden windows.
+        add_executable(btbh_gpu_scene_distortion_smoke
+            "${BTBH_RENDERER_ROOT}/Tests/btbh_gpu_scene_distortion_smoke.c"
+        )
+        target_include_directories(
+            btbh_gpu_scene_distortion_smoke
+            PRIVATE "${BTBH_RENDERER_ROOT}/src/gpu"
+        )
+        target_compile_definitions(btbh_gpu_scene_distortion_smoke
+            PRIVATE
+                SDL_MAIN_HANDLED
+                BTBH_GPU_SMOKE_SHADER_DIR="${BTBH_GPU_SHADER_OUTPUT_DIR}"
+        )
+        target_link_libraries(
+            btbh_gpu_scene_distortion_smoke
+            PRIVATE
+                btbh_gpu
+                SDL3::SDL3-static
+        )
+        if(MSVC)
+            target_compile_options(btbh_gpu_scene_distortion_smoke PRIVATE /W4 /WX)
+        else()
+            target_compile_options(btbh_gpu_scene_distortion_smoke PRIVATE
+                -Wall -Wextra -Wpedantic -Werror
+            )
+        endif()
+        add_dependencies(btbh_gpu_scene_distortion_smoke btbh_gpu_shaders)
+        add_test(NAME btbh_gpu_scene_distortion_smoke COMMAND btbh_gpu_scene_distortion_smoke)
+        set_tests_properties(btbh_gpu_scene_distortion_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
         # btbh_gpu_window_font_load_ex (RFC 0004 A): its checks, and a line of text at 10, 12 and
         # 16 px with and without it, read back into PNGs (font-smoke/ in the build directory).

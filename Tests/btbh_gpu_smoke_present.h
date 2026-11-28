@@ -2,7 +2,11 @@
  * btbh_gpu_window_scene_present_views with one view (the camera, a zero clip, no visibility or lighting of its own,
  * RFC 0014), which must draw byte for byte as btbh_gpu_window_scene_present_instances: an identity run with it set
  * compares the smokes' images with a build of 0.15.0's. Before 0.16.0 (no BTBH_GPU_SCENE_HAS_VIEWS) the variable does
- * nothing, and so does it for a call with a NULL camera array (which both refuse). */
+ * nothing, and so does it for a call with a NULL camera array (which both refuse).
+ * From 0.18.0, BTBH_SMOKE_DISTORTION=1 sets BTBH_GPU_SCENE_POST_DISTORTION in the post and, before each present, two
+ * distortion sources that draw nothing (one of strength 0, one far off to the camera's side: skipped and culled, RFC
+ * 0018): the frames must stay byte for byte as without them. Before 0.18.0 (no BTBH_GPU_SCENE_HAS_DISTORTION) it does
+ * nothing. */
 #ifndef BTBH_GPU_SMOKE_PRESENT_H
 #define BTBH_GPU_SMOKE_PRESENT_H
 
@@ -43,6 +47,27 @@ static inline BTBHGPUResult smoke_present_instances(
     uint8_t clear_alpha,
     BTBHGPUSceneReport *report
 ) {
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+    BTBHGPUScenePost distortion_post;
+    const char *distortion = SDL_getenv("BTBH_SMOKE_DISTORTION");
+    if (distortion != NULL && distortion[0] == '1' && post != NULL && camera_position != NULL &&
+        camera_right != NULL) {
+        distortion_post = *post;
+        distortion_post.flags |= (uint8_t)BTBH_GPU_SCENE_POST_DISTORTION;
+        post = &distortion_post;
+        BTBHGPUSceneDistortionSource sources[2];
+        SDL_zeroa(sources);
+        for (int index = 0; index < 2; ++index) {
+            sources[index].shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+            sources[index].radius = 1.0f;
+            sources[index].strength = index == 0 ? 0.0f : 12.0f;
+            for (int axis = 0; axis < 3; ++axis) {
+                sources[index].position[axis] = camera_position[axis] + (index == 0 ? 0.0f : 1.0e6f * camera_right[axis]);
+            }
+        }
+        (void)btbh_gpu_window_scene_set_distortion(window, sources, 2u, 0.0f, NULL);
+    }
+#endif
 #if defined(BTBH_GPU_SCENE_HAS_VIEWS)
     const char *views = SDL_getenv("BTBH_SMOKE_PRESENT_VIEWS");
     if (views != NULL && views[0] == '1' && view_projection != NULL && camera_right != NULL && camera_up != NULL &&

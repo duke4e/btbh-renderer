@@ -2814,7 +2814,15 @@ static void check_refusals(SmokeWindow *smoke) {
     free(render_scene(smoke, &scene, BTBH_GPU_OK, &report));
 #endif
     build_scene(smoke, &options, &scene);
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+    /* (Bit 3 is RFC 0018's distortion since 0.18.0: taken, a render into a target drawing none; bit 4 is unknown.) */
+    scene.post.flags = (uint8_t)BTBH_GPU_SCENE_POST_DISTORTION;
+    free(render_scene(smoke, &scene, BTBH_GPU_OK, &report));
+    assert(report.distortion_sources_drawn == 0u);
+    scene.post.flags = (uint8_t)(1u << 4);
+#else
     scene.post.flags = (uint8_t)(1u << 3);
+#endif
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);
     scene.post.flags = 0x80u;
     assert(render_scene(smoke, &scene, BTBH_GPU_INVALID_ARGUMENT, &report) == NULL);

@@ -1,7 +1,8 @@
 # RFC 0018: Screen-space distortion: rings, discs and strips that bend the scene, applied in the HDR composite
 
 - **Status:** Accepted on 2026-11-28: v2 answered all 13 questions, each as recommended (see "Decisions"). Phase 1
-  follows HDR output's phase 1 (RFC 0017)
+  implemented on `feature/0.18.0-distortion` (from `release/0.17.0`, after HDR output's phase 1) for 0.18.0, not yet
+  released; where it departs from this text, see "Phase 1 as built"
 - **Requested by:** Be The Bullet Hell v2. Its coordinator asked after the owner's seventeenth play-test (2026-11-28):
   "A screen-space distortion pass: v2 draws distortion sources (rings, blobs, strips with a strength/offset) into a
   buffer and post applies the offset." It went to the renderer with HDR and the lit smoke
@@ -606,3 +607,48 @@ v2 took the recommendation on all 13 questions:
 
 Order (v2): HDR output (0.17.0), this RFC's phase 1, volumetrics phase 1 (RFC 0019), then half-resolution SSR and the
 rest of v2's list.
+
+## Phase 1 as built (feature/0.18.0-distortion)
+
+Where the implementation departs from the text above, and why.
+
+1. **The cost step is 20, not 21.** RFC 0017's phase 1 added no step (its encode is in the UI group), so
+   `BTBH_GPU_COST_STEP_DISTORTION` takes the next free value (`BTBH_GPU_COST_STEP_COUNT` 21). A pass frame prints
+   `distortion_ms` only when it drew the source pass, so lines without distortion keep 0.17.0's fields.
+2. **The haze's second octave drifts three of its cells for each of the first's** (1.5 times as fast in world units),
+   not 1.7 times: with a whole number of cells both octaves repeat when the drift wraps at the lattice's 256 cells, so
+   a growing clock never jumps.
+3. **The CPU works out each source's plane per view** (its origin and unit axes, the fold clamp in render pixels, the
+   wrapped drift: `btbh_distortion_pack` in `src/gpu/btbh_gpu_distortion.h`), so the vertex shader only places a quad.
+   The pending sources and their records live on the window and its runtime; the setter is in `scene.c` (not
+   `window.c`).
+4. **The outward direction** is r's gradient in the plane carried to the screen by the plane coordinates' derivatives
+   (`ddx`, `ddy` of the local point, which are smooth), not r's own derivatives, which kink at a disc's centre and a
+   strip's axis.
+5. **The identity runs' third way** is `BTBH_SMOKE_DISTORTION=1` in the smokes' presents
+   (`Tests/btbh_gpu_smoke_present.h`): the flag and two sources that draw nothing, one skipped and one culled, on every
+   frame of every smoke that presents through it.
+6. **"A refused present leaves them set"** is precise as: a present refused before it begins (its arguments, batches,
+   views or cameras invalid, or a scene waiting for its canvas) leaves them set; one that fails later (a missing shader
+   file included) has taken them.
+7. **The flags smoke's unknown post bit** moves from bit 3 (now `BTBH_GPU_SCENE_POST_DISTORTION`, which a render into a
+   target takes and draws nothing with) to bit 4.
+8. **The frame bench** (`Tests/btbh_gpu_frame_bench.c`) gained the modes `dist-none`, `dist-off`, `dist-typical` and
+   `dist-worst` and the preset `4k` (v2's 4K High: 3840 x 2160 from 2560 x 1440 with FSR 3) for the cost below.
+9. **The cost, measured** (the frame bench on this PC's RTX 3070 Ti, under the machine's perf lock, four windows
+   interleaved over 120 rounds of 8 frames: `dist-none` with v2's bloom, `dist-off` the flag and no source,
+   `dist-typical` 15 % of the frame, `dist-worst` 91 % at 1.8 layers; medians with the 10th and 90th percentiles):
+
+   | | Deck preset (960 x 600 to 1280 x 800, FSR 1) | 4K High (2560 x 1440 to 3840 x 2160, FSR 3) |
+   | --- | --- | --- |
+   | Frame, no source / flag alone | 1.432 ms (1.396-1.482) / 1.432 (1.395-1.517) | 5.475 (5.429-5.694) / 5.476 (5.425-5.704) |
+   | Frame, typical / worst | 1.438 (1.407-1.500) / 1.451 (1.415-1.512) | 5.495 (5.437-5.724) / 5.469 (5.421-5.698) |
+   | `post` group, none / typical / worst | 0.279 / 0.287 / 0.298 ms | 2.510 / 2.521 / 2.507 |
+   | Source pass (`distortion_ms`), typical / worst | 0.000 / 0.010 ms (floor noise, about +-0.02) | 0.010 (-0.012-0.034) / 0.051 (0.027-0.075) |
+   | Composite (`composite_ms`), none / typical / worst | 0.005 / 0.005 / 0.013 ms | 0.072 / 0.080 / 0.105 |
+
+   So the distortion costs about 0.01 ms typical and 0.02 ms worst at the Deck preset here (the frames' and the post
+   group's medians), and about 0.02 ms typical and 0.08 ms worst at 4K (the source pass and the composite's steps; the
+   whole frames' medians move within their noise there), under the estimates above (0.02 / 0.03 and 0.06 / 0.15). With
+   no source it costs nothing measurable, and its frames are 0.17.0's to the byte.
+

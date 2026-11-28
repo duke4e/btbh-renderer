@@ -58,7 +58,15 @@
  *   smoke-lit.
  * - BTBH_FRAME_BENCH_PRESET=high (0.14.0's bench): 1920 x 1080, rendered at that size (no upscaling), instead of the
  *   Deck preset's 960 x 600 upscaled to 1280 x 800. BTBH_FRAME_BENCH_SUN_MAP=<size>: the sun map's size (256 to 8192;
- *   default the renderer's 2048).
+ *   default the renderer's 2048). BTBH_FRAME_BENCH_PRESET=4k (0.18.0's bench): Be The Bullet Hell v2's 4K High, 3840 x
+ *   2160 from a 2560 x 1440 render (FSR 3 Quality, which replaces the anti-aliasing; FSR 1 where the device lacks it).
+ * - RFC 0018's distortion (0.18.0's bench): dist-none, dist-off, dist-typical and dist-worst add bloom (v2's 0.6: its
+ *   frames run the HDR composite) and: dist-none nothing more; dist-off BTBH_GPU_SCENE_POST_DISTORTION with no source;
+ *   dist-typical the flag and, each frame, 2 flat rings (radius 18, width 6, 16 px, chroma 0.3), 6 facing haze discs
+ *   (radius 12, 2.5 px) and 4 facing lenses (radius 7, 8 px, chroma 0.5) over the middle of the city, 15 % of the
+ *   frame; dist-worst a flat haze disc over the whole frame (radius 160, 2 px) and 20 overlapping flat rings (radius
+ *   24, width 10, 18 px, chroma 0.3): 91 % of the frame, 1.8 layers on average. With BTBH_GPU_COST_PASSES=1 the pass frames give the source pass
+ *   (distortion_ms) and the composite (composite_ms) apart. Before 0.18.0 the dist modes draw as dist-none.
  * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
  *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
  *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
@@ -90,7 +98,7 @@ static uint32_t BENCH_WIDTH = 1280u;
 static uint32_t BENCH_HEIGHT = 800u;
 static uint32_t BENCH_RENDER_WIDTH = 960u;
 static uint32_t BENCH_RENDER_HEIGHT = 600u;
-#define BENCH_MAX_RENDER_PIXELS (1920u * 1080u)
+#define BENCH_MAX_RENDER_PIXELS (2560u * 1440u)
 #define BENCH_PIECES 32u
 #define BENCH_MAX_WINDOWS 10u
 #define BENCH_FLOATS 24u
@@ -159,6 +167,8 @@ typedef struct BenchWindow {
     bool smoke_quarter;
     /* The light factor: 0 none, 1 light-off, 2 light, 3 light-mixed. */
     int light;
+    /* RFC 0018's distortion: 0 none, 1 dist-none (bloom), 2 dist-off (and the flag), 3 dist-typical, 4 dist-worst. */
+    int distortion;
     BTBHGPUTexture *smoke_atlas;
     BTBHGPUTexture *smoke_normals;
     BTBHGPUCustomMesh *puff;
@@ -1076,6 +1086,9 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
         (strncmp(bench->mode, "smoke-soft", 10) == 0 ? 2 : (strncmp(bench->mode, "smoke-lit", 9) == 0 ? 3 :
         (strncmp(bench->mode, "smoke-shadow", 12) == 0 ? 4 : (strncmp(bench->mode, "smoke-ground", 12) == 0 ? 5 : 0))));
     bench->smoke_quarter = mode_has(bench->mode, "quarter");
+    bench->distortion = strncmp(bench->mode, "dist-none", 9) == 0 ? 1 :
+        (strncmp(bench->mode, "dist-off", 8) == 0 ? 2 : (strncmp(bench->mode, "dist-typical", 12) == 0 ? 3 :
+        (strncmp(bench->mode, "dist-worst", 10) == 0 ? 4 : 0)));
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {
@@ -1241,6 +1254,19 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
 /* The window's post: the cascades as its mode asks. */
 static BTBHGPUScenePost window_post(const BenchWindow *bench, const BTBHGPUScenePost *post) {
     BTBHGPUScenePost result = *post;
+    if (bench->distortion != 0) {
+        /* v2's bloom, so the frame runs the HDR composite with or without the distortion. */
+        result.bloom_enabled = 1u;
+        result.bloom_intensity = 0.6f;
+        result.bloom_threshold = 1.0f;
+        result.bloom_soft_knee = 0.5f;
+        result.bloom_scatter = 0.7f;
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+        if (bench->distortion >= 2) {
+            result.flags |= (uint8_t)BTBH_GPU_SCENE_POST_DISTORTION;
+        }
+#endif
+    }
     if (!bench->rc) {
         return result;
     }
@@ -1389,6 +1415,76 @@ static BTBHGPUScenePost bench_post(void) {
 
 static bool bench_cpu_mode;
 
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+/* RFC 0018's sources (see the modes above); time animates the haze. */
+static uint32_t distortion_sources(int set, float time, BTBHGPUSceneDistortionSource *sources) {
+    uint32_t count = 0u;
+    if (set == 3) {
+        const float rings[2][2] = {{-30.0f, 10.0f}, {25.0f, -15.0f}};
+        for (uint32_t index = 0u; index < 2u; ++index) {
+            BTBHGPUSceneDistortionSource *source = &sources[count++];
+            memset(source, 0, sizeof(*source));
+            source->shape = BTBH_GPU_SCENE_DISTORTION_RING;
+            source->flags = BTBH_GPU_SCENE_DISTORTION_FLAT;
+            source->position[0] = rings[index][0];
+            source->position[2] = rings[index][1];
+            source->radius = 18.0f;
+            source->width = 6.0f;
+            source->strength = 16.0f;
+            source->chroma = 0.3f;
+        }
+        for (uint32_t index = 0u; index < 6u; ++index) {
+            BTBHGPUSceneDistortionSource *source = &sources[count++];
+            memset(source, 0, sizeof(*source));
+            source->shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+            source->mode = BTBH_GPU_SCENE_DISTORTION_HAZE;
+            source->position[0] = -60.0f + 25.0f * (float)index;
+            source->position[1] = 3.0f;
+            source->position[2] = index % 2u == 0u ? 20.0f : -20.0f;
+            source->radius = 12.0f;
+            source->strength = 2.5f;
+            source->haze_scale = 0.5f;
+            source->haze_speed = 0.8f;
+        }
+        for (uint32_t index = 0u; index < 4u; ++index) {
+            BTBHGPUSceneDistortionSource *source = &sources[count++];
+            memset(source, 0, sizeof(*source));
+            source->shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+            source->position[0] = index % 2u == 0u ? -20.0f : 20.0f;
+            source->position[1] = 6.0f;
+            source->position[2] = index < 2u ? -30.0f : 30.0f;
+            source->radius = 7.0f;
+            source->strength = 8.0f;
+            source->chroma = 0.5f;
+        }
+    } else if (set == 4) {
+        BTBHGPUSceneDistortionSource *haze = &sources[count++];
+        memset(haze, 0, sizeof(*haze));
+        haze->shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+        haze->mode = BTBH_GPU_SCENE_DISTORTION_HAZE;
+        haze->flags = BTBH_GPU_SCENE_DISTORTION_FLAT;
+        haze->radius = 160.0f;
+        haze->strength = 2.0f;
+        haze->haze_scale = 0.4f;
+        haze->haze_speed = 0.8f;
+        for (uint32_t index = 0u; index < 20u; ++index) {
+            BTBHGPUSceneDistortionSource *source = &sources[count++];
+            memset(source, 0, sizeof(*source));
+            source->shape = BTBH_GPU_SCENE_DISTORTION_RING;
+            source->flags = BTBH_GPU_SCENE_DISTORTION_FLAT;
+            source->position[0] = -60.0f + 30.0f * (float)(index % 5u);
+            source->position[2] = -40.0f + (80.0f / 3.0f) * (float)(index / 5u);
+            source->radius = 24.0f;
+            source->width = 10.0f;
+            source->strength = 18.0f;
+            source->chroma = 0.3f;
+        }
+    }
+    (void)time;
+    return count;
+}
+#endif
+
 static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHGPUSceneLighting *lighting,
     const BTBHGPUScenePost *post, uint32_t number, int round, bool with_ring) {
     BTBHGPUSceneReport report;
@@ -1400,6 +1496,18 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
     post = &frame_post;
     const BTBHGPUSceneLighting frame_lighting = window_lighting(bench, lighting);
     lighting = &frame_lighting;
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+    if (bench->distortion >= 3) {
+        BTBHGPUSceneDistortionSource sources[32];
+        const float time = (float)(round < 0 ? 0 : round) * 0.25f;
+        const uint32_t count = distortion_sources(bench->distortion, time, sources);
+        BTBHGPUSceneReport set_report;
+        if (btbh_gpu_window_scene_set_distortion(bench->window, sources, count, time, &set_report) != BTBH_GPU_OK) {
+            fprintf(stderr, "set_distortion: %s\n", set_report.message);
+            exit(1);
+        }
+    }
+#endif
     const uint64_t started = SDL_GetTicksNS();
     const BTBHGPUResult presented = btbh_gpu_window_scene_present_instances(bench->window,
         bench->scene_shaders[0], bench->scene_shaders[1], bench->scene_shaders[2], bench->scene_shaders[3],
@@ -1417,6 +1525,12 @@ static void run_frame(BenchWindow *bench, const BenchCamera *camera, const BTBHG
         fprintf(stderr, "present: %s\n", report.message);
         exit(1);
     }
+#if defined(BTBH_GPU_SCENE_HAS_DISTORTION)
+    if (bench->distortion >= 3 && report.distortion_sources_drawn == 0u) {
+        fprintf(stderr, "the distortion drew no source\n");
+        exit(1);
+    }
+#endif
     if (bench->rc && report.radiance_cascades.active_tier == BTBH_GPU_SCENE_RC_OFF) {
         fprintf(stderr, "the cascades didn't run (fallback %d)\n", (int)report.radiance_cascades.fallback_reason);
         exit(1);
@@ -1449,6 +1563,13 @@ int main(void) {
         BENCH_RENDER_WIDTH = 1920u;
         BENCH_RENDER_HEIGHT = 1080u;
     }
+    const bool preset_4k = preset != NULL && strcmp(preset, "4k") == 0;
+    if (preset_4k) {
+        BENCH_WIDTH = 3840u;
+        BENCH_HEIGHT = 2160u;
+        BENCH_RENDER_WIDTH = 2560u;
+        BENCH_RENDER_HEIGHT = 1440u;
+    }
     printf("BENCH preset %s: %ux%u rendered at %ux%u, sun map %d\n", preset != NULL ? preset : "deck", BENCH_WIDTH,
         BENCH_HEIGHT, BENCH_RENDER_WIDTH, BENCH_RENDER_HEIGHT,
         bench_env_int("BTBH_FRAME_BENCH_SUN_MAP", 2048, 0, 8192));
@@ -1478,7 +1599,18 @@ int main(void) {
     const float centre[3] = { 0.0f, 0.0f, 0.0f };
     const BenchCamera camera = look_at(eye, centre, 0.9f, (float)BENCH_WIDTH / (float)BENCH_HEIGHT);
     const BTBHGPUSceneLighting lighting = bench_lighting();
-    const BTBHGPUScenePost post = bench_post();
+    BTBHGPUScenePost post = bench_post();
+    if (preset_4k) {
+        /* v2's 4K High: FSR 3 Quality, which replaces the anti-aliasing. */
+        post.upscale_mode = BTBH_GPU_SCENE_UPSCALE_FSR3;
+        post.anti_aliasing = 0u;
+        post.temporal_camera_near = 1.0f;
+        post.temporal_camera_far = 400.0f;
+        post.temporal_vertical_fov = 0.9f;
+        post.temporal_frame_seconds = 1.0f / 60.0f;
+        post.temporal_meters_per_unit = 1.0f;
+        post.temporal_reactive_scale = 1.0f;
+    }
     static BenchWindow windows[BENCH_MAX_WINDOWS];
     uint32_t window_count = 0u;
     for (const char *at = list; *at != 0 && window_count < BENCH_MAX_WINDOWS;) {

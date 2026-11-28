@@ -327,6 +327,13 @@ struct BTBHGPUWindow {
     /* A shader path a present was given, and its format: the HDR passes' shaders are its siblings. */
     char shader_reference_path[1024];
     BTBHGPUShaderFormat shader_reference_format;
+    /* Screen-space distortion (RFC 0018, since 0.18.0; btbh_gpu_scene.c): the sources
+       btbh_gpu_window_scene_set_distortion set for the next scene present of the window's frame (copied), their count
+       and clock; pending until that present takes them. */
+    BTBHGPUSceneDistortionSource distortion_sources[BTBH_GPU_SCENE_MAX_DISTORTION_SOURCES];
+    uint32_t distortion_source_count;
+    double distortion_time;
+    bool distortion_pending;
 };
 
 struct BTBHGPUTexture {
@@ -635,6 +642,15 @@ void btbh_gpu_window_release_aside_scene(BTBHGPUWindow *window);
    or a kept target view's (1 to BTBH_GPU_SCENE_TARGET_VIEW_CAPACITY). -1 when that runtime doesn't exist. */
 #define BTBH_GPU_SCENE_WINDOW_RUNTIME UINT32_MAX
 int64_t btbh_gpu_window_scene_shadow_render_count(const BTBHGPUWindow *window, uint32_t view_id);
+/* RFC 0018 (screen-space distortion, since 0.18.0), for the smokes: the window's offset field (RGBA16F) and its size,
+   and its reactive mask (R8, FSR 3's); NULL and 0 where the window's runtime hasn't made them. */
+void btbh_gpu_window_scene_distortion_textures(
+    BTBHGPUWindow *window,
+    SDL_GPUTexture **field,
+    uint32_t *field_width,
+    uint32_t *field_height,
+    SDL_GPUTexture **reactive
+);
 /* RFC 0014 (scene views, since 0.16.0): a view's half of the frame (BTBHGPUSceneView.clip, in output_width x
    output_height pixels) widened by a quarter of a render pixel (render_width x render_height), as the planes its passes
    test:
@@ -761,7 +777,10 @@ typedef enum BTBHGPUCostStep {
     BTBH_GPU_COST_STEP_FSR1_EASU = 17,
     BTBH_GPU_COST_STEP_FSR1_RCAS = 18,
     BTBH_GPU_COST_STEP_LANCZOS = 19,
-    BTBH_GPU_COST_STEP_COUNT = 20
+    BTBH_GPU_COST_STEP_DISTORTION = 20,                  /* post: RFC 0018's source pass, before bloom (printed only
+                                                            by the frames that draw it; the displaced composite stays
+                                                            in composite) */
+    BTBH_GPU_COST_STEP_COUNT = 21
 } BTBHGPUCostStep;
 /* In a pass frame: the passes recorded since the current step began go to it (submitted, waited for and the next
    command buffer acquired, as btbh_gpu_cost_split does), and `step` begins; a group's split ends the current step.

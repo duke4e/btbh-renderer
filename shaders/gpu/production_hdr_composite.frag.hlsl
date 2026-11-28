@@ -6,6 +6,12 @@ Texture2D<float> depth_texture : register(t1, space2);
 SamplerState depth_sampler : register(s1, space2);
 Texture2D<float4> bloom_texture : register(t2, space2);
 SamplerState bloom_sampler : register(s2, space2);
+#if BTBH_DISTORTION
+// RFC 0018 (screen-space distortion, since 0.18.0): the offset field at half the render size (rg the summed displacement
+// in render pixels, x right and y down; b the displacements' lengths times their chroma; a their lengths).
+Texture2D<float4> distortion_texture : register(t3, space2);
+SamplerState distortion_sampler : register(s3, space2);
+#endif
 
 cbuffer CompositeUniforms : register(b0, space3)
 {
@@ -23,6 +29,16 @@ cbuffer CompositeUniforms : register(b0, space3)
     // x = fade distance (inside the rectangle and in view depth), y = enabled (0/1),
     // z = view depth that stays clear of the edge fog, w = unused
     float4 fog_edge;
+#if BTBH_DISTORTION
+    // xy = 1 / render size, z = the summed displacement's largest length (render pixels), w = the reactive mask's scale
+    // (FSR 3's variant: post->temporal_reactive_scale)
+    float4 distortion_frame;
+    // yzw = the view's half of the frame as a plane in UV units (RFC 0014's, as the reflections' ssr_hit_options.yzw);
+    // all zero with one view. x = unused
+    float4 distortion_view_plane;
+    // x = 1 shows the field instead of the scene (BTBH_DEBUG_DISTORTION); yzw = unused
+    float4 distortion_debug;
+#endif
 };
 
 struct FragmentInput
@@ -71,6 +87,7 @@ float fog_amount(float2 uv)
     return amount;
 }
 
+#if !BTBH_DISTORTION
 float4 main(FragmentInput input) : SV_Target0
 {
     const float2 uv = input.texture_coordinate;
@@ -95,3 +112,99 @@ float4 main(FragmentInput input) : SV_Target0
     }
     return float4(color, 1.0f);
 }
+#else
+// RFC 0018: the scene displaced by the offset field. Each pixel shows the scene `d` back (d: the field read at the
+// pixel, its length clamped; by a view's edge faded out, and no read nearer the edge than the reflections' margin);
+// red and blue `d` times 1 +- 0.35 chroma. Fog and bloom are read where green is; the vignette stays on the pixel.
+float distortion_line_scale()
+{
+    return max(length(distortion_view_plane.yz * distortion_frame.xy), 1.0e-30f);
+}
+
+// A displaced read moved back along the view's edge's normal to the reflections' margin, 0.5 + |nx| + |ny| render
+// pixels inside it (none with one view).
+float2 distortion_keep_inside(float2 uv)
+{
+    if (all(distortion_view_plane.yz == 0.0f))
+    {
+        return uv;
+    }
+    const float scale = distortion_line_scale();
+    const float2 normal = distortion_view_plane.yz * distortion_frame.xy / scale;
+    const float line_pixels = dot(distortion_view_plane.yzw, float3(uv, 1.0f)) / scale;
+    const float margin = 0.5f + abs(normal.x) + abs(normal.y);
+    if (line_pixels < margin)
+    {
+        uv += (margin - line_pixels) * normal * distortion_frame.xy;
+    }
+    return uv;
+}
+
+struct CompositeOutput
+{
+    float4 color : SV_Target0;
+#if BTBH_DISTORTION == 2
+    // FSR 3's reactive mask (blended with max over the transparent pass's).
+    float4 reactive : SV_Target1;
+#endif
+};
+
+CompositeOutput main(FragmentInput input)
+{
+    const float2 uv = input.texture_coordinate;
+    const float4 field = distortion_texture.SampleLevel(distortion_sampler, uv, 0.0f);
+    float2 d = field.xy;
+    const float d_length = length(d);
+    if (d_length > distortion_frame.z)
+    {
+        d *= distortion_frame.z / d_length;
+    }
+    if (any(distortion_view_plane.yz != 0.0f))
+    {
+        // By the line between two views the field's taps may hold the other view's sources: the displacement fades to
+        // nothing between 8 render pixels and 0.5 + 2 (|nx| + |ny|) (the half-size field's bilinear reach).
+        const float scale = distortion_line_scale();
+        const float2 normal = abs(distortion_view_plane.yz * distortion_frame.xy) / scale;
+        const float line_pixels = dot(distortion_view_plane.yzw, float3(uv, 1.0f)) / scale;
+        const float margin = 0.5f + 2.0f * (normal.x + normal.y);
+        d *= saturate((line_pixels - margin) / (8.0f - margin));
+    }
+    const float chroma = field.w > 1.0e-4f ? saturate(field.z / field.w) : 0.0f;
+    const float2 green_uv = distortion_keep_inside(uv - d * distortion_frame.xy);
+    float3 color = scene_texture.SampleLevel(scene_sampler, green_uv, 0.0f).rgb;
+    if (chroma > 0.0f && any(d != 0.0f))
+    {
+        const float2 red_uv = distortion_keep_inside(uv - d * (1.0f + 0.35f * chroma) * distortion_frame.xy);
+        const float2 blue_uv = distortion_keep_inside(uv - d * (1.0f - 0.35f * chroma) * distortion_frame.xy);
+        color.r = scene_texture.SampleLevel(scene_sampler, red_uv, 0.0f).r;
+        color.b = scene_texture.SampleLevel(scene_sampler, blue_uv, 0.0f).b;
+    }
+
+    if (fog_shape.z > 0.5f)
+    {
+        color = lerp(color, fog_color_density.rgb, fog_amount(green_uv));
+    }
+    if (bloom_parameters.y > 0.5f)
+    {
+        color += bloom_texture.SampleLevel(bloom_sampler, green_uv, 0.0f).rgb * bloom_parameters.x;
+    }
+    if (vignette_parameters.w > 0.5f)
+    {
+        float2 offset = (uv - 0.5f) * 2.0f;
+        offset.x *= vignette_parameters.z;
+        const float edge = saturate(length(offset) / length(float2(vignette_parameters.z, 1.0f)));
+        const float falloff = smoothstep(1.0f - vignette_parameters.y, 1.0f, edge);
+        color *= 1.0f - vignette_parameters.x * falloff;
+    }
+    if (distortion_debug.x > 0.5f)
+    {
+        color = float3(saturate(0.5f + d / 32.0f), chroma);
+    }
+    CompositeOutput output;
+    output.color = float4(color, 1.0f);
+#if BTBH_DISTORTION == 2
+    output.reactive = float4(saturate(field.w / 6.0f) * distortion_frame.w, 0.0f, 0.0f, 0.0f);
+#endif
+    return output;
+}
+#endif
