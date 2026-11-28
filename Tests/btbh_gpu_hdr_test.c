@@ -1,6 +1,7 @@
 /* HDR output's curves on the CPU (RFC 0017, since 0.17.0): btbh_gpu_hdr.h, the reference the shaders follow, and the
  * public structs' layout. No GPU.
- * - The highlight gain: 1 at and below the knee, C1 there, monotonic, toward P; exactly 1 when P is 1.
+ * - The highlight gain: 1 at and below the knee, C1 there, monotonic, toward P; exactly 1 when P is 1; P, finite, for
+ *   huge and infinite heat; the heat a finite half.
  * - The knee for each tone mapper, against RFC 0017's table.
  * - PQ: BT.2100's values (203 and 1000 nits), its round trip; BT.709 to BT.2020 keeps white.
  * - The encode of paper white and of a highlight, in both compositions, and its clamp at the peak.
@@ -13,6 +14,7 @@
 #include "btbh_gpu_hdr.h"
 
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -52,6 +54,18 @@ static void check_gain(void) {
     assert(near(btbh_hdr_gain(1.0f, ratio, aces_knee, aces_shoulder), 1.276f, 0.01f));
     assert(near(btbh_hdr_gain(4.0f, ratio, aces_knee, aces_shoulder), 4.04f, 0.02f));
     assert(near(btbh_hdr_gain(16.0f, ratio, aces_knee, aces_shoulder), 4.87f, 0.02f));
+    /* Huge and infinite heat: the ratio, never NaN (t * t would be inf / inf). */
+    const float huge[4] = { 1.0e10f, 1.0e30f, FLT_MAX, INFINITY };
+    for (int index = 0; index < 4; ++index) {
+        const float gain = btbh_hdr_gain(huge[index], ratio, aces_knee, aces_shoulder);
+        assert(isfinite(gain) && near(gain, ratio, 1.0e-6f * ratio));
+    }
+    /* The heat stays a finite half, whatever the exposure. */
+    assert(btbh_hdr_heat(1.0e8f, 0.2f, 3.0f, 1.0f) == BTBH_HDR_HEAT_MAX);
+    assert(btbh_hdr_heat(INFINITY, 0.2f, 3.0f, 1.0f) == BTBH_HDR_HEAT_MAX);
+    assert(btbh_hdr_heat(1.0f, -1.0f, -2.0f, -3.0f) == 0.0f);
+    assert(btbh_hdr_heat(2.0f, 0.5f, 0.25f, 0.75f) == 1.5f);
+    assert(btbh_hdr_float_to_half(btbh_hdr_heat(INFINITY, 1.0f, 1.0f, 1.0f)) == 0x7bffu);
 }
 
 static void check_knee(void) {

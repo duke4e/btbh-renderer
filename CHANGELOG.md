@@ -21,8 +21,9 @@ All notable changes to this project are documented here. The format follows
   - **Captures and read-backs:** **`btbh_gpu_window_render_target_create_ex`** with
     `BTBH_GPU_RENDER_TARGET_FRAME_FORMAT` (a target in the frame format, RGBA16F while HDR is on: v2's pause backdrop)
     and **`btbh_gpu_window_readback_presented_frame_rgba16f`**. `capture_pending_scene_texture` gives the frame format;
-    `copy_pending_scene_texture` copies the same format, blits an SDR frame into RGBA16F, and folds an HDR frame's
-    highlights under paper white into an SDR target. The RGBA8 read-back of an HDR frame is clamped at paper white.
+    `copy_pending_scene_texture` copies the same format, blits an SDR frame into an RGBA16F colour target, and folds an
+    HDR frame's highlights under paper white into an SDR target. The RGBA8 read-back of an HDR frame is clamped at paper
+    white.
   - **The tone map:** the scene is tone mapped and graded exactly as in SDR (the LUT never sees a value above 1), then
     a gain lifts highlights toward the peak: 1 at and below the tone map's knee (0.6 of the SDR curve's output, 0.76 for
     PBR Neutral), C1 there, toward peak / paper white, from the scene's heat (exposure times its largest channel); the
@@ -35,11 +36,15 @@ All notable changes to this project are documented here. The format follows
     extended linear (extended linear first on Apple).
   - **Availability and changes:** HDR is available where the swapchain offers an HDR composition and the OS reports HDR
     (under Wine/Proton the swapchain alone: gamescope offers HDR only while its output is HDR; on Apple a headroom above
-    1). Auto follows SDL's HDR and display events at the next frame's start; a swapchain that loses its HDR composition
-    drops one frame and goes on in SDR (fallback `lost`). A switch waits for the GPU once; switching back and forth
-    makes nothing anew after the first time (two classes of the post tail's pipelines). `set_hdr`, and the window's
-    scene prewarm while HDR is on, make the frame texture, the encode and fold passes and the canvas's RGBA16F
-    pipelines; the prewarm makes the HDR post tail.
+    1). Auto follows SDL's HDR and display events at the next frame's start, and asks SDL again there once a second
+    (every frame while a change is pending) for lists that change with no event. A swapchain that loses its HDR
+    composition, or fails 3 acquires in a row in HDR, drops those frames and goes on in SDR (fallback `lost`, logged);
+    an encode pass that can't be made sends the window to SDR at the next frame (fallback `switch_failed`, logged), and
+    no HDR swapchain is ever given unencoded values. A frame's paper white and peak are latched at its start: a change
+    of nits reaches the next frame and raises no `hdr_changed`. A switch waits for the GPU once and resets the temporal
+    history; switching back and forth makes nothing anew after the first time (two classes of the post tail's
+    pipelines). `set_hdr`, and the window's scene prewarm while HDR is on, make the frame texture, the encode and fold
+    passes and the canvas's RGBA16F pipelines; the prewarm makes the HDR post tail.
   - **Shaders:** seven new built files: `production_post_hdr.frag`, `production_tilt_shift_hdr.frag`,
     `production_lut_hdr.frag`, `production_cas_hdr.frag`, `production_upscale_fsr_rcas_hdr.frag` (their SDR sources
     with `BTBH_HDR_OUTPUT`), `production_hdr_encode.frag` and `production_hdr_fold.frag`; and `production_hdr.hlsli`.
@@ -50,10 +55,11 @@ All notable changes to this project are documented here. The format follows
     `BTBH_GPU_HDR=off|auto|force|hdr10|scrgb`, `BTBH_GPU_HDR_NITS=<paper>,<peak>`, `BTBH_GPU_HDR_SIMULATE=hdr10|scrgb`
     (the HDR path with the swapchain left SDR, encoding into a simulated swapchain: how HDR is tested on an SDR
     display), `BTBH_GPU_HDR_DITHER=0`, `BTBH_GPU_HDR_DEBUG=heat`.
-  - **Tests:** `btbh_gpu_hdr_test` (the curves on the CPU, `src/gpu/btbh_gpu_hdr.h`, and the structs' layout) and
-    `btbh_gpu_hdr_smoke` (simulated HDR10 and scRGB: the encode against the CPU, the gain, P = 1 against SDR, the
-    toggle, refusals, captures, copies, the tail). The views bench takes `BTBH_VIEWS_BENCH_SHOWN=1` and prints its CPU
-    frames.
+  - **Tests:** `btbh_gpu_hdr_test` (the curves on the CPU, `src/gpu/btbh_gpu_hdr.h`, huge and infinite heat, and the
+    structs' layout) and `btbh_gpu_hdr_smoke` (simulated HDR10 and scRGB: the encode against the CPU, the gain, P = 1
+    against SDR, the toggle, a change of nits during a frame, Auto with and without SDL events, an encode that can't be
+    made, refusals, captures, copies, the tail at an exposure past the largest half). The views bench takes
+    `BTBH_VIEWS_BENCH_SHOWN=1` and prints its CPU frames.
   - **The Steam Machine test** v2 deploys and the owner runs: `docs/handoff/v2-hdr-steam-machine-test.md`.
 
 ### Known
@@ -77,7 +83,7 @@ The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on `feature/0.17.0-hdr`: `c
 tests), the Swift suite 306 tests (2 skipped, 0 failures), and identity against 0.16.0's build (one-view images equal
 0.16.1's) in four modes (plain, shared meshes, no runs, runs verified): 421 images a mode, 0 px different, 0 run-verify
 mismatches; the same through `present_views` with one view (`BTBH_SMOKE_PRESENT_VIEWS=1`), and in plain and verify with
-the cost log and its pass frames (`BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`; 1,424 and 1,427 `BTBH_GPU_COST` lines);
+the cost log and its pass frames (`BTBH_GPU_COST_LOG=1 BTBH_GPU_COST_PASSES=1`; 1,425 and 1,427 `BTBH_GPU_COST` lines);
 the views smoke passes in the four modes.
 
 HDR, offscreen (`BTBH_GPU_HDR_SIMULATE`; this PC's monitor connection has no HDR), in `btbh_gpu_hdr_smoke`:

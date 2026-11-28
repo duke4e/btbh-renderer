@@ -168,6 +168,11 @@ typedef struct BTBHGPUFrameContext {
     float hdr_highlight_ratio;
     float hdr_knee_override;
     float hdr_shoulder_scale;
+    /* The frame's paper white in nits and the extended-linear encode's scale (paper white / 80; 1 on Apple), latched
+       with hdr_highlight_ratio at the frame's start (btbh_gpu_window_hdr_frame_start): the gain, the encode and the
+       fold of one frame use the same numbers, and a nits change takes effect from the next frame. */
+    float hdr_paper_white_nits;
+    float hdr_linear_scale;
 } BTBHGPUFrameContext;
 
 /* A render into a target (render_to_target and its prewarm): the target format, no HDR (RFC 0017). */
@@ -300,6 +305,20 @@ struct BTBHGPUWindow {
     uint8_t hdr_sticky_fallback;
     char hdr_message[128];
     char hdr_event[16];
+    /* The SDL event (os, display) the next frame start's re-check answers. */
+    char hdr_pending_event[16];
+    /* The frame's HDR numbers (BTBHGPUFrameContext.hdr_*), latched at each frame's start. */
+    float hdr_frame_ratio;
+    float hdr_frame_paper_white;
+    float hdr_frame_linear_scale;
+    /* AUTO's silent re-check (SDL_GetTicks of the last), for lists that change with no SDL event (Wine). */
+    uint64_t hdr_last_check_milliseconds;
+    /* Consecutive failed swapchain acquires while HDR is on (BTBH_GPU_HDR_ACQUIRE_FAILURE_LIMIT falls back). */
+    uint32_t hdr_acquire_failures;
+    /* The encode pass could not be made from the shader reference: never tried again until a set_hdr switch; the window
+       goes to SDR at the next frame's start (fallback SWITCH_FAILED), and why. */
+    bool hdr_encode_failed;
+    char hdr_encode_error[96];
     /* BTBH_GPU_HDR_SIMULATE: the encode's target in place of the swapchain image, at the drawable size. */
     BTBHGPUTexture *hdr_virtual_swapchain;
     /* The encode into RGB10A2 [0] and RGBA16F [1]; the fold of an HDR capture into sdr_format. */
@@ -772,11 +791,30 @@ void btbh_gpu_window_frame_context_fill(
     BTBHGPUFrameContext *frame_context
 );
 /* HDR output (RFC 0017, since 0.17.0). */
-/* At a frame's start (a present with no frame pending): an AUTO window takes a change of availability that an SDL HDR
-   or display event flagged (btbh_gpu_window.c). Nothing for a window with no event since. */
+/* SDL's error as the host left it, kept around the renderer's own probing (SDL's queries may set one). */
+typedef struct BTBHGPUHDRSavedError {
+    char text[512];
+} BTBHGPUHDRSavedError;
+static inline void btbh_gpu_hdr_save_error(BTBHGPUHDRSavedError *saved) {
+    (void)SDL_snprintf(saved->text, sizeof(saved->text), "%s", SDL_GetError());
+}
+static inline void btbh_gpu_hdr_restore_error(const BTBHGPUHDRSavedError *saved) {
+    if (saved->text[0] != '\0') {
+        (void)SDL_SetError("%s", saved->text);
+    } else {
+        SDL_ClearError();
+    }
+}
+/* Consecutive failed swapchain acquires in HDR after which the window falls back to SDR (fallback LOST), even while the
+   swapchain still lists the composition. */
+#define BTBH_GPU_HDR_ACQUIRE_FAILURE_LIMIT 3u
+/* At a frame's start (a present with no frame pending; btbh_gpu_window.c): a failed encode falls back to SDR; an AUTO
+   window takes a change an SDL HDR or display event flagged, re-checks SDL's lists every frame while a change is
+   pending and once a second otherwise; then the frame's HDR numbers are latched. */
 void btbh_gpu_window_hdr_frame_start(BTBHGPUWindow *window);
-/* After a failed swapchain acquire while HDR is on: true when the swapchain no longer offers its HDR composition, the
-   window then back in SDR (fallback LOST, logged); false otherwise (btbh_gpu_window.c). */
+/* After a failed swapchain acquire while HDR is on: true when the window went back to SDR (fallback LOST, logged):
+   the swapchain no longer offers its HDR composition, or BTBH_GPU_HDR_ACQUIRE_FAILURE_LIMIT acquires failed in a row;
+   false otherwise (btbh_gpu_window.c). SDL's error is kept. */
 bool btbh_gpu_window_hdr_acquire_failed(BTBHGPUWindow *window);
 /* Keeps `path` as the reference for the HDR passes' shaders (their siblings), from a present's shader paths. */
 void btbh_gpu_window_hdr_remember_shaders(BTBHGPUWindow *window, const char *path, BTBHGPUShaderFormat format);
@@ -794,7 +832,8 @@ SDL_GPUGraphicsPipeline *btbh_gpu_window_hdr_create_pass_pipeline(
    size, the encode pipeline, the canvas's RGBA16F pipelines (once the canvas has its shaders). For set_hdr's switch. */
 void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window);
 /* Records the encode of the HDR frame `frame` into `destination` (the swapchain image, or the simulated one), both
-   width x height (btbh_gpu_canvas.c). */
+   width x height, with the frame's latched numbers (btbh_gpu_canvas.c). False when it can't: no shader reference yet,
+   or the pipeline could not be made (then remembered: hdr_encode_failed, never retried until a set_hdr switch). */
 bool btbh_gpu_window_hdr_record_encode(
     BTBHGPUWindow *window,
     SDL_GPUCommandBuffer *command,
@@ -1074,6 +1113,8 @@ typedef enum BTBHGPULazyTimedCall {
     BTBH_GPU_LAZY_CALL_SWAPCHAIN_ACQUIRE,
     BTBH_GPU_LAZY_CALL_CANVAS_UPLOAD_MAP,
     BTBH_GPU_LAZY_CALL_FRAME_SUBMIT,
+    /* RFC 0017: SDL_SetGPUSwapchainParameters for an HDR switch (it waits for the GPU). */
+    BTBH_GPU_LAZY_CALL_HDR_SWITCH,
     BTBH_GPU_LAZY_CALL_COUNT
 } BTBHGPULazyTimedCall;
 void btbh_gpu_lazy_creation_begin(

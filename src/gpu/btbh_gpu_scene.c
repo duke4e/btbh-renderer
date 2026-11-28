@@ -10285,6 +10285,8 @@ static void btbh_gpu_scene_select_tail_class(
         runtime->upscale_height = 0u;
         runtime->temporal_previous_color_width = 0u;
         runtime->temporal_previous_color_height = 0u;
+        /* FSR 3's history (and the motion palette's) holds the other class's values: it starts again. */
+        runtime->temporal_previous_valid = false;
     }
     runtime->tail_hdr = hdr;
     runtime->tail_format = frame_format;
@@ -14322,13 +14324,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances_with_visibility(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
-    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
-    btbh_gpu_window_hdr_frame_start(window);
+    /* RFC 0017: the HDR passes' shader reference, then the frame's start inside the log's scope (an AUTO window takes
+       an HDR change there, and the log names the switch's wait and what it makes). */
     btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
-    BTBHGPUFrameContext frame_context;
-    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    btbh_gpu_window_hdr_frame_start(window);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
         window,
         vertex_shader_path,
@@ -14408,13 +14411,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_instances(
     BTBHGPUSceneView camera_view;
     const bool camera_given =
         btbh_gpu_scene_camera_view(view_projection, camera_right, camera_up, camera_position, &camera_view);
-    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
-    btbh_gpu_window_hdr_frame_start(window);
+    /* RFC 0017: the HDR passes' shader reference, then the frame's start inside the log's scope (an AUTO window takes
+       an HDR change there, and the log names the switch's wait and what it makes). */
     btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
-    BTBHGPUFrameContext frame_context;
-    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    btbh_gpu_window_hdr_frame_start(window);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
         window,
         vertex_shader_path,
@@ -14779,9 +14783,9 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm(
     uint32_t batch_count,
     BTBHGPUSceneReport *report
 ) {
-    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
-    btbh_gpu_window_hdr_frame_start(window);
+    /* RFC 0017: the HDR passes' shader reference, and a frame's start (an AUTO window takes an HDR change). */
     btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
+    btbh_gpu_window_hdr_frame_start(window);
     if (window != NULL && window->hdr_active) {
         /* RFC 0017: an HDR window's frame texture, encode, fold and canvas RGBA16F pipelines too. */
         btbh_gpu_window_hdr_prewarm(window);
@@ -14852,13 +14856,14 @@ BTBHGPUResult btbh_gpu_window_scene_present_views(
     BTBHGPUSceneViewReport *view_reports,
     BTBHGPUSceneReport *report
 ) {
-    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
-    btbh_gpu_window_hdr_frame_start(window);
+    /* RFC 0017: the HDR passes' shader reference, then the frame's start inside the log's scope (an AUTO window takes
+       an HDR change there, and the log names the switch's wait and what it makes). */
     btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
-    BTBHGPUFrameContext frame_context;
-    btbh_gpu_window_frame_context_fill(window, &frame_context);
     BTBHGPULazyCreationScope lazy_scope;
     btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_SCENE_PRESENT, &lazy_scope);
+    btbh_gpu_window_hdr_frame_start(window);
+    BTBHGPUFrameContext frame_context;
+    btbh_gpu_window_frame_context_fill(window, &frame_context);
     const BTBHGPUResult result = btbh_gpu_window_scene_present_instances_internal(
         window,
         vertex_shader_path,
@@ -14935,9 +14940,9 @@ BTBHGPUResult btbh_gpu_window_scene_prewarm_views(
     if (!btbh_gpu_scene_views_valid(views, view_count, 0u, report)) {
         return report->result;
     }
-    /* RFC 0017: a frame's start (an AUTO window takes an HDR change), and the HDR passes' shader reference. */
-    btbh_gpu_window_hdr_frame_start(window);
+    /* RFC 0017: the HDR passes' shader reference, and a frame's start (an AUTO window takes an HDR change). */
     btbh_gpu_window_hdr_remember_shaders(window, post_fragment_shader_path, shader_format);
+    btbh_gpu_window_hdr_frame_start(window);
     if (window != NULL && window->hdr_active) {
         /* RFC 0017: an HDR window's frame texture, encode, fold and canvas RGBA16F pipelines too. */
         btbh_gpu_window_hdr_prewarm(window);
@@ -16062,17 +16067,18 @@ static SDL_GPUTextureFormat btbh_gpu_scene_composite_format(const BTBHGPUWindow 
         : SDL_GetGPUSwapchainTextureFormat(window->device->gpu, window->window);
 }
 
-/* RFC 0017: a copy's destination format: the composite's (copied), the target format under an HDR frame (folded), or
-   RGBA16F under an SDR frame (blitted). */
-static bool btbh_gpu_scene_copy_format_allowed(const BTBHGPUWindow *window, SDL_GPUTextureFormat format) {
+/* RFC 0017: a copy's destination: the composite's format (copied), the target format under an HDR frame (folded), or
+   RGBA16F under an SDR frame (blitted) when it is a colour target (a FRAME_FORMAT render target, a capture): 0.16.1
+   refused every other format, and a blit needs a colour target. */
+static bool btbh_gpu_scene_copy_destination_allowed(const BTBHGPUWindow *window, const BTBHGPUTexture *destination) {
     const SDL_GPUTextureFormat composite = btbh_gpu_scene_composite_format(window);
-    if (format == composite) {
+    if (destination->format == composite) {
         return true;
     }
     if (composite == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
-        return format == window->sdr_format;
+        return destination->format == window->sdr_format && destination->color_target;
     }
-    return format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    return destination->format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT && destination->color_target;
 }
 
 /* RFC 0017: the composite into `destination` of another format: the fold (production_hdr_fold.frag) for an HDR frame
@@ -16121,9 +16127,10 @@ static bool btbh_gpu_scene_convert_composite(
     if (pass == NULL) {
         return false;
     }
+    /* The frame's peak, latched at its start with the one its gain used. */
     const float fold_parameters[4] = {
         BTBH_HDR_FOLD_KNEE,
-        window->hdr_state.highlight_ratio > 1.0f ? window->hdr_state.highlight_ratio : 1.0f,
+        window->hdr_frame_ratio > 1.0f ? window->hdr_frame_ratio : 1.0f,
         0.0f,
         0.0f
     };
@@ -16166,7 +16173,7 @@ BTBHGPUResult btbh_gpu_window_copy_pending_scene_texture(
         btbh_gpu_texture_is_heightfield(destination) ||
         destination->width != window->scene_runtime->composite_width ||
         destination->height != window->scene_runtime->composite_height ||
-        !btbh_gpu_scene_copy_format_allowed(window, destination->format)
+        !btbh_gpu_scene_copy_destination_allowed(window, destination)
     ) {
         report->result = BTBH_GPU_INVALID_ARGUMENT;
         (void)snprintf(

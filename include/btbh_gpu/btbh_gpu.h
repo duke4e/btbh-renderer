@@ -196,8 +196,9 @@ typedef struct BTBHGPUPlatformSnapshot {
     uint8_t focused;
     uint8_t cursor_visible;
     /* 1 (since 0.17.0, RFC 0017) when, since the last btbh_gpu_window_poll_events, SDL reported an HDR change, the
-       window moved to another display, or the renderer switched the window's HDR or fell back to SDR: read
-       btbh_gpu_window_hdr_state. */
+       window moved to another display, the renderer switched the window's HDR or fell back to SDR, or (AUTO) its
+       re-check found what SDL reports changed: read btbh_gpu_window_hdr_state. Raised in every mode, OFF included
+       (an option row can show whether HDR is available). A change of nits alone doesn't raise it. */
     uint8_t hdr_changed;
     uint8_t reserved[4];
 } BTBHGPUPlatformSnapshot;
@@ -2008,7 +2009,9 @@ BTBHGPUResult btbh_gpu_window_poll_events(
 typedef enum BTBHGPUHDRMode {
     BTBH_GPU_HDR_MODE_OFF = 0,    /* SDR, as before (the zero value) */
     /* HDR while BTBHGPUWindowHDRState.available is 1, SDR otherwise, following the OS and the display: a change is
-       taken at the next frame's start (the first present with no frame pending), which then waits for the GPU once. */
+       taken at the next frame's start (the first present with no frame pending), which then waits for the GPU once.
+       Besides SDL's events, the frame start asks SDL again once a second (every frame while a change is pending), for
+       lists that change with no event (Wine); that re-check doesn't undo a fallback, an event does. */
     BTBH_GPU_HDR_MODE_AUTO = 1,
     /* HDR whenever the swapchain offers an HDR composition, whatever the OS reports (for tests). */
     BTBH_GPU_HDR_MODE_FORCE = 2
@@ -2019,8 +2022,12 @@ typedef enum BTBHGPUHDRFallback {
     BTBH_GPU_HDR_FALLBACK_NONE = 0,           /* HDR is active, or the mode is OFF */
     BTBH_GPU_HDR_FALLBACK_UNSUPPORTED = 1,    /* the swapchain offers no HDR composition (or not the one named) */
     BTBH_GPU_HDR_FALLBACK_OS_SDR = 2,         /* AUTO: offered, but the OS reports the display SDR */
-    BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED = 3,  /* SDL refused or failed the switch; the window went back to SDR */
-    BTBH_GPU_HDR_FALLBACK_LOST = 4,           /* the swapchain lost its HDR composition (the display or OS changed) */
+    /* SDL refused or failed the switch, or the HDR encode pass can't be made (message "The HDR encode is
+       unavailable ..."); the window went back to SDR until the next set_hdr switch. */
+    BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED = 3,
+    /* The swapchain lost its HDR composition (the display or the OS changed), or 3 swapchain acquires in a row failed
+       in HDR; the window went back to SDR (logged). */
+    BTBH_GPU_HDR_FALLBACK_LOST = 4,
     BTBH_GPU_HDR_FALLBACK_PENDING = 5         /* AUTO: waiting for the next frame's start to switch */
 } BTBHGPUHDRFallback;
 
@@ -2048,7 +2055,7 @@ typedef struct BTBHGPUWindowHDRSettings {
    display_peak_nits 44, paper_white_nits 48, peak_nits 52, highlight_ratio 56, switch_count 60,
    last_switch_milliseconds 64, display_id 72, reserved 76, message 96. */
 typedef struct BTBHGPUWindowHDRState {
-    uint32_t serial;                           /* from 1; changes whenever anything below changes */
+    uint32_t serial;                           /* from 1; changes whenever anything below changes, when seen */
     BTBHGPUSwapchainComposition composition;   /* in use: SDR, or one of the HDR compositions */
     BTBHGPUTextureFormat swapchain_format;     /* the swapchain image's (RGB10A2_UNORM or RGBA16_FLOAT in HDR) */
     /* What the window's scene ends in, the canvas's screen passes draw in, and captures are: the swapchain's in SDR,
@@ -2087,7 +2094,9 @@ typedef struct BTBHGPUWindowHDRState {
 } BTBHGPUWindowHDRState;
 
 /* Fills `state`, asking SDL again (the window's HDR properties and the compositions it offers). Call it on the thread
-   that made the window, at any time, between frames or not; it never touches the GPU device's state. Returns
+   that made the window, at any time, between frames or not; it never touches the GPU device's state. When what it
+   reports changed since the last state (SDL changed a list with no event, say), it takes a new serial (and the HDR
+   line, with BTBH_GPU_HDR_LOG=1); the switch, if AUTO needs one, is the next frame's. Returns
    BTBH_GPU_INVALID_ARGUMENT for NULL or a window not claimed. */
 BTBHGPUResult btbh_gpu_window_hdr_state(
     BTBHGPUWindow *window,
@@ -2099,7 +2108,8 @@ BTBHGPUResult btbh_gpu_window_hdr_state(
      paths), so that the next frame makes little: call btbh_gpu_window_scene_prewarm after it for the scene's HDR post
      pipelines and its targets at the render size (while HDR is on, that prewarm makes the passes above too).
    - A change of nits only takes effect from the next frame, with no wait: a calibration screen can call it every
-     frame.
+     frame. A frame pending keeps the numbers it started with (its gain, its encode and its fold agree). It takes a new
+     serial but doesn't raise BTBHGPUPlatformSnapshot.hdr_changed.
    - Returns BTBH_GPU_OK when the settings are taken, even when HDR could not become active: state->active is then 0,
      state->fallback and state->message say why, and the window is SDR and works.
    - Refused with BTBH_GPU_INVALID_ARGUMENT, nothing taken, `state` filled with the current state where it can be:
@@ -2115,7 +2125,8 @@ BTBHGPUResult btbh_gpu_window_set_hdr(
 );
 /* Writes the window's HDR line into `buffer`, NUL-terminated and truncated to capacity - 1, and returns the characters
    written (0 for NULL arguments). For the host's own log. With BTBH_GPU_HDR_LOG=1 the renderer prints the same line
-   through SDL_Log at the claim and at every change. One line of key=value fields: event, serial, gpu, wine, simulate,
+   through SDL_Log at the claim and at every change; it prints a fall back to SDR the host didn't ask for (event lost or
+   encode) always. One line of key=value fields: event, serial, gpu, wine, simulate,
    display, os_hdr, sdr_white, headroom, peak_reported, supported, available, mode, composition, swapchain, colorspace,
    frame, target, paper, peak, P, metadata, fallback (with reason="..." when not none), switch_ms. */
 #define BTBH_GPU_HDR_DESCRIBE_CAPACITY 512u

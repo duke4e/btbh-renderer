@@ -34,7 +34,7 @@ peak=1000 P=1.00 metadata=0 (SDL 3.4.2 has no call) fallback=none switch_ms=0.0
 
 | Field | What to look at |
 | --- | --- |
-| `event` | `claim` (window start), `set` (the game changed the setting), `switch` (Auto followed the OS or display), `os` / `display` (SDL reported a change), `lost` (the swapchain lost HDR; the game went to SDR) |
+| `event` | `claim` (window start), `set` (the game changed the setting), `switch` (Auto followed the OS or display), `os` / `display` (SDL reported a change), `recheck` / `state` (what SDL reports changed with no event), `lost` (the swapchain lost HDR, or 3 presents in a row found no image; the game went to SDR), `encode` (the HDR encode can't be made; SDR). `lost` and `encode` print even without `BTBH_GPU_HDR_LOG=1` |
 | `wine` | 1 on the Machine |
 | `os_hdr`, `sdr_white`, `headroom`, `peak_reported` | what SDL reports. Under Proton these depend on `DXVK_HDR` (step 2) |
 | `supported` | the compositions the swapchain offers. On the Machine with HDR on and the game fullscreen it should list `HDR10_ST2084` and `HDR_EXTENDED_LINEAR` |

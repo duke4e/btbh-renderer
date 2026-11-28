@@ -996,10 +996,12 @@ Where the implementation departs from the text above, and why. The text above is
 8. **The cost log** has no separate encode step (it is in the UI group), and the lazy creation log no new kinds.
 9. **Two more debug switches** for the tests: `BTBH_GPU_HDR_DITHER=0` (no HDR10 dither) and `BTBH_GPU_HDR_DEBUG=heat`
    (the output pass writes the scene's heat into the frame's alpha).
-10. **Without any present's shader paths** (a `present_clear` before the first present) the encode can't be made: the
-    HDR frame is then blitted to the swapchain as it is, for that frame.
-11. **`hdr_changed`** is not raised by the claim; a frame-start re-check raises it only when it switches (the SDL event
-    itself raised it at the poll).
+10. **Without any present's shader paths** (a `present_clear` before the first present) the encode can't be made: an
+    HDR swapchain image is then cleared to black for that frame (after the review: never unencoded values into an HDR
+    swapchain; the first build blitted them).
+11. **`hdr_changed`** is not raised by the claim, nor by a change of nits alone (`set_hdr` gives that a new serial
+    only); a frame-start re-check raises it when it switches or finds what SDL reports changed (the SDL event itself
+    raised it at the poll). It is raised in every mode, OFF included, so that an option row can follow availability.
 12. **`BTBH_GPU_HDR_SIMULATE`** keeps the real swapchain SDR: `BTBHGPUWindowReport` reports SDR, and the HDR state the
     simulated composition and format (`simulate=` in the line). Like an SDR window, a window with no swapchain image
     (hidden, minimized) draws no screen passes, so the encode needs a shown window; captures and copies work hidden.
@@ -1010,7 +1012,41 @@ Where the implementation departs from the text above, and why. The text above is
     prewarm smoke's SMAA and FSR 1 frames); render-to-target and canvas-target scenes stay byte for byte. The SDR mode
     itself is byte for byte 0.16.1's.
 14. **The window's scene prewarm makes the HDR passes too** while HDR is on (the frame texture, the encode, the fold,
-    the canvas's RGBA16F pipelines), as `set_hdr` does once a present has given the renderer its shader paths.
+    the canvas's RGBA16F pipelines), as `set_hdr` does once a present has given the renderer its shader paths. It
+    leaves the textures alone while a frame is pending.
+
+After an independent review of the first build (`26ad135a`):
+
+15. **The heat is clamped to the largest half (65504) and the gain's `t` to 1e4,** in the shaders and the CPU
+    reference. The LUT pass carries the heat in RGBA16F alpha, where a heat past 65504 may store as infinity on some
+    GPUs; `t^2 / (1 + t^2)` was then inf / inf, and the NaN spread through SMAA, FXAA, FSR and FSR 3's history. The
+    gain is now P, finite, for any heat. (On this PC's GPU the old formula showed no NaN in the smoke's exposure-1e6
+    frame; the infinite case is checked on the CPU.)
+16. **A frame's HDR numbers are latched at its start** (`btbh_gpu_window_hdr_frame_start`): P, paper white and the
+    extended-linear scale, carried in the frame context. The gain, the encode and the fold of one frame use them, so a
+    `set_hdr` of nits while a frame is pending reaches the next frame, as the API says; the first build's encode and
+    fold read the window's state when recorded.
+17. **`lost` also after 3 failed swapchain acquires in a row in HDR** (`BTBH_GPU_HDR_ACQUIRE_FAILURE_LIMIT`), even while
+    SDL still lists the composition, so that gamescope can't leave every present failing; and `present_clear`'s
+    acquire failure counts too. A fall back to SDR the host didn't ask for (events `lost`, `encode`) is logged always,
+    with or without `BTBH_GPU_HDR_LOG`.
+18. **An encode that can't be made is remembered:** the window goes to SDR at the next frame's start (fallback
+    `switch_failed`, message "The HDR encode is unavailable (...)", event `encode`), nothing loads it again until a
+    `set_hdr` switch, which tries once; that frame's HDR swapchain image is black. No new fallback value:
+    `switch_failed` covers it.
+19. **AUTO re-checks SDL's lists at the frame start** every frame while a change is pending and once a second
+    otherwise, for lists that change with no SDL event (Wine); a silent re-check doesn't undo a fallback, an SDL event
+    retries. `btbh_gpu_window_hdr_state` gives a new serial when what it reports changed (the first build kept the old
+    one).
+20. **SDL's error is kept** across the renderer's HDR probing (the claim's, `hdr_state`, the describe line, the
+    prewarm): saved and restored instead of cleared.
+21. **RGBA16F copy destinations and canvas targets must be colour targets** (a `FRAME_FORMAT` render target, a capture)
+    under an SDR frame; 0.16.1 refused every RGBA16F texture, and still does for any other (a heightfield, say). The
+    canvas's acquire failure reports SDL's error as 0.16.1 did.
+22. **The lazy creation log covers an AUTO switch:** the frame start runs inside the present's scope, and the switch's
+    `SDL_SetGPUSwapchainParameters` is a timed call ("SDL_SetGPUSwapchainParameters (HDR switch)"). A switch between
+    SDR and HDR resets the temporal history (FSR 3's, the motion palette): the frames before were the other class.
+23. **The window's destroy frees the frame texture and the simulated swapchain** (the texture list only orphaned them).
 
 ## Decisions (v2, 2026-11-28)
 

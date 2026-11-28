@@ -8,7 +8,11 @@
  *   - the encode: every pixel of the simulated swapchain against the CPU reference applied to the RGBA16F frame (1 code
  *     of 10 bits for HDR10 with the dither off, 2e-3 relative for scRGB's halves), at P = 1 and P = 1000/203;
  *   - the highlight gain: with BTBH_GPU_HDR_DEBUG=heat the frame's alpha holds the scene's heat, and the P = 4.93
- *     frame over the P = 1 frame, in display light, is the CPU gain of that heat;
+ *     frame over the P = 1 frame, in display light, is the CPU gain of that heat; a heat past the largest half (the
+ *     LUT's alpha, exposure 1e6) gives P, no NaN through SMAA;
+ *   - a change of nits while a frame is pending reaches the next frame (the pending one encodes with its own); the
+ *     serial and hdr_changed for it; AUTO's re-check of a change SDL sends no event for;
+ *   - an encode that can't be made: SDR at the next frame (SWITCH_FAILED), not retried until a switch;
  *   - the toggle: SDR and HDR ten times between frames with a prewarm after each switch: nothing made after the first
  *     round, every SDR frame the first one's to the byte;
  *   - a set_hdr that switches while a frame is pending is refused, a change of nits is taken;
@@ -505,6 +509,14 @@ static void check_encode(SmokeWindow *smoke, const BTBHGPUWindowHDRState *state,
 static void check_plain_window(BTBHGPUDevice *device) {
     SmokeWindow smoke = open_window(device, "HDR smoke: plain", true);
     BTBHGPUWindowHDRState state;
+    /* The HDR probing (SDL's window properties and compositions, the display's name; the claim's too) keeps the host's
+       SDL error. */
+    (void)SDL_SetError("%s", "the host's own error");
+    assert(btbh_gpu_window_hdr_state(smoke.window, &state) == BTBH_GPU_OK);
+    char probe_line[BTBH_GPU_HDR_DESCRIBE_CAPACITY];
+    (void)btbh_gpu_window_hdr_describe(smoke.window, probe_line, sizeof(probe_line));
+    assert(strcmp(SDL_GetError(), "the host's own error") == 0);
+    SDL_ClearError();
     assert(btbh_gpu_window_hdr_state(smoke.window, &state) == BTBH_GPU_OK);
     assert(state.serial >= 1u);
     assert(state.mode == BTBH_GPU_HDR_MODE_OFF && state.active == 0u);
@@ -731,6 +743,141 @@ static void check_toggle(BTBHGPUDevice *device) {
     btbh_gpu_window_destroy(smoke.window);
 }
 
+/* A change of nits while a frame is pending reaches the next frame: the pending one encodes (and lifts) with the
+   numbers it started with. A change of nits takes a new serial and raises no hdr_changed; hdr_state with nothing
+   changed keeps the serial. */
+static void check_frame_nits(BTBHGPUDevice *device) {
+    set_env("BTBH_GPU_HDR_SIMULATE", "hdr10");
+    set_env("BTBH_GPU_HDR_DITHER", "0");
+    SmokeWindow smoke = open_window(device, "HDR smoke: frame nits", false);
+    set_env("BTBH_GPU_HDR_SIMULATE", NULL);
+    set_env("BTBH_GPU_HDR_DITHER", NULL);
+    const BTBHGPUScenePost post = smoke_post();
+    const BTBHGPUWindowHDRState before = set_hdr(&smoke, BTBH_GPU_HDR_MODE_AUTO, 203.0f, 1000.0f);
+    assert(before.active == 1u);
+    frame(&smoke, &post);
+    BTBHGPUPlatformSnapshot snapshot;
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK && snapshot.hdr_changed == 1u);
+
+    BTBHGPUSceneReport report;
+    assert(present_scene(&smoke, &post, &report) == BTBH_GPU_OK);
+    const BTBHGPUWindowHDRState after = set_hdr(&smoke, BTBH_GPU_HDR_MODE_AUTO, 300.0f, 600.0f);
+    assert(after.paper_white_nits == 300.0f && after.peak_nits == 600.0f && after.serial != before.serial);
+    btbh_gpu_window_request_presented_frame_readback(smoke.window);
+    canvas(&smoke);
+    check_encode(&smoke, &before, "nits changed while the frame was pending: the frame's own");
+    float *values = read_frame(&smoke);
+    const float new_peak = powf(after.highlight_ratio, 1.0f / 2.2f);
+    uint32_t above_new_peak = 0u;
+    for (uint32_t index = 0u; index < smoke.width * smoke.height * 4u; ++index) {
+        above_new_peak += index % 4u != 3u && values[index] > new_peak * 1.01f ? 1u : 0u;
+    }
+    free(values);
+    printf("frame nits: %u values above the new peak in the pending frame (its gain kept P = %.2f)\n",
+        above_new_peak, (double)before.highlight_ratio);
+    assert(above_new_peak > 20u);
+    frame(&smoke, &post);
+    check_encode(&smoke, &after, "the next frame: the new nits");
+
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK && snapshot.hdr_changed == 0u);
+    BTBHGPUWindowHDRState first;
+    BTBHGPUWindowHDRState second;
+    assert(btbh_gpu_window_hdr_state(smoke.window, &first) == BTBH_GPU_OK);
+    assert(btbh_gpu_window_hdr_state(smoke.window, &second) == BTBH_GPU_OK);
+    assert(first.serial == second.serial && memcmp(&first, &second, sizeof(first)) == 0);
+    printf("frame nits: serial %u kept by two states, no hdr_changed for a change of nits\n", (unsigned)first.serial);
+    btbh_gpu_window_destroy(smoke.window);
+}
+
+/* The encode pass can't be made (its shader is missing beside the others): the frame that found it out still shows,
+   the window falls back to SDR at the next frame's start (SWITCH_FAILED, "encode", logged), nothing is tried again
+   until a set_hdr switch, which tries once. */
+static void check_encode_unavailable(BTBHGPUDevice *device) {
+    const char *temp = SDL_getenv("TEMP");
+    temp = temp != NULL ? temp : SDL_getenv("TMPDIR");
+    temp = temp != NULL ? temp : "/tmp";
+    char directory[1024];
+    (void)snprintf(directory, sizeof(directory), "%s/btbh_hdr_smoke_no_encode", temp);
+    (void)SDL_CreateDirectory(directory);
+    SDL_PathInfo directory_info;
+    assert(SDL_GetPathInfo(directory, &directory_info) && directory_info.type == SDL_PATHTYPE_DIRECTORY);
+    int count = 0;
+    /* (Every file beside the shaders, which the scene reads too: its BRDF table.) */
+    char **names = SDL_GlobDirectory(BTBH_GPU_SMOKE_SHADER_DIR, "*", 0, &count);
+    assert(names != NULL && count > 14);
+    int copied = 0;
+    for (int index = 0; index < count; ++index) {
+        char source[1024];
+        char target[1024];
+        (void)snprintf(source, sizeof(source), "%s/%s", BTBH_GPU_SMOKE_SHADER_DIR, names[index]);
+        SDL_PathInfo source_info;
+        if (strcmp(names[index], "production_hdr_encode.frag" SMOKE_SHADER_EXTENSION) == 0 ||
+            !SDL_GetPathInfo(source, &source_info) || source_info.type != SDL_PATHTYPE_FILE) {
+            continue;
+        }
+        (void)snprintf(target, sizeof(target), "%s/%s", directory, names[index]);
+        size_t size = 0u;
+        void *bytes = SDL_LoadFile(source, &size);
+        assert(bytes != NULL && SDL_SaveFile(target, bytes, size));
+        SDL_free(bytes);
+        copied += 1;
+    }
+    char saved_paths[14][1024];
+    memcpy(saved_paths, shader_paths, sizeof(saved_paths));
+    for (int index = 0; index < 14; ++index) {
+        (void)snprintf(shader_paths[index], sizeof(shader_paths[index]), "%s/%s%s", directory, shader_names[index],
+            SMOKE_SHADER_EXTENSION);
+    }
+
+    set_env("BTBH_GPU_HDR_SIMULATE", "hdr10");
+    SmokeWindow smoke = open_window(device, "HDR smoke: no encode", false);
+    set_env("BTBH_GPU_HDR_SIMULATE", NULL);
+    const BTBHGPUScenePost post = smoke_post();
+    BTBHGPUWindowHDRState state = set_hdr(&smoke, BTBH_GPU_HDR_MODE_AUTO, 203.0f, 1000.0f);
+    assert(state.active == 1u);
+    frame(&smoke, &post);
+    assert(smoke.window->hdr_encode_failed);
+    BTBHGPUPlatformSnapshot snapshot;
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK);
+    frame(&smoke, &post);
+    assert(btbh_gpu_window_hdr_state(smoke.window, &state) == BTBH_GPU_OK);
+    char line[BTBH_GPU_HDR_DESCRIBE_CAPACITY];
+    (void)btbh_gpu_window_hdr_describe(smoke.window, line, sizeof(line));
+    printf("no encode: %s\n", line);
+    assert(state.active == 0u && state.fallback == BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED);
+    assert(strstr(state.message, "encode is unavailable") != NULL);
+    assert(strstr(line, "event=encode") != NULL);
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK && snapshot.hdr_changed == 1u);
+    BTBHGPUCreationStats before;
+    btbh_gpu_creation_stats(&before);
+    for (uint32_t repeat = 0u; repeat < 3u; ++repeat) {
+        frame(&smoke, &post);
+    }
+    BTBHGPUCreationStats after;
+    btbh_gpu_creation_stats(&after);
+    assert(btbh_gpu_window_hdr_state(smoke.window, &state) == BTBH_GPU_OK && state.active == 0u);
+    assert(after.shaders == before.shaders && after.graphics_pipelines == before.graphics_pipelines);
+    /* A set_hdr switch tries once more: the prewarm can't make it either, so SDR at once. */
+    (void)set_hdr(&smoke, BTBH_GPU_HDR_MODE_OFF, 203.0f, 1000.0f);
+    state = set_hdr(&smoke, BTBH_GPU_HDR_MODE_AUTO, 203.0f, 1000.0f);
+    (void)btbh_gpu_window_hdr_describe(smoke.window, line, sizeof(line));
+    assert(state.active == 0u && state.fallback == BTBH_GPU_HDR_FALLBACK_SWITCH_FAILED);
+    assert(strstr(line, "event=encode") != NULL);
+    frame(&smoke, &post);
+    printf("no encode: %d files copied without the encode; SDR at the next frame, not retried, once more on a "
+        "switch\n", copied);
+    btbh_gpu_window_destroy(smoke.window);
+
+    memcpy(shader_paths, saved_paths, sizeof(saved_paths));
+    for (int index = 0; index < count; ++index) {
+        char target[1024];
+        (void)snprintf(target, sizeof(target), "%s/%s", directory, names[index]);
+        (void)SDL_RemovePath(target);
+    }
+    (void)SDL_RemovePath(directory);
+    SDL_free(names);
+}
+
 /* Auto following the OS: the simulated display reports SDR, then HDR again, each time with an SDL HDR event. */
 static void push_hdr_event(SmokeWindow *smoke) {
     SDL_Event event;
@@ -778,6 +925,28 @@ static void check_auto(BTBHGPUDevice *device) {
     assert(state.active == 1u && state.fallback == BTBH_GPU_HDR_FALLBACK_NONE);
     (void)btbh_gpu_window_hdr_describe(smoke.window, line, sizeof(line));
     printf("auto, OS back to HDR: %s\n", line);
+
+    /* No event (SDL's answer changes silently, as Wine's lists may): hdr_state sees it (a new serial, PENDING) and the
+       next frame switches; with no call at all, the frame start's re-check a second later. */
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK);
+    BTBHGPUWindowHDRState quiet;
+    assert(btbh_gpu_window_hdr_state(smoke.window, &quiet) == BTBH_GPU_OK);
+    const uint32_t quiet_serial = quiet.serial;
+    smoke.window->hdr_simulate_os_sdr = true;
+    assert(btbh_gpu_window_hdr_state(smoke.window, &quiet) == BTBH_GPU_OK);
+    assert(quiet.serial != quiet_serial && quiet.active == 1u && quiet.fallback == BTBH_GPU_HDR_FALLBACK_PENDING);
+    frame(&smoke, &post);
+    assert(btbh_gpu_window_hdr_state(smoke.window, &quiet) == BTBH_GPU_OK);
+    assert(quiet.active == 0u && quiet.fallback == BTBH_GPU_HDR_FALLBACK_OS_SDR);
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK && snapshot.hdr_changed == 1u);
+    smoke.window->hdr_simulate_os_sdr = false;
+    frame(&smoke, &post);
+    SDL_Delay(1100u);
+    frame(&smoke, &post);
+    assert(btbh_gpu_window_hdr_state(smoke.window, &quiet) == BTBH_GPU_OK && quiet.active == 1u);
+    assert(btbh_gpu_window_poll_events(smoke.window, &snapshot) == BTBH_GPU_OK && snapshot.hdr_changed == 1u);
+    (void)btbh_gpu_window_hdr_describe(smoke.window, line, sizeof(line));
+    printf("auto, no event: PENDING seen by hdr_state, SDR at the next frame, HDR again by the re-check: %s\n", line);
     free(sdr);
     free(after);
     btbh_gpu_window_destroy(smoke.window);
@@ -866,6 +1035,29 @@ static void check_copies(BTBHGPUDevice *device) {
     assert(folded > 50u);
     free(data[0]);
     free(data[1]);
+
+    /* In SDR: a copy into the FRAME_FORMAT target (RGBA16F, a colour target) is a blit; an RGBA16F texture that isn't a
+       colour target is refused, by a copy and by a canvas pass, as 0.16.1 refused every RGBA16F texture. */
+    (void)set_hdr(&smoke, BTBH_GPU_HDR_MODE_OFF, 203.0f, 1000.0f);
+    BTBHGPUTexture *sampled = btbh_gpu_window_texture_create_empty(smoke.window, smoke.width, smoke.height,
+        SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER, BTBH_GPU_TEXTURE_FILTER_LINEAR,
+        BTBH_GPU_TEXTURE_WRAP_CLAMP, &texture_report);
+    assert(sampled != NULL && !sampled->color_target);
+    assert(present_scene(&smoke, &post, &report) == BTBH_GPU_OK);
+    assert(btbh_gpu_window_copy_pending_scene_texture(smoke.window, sampled, &texture_report) ==
+        BTBH_GPU_INVALID_ARGUMENT);
+    assert(btbh_gpu_window_copy_pending_scene_texture(smoke.window, frame_target, &texture_report) == BTBH_GPU_OK);
+    BTBHGPUCanvasPass pass;
+    memset(&pass, 0, sizeof(pass));
+    pass.target = sampled;
+    BTBHGPUCanvasReport canvas_report;
+    assert(btbh_gpu_window_canvas_present(smoke.window, shader_paths[11], shader_paths[12], shader_paths[13],
+        SMOKE_SHADER_FORMAT, NULL, 0u, NULL, 0u, &pass, 1u, &canvas_report) == BTBH_GPU_INVALID_ARGUMENT);
+    pass.target = frame_target;
+    assert(btbh_gpu_window_canvas_present(smoke.window, shader_paths[11], shader_paths[12], shader_paths[13],
+        SMOKE_SHADER_FORMAT, NULL, 0u, NULL, 0u, &pass, 1u, &canvas_report) == BTBH_GPU_OK);
+    printf("copies, SDR: into the frame-format target taken, into a sampled RGBA16F texture refused (copy, canvas)\n");
+    btbh_gpu_texture_destroy(sampled);
     btbh_gpu_texture_destroy(capture);
     btbh_gpu_texture_destroy(frame_target);
     btbh_gpu_texture_destroy(sdr_target);
@@ -897,9 +1089,11 @@ static void check_tail(BTBHGPUDevice *device) {
         &texture_report);
     free(lut_pixels);
     assert(lut != NULL);
-    const char *names[7] = { "FXAA", "SMAA", "FSR 1", "FSR 3", "tilt-shift", "LUT and CAS", "LUT, CAS, tilt-shift" };
+    const char *names[8] = {
+        "FXAA", "SMAA", "FSR 1", "FSR 3", "tilt-shift", "LUT and CAS", "LUT, CAS, tilt-shift", "LUT, SMAA, exposure 1e6"
+    };
     const float peak = powf(state.highlight_ratio, 1.0f / 2.2f);
-    for (uint32_t variant = 0u; variant < 7u; ++variant) {
+    for (uint32_t variant = 0u; variant < 8u; ++variant) {
         BTBHGPUScenePost post = smoke_post();
         post.bloom_enabled = 1u;
         post.bloom_intensity = 0.3f;
@@ -934,7 +1128,7 @@ static void check_tail(BTBHGPUDevice *device) {
                 post.cas_enabled = 1u;
                 post.cas_sharpness = 0.5f;
                 break;
-            default:
+            case 6u:
                 post.lut_enabled = 1u;
                 post.lut_texture = lut;
                 post.cas_enabled = 1u;
@@ -945,6 +1139,14 @@ static void check_tail(BTBHGPUDevice *device) {
                 post.focus_direction_x = 1.0f;
                 post.focus_half_width = 0.1f;
                 post.maximum_radius_pixels = 6.0f;
+                break;
+            default:
+                /* The heat (exposure times the scene) far past the largest half: the LUT pass's alpha must stay
+                   finite and the gain P, or NaN spreads through SMAA. */
+                post.lut_enabled = 1u;
+                post.lut_texture = lut;
+                post.anti_aliasing = 2u;
+                post.exposure = 1.0e6f;
                 break;
         }
         for (uint32_t repeat = 0u; repeat < 3u; ++repeat) {
@@ -1004,7 +1206,9 @@ int main(void) {
     check_simulated(device, "hdr10");
     check_simulated(device, "scrgb");
     check_toggle(device);
+    check_frame_nits(device);
     check_auto(device);
+    check_encode_unavailable(device);
     check_copies(device);
     check_tail(device);
     btbh_gpu_device_shutdown(device);

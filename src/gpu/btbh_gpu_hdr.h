@@ -91,12 +91,28 @@ static inline float btbh_hdr_knee_input(uint32_t tonemap_mode, float white_point
     return high;
 }
 
+/* The largest finite half: the heat is kept below it (the LUT pass carries it in RGBA16F alpha). */
+#define BTBH_HDR_HEAT_MAX 65504.0f
+/* Past this the gain is the ratio to float precision; t is clamped here, so that t * t never overflows. */
+#define BTBH_HDR_GAIN_T_MAX 1.0e4f
+
+/* The scene's heat: exposure times its largest channel, 0 to BTBH_HDR_HEAT_MAX (production_hdr.hlsli's
+   btbh_hdr_heat). */
+static inline float btbh_hdr_heat(float exposure, float red, float green, float blue)
+{
+    float largest = red > green ? red : green;
+    largest = largest > blue ? largest : blue;
+    const float heat = exposure * largest;
+    return heat > 0.0f ? (heat < BTBH_HDR_HEAT_MAX ? heat : BTBH_HDR_HEAT_MAX) : 0.0f;
+}
+
 /* The highlight gain: 1 at and below the knee m_k (and C1 there), rising monotonically toward ratio (peak over paper
-   white). heat: exposure * the scene's largest channel. */
+   white). heat: exposure * the scene's largest channel. Finite for any heat, infinity included. */
 static inline float btbh_hdr_gain(float heat, float ratio, float knee_input, float shoulder)
 {
     const float over = heat - knee_input;
-    const float t = over > 0.0f ? over / (shoulder > 1.0e-6f ? shoulder : 1.0e-6f) : 0.0f;
+    float t = over > 0.0f ? over / (shoulder > 1.0e-6f ? shoulder : 1.0e-6f) : 0.0f;
+    t = t < BTBH_HDR_GAIN_T_MAX ? t : BTBH_HDR_GAIN_T_MAX;
     const float t2 = t * t;
     return 1.0f + (ratio - 1.0f) * (t2 / (1.0f + t2));
 }

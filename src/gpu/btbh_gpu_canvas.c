@@ -616,7 +616,7 @@ static bool btbh_gpu_canvas_validate_passes(
               btbh_gpu_texture_is_array(pass->target) ||
               btbh_gpu_texture_is_heightfield(pass->target) ||
               (pass->target->format != frame_context->target_format &&
-               pass->target->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT)))
+               (pass->target->format != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT || !pass->target->color_target))))
         ) {
             return false;
         }
@@ -1082,7 +1082,13 @@ void btbh_gpu_window_frame_context_fill(
         : frame_context->swapchain_format;
     frame_context->hdr_active = window->hdr_active;
     frame_context->hdr_debug_heat = window->hdr_active && window->hdr_debug_heat;
-    frame_context->hdr_highlight_ratio = window->hdr_active ? window->hdr_state.highlight_ratio : 1.0f;
+    /* The frame's numbers, latched at its start (btbh_gpu_window_hdr_frame_start): a nits change while a frame is
+       pending reaches the next one, its gain and its encode alike. */
+    frame_context->hdr_highlight_ratio = window->hdr_active && window->hdr_frame_ratio > 1.0f
+        ? window->hdr_frame_ratio
+        : 1.0f;
+    frame_context->hdr_paper_white_nits = window->hdr_frame_paper_white;
+    frame_context->hdr_linear_scale = window->hdr_frame_linear_scale;
     frame_context->hdr_knee_override = window->hdr_knee_override;
     frame_context->hdr_shoulder_scale =
         window->hdr_shoulder_scale > 0.0f ? window->hdr_shoulder_scale : BTBH_HDR_SHOULDER_SCALE;
@@ -1283,6 +1289,16 @@ bool btbh_gpu_window_hdr_record_encode(
 ) {
     const uint32_t index = destination_format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 1u : 0u;
     if (window->hdr_encode_pipelines[index] == NULL) {
+        if (window->hdr_encode_failed) {
+            /* (Not again every frame: the window goes to SDR at the next frame's start.) */
+            SDL_SetError("The HDR encode is unavailable (%s)", window->hdr_encode_error);
+            return false;
+        }
+        if (window->shader_reference_path[0] == '\0') {
+            /* No present has given its shader paths yet (a present_clear first): this frame only. */
+            SDL_SetError("%s", "HDR output needs a present's shader paths first");
+            return false;
+        }
         char message[256];
         window->hdr_encode_pipelines[index] = btbh_gpu_window_hdr_create_pass_pipeline(
             window,
@@ -1292,20 +1308,21 @@ bool btbh_gpu_window_hdr_record_encode(
             sizeof(message)
         );
         if (window->hdr_encode_pipelines[index] == NULL) {
-            SDL_SetError("%s", message);
+            window->hdr_encode_failed = true;
+            (void)snprintf(window->hdr_encode_error, sizeof(window->hdr_encode_error), "%s", message);
+            SDL_SetError("The HDR encode is unavailable (%s)", message);
             return false;
         }
     }
     if (window->presented_frame == NULL || window->presented_frame->sampler == NULL) {
         return false;
     }
+    /* The frame's numbers, latched at its start with the ones its gain used. */
     BTBHGPUHDREncodeUniforms uniforms;
     SDL_zero(uniforms);
-    uniforms.paper_white_nits = window->hdr_state.paper_white_nits;
-    uniforms.highlight_ratio = window->hdr_state.highlight_ratio > 1.0f ? window->hdr_state.highlight_ratio : 1.0f;
-    uniforms.linear_scale = window->hdr_state.relative_luminance != 0u
-        ? 1.0f
-        : window->hdr_state.paper_white_nits / BTBH_HDR_SCRGB_NITS;
+    uniforms.paper_white_nits = window->hdr_frame_paper_white;
+    uniforms.highlight_ratio = window->hdr_frame_ratio > 1.0f ? window->hdr_frame_ratio : 1.0f;
+    uniforms.linear_scale = window->hdr_frame_linear_scale;
     const bool hdr10 = window->hdr_composition == BTBH_GPU_SWAPCHAIN_HDR10_ST2084;
     uniforms.dither_scale = hdr10 && window->hdr_dither ? 1.0f / 1023.0f : 0.0f;
     uniforms.encode_mode = hdr10 ? 0u : 1u;
@@ -1364,8 +1381,9 @@ static SDL_GPUTexture *btbh_gpu_hdr_virtual_swapchain(BTBHGPUWindow *window, uin
 }
 
 /* The HDR frame into the swapchain image: the encode (with BTBH_GPU_HDR_SIMULATE into the simulated swapchain, and the
-   frame blitted to the SDR image, clamped). Without the encode's shaders (no present has given its paths yet) the frame
-   is blitted as it is. */
+   frame blitted to the SDR image, clamped). Without the encode (no present has given its shader paths yet, or its
+   pipeline can't be made) an HDR swapchain image is cleared to black, never given unencoded values; the window goes
+   to SDR at the next frame's start when the encode can't be made. */
 static bool btbh_gpu_window_record_hdr_frame(BTBHGPUWindow *window) {
     const uint32_t width = window->pending_drawable_width;
     const uint32_t height = window->pending_drawable_height;
@@ -1389,9 +1407,22 @@ static bool btbh_gpu_window_record_hdr_frame(BTBHGPUWindow *window) {
     if (encoded && window->hdr_simulate == 0u) {
         return true;
     }
-    if (!encoded && window->hdr_simulate != 0u) {
-        return false;
+    if (window->hdr_simulate == 0u) {
+        SDL_GPUColorTargetInfo black;
+        SDL_zero(black);
+        black.texture = window->pending_swapchain;
+        black.clear_color.a = 1.0f;
+        black.load_op = SDL_GPU_LOADOP_CLEAR;
+        black.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_InsertGPUDebugLabel(window->pending_command, "BTBH HDR No Encode");
+        SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(window->pending_command, &black, 1u, NULL);
+        if (pass == NULL) {
+            return false;
+        }
+        SDL_EndGPURenderPass(pass);
+        return true;
     }
+    /* The simulated swapchain's real image is SDR: the frame, clamped, encoded or not. */
     SDL_GPUBlitInfo blit;
     SDL_zero(blit);
     blit.source.texture = frame;
@@ -1411,6 +1442,8 @@ void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window) {
     if (window == NULL || !window->hdr_active || window->device == NULL || window->device->gpu == NULL) {
         return;
     }
+    BTBHGPUHDRSavedError saved;
+    btbh_gpu_hdr_save_error(&saved);
     int drawable_width = 0;
     int drawable_height = 0;
     /* (Not the textures while a frame is pending: its commands may draw into the frame texture.) */
@@ -1444,7 +1477,8 @@ void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window) {
     }
     const SDL_GPUTextureFormat output_format = btbh_gpu_hdr_output_format(window);
     const uint32_t index = output_format == SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT ? 1u : 0u;
-    if (window->hdr_encode_pipelines[index] == NULL) {
+    if (window->hdr_encode_pipelines[index] == NULL && !window->hdr_encode_failed &&
+        window->shader_reference_path[0] != '\0') {
         char message[256];
         window->hdr_encode_pipelines[index] = btbh_gpu_window_hdr_create_pass_pipeline(
             window,
@@ -1453,6 +1487,11 @@ void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window) {
             message,
             sizeof(message)
         );
+        if (window->hdr_encode_pipelines[index] == NULL) {
+            /* Remembered: the switch falls back to SDR, and nothing tries again until a set_hdr switch. */
+            window->hdr_encode_failed = true;
+            (void)snprintf(window->hdr_encode_error, sizeof(window->hdr_encode_error), "%s", message);
+        }
     }
     /* The fold of an HDR capture into an SDR target (btbh_gpu_window_copy_pending_scene_texture). */
     if (window->hdr_fold_pipeline == NULL) {
@@ -1470,7 +1509,7 @@ void btbh_gpu_window_hdr_prewarm(BTBHGPUWindow *window) {
         SDL_zero(report);
         (void)btbh_gpu_canvas_ensure_float_pipelines(window, false, &report);
     }
-    SDL_ClearError();
+    btbh_gpu_hdr_restore_error(&saved);
 }
 
 /* Halves to RGBA8 (an HDR frame's RGBA8 read-back: clamped and rounded), or RGBA8/BGRA8 widened to halves. */
@@ -2012,12 +2051,13 @@ BTBHGPUResult btbh_gpu_window_canvas_present(
     uint32_t pass_count,
     BTBHGPUCanvasReport *report
 ) {
-    /* RFC 0017: a canvas present with no scene before it starts the frame (an AUTO window takes an HDR change). */
+    BTBHGPULazyCreationScope lazy_scope;
+    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
+    /* RFC 0017: a canvas present with no scene before it starts the frame (an AUTO window takes an HDR change), inside
+       the log's scope, so that it names a switch's wait and what it makes. */
     btbh_gpu_window_hdr_frame_start(window);
     BTBHGPUFrameContext frame_context;
     btbh_gpu_window_frame_context_fill(window, &frame_context);
-    BTBHGPULazyCreationScope lazy_scope;
-    btbh_gpu_lazy_creation_begin(window, BTBH_GPU_LAZY_CREATION_CALL_CANVAS_PRESENT, &lazy_scope);
     const BTBHGPUResult result = btbh_gpu_window_canvas_present_internal(
         window,
         &frame_context,
@@ -2222,8 +2262,6 @@ static bool btbh_gpu_window_canvas_acquire_frame(
         );
     btbh_gpu_lazy_creation_call_timed(BTBH_GPU_LAZY_CALL_SWAPCHAIN_ACQUIRE, acquire_started_ticks);
     if (!swapchain_acquired) {
-        char acquire_error[256];
-        (void)snprintf(acquire_error, sizeof(acquire_error), "%s", SDL_GetError());
         if (window->pending_command != NULL) {
             (void)btbh_gpu_window_finish_pending_frame(
                 window,
@@ -2231,15 +2269,16 @@ static bool btbh_gpu_window_canvas_acquire_frame(
             );
         }
         window->pending_scene_ready = false;
-        /* RFC 0017: the swapchain may have lost its HDR composition; the window is SDR from the next frame. */
-        (void)btbh_gpu_window_hdr_acquire_failed(window);
         btbh_gpu_canvas_error(
             report,
             BTBH_GPU_WINDOW_FAILURE,
-            acquire_error
+            SDL_GetError()
         );
+        /* RFC 0017: the swapchain may have lost its HDR composition; the window is SDR from the next frame. */
+        (void)btbh_gpu_window_hdr_acquire_failed(window);
         return false;
     }
+    window->hdr_acquire_failures = 0u;
     // A minimized or hidden window has no swapchain image. That is not an error: the
     // frame's offscreen work (scene and canvas target passes) still runs and is
     // submitted, and only the screen passes are skipped.
