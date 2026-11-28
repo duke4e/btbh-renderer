@@ -15,10 +15,12 @@
  *   red and blue at their own offsets) within IMAGE_TOLERANCE levels but for IMAGE_OUTLIERS of the pixels.
  * - Scene views: a vertical split of one camera with a ring across the line equals the one-view frame farther than
  *   VIEW_BAND render pixels from the line; with view 0 seeing a red ground and view 1 a blue one and a strong ring on the
- *   line, no pixel of a half shows the other's colour.
- * - FSR 3 (from half the size, where the device has it): the reactive mask holds min(1, a / 6) times the frame's
- *   reactive scale (a: the field's length channel read bilinearly) where the field displaces, 0 elsewhere; a ring that
- *   grows over 30 frames under a panning camera presents every frame.
+ *   line, no pixel of a half shows the other's colour. A source far from the line leaves the band by it byte for byte
+ *   (no displacement, no read moved). A source in view 0's frustum but wholly on view 1's side (view 1's camera elsewhere)
+ *   is culled: the frame is the frame without it, byte for byte, and none is counted.
+ * - FSR 3 (from half the size, where the device has it): the reactive mask holds min(1, |d| / 6) times the frame's
+ *   reactive scale (d: the field's summed displacement read bilinearly and clamped) where the field displaces, 0
+ *   elsewhere; a ring that grows over 30 frames under a panning camera presents every frame.
  * - The setter: each refusal (BTBH_GPU_INVALID_ARGUMENT, the message naming the source and the field), after which
  *   nothing is drawn; a render into a target neither draws nor takes the sources; a present refused for its arguments
  *   leaves them set.
@@ -362,6 +364,8 @@ typedef struct Params {
     uint32_t render_width;
     uint32_t render_height;
     float eye_x;
+    /* With the split: view 1's camera this far along x from view 0's (0: the same camera). */
+    float view1_offset;
     /* A present the core refuses (no batches). */
     bool refused;
 } Params;
@@ -401,11 +405,13 @@ static BTBHGPUResult present(SmokeWindow *smoke, const Params *params, BTBHGPUSc
     static const uint8_t only_blue[2] = {0u, 1u};
     BTBHGPUSceneView views[2];
     memset(views, 0, sizeof(views));
+    const SmokeCamera second = camera_at(params->eye_x + params->view1_offset, WIDTH, HEIGHT);
     for (uint32_t index = 0u; index < 2u; ++index) {
-        memcpy(views[index].view_projection, camera.view_projection, sizeof(views[index].view_projection));
-        memcpy(views[index].right, camera.right, sizeof(views[index].right));
-        memcpy(views[index].up, camera.up, sizeof(views[index].up));
-        memcpy(views[index].position, camera.position, sizeof(views[index].position));
+        const SmokeCamera *view_camera = index == 0u ? &camera : &second;
+        memcpy(views[index].view_projection, view_camera->view_projection, sizeof(views[index].view_projection));
+        memcpy(views[index].right, view_camera->right, sizeof(views[index].right));
+        memcpy(views[index].up, view_camera->up, sizeof(views[index].up));
+        memcpy(views[index].position, view_camera->position, sizeof(views[index].position));
         const float sign = index == 0u ? -1.0f : 1.0f;
         views[index].clip[0] = sign;
         views[index].clip[1] = 0.0f;
@@ -596,7 +602,8 @@ static float *reference_field(const BTBHGPUSceneDistortionSource *sources, uint3
     assert(field != NULL);
     for (uint32_t index = 0u; index < count; ++index) {
         BTBHDistortionRecord record;
-        if (!btbh_distortion_pack(&sources[index], camera->view_projection, camera->right, camera->up, WIDTH, HEIGHT,
+        if (!btbh_distortion_pack(&sources[index], camera->view_projection, NULL, camera->right, camera->up, WIDTH,
+                HEIGHT,
                 (double)time, &record)) {
             continue;
         }
@@ -947,6 +954,61 @@ static void check_views(SmokeWindow *smoke) {
         crossed);
     assert(crossed == 0u);
     free(frame);
+
+    /* A disc far from the line (on view 0's side): the band by the line, where nothing is displaced, keeps its bytes. */
+    Params plain_split = params_default();
+    plain_split.split = true;
+    uint8_t *without = frame_pixels(smoke, &plain_split, &report);
+    assert(report.distortion_sources_drawn == 0u);
+    BTBHGPUSceneDistortionSource far_disc = source_of(BTBH_GPU_SCENE_DISTORTION_DISC, BTBH_GPU_SCENE_DISTORTION_PUSH,
+        false, -5.0f, 0.0f);
+    far_disc.chroma = 0.6f;
+    set_sources(smoke, &far_disc, 1u, 0.0f);
+    uint8_t *with_far = frame_pixels(smoke, &plain_split, &report);
+    assert(report.distortion_sources_drawn == 1u);
+    uint32_t band_changed = 0u;
+    uint32_t elsewhere_changed = 0u;
+    for (uint32_t y = 0u; y < HEIGHT; ++y) {
+        for (uint32_t x = 0u; x < WIDTH; ++x) {
+            const bool differs = memcmp(&without[(y * WIDTH + x) * 4u], &with_far[(y * WIDTH + x) * 4u], 4u) != 0;
+            if (fabsf((float)x + 0.5f - 0.5f * (float)WIDTH) <= VIEW_BAND) {
+                band_changed += differs ? 1u : 0u;
+            } else {
+                elsewhere_changed += differs ? 1u : 0u;
+            }
+        }
+    }
+    printf("views: a disc far from the line: %u pixels of the band by the line changed (%u elsewhere)\n", band_changed,
+        elsewhere_changed);
+    assert(band_changed == 0u);
+    assert(elsewhere_changed > 100u);
+    free(with_far);
+
+    /* A disc just past the line on view 1's side, in view 0's frustum only (view 1's camera 40 units away): culled by
+       view 0's half and view 1's frustum, so the frame is the frame without it, and no source counts. */
+    Params apart = params_default();
+    apart.split = true;
+    apart.view1_offset = 40.0f;
+    uint8_t *apart_without = frame_pixels(smoke, &apart, &report);
+    BTBHGPUSceneDistortionSource past_line = source_of(BTBH_GPU_SCENE_DISTORTION_DISC, BTBH_GPU_SCENE_DISTORTION_PUSH,
+        false, 1.6f, 0.0f);
+    past_line.radius = 0.5f;
+    set_sources(smoke, &past_line, 1u, 0.0f);
+    uint8_t *apart_with = frame_pixels(smoke, &apart, &report);
+    const uint32_t apart_changed = differing_pixels(apart_without, apart_with);
+    printf("views: a disc just past the line on the other view's side: %u sources drawn, %u pixels changed\n",
+        (unsigned)report.distortion_sources_drawn, apart_changed);
+    assert(report.distortion_sources_drawn == 0u);
+    assert(apart_changed == 0u);
+    /* The same disc a little left, across the line: drawn by view 0 (its part on view 0's side). */
+    past_line.position[0] = 0.15f;
+    set_sources(smoke, &past_line, 1u, 0.0f);
+    uint8_t *across = frame_pixels(smoke, &apart, &report);
+    assert(report.distortion_sources_drawn == 1u);
+    free(across);
+    free(apart_with);
+    free(apart_without);
+    free(without);
 }
 
 static void check_fsr3(SmokeWindow *smoke) {
@@ -985,13 +1047,16 @@ static void check_fsr3(SmokeWindow *smoke) {
             float f[4];
             field_sample(field, field_width, field_height, ((float)x + 0.5f) / (float)params.render_width,
                 ((float)y + 0.5f) / (float)params.render_height, f);
-            const float expected = fminf(f[3] / BTBH_DISTORTION_REACTIVE_PIXELS, 1.0f) * 0.8f * 255.0f;
+            const float limit = BTBH_DISTORTION_SUM_LIMIT * (float)params.render_height /
+                BTBH_DISTORTION_REFERENCE_LINES;
+            const float length = fminf(sqrtf(f[0] * f[0] + f[1] * f[1]), limit);
+            const float expected = fminf(length / BTBH_DISTORTION_REACTIVE_PIXELS, 1.0f) * 0.8f * 255.0f;
             const int difference = (int)fabsf((float)reactive[y * params.render_width + x] - expected);
             largest = difference > largest ? difference : largest;
             marked += reactive[y * params.render_width + x] > 0u ? 1u : 0u;
         }
     }
-    printf("fsr3: the reactive mask against min(1, a / 6) x 0.8: largest %d levels; %u pixels marked\n", largest,
+    printf("fsr3: the reactive mask against min(1, |d| / 6) x 0.8: largest %d levels; %u pixels marked\n", largest,
         marked);
     assert(largest <= 2);
     assert(marked > 50u);
