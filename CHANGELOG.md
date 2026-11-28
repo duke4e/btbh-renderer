@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-11-28
+
+0.16.1: the reflections by the split line that Be The Bullet Hell v2 asked for after its 0.16.0 test, and RFC 0015
+phase 1a, the frame thread's groundwork; no API change, nothing to set. A split's reflections fade within 24 render
+pixels of the line, not 1/12 of the frame, and their march ends just before the line instead of missing what lies
+behind near it; the SSAO's denoise keeps its taps off the band on a diagonal. The presents read the window once,
+through a frame context, and the canvas present runs in three steps. Every frame with one view is byte for byte
+0.16.0's. Shaders: rebuild them. 79 are built; 2 changed (`production_ssao_resolve.frag`,
+`production_ssao_denoise.frag`), their pictures with one view not.
+
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on the merged release: `check.ps1` 46/46, the Swift suite 306
+tests (2 skipped, 0 failures), and identity against 0.16.0 in four modes (plain, shared meshes, no runs, runs
+verified): 421 images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view
+(`BTBH_SMOKE_PRESENT_VIEWS=1`) and with the cost log and its pass frames on; the views smoke passes in the four modes,
+its split chains now reflecting. Both branches were reviewed; every finding was fixed before the candidate.
+
+Be The Bullet Hell v2's test of the candidate (`54f9be3c`; Windows, Vulkan, RTX 3070 Ti, under the perf lock) passed all
+four asks, and v2 adopts it. A clean build with `shaders-161` (79: 77 as 0.16.0's, the two changed) makes no pipeline
+after frame 1 at High by day and night or on the Deck preset. With no split its pixels are 0.16.0's within its noise
+(six 1600 x 900 scenes with no stable change; three 4K FSR 3 scenes 344-2,469 px at 2 levels or less against 0.5-1.9
+million px from run to run), its golden hashes pass, a two-player replay from 0.16.0 plays the same, and its 697 crate
+tests pass. Split at 4K High, the facades by the line keep their reflections: the second view's glass reflects up to the
+divider where 0.16.0 left it dark, only glass changed (93-97 % of the changed pixels within 256 px of the line), and no
+hard edge or flicker shows at or past the divider in its four pairs by day and night. Its frame went from 9.06-9.40 ms
+to 9.17-9.49 at native size and from 6.12-6.13 to 6.14-6.21 at 67 %, where SSR took 0.42 ms and then 0.43. On the Deck
+preset nothing moved: a stage-3 fight 1.612-1.644 ms against 1.618-1.622, the split 1.61-1.63 and one view 1.67 on both,
+every CPU phase of the renderer within 0.005 ms.
+
 ### Changed
 - **The scene and canvas presents read the window through a frame context, and the canvas present is in two halves**
   (RFC 0015 phase 1a; no API change, nothing to set). Phase 1b encodes a frame on a thread of the renderer's while the
