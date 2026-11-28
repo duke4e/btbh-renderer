@@ -12,7 +12,7 @@ this current; a game's session asks (an issue) when something here changes. Rule
 | Consumes through | git submodule `City Generator (r3d)/Vendor/BTBHRenderer`, SwiftPM `.package(path:)`; products `BTBHRenderer`, `BTBHRendererGPU` | `crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from `BTBH_RENDERER_DIR` (default `../btbh-renderer`), bindgen over `btbh_gpu.h` | git submodule `external/btbh-renderer`; its CMake globs `src/gpu/*.c` into a static `btbh_gpu` | `v2/crates/btbh-gpu-sys/build.rs` compiles `src/gpu/*.c` from the checkout `v2/renderer.pin` names (`BTBH_RENDERER_DIR` overrides it), bindgen over `btbh_gpu.h` |
 | Native deps | renderer's CMake (`build-gpu-game.ps1/.sh`, `build-gpu-game-linux.sh`): SDL3 static, Assimp, shadercross | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/build_prebuilt.ps1`) | system SDL3, Assimp, zlib | `BTBH_RENDERER_PREBUILT` (SDL3-static, Assimp DLL; `tools/stage_prebuilt.py`) |
 | Shaders | renderer's CMake → SPIR-V / metallib staged into `GPUShaders/` | `tools/build_shaders.py` (shadercross → SPIR-V in `assets-cache/shaders`), list read from the renderer's `CMakeLists.txt` | its CMake: shadercross → SPIR-V → MSL → `xcrun metal` metallib, list read from the renderer's `CMakeLists.txt` | `v2/tools/build_shaders.py` |
-| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.14.2` (tag `v0.14.2`; CHIMERA `7e7c905c`, 2026-11-25) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.17.0` (tag `v0.17.0`; BTBH `03554795b`, 2026-11-28) |
+| Pinned version | submodule at tag `v0.5.1` (BTBH `ca6744ac`, 2026-11-12) | `renderer.pin` → `../btbh-renderer-v0.14.2` (tag `v0.14.2`; CHIMERA `7e7c905c`, 2026-11-25) | submodule at tag `v0.2.1` (Tyrian3D `60c1b596`, 2026-11-11) | `v2/renderer.pin` → `../../btbh-renderer-v0.18.0` (tag `v0.18.0`; BTBH `b450f32e5`, 2026-11-28) |
 
 ## Features used
 
@@ -130,8 +130,17 @@ beside the row from `btbh_gpu_window_hdr_state` ("Not on this display", "Off in 
 Proton); `btbh_gpu_window_hdr_describe` logged at start-up and on `hdr_changed`; the pause backdrop in
 `BTBH_GPU_RENDER_TARGET_FRAME_FORMAT`.
 
-Later: HDR phase 2 from the Machine run (0.17.x), the distortion pass (RFC 0018) with the cover layer and still ice
-(RFC 0020) in 0.18.0, volumetrics (RFC 0019), half-resolution SSR, multi-draw indirect (RFC 0011 phase 2, after a
+Since 0.18.0 (shaders `shaders-180`, its 10 new ones in its list):
+- the distortion pass (RFC 0018): `btbh_gpu_window_scene_set_distortion` with up to 96 sources a frame (push rings on
+  blasts, stomps and leap landings; haze over fires, along beams and in the desert; lenses on hazard orbs and rift
+  portals), on its "Screen distortion" row (on by default) through `BTBH_GPU_SCENE_POST_DISTORTION`, the haze on its
+  game time;
+- the cover and still ice (RFC 0020): `btbh_gpu_window_scene_set_cover` per biome (ice: snow settling 0.3 to 0.9 over
+  a stage and a ground layer; jungle: moss and mud with puddles; desert: sand; flood: mud), `flags2` bits 2-3 on kit,
+  props and terrain (never units, the kaiju, effects, water or anything moving), each layer multiplied by its mood's
+  tint every frame; `ICE` on the ice biome's water and frozen cells; `COARSE` on the Deck preset and Low.
+
+Later: HDR phase 2 from the Machine run (0.17.x), volumetrics (RFC 0019), half-resolution SSR, multi-draw indirect (RFC 0011 phase 2, after a
 submit-cost measurement), a depth prepass (RFC 0016), the frame thread (RFC 0015 phase 1b), FSR 3 over two views and
 bloom per view (RFC 0014 phases 2 and 3), BC texture formats (RFC 0008 phase 2), and descriptor pools made before the
 first frames.
