@@ -11077,17 +11077,27 @@ static bool btbh_gpu_scene_ensure_distortion(
     return true;
 }
 
-/* RFC 0018: each view's records of the window's taken sources (btbh_distortion_pack: culled by the view's frustum,
-   clamped, at this render size), into the runtime's; the sources drawn in any view. */
+/* RFC 0018: each view's records of the window's taken sources (btbh_distortion_pack: culled by the view's frustum and
+   by its half of the frame, clamped, at this render size), into the runtime's; the sources drawn in any view. The halves
+   are the planes the passes clip to (btbh_gpu_scene_view_planes at the frame's drawable size: the window's frame). */
 static uint32_t btbh_gpu_scene_pack_distortion(
     const BTBHGPUWindow *window,
     BTBHGPUSceneRuntime *runtime,
     const BTBHGPUSceneViewFrame *views,
     uint32_t view_count,
+    uint32_t drawable_width,
+    uint32_t drawable_height,
     uint32_t render_width,
     uint32_t render_height
 ) {
     uint32_t drawn = 0u;
+    float clip_planes[BTBH_GPU_SCENE_MAX_VIEWS][4];
+    SDL_zeroa(clip_planes);
+    for (uint32_t view = 0u; view < view_count; ++view) {
+        float uv_plane[4];
+        btbh_gpu_scene_view_planes(views[view].view->clip, drawable_width, drawable_height, render_width,
+            render_height, clip_planes[view], uv_plane);
+    }
     SDL_zeroa(runtime->distortion_record_counts);
     for (uint32_t index = 0u; index < window->distortion_source_count; ++index) {
         bool any = false;
@@ -11095,7 +11105,7 @@ static uint32_t btbh_gpu_scene_pack_distortion(
             BTBHDistortionRecord *record =
                 &runtime->distortion_records[view][runtime->distortion_record_counts[view]];
             if (btbh_distortion_pack(&window->distortion_sources[index], views[view].view_projection,
-                    views[view].view->right, views[view].view->up, render_width, render_height,
+                    clip_planes[view], views[view].view->right, views[view].view->up, render_width, render_height,
                     window->distortion_time, record)) {
                 runtime->distortion_record_counts[view] += 1u;
                 any = true;
@@ -11804,7 +11814,8 @@ static BTBHGPUResult btbh_gpu_window_scene_present_instances_internal(
     uint32_t distortion_drawn = 0u;
     if (setup.distortion_active) {
         distortion_drawn = distortion_taken
-            ? btbh_gpu_scene_pack_distortion(window, runtime, view_frames, view_count, render_width, render_height)
+            ? btbh_gpu_scene_pack_distortion(window, runtime, view_frames, view_count, frame_context->drawable_width,
+                frame_context->drawable_height, render_width, render_height)
             : 0u;
         setup.distortion_active = distortion_drawn > 0u;
     }

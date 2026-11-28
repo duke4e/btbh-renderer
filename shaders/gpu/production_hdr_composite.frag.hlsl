@@ -114,8 +114,9 @@ float4 main(FragmentInput input) : SV_Target0
 }
 #else
 // RFC 0018: the scene displaced by the offset field. Each pixel shows the scene `d` back (d: the field read at the
-// pixel, its length clamped; by a view's edge faded out, and no read nearer the edge than the reflections' margin);
-// red and blue `d` times 1 +- 0.35 chroma. Fog and bloom are read where green is; the vignette stays on the pixel.
+// pixel, its length clamped; by a view's edge faded out, and a displaced read no nearer the edge than the reflections'
+// margin; where d is 0 the pixel reads itself); red and blue `d` times 1 +- 0.35 chroma. Fog and bloom are read where
+// green is; the vignette stays on the pixel.
 float distortion_line_scale()
 {
     return max(length(distortion_view_plane.yz * distortion_frame.xy), 1.0e-30f);
@@ -170,9 +171,11 @@ CompositeOutput main(FragmentInput input)
         d *= saturate((line_pixels - margin) / (8.0f - margin));
     }
     const float chroma = field.w > 1.0e-4f ? saturate(field.z / field.w) : 0.0f;
-    const float2 green_uv = distortion_keep_inside(uv - d * distortion_frame.xy);
+    // (No displacement, no read moved: a pixel by the line keeps its own value.)
+    const bool displaced = any(d != 0.0f);
+    const float2 green_uv = displaced ? distortion_keep_inside(uv - d * distortion_frame.xy) : uv;
     float3 color = scene_texture.SampleLevel(scene_sampler, green_uv, 0.0f).rgb;
-    if (chroma > 0.0f && any(d != 0.0f))
+    if (chroma > 0.0f && displaced)
     {
         const float2 red_uv = distortion_keep_inside(uv - d * (1.0f + 0.35f * chroma) * distortion_frame.xy);
         const float2 blue_uv = distortion_keep_inside(uv - d * (1.0f - 0.35f * chroma) * distortion_frame.xy);
@@ -203,7 +206,8 @@ CompositeOutput main(FragmentInput input)
     CompositeOutput output;
     output.color = float4(color, 1.0f);
 #if BTBH_DISTORTION == 2
-    output.reactive = float4(saturate(field.w / 6.0f) * distortion_frame.w, 0.0f, 0.0f, 0.0f);
+    // Refraction's rule: fully reactive at 6 render pixels of the displacement the pixel shows (the summed one, clamped).
+    output.reactive = float4(saturate(length(d) / 6.0f) * distortion_frame.w, 0.0f, 0.0f, 0.0f);
 #endif
     return output;
 }

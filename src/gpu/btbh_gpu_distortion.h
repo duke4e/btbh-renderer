@@ -19,11 +19,13 @@
 #define BTBH_DISTORTION_REFERENCE_LINES 1080.0f
 /* The sources' summed displacement is clamped to this many pixels of a 1080-line frame. */
 #define BTBH_DISTORTION_SUM_LIMIT 64.0f
-/* A PUSH source's fold clamp: a ring's displacement to this share of its width, a disc's or a strip's to this share of
-   its radius, measured on screen. Below them p -> p - d(p) stays one-to-one: the ring's profile is steepest at
-   1.5396 / (width / 2) = 3.08 / width, the disc's at 3.4939 / radius (its centre). */
-#define BTBH_DISTORTION_RING_FOLD 0.3f
-#define BTBH_DISTORTION_DISC_FOLD 0.28f
+/* A PUSH source's fold clamp keeps the Jacobian of p -> p - k d(p) positive over the whole shape for every colour
+   (k = 1 + BTBH_DISTORTION_CHROMA_SPLIT * chroma, red's), at this share of the limit. With the shape's projection
+   locally A (singular values a >= b, render pixels per world unit) and d = m(r) along r's gradient on screen, the
+   Jacobian's determinant is det(A) (1 - k m'(r) / l)(1 - k (m(r) / r) l^3 / (a b)^2) for l = a b / |A^-T r^| in [b, a]:
+   one-to-one while k m' < b and k (m / r) < b^2 / a everywhere (a pull: k (-m') < b). btbh_distortion_pack takes a, b
+   over the shape (perspective: its thinnest place) and m's steepest slopes (btbh_distortion_profile_slopes). */
+#define BTBH_DISTORTION_FOLD_MARGIN 0.9f
 /* 1 / max(u (1 - u^2)^2), at u = 1 / sqrt(5): the disc's profile peaks at 1. */
 #define BTBH_DISTORTION_DISC_PEAK 3.4938562f
 /* Chroma: red displaced by 1 + this * chroma, blue by 1 - this * chroma (REFRACT's dispersion). */
@@ -258,6 +260,24 @@ static inline void btbh_distortion_bounds(const BTBHGPUSceneDistortionSource *so
     }
 }
 
+/* Whether a sphere lies at least partly on the drawn side of a view's half (RFC 0014): clip_plane is its clip-space
+   plane (btbh_gpu_scene_view_planes: a point is drawn where a x + b y + c w >= 0), a world plane through the camera;
+   NULL or zero: the whole frame. */
+static inline bool btbh_distortion_in_half(const float m[16], const float clip_plane[4], const float centre[3],
+    float radius) {
+    if (clip_plane == NULL || (clip_plane[0] == 0.0f && clip_plane[1] == 0.0f && clip_plane[2] == 0.0f)) {
+        return true;
+    }
+    float plane[4];
+    for (int column = 0; column < 4; ++column) {
+        plane[column] = clip_plane[0] * m[column * 4 + 0] + clip_plane[1] * m[column * 4 + 1] +
+            clip_plane[2] * m[column * 4 + 3];
+    }
+    const float length = sqrtf(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]);
+    const float distance = plane[0] * centre[0] + plane[1] * centre[1] + plane[2] * centre[2] + plane[3];
+    return distance >= -radius * length;
+}
+
 /* Whether a sphere meets the frustum of a view-projection (column-major; clip x, y in -w..w, z in 0..w). */
 static inline bool btbh_distortion_in_frustum(const float m[16], const float centre[3], float radius) {
     float rows[4][4];
@@ -288,35 +308,96 @@ static inline bool btbh_distortion_in_frustum(const float m[16], const float cen
     return true;
 }
 
-/* Render pixels per world unit along `axis` at `point` (the projection's derivative there; 0 behind the camera). */
-static inline float btbh_distortion_pixels_per_unit(
+/* The plane's projection at a point: the most (a) and the fewest (b) render pixels a world unit of it spans on screen
+   (A's singular values, A the derivative of the screen position by the plane's coordinates). False behind the camera. */
+static inline bool btbh_distortion_plane_scales(
     const float m[16],
     const float point[3],
-    const float axis[3],
+    const float axis_u[3],
+    const float axis_v[3],
     uint32_t render_width,
-    uint32_t render_height
+    uint32_t render_height,
+    float *a,
+    float *b
 ) {
     float clip[4];
-    float delta[4];
+    float du[4];
+    float dv[4];
     for (int row = 0; row < 4; ++row) {
         clip[row] = m[0 * 4 + row] * point[0] + m[1 * 4 + row] * point[1] + m[2 * 4 + row] * point[2] +
             m[3 * 4 + row];
-        delta[row] = m[0 * 4 + row] * axis[0] + m[1 * 4 + row] * axis[1] + m[2 * 4 + row] * axis[2];
+        du[row] = m[0 * 4 + row] * axis_u[0] + m[1 * 4 + row] * axis_u[1] + m[2 * 4 + row] * axis_u[2];
+        dv[row] = m[0 * 4 + row] * axis_v[0] + m[1 * 4 + row] * axis_v[1] + m[2 * 4 + row] * axis_v[2];
     }
     if (!(clip[3] > 1.0e-6f)) {
-        return 0.0f;
+        return false;
     }
     const float w2 = clip[3] * clip[3];
-    const float dx = (delta[0] * clip[3] - clip[0] * delta[3]) / w2 * 0.5f * (float)render_width;
-    const float dy = (delta[1] * clip[3] - clip[1] * delta[3]) / w2 * 0.5f * (float)render_height;
-    return sqrtf(dx * dx + dy * dy);
+    const float sx = 0.5f * (float)render_width / w2;
+    const float sy = 0.5f * (float)render_height / w2;
+    const float ux = (du[0] * clip[3] - clip[0] * du[3]) * sx;
+    const float uy = (du[1] * clip[3] - clip[1] * du[3]) * sy;
+    const float vx = (dv[0] * clip[3] - clip[0] * dv[3]) * sx;
+    const float vy = (dv[1] * clip[3] - clip[1] * dv[3]) * sy;
+    const float p = ux * ux + uy * uy;
+    const float q = vx * vx + vy * vy;
+    const float c = ux * vx + uy * vy;
+    const float spread = sqrtf((p - q) * (p - q) + 4.0f * c * c);
+    *a = sqrtf(0.5f * (p + q + spread));
+    *b = *a > 0.0f ? fabsf(ux * vy - uy * vx) / *a : 0.0f;
+    return *b > 0.0f;
 }
 
-/* One source's record in one view, or false where it is skipped or outside the view's frustum. view_projection: the
-   matrix the view's geometry is drawn with; right, up: its camera's; time_seconds: the setter's clock. */
+/* A PUSH profile's steepest slopes, per world unit of r: the most m'(r) / strength rises (rise) and falls (fall), and the
+   largest m(r) / (r strength) (ratio). A disc's and a strip's are 3.4939 / radius, 2.7951 / radius and 3.4939 / radius
+   (at the centre and at u = 0.775); a ring's are sampled over its band (1.5396 / (width / 2) each way for a ring whose
+   radius is past its width, more by its centre for a newborn one). */
+static inline void btbh_distortion_profile_slopes(
+    const BTBHGPUSceneDistortionSource *source,
+    float *rise,
+    float *fall,
+    float *ratio
+) {
+    if (source->shape != (uint32_t)BTBH_GPU_SCENE_DISTORTION_RING) {
+        *rise = BTBH_DISTORTION_DISC_PEAK / source->radius;
+        *fall = 0.8f * BTBH_DISTORTION_DISC_PEAK / source->radius;
+        *ratio = BTBH_DISTORTION_DISC_PEAK / source->radius;
+        return;
+    }
+    const float half = 0.5f * source->width;
+    const float inner = source->radius > half ? source->radius - half : 0.0f;
+    const float outer = source->radius + half;
+    *rise = 0.0f;
+    *fall = 0.0f;
+    *ratio = 0.0f;
+    for (int sample = 0; sample < 64; ++sample) {
+        const float r = inner + ((float)sample + 0.5f) / 64.0f * (outer - inner);
+        const float x = (r - source->radius) / half;
+        const float band = (1.0f - x * x) * (1.0f - x * x);
+        const float band_slope = -4.0f * x * (1.0f - x * x) / half;
+        float slope;
+        float per_r;
+        if (r < half) {
+            slope = band / half + (r / half) * band_slope;
+            per_r = band / half;
+        } else {
+            slope = band_slope;
+            per_r = band / r;
+        }
+        *rise = slope > *rise ? slope : *rise;
+        *fall = -slope > *fall ? -slope : *fall;
+        *ratio = per_r > *ratio ? per_r : *ratio;
+    }
+}
+
+/* One source's record in one view, or false where it draws nothing there: skipped, outside the view's frustum or its
+   half (clip_plane, NULL or zero for the whole frame), or a PUSH source whose centre is behind the camera.
+   view_projection: the matrix the view's geometry is drawn with; right, up: its camera's; time_seconds: the setter's
+   clock. */
 static inline bool btbh_distortion_pack(
     const BTBHGPUSceneDistortionSource *source,
     const float view_projection[16],
+    const float clip_plane[4],
     const float right[3],
     const float up[3],
     uint32_t render_width,
@@ -331,7 +412,8 @@ static inline bool btbh_distortion_pack(
     float centre[3];
     float bound = 0.0f;
     btbh_distortion_bounds(source, centre, &bound);
-    if (!btbh_distortion_in_frustum(view_projection, centre, bound)) {
+    if (!btbh_distortion_in_frustum(view_projection, centre, bound) ||
+        !btbh_distortion_in_half(view_projection, clip_plane, centre, bound)) {
         return false;
     }
     btbh_distortion_axes(source, right, up, record->axis_u, record->axis_v, &record->span);
@@ -339,18 +421,55 @@ static inline bool btbh_distortion_pack(
     record->radius = source->radius;
     float strength = source->strength * (float)render_height / BTBH_DISTORTION_REFERENCE_LINES;
     if (source->mode == (uint32_t)BTBH_GPU_SCENE_DISTORTION_PUSH) {
-        const float along_u =
-            btbh_distortion_pixels_per_unit(view_projection, centre, record->axis_u, render_width, render_height);
-        const float along_v =
-            btbh_distortion_pixels_per_unit(view_projection, centre, record->axis_v, render_width, render_height);
-        const float pixels_per_unit = along_u < along_v ? along_u : along_v;
-        const float limit = pixels_per_unit * (source->shape == (uint32_t)BTBH_GPU_SCENE_DISTORTION_RING
-            ? BTBH_DISTORTION_RING_FOLD * source->width
-            : BTBH_DISTORTION_DISC_FOLD * source->radius);
-        if (strength > limit) {
-            strength = limit;
-        } else if (strength < -limit) {
-            strength = -limit;
+        /* The fold clamp (BTBH_DISTORTION_FOLD_MARGIN): the projection's scales at the shape's centre and over its
+           quad's corners and edges (perspective makes the far side thinner), behind the camera skipped. */
+        float scale_a = 0.0f;
+        float scale_b = 0.0f;
+        if (!btbh_distortion_plane_scales(view_projection, centre, record->axis_u, record->axis_v, render_width,
+                render_height, &scale_a, &scale_b)) {
+            return false;   /* its centre behind the camera */
+        }
+        float thinnest = scale_b;
+        float tangential = scale_b * scale_b / scale_a;
+        const float extent = source->shape == (uint32_t)BTBH_GPU_SCENE_DISTORTION_RING
+            ? source->radius + 0.5f * source->width
+            : source->radius;
+        const float low[2] = {-extent, -extent};
+        const float high[2] = {
+            (source->shape == (uint32_t)BTBH_GPU_SCENE_DISTORTION_STRIP ? record->span : 0.0f) + extent, extent,
+        };
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                const float u = low[0] + 0.5f * (float)column * (high[0] - low[0]);
+                const float v = low[1] + 0.5f * (float)row * (high[1] - low[1]);
+                const float point[3] = {
+                    source->position[0] + record->axis_u[0] * u + record->axis_v[0] * v,
+                    source->position[1] + record->axis_u[1] * u + record->axis_v[1] * v,
+                    source->position[2] + record->axis_u[2] * u + record->axis_v[2] * v,
+                };
+                float a = 0.0f;
+                float b = 0.0f;
+                if (!btbh_distortion_plane_scales(view_projection, point, record->axis_u, record->axis_v, render_width,
+                        render_height, &a, &b)) {
+                    continue;
+                }
+                thinnest = b < thinnest ? b : thinnest;
+                tangential = b * b / a < tangential ? b * b / a : tangential;
+            }
+        }
+        float rise = 0.0f;
+        float fall = 0.0f;
+        float ratio = 0.0f;
+        btbh_distortion_profile_slopes(source, &rise, &fall, &ratio);
+        const float k = 1.0f + BTBH_DISTORTION_CHROMA_SPLIT * source->chroma;
+        if (strength > 0.0f) {
+            const float by_rise = thinnest / (k * rise);
+            const float by_ratio = tangential / (k * ratio);
+            const float limit = BTBH_DISTORTION_FOLD_MARGIN * (by_rise < by_ratio ? by_rise : by_ratio);
+            strength = strength > limit ? limit : strength;
+        } else {
+            const float limit = BTBH_DISTORTION_FOLD_MARGIN * thinnest / (k * fall);
+            strength = strength < -limit ? -limit : strength;
         }
     } else {
         strength = fabsf(strength);

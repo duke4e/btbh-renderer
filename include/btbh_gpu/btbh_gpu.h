@@ -3374,15 +3374,20 @@ typedef struct BTBHGPUSceneDistortionSource {
     /* The largest displacement, in pixels of a frame 1080 pixels high: strength / 1080 of the frame's height, so it
        reads the same at any resolution and render scale (12: 12 px at 1080p, 24 at 2160, 8.9 on the Deck's 800 lines).
        PUSH: signed, as above. HAZE: the largest along each axis (its sign is ignored). 0: nothing.
-       A PUSH source's displacement is clamped where its picture would fold over itself: to 0.3 of its width (RING) or
-       0.28 of its radius (DISC, STRIP), as long on screen as the shape's shorter axis there. The sources' displacements
-       add up, and their sum is clamped to 64 pixels of a 1080-line frame. */
+       A PUSH source's displacement is clamped so that no colour's picture folds over itself anywhere on the shape (red's
+       too, at 1 + 0.35 * chroma times it), from the shape's projection where it is thinnest and most slanted on screen
+       (so the far side of a large flat shape counts): about 0.26 of a facing disc's or strip's radius on screen and 0.29
+       of a ring's width without chroma (0.32 of the radius pulling a disc in), less with chroma and for a flat shape
+       under a tilted camera. The sources' displacements add up, and their sum is clamped to 64 pixels of a 1080-line
+       frame. */
     float strength;
     /* 0..1: red displaced by 1 + 0.35 * chroma times the displacement, blue by 1 - 0.35 * chroma, so colours part along
        the bend (as REFRACT's dispersion). 0: none. Where sources overlap, their chroma is averaged by displacement. */
     float chroma;
     float haze_scale;    /* HAZE: noise cells per world unit (0: 1). 0 for PUSH */
-    float haze_speed;    /* HAZE: cells per second the noise drifts (0: still). 0 for PUSH */
+    /* HAZE: cells per second the noise drifts (0: still). The drift is time_seconds times this, so a speed changed
+       between frames moves the pattern at once (keep a source's speed, and ease its strength). 0 for PUSH */
+    float haze_speed;
     uint32_t shape;      /* BTBHGPUSceneDistortionShape */
     uint32_t mode;       /* BTBHGPUSceneDistortionMode */
     uint32_t flags;      /* BTBH_GPU_SCENE_DISTORTION_* bits; 0: facing the camera */
@@ -3398,13 +3403,18 @@ typedef struct BTBHGPUSceneDistortionSource {
    - They are drawn only when the present's post has BTBH_GPU_SCENE_POST_DISTORTION, and not in the radiance cascades'
      debug views. Renders into targets and prewarms neither draw nor take them.
    - A source is skipped (not drawn, not counted) when its radius or its strength is 0, or a ring's width is 0. In each
-     view it is drawn when its bounds meet the view's frustum: projected with the view's camera and clipped to its half.
+     view it is drawn when its bounds meet the view's frustum and its half of the frame (present_views), projected with
+     the view's camera and clipped to its half; a PUSH source whose centre is behind the camera isn't drawn. A frame
+     whose sources all draw nothing is as without them, to the byte.
      With two views (btbh_gpu_window_scene_present_views), the displacement fades to nothing within 8 render pixels of a
      view's edge (from 2.5 to 3.3 pixels from it), and no displaced read crosses it.
-   - Where FSR 3 runs, displaced pixels are marked in its reactive mask by refraction's rule: min(1, the summed
-     displacements' length / 6 render pixels) times post->temporal_reactive_scale. The motion vectors stay the scene's.
+   - Where FSR 3 runs, displaced pixels are marked in its reactive mask by refraction's rule: min(1, the length of the
+     displacement the pixel shows (the sources' summed and clamped) / 6 render pixels) times
+     post->temporal_reactive_scale. The motion vectors stay the scene's.
    - time_seconds is the haze's clock: any steadily growing seconds (a game's time, stopped with its pause). Each
-     source's drift is wrapped on the CPU, so the clock may grow without bound.
+     source's drift (time_seconds times haze_speed) is wrapped on the CPU in double precision, but the clock itself is a
+     float: past about 36 hours (2^17 s) its steps pass a 60 Hz frame and the haze moves in steps. A game that runs
+     longer restarts its clock (the haze then jumps once).
    - Needs production_distortion.vert, production_distortion.frag, production_hdr_composite_distort.frag and
      production_hdr_composite_distort_reactive.frag beside the present's post fragment shader. A frame that draws a
      source without them fails with BTBH_GPU_INVALID_ARGUMENT, naming the file; so does a prewarm with the flag.

@@ -75,16 +75,27 @@ All notable changes to this project are documented here. The format follows
     preset's or a player's switch), and with it the prewarm makes the distortion's pipelines and field.
     `BTBHGPUSceneReport.distortion_sources_drawn` takes the byte after `upscale_mode` (the report keeps its size;
     `upscale_reserved` is two bytes now). Refusals name the source and the field.
-  - **What it does:** each view draws the sources its frustum meets, clamped where the picture would fold, into an
-    offset field (RGBA16F at half the render size, added up), and the HDR composite shows the scene displaced by it:
+  - **What it does:** each view draws the sources that meet its frustum and its half of the frame, into an offset
+    field (RGBA16F at half the render size, added up), and the HDR composite shows the scene displaced by it:
     fog and bloom read at the displaced point, the vignette on the pixel, red and blue apart by the chroma, the sum
     clamped to 64 pixels of a 1080-line frame. That is before the grading, the tone map, the anti-aliasing and the
     upscaling (HDR output reads the displaced picture); the canvas is never displaced. A frame with sources runs the
-    composite whatever fog, bloom and the vignette say. Renders into targets draw none and leave them for the frame.
-  - **FSR 3:** the displaced composite also writes the reactive mask, min(1, the displacements' length / 6 render
-    pixels) times `temporal_reactive_scale` (refraction's rule), blended with max; the motion vectors stay the scene's.
-  - **Scene views:** each view's sources are clipped to its half; the displacement fades to nothing within 8 render
-    pixels of a view's edge, and no displaced read crosses the line (it stops at the reflections' margin).
+    composite whatever fog, bloom and the vignette say; a pixel with no displacement reads itself. Renders into targets
+    draw none and leave them for the frame. A frame whose sources all draw nothing (skipped, culled, a pushing source
+    whose centre is behind the camera) is as without them, to the byte.
+  - **The fold clamp:** a pushing source's strength is clamped so that no colour's picture (red's at 1 + 0.35 chroma
+    times the displacement) folds anywhere on the shape: the Jacobian of p -> p - k d(p) stays positive, from the
+    profile's steepest slopes and the shape's projection where it is thinnest and most slanted on screen. About 0.26
+    of a facing disc's or strip's radius on screen and 0.29 of a ring's width without chroma, less with chroma and for
+    flat shapes under a tilted camera.
+  - **FSR 3:** the displaced composite also writes the reactive mask, min(1, the length of the displacement the pixel
+    shows (summed, clamped) / 6 render pixels) times `temporal_reactive_scale` (refraction's rule), blended with max;
+    the motion vectors stay the scene's.
+  - **Scene views:** each view culls its sources by its half and clips them to it; the displacement fades to nothing
+    within 8 render pixels of a view's edge, and no displaced read crosses the line (it stops at the reflections'
+    margin).
+  - **The clock:** `time_seconds` is a float: past about 36 hours of game time its steps pass a 60 Hz frame and the haze
+    moves in steps; a `haze_speed` changed between frames moves the pattern at once.
   - **Shaders:** four new built files, `production_distortion.vert`, `production_distortion.frag`,
     `production_hdr_composite_distort.frag` and `production_hdr_composite_distort_reactive.frag` (the composite's
     source with `BTBH_DISTORTION` 1 and 2), and `production_distortion.hlsli`. The composite's source gains preprocessor
@@ -93,9 +104,11 @@ All notable changes to this project are documented here. The format follows
     stays in `composite_ms`); the others print as before.
   - **Debug:** `BTBH_DEBUG_DISTORTION=1` shows the field instead of the scene.
   - **Tests:** `btbh_gpu_distortion_test` (the struct's layout, the setter's checks, the CPU reference
-    `src/gpu/btbh_gpu_distortion.h`: profiles, the fold clamp, the haze, culling, the views' rules) and
-    `btbh_gpu_scene_distortion_smoke` (identity without sources; each shape and mode's field and frame against the CPU
-    reference; scene views by the line; FSR 3's reactive mask; refusals; prewarm; a missing shader). The smokes'
+    `src/gpu/btbh_gpu_distortion.h`: profiles, the fold clamp's Jacobian at every pixel of 84 cases, the haze, culling
+    by the frustum, the half and behind the camera, the views' rules) and `btbh_gpu_scene_distortion_smoke` (identity
+    without sources; each shape and mode's field and frame against the CPU reference; scene views by the line, the band
+    by it untouched by a far source, a source on the other view's side culled to the byte; FSR 3's reactive mask;
+    refusals; prewarm; a missing shader). The smokes'
     presents take `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing) for the identity runs; the
     frame bench takes the modes `dist-none`, `dist-off`, `dist-typical`, `dist-worst` and the preset `4k`.
 - **A cover by facing** (RFC 0020 phase 1, `BTBH_GPU_SCENE_HAS_COVER`; asked for by Be The Bullet Hell v2 for its
@@ -197,16 +210,22 @@ machine's perf lock, 04:34:52 to 04:39, pairs interleaved, 3 runs a side, 228 fr
 - So HDR costs about 0.3 ms at 4K here (3-4 %), below the RFC's estimate of 0.5-0.7; a real HDR swapchain has no extra
   blit, so somewhat less.
 
-Screen-space distortion, on `feature/0.18.0-distortion` (Windows, Vulkan, RTX 3070 Ti): `check.ps1` 50/50 (the 48 and the
-two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures), identity against 0.16.0's build in the
-four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view
-and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing), and in plain and verify with the cost log
-and its pass frames (1,525 and 1,523 lines naming `BTBH_GPU_COST`, none with `distortion_ms`); the views smoke passes in
-the four modes and HDR's smoke with the rest. In `btbh_gpu_scene_distortion_smoke` the field read back matches the CPU
-reference within 0.035 px at every covered texel (peaks 2.8-10.9 px) and the frame the undisplaced one resampled within
-1 level, for 13 cases of every shape and mode; FSR 3's reactive mask matches min(1, a / 6) x 0.8 to the level.
+Screen-space distortion, on `feature/0.18.0-distortion` with the review's fixes (Windows, Vulkan, RTX 3070 Ti):
+`check.ps1` 50/50 (the 48 and the two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures),
+identity against 0.16.0's build in the four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same
+through `present_views` with one view and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing),
+and in plain and verify with the cost log and its pass frames (54 frame lines and 8 pass frames each, none with
+`distortion_ms`); the views smoke passes in the four modes and HDR's smoke with the rest. `btbh_gpu_distortion_test`
+checks the fold clamp at 2.2 million pixels of 84 cases: each colour's Jacobian determinant stays above 0 (the lowest
+0.010), and 2.5 times the clamp folds a flat disc (-0.26). In `btbh_gpu_scene_distortion_smoke` the field read back
+matches the CPU reference within 0.023 px at every covered texel (peaks 1.2-9.4 px) and the frame the undisplaced one
+resampled within 1 level, for 13 cases of every shape and mode; with the split, a disc far from the line leaves the band
+by it byte for byte (3,946 pixels changed elsewhere), and one just past the line on the other view's side draws nothing
+and changes no pixel; FSR 3's reactive mask matches min(1, |d| / 6) x 0.8 to the level (1,254 pixels).
 
-The distortion's cost (the frame bench, under the machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
+The distortion's cost (the frame bench on the first commit, before the review's fixes, which change no pass's work on
+the GPU: the clamp and the culling run in the pack, 57 microseconds of CPU for 240 sources in two views; under the
+machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
 rounds; medians with the 10th and 90th percentiles; `dist-typical` covers 15 % of the frame, `dist-worst` 91 % at 1.8
 layers, both with v2's bloom as is `dist-none`):
 - **The Deck preset** (960 x 600 to 1280 x 800, FSR 1, HBAO, FXAA): a frame 1.432 ms (1.396-1.482) with no source,

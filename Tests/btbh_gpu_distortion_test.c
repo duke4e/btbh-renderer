@@ -5,10 +5,12 @@
  * - Each check of btbh_gpu_window_scene_set_distortion, with its message naming the source and the field; a NULL
  *   window refused.
  * - The profiles: 0 at their edges and C1 there, their peaks where RFC 0018 says, a ring's ramp by its centre.
- * - The fold clamp: at the clamped strength p -> p - d(p) stays monotonic along the outward direction, for each shape,
- *   facing and flat, pushed and pulled; past it a ring would fold.
+ * - The fold clamp: at the clamped strength the Jacobian of p -> p - k d(p) stays positive at every pixel for every
+ *   colour (chroma 0, 0.6 and 1), each shape facing and flat under a 45 degree camera, pushed and pulled, large flat
+ *   shapes too; past it a flat disc folds.
  * - The haze: its noise within -1..1, repeating every 256 cells (the drift's wrap), a source's drift wrapped.
- * - Skipping and culling: zero radius, strength or ring width skipped; a source off to the side culled; the bounds.
+ * - Skipping and culling: zero radius, strength or ring width skipped; a source off to the side, behind the camera, or
+ *   (scene views) on the other side of a view's half culled, one across the line kept; the bounds.
  * - The view rules: no fade with one view, the fade's ends, a read moved back to the margin. */
 #undef NDEBUG
 
@@ -20,6 +22,10 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+
+/* The core's view planes (RFC 0014; btbh_gpu_internal.h), for the half-plane culling. */
+void btbh_gpu_scene_view_planes(const float clip[3], uint32_t output_width, uint32_t output_height,
+    uint32_t render_width, uint32_t render_height, float clip_plane[4], float uv_plane[4]);
 
 _Static_assert(sizeof(BTBHGPUSceneDistortionSource) == 64u, "a distortion source is 64 bytes");
 _Static_assert(offsetof(BTBHGPUSceneDistortionSource, position) == 0u, "position");
@@ -351,11 +357,31 @@ static void camera(float view_projection[16], float inverse[16], float right[3],
     memcpy(up, camera_up, sizeof(camera_up));
 }
 
-/* At the clamp the mapping p -> p - d(p) along the outward direction never turns back: the sampled point's distance
-   from the source's centre on screen rises with the pixel's. */
+/* The displacement a record writes at a render pixel's position (x, y continuous; the field is half the size). */
+static void render_displacement(const BTBHDistortionRecord *record, const float inverse[16], uint32_t field_width,
+    uint32_t field_height, float x, float y, float out[2]) {
+    float field[4];
+    btbh_distortion_field_at(record, inverse, field_width, field_height, 0.5f * x, 0.5f * y, field);
+    out[0] = field[0];
+    out[1] = field[1];
+}
+
+typedef struct FoldCase {
+    const char *name;
+    uint32_t shape;
+    float radius;
+    float width;
+    float length;
+} FoldCase;
+
+/* At the clamped strength, for every colour's scale k (red's 1 + 0.35 chroma, green's 1, blue's 1 - 0.35 chroma), the
+   Jacobian of p -> p - k d(p) has a positive determinant at every render pixel of the shape: a 2D check by central
+   differences across half a pixel, under a camera looking down at 45 degrees, for each shape facing and flat, pushed and
+   pulled, with chroma 0, 0.6 (v2's largest, an orb's) and 1; large flat shapes too (their far side thinner). Past the
+   clamp (2.5 times its strength, no chroma) a flat disc's tangential term would fold: the check would find it. */
 static void check_fold_clamp(void) {
-    const uint32_t width = 640u;
-    const uint32_t height = 360u;
+    const uint32_t width = 480u;
+    const uint32_t height = 270u;
     float view_projection[16];
     float inverse[16];
     float right[3];
@@ -363,56 +389,126 @@ static void check_fold_clamp(void) {
     camera(view_projection, inverse, right, up, width, height);
     const uint32_t field_width = width / 2u;
     const uint32_t field_height = height / 2u;
-    for (uint32_t shape = 0u; shape < 3u; ++shape) {
+    const FoldCase cases[7] = {
+        {"ring", BTBH_GPU_SCENE_DISTORTION_RING, 2.0f, 1.0f, 0.0f},
+        {"newborn ring", BTBH_GPU_SCENE_DISTORTION_RING, 0.3f, 1.4f, 0.0f},
+        {"large ring", BTBH_GPU_SCENE_DISTORTION_RING, 6.0f, 2.0f, 0.0f},
+        {"disc", BTBH_GPU_SCENE_DISTORTION_DISC, 1.5f, 0.0f, 0.0f},
+        {"large disc", BTBH_GPU_SCENE_DISTORTION_DISC, 5.0f, 0.0f, 0.0f},
+        {"strip", BTBH_GPU_SCENE_DISTORTION_STRIP, 0.8f, 0.0f, 3.0f},
+        {"long strip", BTBH_GPU_SCENE_DISTORTION_STRIP, 1.2f, 0.0f, 9.0f},
+    };
+    const float chromas[3] = {0.0f, 0.6f, 1.0f};
+    float lowest = 1.0e30f;
+    uint64_t checked = 0u;
+    for (uint32_t index = 0u; index < 7u; ++index) {
         for (uint32_t flat = 0u; flat < 2u; ++flat) {
             for (int sign = -1; sign <= 1; sign += 2) {
-                BTBHGPUSceneDistortionSource source;
-                memset(&source, 0, sizeof(source));
-                source.shape = shape;
-                source.flags = flat != 0u ? BTBH_GPU_SCENE_DISTORTION_FLAT : 0u;
-                source.radius = shape == BTBH_GPU_SCENE_DISTORTION_RING ? 2.0f : 1.5f;
-                source.width = shape == BTBH_GPU_SCENE_DISTORTION_RING ? 1.0f : 0.0f;
-                if (shape == BTBH_GPU_SCENE_DISTORTION_STRIP) {
-                    source.position[0] = -1.0f;
-                    source.end[0] = 1.0f;
-                }
-                source.strength = (float)sign * 1000.0f;   /* far past the clamp */
-                BTBHDistortionRecord record;
-                assert(btbh_distortion_pack(&source, view_projection, right, up, width, height, 0.0, &record));
-                float centre[3];
-                float bound = 0.0f;
-                btbh_distortion_bounds(&source, centre, &bound);
-                const float pixels_per_unit = fminf(
-                    btbh_distortion_pixels_per_unit(view_projection, centre, record.axis_u, width, height),
-                    btbh_distortion_pixels_per_unit(view_projection, centre, record.axis_v, width, height)
-                );
-                const float limit = pixels_per_unit * (shape == BTBH_GPU_SCENE_DISTORTION_RING
-                    ? BTBH_DISTORTION_RING_FOLD * source.width
-                    : BTBH_DISTORTION_DISC_FOLD * source.radius);
-                assert(fabsf(fabsf(record.strength) - limit) < 1.0e-3f * limit);
-                assert(record.strength * (float)sign > 0.0f);
-                /* March out from the centre across the frame's middle row (field pixels), the sampled point's x. */
-                float centre_clip[4];
-                for (int row = 0; row < 4; ++row) {
-                    centre_clip[row] = view_projection[0 * 4 + row] * source.position[0] +
-                        view_projection[1 * 4 + row] * source.position[1] +
-                        view_projection[2 * 4 + row] * source.position[2] + view_projection[3 * 4 + row];
-                }
-                const float centre_x = (centre_clip[0] / centre_clip[3] * 0.5f + 0.5f) * (float)field_width;
-                const float centre_y = (0.5f - centre_clip[1] / centre_clip[3] * 0.5f) * (float)field_height;
-                float previous = -1.0e30f;
-                for (int step = 0; step < 400; ++step) {
-                    const float x = centre_x + 0.25f * (float)step;
-                    float out[4];
-                    btbh_distortion_field_at(&record, inverse, field_width, field_height, x, centre_y, out);
-                    /* (The displacement is in render pixels, twice the field's.) */
-                    const float sampled = 2.0f * x - out[0];
-                    assert(sampled >= previous - 1.0e-3f);
-                    previous = sampled;
+                for (uint32_t which = 0u; which < 3u; ++which) {
+                    BTBHGPUSceneDistortionSource source;
+                    memset(&source, 0, sizeof(source));
+                    source.shape = cases[index].shape;
+                    source.flags = flat != 0u ? BTBH_GPU_SCENE_DISTORTION_FLAT : 0u;
+                    source.radius = cases[index].radius;
+                    source.width = cases[index].width;
+                    if (source.shape == BTBH_GPU_SCENE_DISTORTION_STRIP) {
+                        source.position[0] = -0.5f * cases[index].length;
+                        source.end[0] = 0.5f * cases[index].length;
+                        source.end[2] = 0.3f * cases[index].length;
+                    }
+                    source.strength = (float)sign * 5000.0f;   /* far past the clamp */
+                    source.chroma = chromas[which];
+                    BTBHDistortionRecord record;
+                    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, width, height, 0.0,
+                        &record));
+                    assert(record.strength * (float)sign > 0.0f);
+                    /* The shape's pixels: a coarse scan for where it displaces, then every pixel of that box. */
+                    int box[4] = {(int)width, (int)height, -1, -1};
+                    for (uint32_t y = 0u; y < height; y += 2u) {
+                        for (uint32_t x = 0u; x < width; x += 2u) {
+                            float d[2];
+                            render_displacement(&record, inverse, field_width, field_height, (float)x + 0.5f,
+                                (float)y + 0.5f, d);
+                            if (d[0] != 0.0f || d[1] != 0.0f) {
+                                box[0] = (int)x < box[0] ? (int)x : box[0];
+                                box[1] = (int)y < box[1] ? (int)y : box[1];
+                                box[2] = (int)x > box[2] ? (int)x : box[2];
+                                box[3] = (int)y > box[3] ? (int)y : box[3];
+                            }
+                        }
+                    }
+                    assert(box[2] >= box[0]);
+                    const float scales[3] = {
+                        1.0f + BTBH_DISTORTION_CHROMA_SPLIT * source.chroma, 1.0f,
+                        1.0f - BTBH_DISTORTION_CHROMA_SPLIT * source.chroma,
+                    };
+                    float case_lowest = 1.0e30f;
+                    for (int y = box[1] - 3; y <= box[3] + 3; ++y) {
+                        for (int x = box[0] - 3; x <= box[2] + 3; ++x) {
+                            const float px = (float)x + 0.5f;
+                            const float py = (float)y + 0.5f;
+                            float left[2];
+                            float right_d[2];
+                            float above[2];
+                            float below[2];
+                            render_displacement(&record, inverse, field_width, field_height, px - 0.5f, py, left);
+                            render_displacement(&record, inverse, field_width, field_height, px + 0.5f, py, right_d);
+                            render_displacement(&record, inverse, field_width, field_height, px, py - 0.5f, above);
+                            render_displacement(&record, inverse, field_width, field_height, px, py + 0.5f, below);
+                            const float dxx = right_d[0] - left[0];
+                            const float dyx = right_d[1] - left[1];
+                            const float dxy = below[0] - above[0];
+                            const float dyy = below[1] - above[1];
+                            for (int channel = 0; channel < 3; ++channel) {
+                                const float k = scales[channel];
+                                const float det = (1.0f - k * dxx) * (1.0f - k * dyy) - k * k * dxy * dyx;
+                                case_lowest = det < case_lowest ? det : case_lowest;
+                            }
+                            checked += 1u;
+                        }
+                    }
+                    if (case_lowest <= 0.0f) {
+                        fprintf(stderr, "fold: %s %s %s chroma %.1f: determinant %.4f at strength %.3f px\n",
+                            cases[index].name, flat != 0u ? "flat" : "facing", sign > 0 ? "push" : "pull",
+                            (double)source.chroma, (double)case_lowest, (double)record.strength);
+                    }
+                    assert(case_lowest > 0.0f);
+                    lowest = case_lowest < lowest ? case_lowest : lowest;
                 }
             }
         }
     }
+    /* 2.5 times the clamped strength on a flat disc folds: the check sees it. */
+    BTBHGPUSceneDistortionSource disc;
+    memset(&disc, 0, sizeof(disc));
+    disc.shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+    disc.flags = BTBH_GPU_SCENE_DISTORTION_FLAT;
+    disc.radius = 1.5f;
+    disc.strength = 5000.0f;
+    BTBHDistortionRecord record;
+    assert(btbh_distortion_pack(&disc, view_projection, NULL, right, up, width, height, 0.0, &record));
+    record.strength *= 2.5f;
+    float folded = 1.0e30f;
+    for (uint32_t y = 0u; y < height; ++y) {
+        for (uint32_t x = 0u; x < width; ++x) {
+            const float px = (float)x + 0.5f;
+            const float py = (float)y + 0.5f;
+            float left[2];
+            float right_d[2];
+            float above[2];
+            float below[2];
+            render_displacement(&record, inverse, field_width, field_height, px - 0.5f, py, left);
+            render_displacement(&record, inverse, field_width, field_height, px + 0.5f, py, right_d);
+            render_displacement(&record, inverse, field_width, field_height, px, py - 0.5f, above);
+            render_displacement(&record, inverse, field_width, field_height, px, py + 0.5f, below);
+            const float det = (1.0f - (right_d[0] - left[0])) * (1.0f - (below[1] - above[1])) -
+                (below[0] - above[0]) * (right_d[1] - left[1]);
+            folded = det < folded ? det : folded;
+        }
+    }
+    printf("fold clamp: %llu pixel checks, lowest determinant %.3f; 2.5 times the clamp on a flat disc: %.3f\n",
+        (unsigned long long)checked, (double)lowest, (double)folded);
+    assert(folded < 0.0f);
 }
 
 static void check_haze(void) {
@@ -452,12 +548,12 @@ static void check_haze(void) {
     source.strength = -3.0f;
     source.haze_speed = 0.75f;
     BTBHDistortionRecord record;
-    assert(btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 1000.0, &record));
+    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 1000.0, &record));
     assert(fabsf(record.haze_drift - (float)fmod(750.0, 256.0)) < 1.0e-4f);
     assert(record.haze_scale == 1.0f);                                  /* 0: one cell a unit */
     assert(fabsf(record.strength - 3.0f * 360.0f / 1080.0f) < 1.0e-5f); /* its size, in render pixels */
     source.haze_speed = -0.75f;
-    assert(btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 1000.0, &record));
+    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 1000.0, &record));
     assert(record.haze_drift >= 0.0f && record.haze_drift < 256.0f);
     assert(fabsf(record.haze_drift - (float)(256.0 - fmod(750.0, 256.0))) < 1.0e-3f);
 }
@@ -470,26 +566,53 @@ static void check_skip_and_cull(void) {
     camera(view_projection, inverse, right, up, 640u, 360u);
     BTBHDistortionRecord record;
     BTBHGPUSceneDistortionSource source = ring(2.0f, 1.0f, 10.0f);
-    assert(btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     assert(fabsf(record.kind - 0.0f) < 1.0e-6f && record.span == 1.0f);
     source.width = 0.0f;
-    assert(!btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     source = ring(0.0f, 1.0f, 10.0f);
-    assert(!btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     source = ring(2.0f, 1.0f, 0.0f);
-    assert(!btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     /* Off to the side, and behind the camera. */
     source = ring(2.0f, 1.0f, 10.0f);
     source.position[0] = 1.0e5f;
-    assert(!btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     source.position[0] = 0.0f;
     source.position[1] = 30.0f;
     source.position[2] = 30.0f;
-    assert(!btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
+    /* A PUSH source whose centre is behind the camera (its ring reaching in front) isn't drawn; a haze one is. */
+    source = ring(30.0f, 2.0f, 10.0f);
+    source.position[1] = 12.0f;
+    source.position[2] = 12.0f;
+    assert(!btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
+    source.mode = BTBH_GPU_SCENE_DISTORTION_HAZE;
+    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
+    /* A view's half (RFC 0014): the right half, x >= 320 of 640 (clip (1, 0, -320), as btbh_gpu_scene_view_planes
+       makes it). A disc to the left of the line is culled, one to the right kept, one across the line kept. */
+    {
+        float clip_plane[4];
+        float uv_plane[4];
+        const float clip[3] = {1.0f, 0.0f, -320.0f};
+        btbh_gpu_scene_view_planes(clip, 640u, 360u, 640u, 360u, clip_plane, uv_plane);
+        BTBHGPUSceneDistortionSource disc;
+        memset(&disc, 0, sizeof(disc));
+        disc.shape = BTBH_GPU_SCENE_DISTORTION_DISC;
+        disc.radius = 0.5f;
+        disc.strength = 10.0f;
+        disc.position[0] = -1.5f;
+        assert(btbh_distortion_pack(&disc, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
+        assert(!btbh_distortion_pack(&disc, view_projection, clip_plane, right, up, 640u, 360u, 0.0, &record));
+        disc.position[0] = 1.5f;
+        assert(btbh_distortion_pack(&disc, view_projection, clip_plane, right, up, 640u, 360u, 0.0, &record));
+        disc.position[0] = -0.3f;
+        assert(btbh_distortion_pack(&disc, view_projection, clip_plane, right, up, 640u, 360u, 0.0, &record));
+    }
     /* Just outside the left edge, but its band reaches in. */
     source = ring(4.0f, 2.0f, 10.0f);
     source.position[0] = -12.0f;
-    assert(btbh_distortion_pack(&source, view_projection, right, up, 640u, 360u, 0.0, &record));
+    assert(btbh_distortion_pack(&source, view_projection, NULL, right, up, 640u, 360u, 0.0, &record));
     float centre[3];
     float bound = 0.0f;
     btbh_distortion_bounds(&source, centre, &bound);
