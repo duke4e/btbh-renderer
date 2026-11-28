@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-11-28
+
+0.17.0: HDR output, which the owner asked Be The Bullet Hell v2 for after its seventeenth play-test (RFC 0017 phase 1).
+A window stays SDR until its host calls `btbh_gpu_window_set_hdr` (Off, Auto or Force, with peak and paper white in
+nits); then the frame is RGBA16F after the unchanged SDR tone map, highlights above its knee are lifted toward the peak,
+and an encode pass writes HDR10 (PQ) or scRGB with the UI at paper white. A host that never calls it gets every frame
+byte for byte 0.16.1's, with no new pipeline or wait. Shaders: rebuild them. 86 are built (0.16.1's 79, whose SDR bytes
+are unchanged, and 7 new ones a game adds to its list). Not yet seen on a real HDR display: the Steam Machine run with
+the owner (`docs/handoff/v2-hdr-steam-machine-test.md`) feeds phase 2 (0.17.x).
+
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on the merged release: `check.ps1` 48/48 (0.16.1's 46, the HDR test
+and the HDR smoke), the Swift suite 306 tests (2 skipped, 0 failures), and identity against 0.16.1 in four modes (plain,
+shared meshes, no runs, runs verified): 421 images a mode, 0 px different, 0 run-verify mismatches, the same through
+`present_views` with one view and with the cost log and its pass frames on; the views smoke passes in the four modes.
+HDR offscreen, simulated, against a CPU reference of every curve: HDR10 within 0.56 of a 10-bit code, scRGB within
+0.001, the gain within 0.19 %, peak equal to paper white the SDR picture within a code, the toggle making no pipeline
+after its first round. Its cost at 4K, simulated: +0.28 to +0.30 ms of GPU. An independent review found nothing serious;
+its eight findings were fixed before the candidate.
+
+Be The Bullet Hell v2's test of the candidate (`cfd10eb2`; Windows, Vulkan, RTX 3070 Ti, under the perf lock) passed
+everything it could test here, and v2 adopts it. HDR off: `shaders-170` (86) all in its list, no pipeline after frame 1
+at High by day and night or on the Deck preset, its nine pixel scenes with no stable change, 869 tests and its golden
+hashes pass, and a two-player replay from 0.16.1 plays the same. HDR on, simulated, and back: seven switches in 2,400
+frames at High and on the Deck preset, 0.2-1.7 ms each, nothing created after frame 1 beyond SDR's, a switch while
+paused rebuilding the backdrop, and a backdrop in the frame format keeping its highlights. Its cost in a stage-3 fight:
+4K High (FSR 3 at 0.67) 8.147 to 8.249 ms a frame, the Deck preset 1.631 to 1.707; the 4K GPU 7.51 to 7.96 ms, of which
+the encode and the simulated blit (absent on a real display) are 0.34. v2's Display row (HDR Off, or On as Auto; Off by
+default until the owner's Machine run), its calibration panel (paper white 80-400 nits, peak Auto or 400-4000) and the
+reasons beside the row are built on it.
+
 ### Added
 - **HDR output** (RFC 0017 phase 1, `BTBH_GPU_HAS_HDR_OUTPUT`; asked for by Be The Bullet Hell v2 after the owner's
   seventeenth play-test, on a 4K TV and the Steam Machine). A window is SDR until its host turns HDR on; SDR frames are
