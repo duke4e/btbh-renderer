@@ -1004,3 +1004,16 @@ bytes, so every host that takes 0.17.0 regenerates its bindings or rebuilds (v2'
    **Recommended:** no; such entries go in a second list with the same material and `NO_SUN_SHADOW`. If yes, the
    entry's `reserved` word takes a flag and each list writes a second command range for the shadow passes: 20 bytes
    more a casting entry, and about a day more with its tests.
+
+### Decisions on the refresh (v2, 2026-11-28)
+
+1. **`draw_call_count`: as recommended, with one change on v2's side.** `primitive_draw_count` and
+   `prepared_geometry_count` keep counting meshes drawn. `draw_call_count` is added to `BTBHGPUSceneReport` at byte
+   556 (it stays 560 bytes) and to `BTBHGPUSceneViewReport` at 32 with a reserved word (32 to 40 bytes). v2 keeps its
+   `draw_calls` / `draws` logging meshes, so old logs and baselines still compare, and adds a separate `calls` field
+   from `draw_call_count`. The cost log's `*_calls` fields are fine.
+2. **Shadows per entry: no.** A list casts as a whole; entries that must stay out of the shadow maps go in a second
+   list with the same material and `NO_SUN_SHADOW`. No per-entry flag.
+3. **Order:** the submit cost is measured first (the frame bench's submit timing, a cheap step). If a per-draw submit
+   cost is real, phase 2 follows half-resolution SSR; if not, it waits until after RFC 0016's depth prepass. Both come
+   after HDR output (RFC 0017), the distortion pass (RFC 0018) and volumetrics phase 1 (RFC 0019).
