@@ -140,10 +140,10 @@ Since 0.18.0 (shaders `shaders-180`, its 10 new ones in its list):
   props and terrain (never units, the kaiju, effects, water or anything moving), each layer multiplied by its mood's
   tint every frame; `ICE` on the ice biome's water and frozen cells; `COARSE` on the Deck preset and Low.
 
-Later: HDR phase 2 from the Machine run (0.17.x), volumetrics (RFC 0019), half-resolution SSR, multi-draw indirect (RFC 0011 phase 2, after a
-submit-cost measurement), a depth prepass (RFC 0016), the frame thread (RFC 0015 phase 1b), FSR 3 over two views and
-bloom per view (RFC 0014 phases 2 and 3), BC texture formats (RFC 0008 phase 2), and descriptor pools made before the
-first frames.
+Later: HDR phase 2 from the Machine run (0.17.x), volumetrics (RFC 0019), half-resolution SSR, multi-draw indirect (RFC
+0011 phase 2, after a submit-cost measurement), a depth prepass (RFC 0016), the frame thread (RFC 0015 phase 1b), FSR 3
+over two views and bloom per view (RFC 0014 phases 2 and 3), BC texture formats (RFC 0008 phase 2), and descriptor pools
+made before the first frames.
 
 **Tyrian3D** (`src/render_gpu.c`, `src/background3d.c`, `src/extract.c`): device and window,
 `window_sdl_window`, raw RGBA textures (`window_texture_create_rgba8_ex`, `texture_update_rgba8`,
