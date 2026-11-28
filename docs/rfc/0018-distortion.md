@@ -681,3 +681,9 @@ The review of `8e036913` (an independent pass) found five things, fixed in the n
     60 Hz frame and the haze moves in steps (a game that runs longer restarts its clock); and the drift is time times
     `haze_speed`, so a speed changed between frames moves the pattern at once.
 
+After the fixes the checks pass as before (identity in every mode, 0 px different), the fold check's lowest determinant
+is 0.010 over 2.2 million pixel checks, and the smoke's band by the line and its source past the line are byte for byte
+the frames without them. The cost in 9 was measured before the fixes and not again: they change no pass's work on the
+GPU (the clamp and the culling run in the pack, 57 microseconds of CPU for 240 sources in two views; the composite only
+skips the keep-inside for undisplaced pixels).
+

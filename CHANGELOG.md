@@ -165,16 +165,22 @@ machine's perf lock, 04:34:52 to 04:39, pairs interleaved, 3 runs a side, 228 fr
 - So HDR costs about 0.3 ms at 4K here (3-4 %), below the RFC's estimate of 0.5-0.7; a real HDR swapchain has no extra
   blit, so somewhat less.
 
-Screen-space distortion, on `feature/0.18.0-distortion` (Windows, Vulkan, RTX 3070 Ti): `check.ps1` 50/50 (the 48 and the
-two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures), identity against 0.16.0's build in the
-four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view
-and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing), and in plain and verify with the cost log
-and its pass frames (1,525 and 1,523 lines naming `BTBH_GPU_COST`, none with `distortion_ms`); the views smoke passes in
-the four modes and HDR's smoke with the rest. In `btbh_gpu_scene_distortion_smoke` the field read back matches the CPU
-reference within 0.035 px at every covered texel (peaks 2.8-10.9 px) and the frame the undisplaced one resampled within
-1 level, for 13 cases of every shape and mode; FSR 3's reactive mask matches min(1, a / 6) x 0.8 to the level.
+Screen-space distortion, on `feature/0.18.0-distortion` with the review's fixes (Windows, Vulkan, RTX 3070 Ti):
+`check.ps1` 50/50 (the 48 and the two new tests; 90 shaders), the Swift suite 306 tests (2 skipped, 0 failures),
+identity against 0.16.0's build in the four modes: 421 images a mode, 0 px different, 0 run-verify mismatches, the same
+through `present_views` with one view and with `BTBH_SMOKE_DISTORTION=1` (the flag and two sources that draw nothing),
+and in plain and verify with the cost log and its pass frames (54 frame lines and 8 pass frames each, none with
+`distortion_ms`); the views smoke passes in the four modes and HDR's smoke with the rest. `btbh_gpu_distortion_test`
+checks the fold clamp at 2.2 million pixels of 84 cases: each colour's Jacobian determinant stays above 0 (the lowest
+0.010), and 2.5 times the clamp folds a flat disc (-0.26). In `btbh_gpu_scene_distortion_smoke` the field read back
+matches the CPU reference within 0.023 px at every covered texel (peaks 1.2-9.4 px) and the frame the undisplaced one
+resampled within 1 level, for 13 cases of every shape and mode; with the split, a disc far from the line leaves the band
+by it byte for byte (3,946 pixels changed elsewhere), and one just past the line on the other view's side draws nothing
+and changes no pixel; FSR 3's reactive mask matches min(1, |d| / 6) x 0.8 to the level (1,254 pixels).
 
-The distortion's cost (the frame bench, under the machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
+The distortion's cost (the frame bench on the first commit, before the review's fixes, which change no pass's work on
+the GPU: the clamp and the culling run in the pack, 57 microseconds of CPU for 240 sources in two views; under the
+machine's perf lock, 08:20 to 08:23; four windows interleaved over 120
 rounds; medians with the 10th and 90th percentiles; `dist-typical` covers 15 % of the frame, `dist-worst` 91 % at 1.8
 layers, both with v2's bloom as is `dist-none`):
 - **The Deck preset** (960 x 600 to 1280 x 800, FSR 1, HBAO, FXAA): a frame 1.432 ms (1.396-1.482) with no source,
