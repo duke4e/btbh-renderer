@@ -1,7 +1,9 @@
 # RFC 0020: A cover by facing (snow, sand, mud) on the batches that ask, and still ice on the water
 
 - **Status:** Accepted on 2026-11-28: v2 answered all 17 questions, each as recommended (see "Decisions"). Cover
-  phase 1 and the still ice ship in one release after the distortion pass (RFC 0018), before volumetrics phase 1
+  phase 1 and the still ice ship in one release after the distortion pass (RFC 0018), before volumetrics phase 1.
+  Both implemented on `feature/0.18.0-cover-ice` (from `feature/0.18.0-distortion`) for 0.18.0, not yet released, in
+  shader variants by decision 14; where it departs from this text, see "Phase 1 as built"
 - **Requested by:** Be The Bullet Hell v2, through its biomes and effects agents after the owner's seventeenth play-test
   (2026-11-28). The biomes agent's renderer requests 1 and 2 (`v2/docs/seventeenth-playtest-2026-11-28.md`, "Biomes",
   on branch `p23-biomes`): "A cover by facing: snow or sand on every up-facing surface of the kit (ledges, sills,
@@ -756,3 +758,102 @@ v2 took the recommendation on all 17 questions:
 16. **Cover phase 1 and the ice in one release,** after distortion and before volumetrics phase 1.
 17. **Items 3-5:** v2 does 5 now (one decal batch with `INSTANCE_UV_RECT` and the height lift), tries 4 now (lit
     see-through normal-mapped cracks), and draws its rain strips as lit particles until 3.
+
+## Phase 1 as built (feature/0.18.0-cover-ice)
+
+Where the implementation departs from the text above, and why. Cover phase 1 and still ice are built together on
+`feature/0.18.0-cover-ice` (from `feature/0.18.0-distortion`, with its review's fixes merged).
+
+1. **Shader variants: question 14's fallback, taken.** As first built, with the branch in the six scene fragment
+   shaders, the cover off cost the main pass +0.0014 ms at the Deck preset (paired by round, 10th to 90th percentile
+   -0.017 to +0.051) and +0.014 ms at 4K High (-0.044 to +0.126); whole frames 1.321 to 1.320 ms and 5.248 to 5.270
+   ms. That is no clear cost, but not a provable zero either, and the upper percentiles reached +0.05 and +0.13 ms. By
+   decision 14 the cover and the ice moved behind `#if BTBH_COVER` (0 by default) into six new files:
+   `production_model_cover.frag` and its `_2d_shadows`, `_unshadowed`, `_rc`, `_rc_2d_shadows` and `_rc_unshadowed`
+   siblings. Each is a few lines that set `BTBH_COVER 1` and include `production_model.frag.hlsl`.
+   - **Without the cover, the shaders are the old ones to the byte.** All 90 shaders built before compile to
+     0.18.0-distortion's SPIR-V byte for byte, the six scene shaders included, and those keep three uniform buffers.
+     The cover variants have four. 96 shaders.
+   - **Which shader draws which batch:** a batch whose bit's layer is on, or a still-ice batch, draws with the cover
+     variant of the shader the frame's shadows and cascades pick. Every other batch draws with the shaders and
+     pipelines it had, a batch whose layer is off included. So "a layer at amount 0 changes nothing" holds by
+     construction.
+   - **Pipelines:** the cover variants have their own sets (`BTBHGPUSceneCoverPipelines`: static, skinned, with a
+     table, lifted, lifted with a table, by shadow set; never fast unlit). The first batch that draws one allocates
+     them. So the "Pipelines added: 0" row becomes: none for a host that covers nothing, and one more for each state a
+     covered or icy batch draws in.
+   - **Prewarm:** `btbh_gpu_window_scene_prewarm` makes both pipelines for a batch with a cover bit (its layer may be on
+     or off by the frame), and only the cover variant's for still ice. So a host that turns snow on mid-stage
+     prewarms with the bits set. The lazy creation log names a cover pipeline a prewarm missed (marked
+     `prewarm_covers` 1).
+   - **The shader check** reads the cover variant the frame draws with, not the host's fragment shader. A covered or
+     still-ice batch whose cover shader is missing (shaders from before 0.18.0) or doesn't name `cover_color_roughness`
+     fails the present with `BTBH_GPU_INVALID_ARGUMENT`, naming the file. A prewarm also checks batches whose bit's
+     layer is off.
+   - **Measured with the variants** (item 9): bits on every kit piece and the ground with the cover off cost the main
+     pass -0.002 ms at the Deck preset (-0.017 to +0.012) and +0.001 ms at 4K High (-0.033 to +0.033) against
+     0.18.0-distortion's shaders. A batch without a bit draws with the same bytes.
+2. **A face past the cover's reach does no cover work.** The first build cost more than the estimate: +0.43 ms on the
+   main pass at 4K High with noise and relief and +0.31 with `COARSE`, against about 0.10 and 0.05 estimated; +0.086
+   and +0.062 at the Deck preset. The shader worked out the noise on every pixel of a covered batch, walls included.
+   Now a fragment whose slope is at or past amount x slope plus the noise's reach returns before the noise, because c
+   is 0 there whatever the noise. (`BTBH_DEBUG_COVER` draws such a fragment black, as c 0.) The CPU reference does
+   the same, and the native test checks that the surface comes back unchanged past the reach. That cut the 4K cost by
+   about 0.1 ms and most of the Deck preset's (item 9).
+3. **The noise's reach grows with the amount** up to 0.25 (`edge_noise_degrees x min(1, 4 x amount)`). Without that,
+   a thin cover (amount 0.01) still laid patches up to the noise's reach, while amount 0 lays nothing.
+4. **No table-entry flags yet.** The text put them in phase 1's header, refused until phase 2. They aren't in it:
+   phase 2 adds them, additively. Bit 2 of `world_detail_mode.z` says the batch is see-through (its alpha rises to c),
+   not the table's choice; phase 2 takes another bit.
+5. **Still ice:**
+   - **Its cracks' anti-aliasing:** a crack is drawn at `max(width, half a pixel's footprint)` and loses strength in
+     step (`width / that`), so a crack thinner than a pixel keeps its share of the pixel and fades evenly. The text
+     multiplied by `saturate(2 x width / footprint)` at the true width. The bevel follows the same rule, and the craze
+     is skipped where its width is under half a pixel.
+   - **Its roughness is its own:** the batch's roughness factor doesn't scale it.
+   - **Its normal** is a surface gradient added with the details' gradients, so it needs no tangent frame.
+   - **Its code** is in `production_cover.hlsli` (there is no `production_ice.hlsli`), and its CPU reference is in
+     `btbh_gpu_cover.h`.
+6. **Where it lives:** the setter and the window's setting are in `scene.c`, not `window.c`. `scene.c` sets
+   `world_detail_mode.z` from `btbh_cover_batch_mode`; `btbh_gpu_world_detail.h` is unchanged.
+7. **The identity runs' third way** is `BTBH_SMOKE_COVER=1` in the smokes' presents (`Tests/btbh_gpu_smoke_present.h`):
+   a cover whose layers lay nothing (amount 0, every other field set) and `COVER_0` on every batch that may take it.
+8. **The smoke** (`btbh_gpu_scene_cover_smoke`):
+   - **What it draws:** eight facets from 0 to 120 degrees under one camera. It checks each pattern, `COARSE`, the
+     second layer, `normal_influence` and the debug view, each pixel against the CPU reference. It also checks the
+     three shadow sets (unlit facets through each cover variant), the targets the screen-space passes read, the
+     cascades' albedo target, SSR under rough snow, see-through batches, the ice unlit and lit, runs and the run
+     verifier, views, a render into a target, prewarm, the refusals, and old and missing cover shaders.
+   - **Accuracy:** the tolerance is 3 levels in 99.5 % of the pixels and 8 everywhere. The patterns land within 1
+     level everywhere, the debug view within 3, and the unlit ice within 3 except 2 pixels of 38,354.
+   - **Not covered:** skinned, lifted and table batches under the cover (their cover pipelines are picked as the plain
+     ones are), and the Deck-size camera pan for the cracks' aliasing.
+9. **The cost, measured.** The frame bench (`Tests/btbh_gpu_frame_bench.c`) gained the modes `cover-off` (a river
+   across the city, v2's water material), `cover-bits` (`COVER_0` on every kit piece and the ground, no layer set),
+   `cover-full` (that and a snow layer at v2's starting values: amount 0.8, slope 55, edge 6, noise 14 degrees at 1.6
+   cells a unit, bump 0.4), `cover-coarse` (the same, `COARSE`) and `cover-ice` (the river as still ice, frost 0.35).
+   The runs below are on this PC's RTX 3070 Ti under the machine's perf lock: five windows interleaved over 80 rounds
+   of 8 frames, at 09:54 to 09:56. They give medians with the 10th and 90th percentiles, and each mode's main pass
+   paired by round against `cover-off` on 0.18.0-distortion's shaders.
+
+   | | Deck preset (960 x 600 to 1280 x 800, FSR 1) | 4K High (2560 x 1440 to 3840 x 2160, FSR 3) |
+   | --- | --- | --- |
+   | Frame, cover off (0.18.0-distortion's shaders) | 1.396 ms (1.334-1.433) | 5.264 (5.223-5.373) |
+   | Frame, bits, cover off / full / `COARSE` / ice | 1.395 / 1.415 / 1.389 / 1.407 | 5.262 / 5.636 / 5.510 / 5.283 |
+   | Main pass against cover off: bits | -0.002 ms (-0.017..+0.012) | +0.001 (-0.033..+0.033) |
+   | Main pass: full | +0.018 (-0.002..+0.128) | +0.330 (+0.297..+0.398) |
+   | Main pass: `COARSE` | -0.011 (-0.024..+0.087) | +0.231 (+0.203..+0.266) |
+   | Main pass: ice on the river | +0.007 (-0.008..+0.022) | +0.016 (-0.009..+0.063) |
+
+   So with nothing covered, or the bits set and the cover off, the cover costs nothing: the bytes are the same. At the
+   Deck preset the full cover costs about 0.02 ms (within noise) and `COARSE` nothing measurable. At 4K High it costs
+   0.33 ms full and 0.23 `COARSE`, about 4 % and 3 % of v2's 7.5-8.2 ms frame. That is three to five times the
+   estimate (0.10 and 0.05), with every roof, ledge and street of the bench's city covered. A 4K pixel costs about
+   three times a Deck pixel here; why is not established (the Deck numbers are near the noise). The ice costs about
+   0.01-0.02 ms, as estimated. The first build (the branch,
+   no early-out; 09:21 to 09:23, the same bench) measured the main pass at +0.086 / +0.062 ms (Deck, full / `COARSE`)
+   and +0.432 / +0.309 (4K), and the ice at +0.003 and +0.027. Three runs with a sixth window (`cover-off` on this
+   branch's shaders, the same bytes) were not usable: partway through each, some windows' main pass slowed by up to
+   half, at both sizes (at 4K six windows' targets come near the card's 8 GB). The five-window run above is steady.
+10. **What doesn't change:** the cost log's groups and steps (the cover and the ice are inside the opaque and
+    transparent passes), and the scene shaders' bytes for every batch that takes neither.

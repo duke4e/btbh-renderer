@@ -4,7 +4,8 @@
  *   byte as no cover at all.
  * - The patterns, unlit (the frame holds sRGB of the covered albedo): eight facets at 0 to 120 degrees from level; SNOW
  *   without noise (each facet one c), SNOW, SAND and MUD with noise, SNOW COARSE, the second layer through COVER_1, a
- *   normal map leaning the facing (normal_influence), and BTBH_DEBUG_COVER. Each pixel against the reference at the
+ *   normal map leaning the facing (normal_influence), BTBH_DEBUG_COVER, and SNOW under the sun's shadow and under the
+ *   sun's and an omni light's (the cover variants of each shadow set). Each pixel against the reference at the
  *   point its ray hits: within 3 levels in 99.5 % of the pixels, 8 everywhere.
  * - The targets the screen-space passes read (lit; the SSAO resolve's reflections and occlusion read the normal target
  *   and the specular target's alpha, the HBAO the normal target): MUD with puddles (wet) and SNOW with relief, the
@@ -17,9 +18,12 @@
  * - Runs: covered batches sharing a material draw in as many runs as uncovered ones, and BTBH_GPU_SCENE_RUNS=verify
  *   finds no mismatch.
  * - Scene views (two halves equal the one-view frame) and a render into a target take the cover.
- * - Prewarm: a prewarm without the cover covers a first frame with it and with still ice (nothing made).
+ * - Prewarm: a prewarm with the cover's bits and still ice, the layers off, covers a first frame with them on and one
+ *   with them off (nothing made); a prewarm without them leaves the cover variants' pipelines to the first covered
+ *   frame (made then, marked as a prewarm's).
  * - Refusals: the setter's (a refused call keeps the setting), the batches' (both bits, a lit particle, a refracting
- *   batch, the fast unlit shader's, ICE's parameters), and scene shaders that don't name the cover's block. */
+ *   batch, the fast unlit shader's, ICE's parameters), and cover variants of the scene shader that don't name the
+ *   cover's block or are missing (shaders from before 0.18.0). */
 #undef NDEBUG
 
 #include "btbh_gpu/btbh_gpu.h"
@@ -768,12 +772,39 @@ static BTBHGPUSceneCoverLayer snow_layer(void) {
 
 /* The covered unlit frame of the facets against the reference. layer_index: which layer the batches take. tilt: the
    facets' normal map leans their shading normal by asin(0.2) toward +x (tilt_map). debug: BTBH_DEBUG_COVER. */
+/* The frame's shadows in check_unlit_case (0 none, 1 the sun's, 2 the sun's and an omni light's): unlit facets draw
+   the same under each, through the cover variant of the scene shader each picks (_unshadowed, _2d_shadows and the
+   plain one). */
+static int unlit_shadows;
+
+static void identity4(float matrix[16]) {
+    memset(matrix, 0, 16u * sizeof(float));
+    matrix[0] = matrix[5] = matrix[10] = matrix[15] = 1.0f;
+}
+
 static void check_unlit_case(SmokeWindow *smoke, const char *name, const BTBHGPUSceneCover *cover, uint32_t layer_index,
     bool tilt, bool debug) {
     set_cover(smoke, cover);
     Scene scene = facets_scene(smoke, true,
         layer_index == 0u ? (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0
                           : (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1);
+    if (unlit_shadows >= 1) {
+        identity4(scene.lighting.directional_shadow_view_projection);
+        scene.lighting.directional_shadow_enabled = 1u;
+        scene.lighting.directional_shadow_softness = 1.0f;
+    }
+    if (unlit_shadows >= 2) {
+        scene.lighting.spot_position_y = 3.0f;
+        scene.lighting.spot_direction_y = -1.0f;
+        scene.lighting.spot_outer_cutoff = -1.0f;
+        scene.lighting.spot_shadow_enabled = 1u;
+        scene.lighting.spot_shadow_is_omni = 1u;
+        scene.lighting.spot_shadow_near = 0.1f;
+        scene.lighting.spot_shadow_softness = 1.0f;
+        for (uint32_t face = 0u; face < 6u; ++face) {
+            identity4(scene.lighting.omni_shadow_view_projection[face]);
+        }
+    }
     if (tilt) {
         for (uint32_t index = 0u; index < FACETS; ++index) {
             scene.batches[index].normal_texture = smoke->tilt_map;
@@ -889,6 +920,17 @@ static void check_patterns(SmokeWindow *smoke) {
     cover.layers[0].normal_influence = 0.0f;
     cover.layers[0].edge_noise_degrees = 15.0f;
     check_unlit_case(smoke, "debug", &cover, 0u, false, true);
+    /* The frame's shadow sets: the sun's (production_model_cover_2d_shadows.frag), the sun's and an omni light's
+       (production_model_cover.frag). */
+    cover.layers[0] = snow_layer();
+    cover.layers[0].edge_degrees = 10.0f;
+    cover.layers[0].edge_noise_degrees = 20.0f;
+    cover.layers[0].noise_scale = 1.2f;
+    unlit_shadows = 1;
+    check_unlit_case(smoke, "snow-noise-sun-shadow", &cover, 0u, false, false);
+    unlit_shadows = 2;
+    check_unlit_case(smoke, "snow-noise-omni-shadow", &cover, 0u, false, false);
+    unlit_shadows = 0;
 }
 
 /* Without a cover, with a cover and no bits, with bits on every layer at amount 0: the same bytes. */
@@ -1403,45 +1445,82 @@ static uint32_t made_by_prewarm(BTBHGPUWindow *window, bool print) {
     return covered;
 }
 
-static void check_prewarm(SmokeWindow *smoke) {
-    set_cover(smoke, NULL);
-    /* The facets lit and an ice sheet, without the cover or the variant, as the prewarm sees them. */
+/* The facets lit (alternate ones with COVER_0 and COVER_1 when `bits`) and an ice sheet (still ice when `ice`). */
+static Scene prewarm_scene(const SmokeWindow *smoke, bool bits, bool ice) {
     Scene scene = facets_scene(smoke, false, 0u);
     post_reflections(&scene.post);
+    for (uint32_t index = 0u; bits && index < FACETS; ++index) {
+        scene.batches[index].flags2 = index % 2u == 0u ? (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 :
+            (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1;
+    }
     instance(scene.instances[FACETS], ice_albedo);
     scene.batches[FACETS] = batch_of(smoke->ice, FACETS, false);
+    if (ice) {
+        scene.batches[FACETS].surface_variant = BTBH_GPU_SCENE_SURFACE_ICE;
+    }
     scene.batch_count = FACETS + 1u;
-    btbh_gpu_window_set_lazy_creation_log_enabled(smoke->window, 1u);
+    return scene;
+}
+
+static void prewarm(SmokeWindow *smoke, const Scene *scene) {
     const ShaderSet *set = &shaders;
     BTBHGPUSceneReport report;
     memset(&report, 0, sizeof(report));
     const BTBHGPUResult prewarmed = btbh_gpu_window_scene_prewarm(smoke->window, set->paths[0], set->paths[1],
         set->paths[2], set->paths[3], set->paths[4], set->paths[5], set->paths[6], set->paths[7], set->paths[8],
-        set->paths[9], set->paths[10], SMOKE_SHADER_FORMAT, WIDTH, HEIGHT, &scene.lighting, &scene.post,
-        scene.batches, scene.batch_count, &report);
+        set->paths[9], set->paths[10], SMOKE_SHADER_FORMAT, WIDTH, HEIGHT, &scene->lighting, &scene->post,
+        scene->batches, scene->batch_count, &report);
     if (prewarmed != BTBH_GPU_OK) {
         fprintf(stderr, "prewarm: %s\n", report.message);
     }
     assert(prewarmed == BTBH_GPU_OK);
-    (void)made_by_prewarm(smoke->window, false);
+}
+
+/* Two layers on (SNOW, MUD), or none. */
+static void two_layers(SmokeWindow *smoke, bool on) {
     BTBHGPUSceneCover cover;
     memset(&cover, 0, sizeof(cover));
     cover.layers[0] = snow_layer();
     cover.layers[1] = snow_layer();
     cover.layers[1].pattern = BTBH_GPU_SCENE_COVER_MUD;
-    set_cover(smoke, &cover);
-    for (uint32_t index = 0u; index < FACETS; ++index) {
-        scene.batches[index].flags2 = index % 2u == 0u ? (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 :
-            (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1;
-    }
-    scene.batches[FACETS].surface_variant = BTBH_GPU_SCENE_SURFACE_ICE;
-    uint8_t *frame = frame_of(smoke, &scene, NULL);
+    set_cover(smoke, on ? &cover : NULL);
+}
+
+/* `covered` prewarms with the bits and still ice, the layers off; `bare` without either. */
+static void check_prewarm(SmokeWindow *covered, SmokeWindow *bare) {
+    two_layers(covered, false);
+    btbh_gpu_window_set_lazy_creation_log_enabled(covered->window, 1u);
+    Scene scene = prewarm_scene(covered, true, true);
+    prewarm(covered, &scene);
+    (void)made_by_prewarm(covered->window, false);
+    two_layers(covered, true);
+    uint8_t *frame = frame_of(covered, &scene, NULL);
     free(frame);
-    const uint32_t made = made_by_prewarm(smoke->window, true);
-    printf("prewarm without the cover or ICE: their first frame made %u things a prewarm makes\n", made);
-    assert(made == 0u);
-    btbh_gpu_window_set_lazy_creation_log_enabled(smoke->window, 0u);
-    set_cover(smoke, NULL);
+    const uint32_t made_on = made_by_prewarm(covered->window, true);
+    two_layers(covered, false);
+    frame = frame_of(covered, &scene, NULL);
+    free(frame);
+    const uint32_t made_off = made_by_prewarm(covered->window, true);
+    printf("prewarm with the bits and ICE (layers off): the first frame with the layers on made %u things a prewarm "
+           "makes, with them off %u\n", made_on, made_off);
+    assert(made_on == 0u && made_off == 0u);
+    btbh_gpu_window_set_lazy_creation_log_enabled(covered->window, 0u);
+
+    two_layers(bare, false);
+    btbh_gpu_window_set_lazy_creation_log_enabled(bare->window, 1u);
+    scene = prewarm_scene(bare, false, false);
+    prewarm(bare, &scene);
+    (void)made_by_prewarm(bare->window, false);
+    two_layers(bare, true);
+    scene = prewarm_scene(bare, true, true);
+    frame = frame_of(bare, &scene, NULL);
+    free(frame);
+    const uint32_t made_bare = made_by_prewarm(bare->window, true);
+    printf("prewarm without the bits or ICE: the first covered frame made %u things a prewarm makes (the cover "
+           "variants' pipelines)\n", made_bare);
+    assert(made_bare > 0u);
+    btbh_gpu_window_set_lazy_creation_log_enabled(bare->window, 0u);
+    two_layers(bare, false);
 }
 
 /* ---- Refusals ---- */
@@ -1573,25 +1652,36 @@ static void unname_cover(const char *path) {
     SDL_free(bytes);
 }
 
-static void check_old_shaders(SmokeWindow *smoke) {
+static const char *const cover_shaders[6] = {
+    "production_model_cover.frag", "production_model_cover_2d_shadows.frag",
+    "production_model_cover_unshadowed.frag", "production_model_cover_rc.frag",
+    "production_model_cover_rc_2d_shadows.frag", "production_model_cover_rc_unshadowed.frag",
+};
+
+/* The built shaders copied into a folder beside them (`name`), with the cover variants unnamed (rename) or removed. */
+static void copy_shaders(const char *name, bool rename, ShaderSet *set) {
     ShaderCopy copy;
     memset(&copy, 0, sizeof(copy));
     (void)snprintf(copy.from, sizeof(copy.from), "%s", BTBH_GPU_SMOKE_SHADER_DIR);
-    (void)snprintf(copy.to, sizeof(copy.to), "%s/../cover_old_shaders", BTBH_GPU_SMOKE_SHADER_DIR);
+    (void)snprintf(copy.to, sizeof(copy.to), "%s/../%s", BTBH_GPU_SMOKE_SHADER_DIR, name);
     (void)SDL_CreateDirectory(copy.to);
     assert(SDL_EnumerateDirectory(copy.from, copy_shader_file, &copy));
     assert(copy.copied > 20u);
-    static const char *const scene_shaders[6] = {
-        "production_model.frag", "production_model_2d_shadows.frag", "production_model_unshadowed.frag",
-        "production_model_rc.frag", "production_model_rc_2d_shadows.frag", "production_model_rc_unshadowed.frag",
-    };
     for (int index = 0; index < 6; ++index) {
         char path[1300];
-        (void)snprintf(path, sizeof(path), "%s/%s%s", copy.to, scene_shaders[index], SMOKE_SHADER_EXTENSION);
-        unname_cover(path);
+        (void)snprintf(path, sizeof(path), "%s/%s%s", copy.to, cover_shaders[index], SMOKE_SHADER_EXTENSION);
+        if (rename) {
+            unname_cover(path);
+        } else {
+            assert(SDL_RemovePath(path));
+        }
     }
+    shader_set_in(set, copy.to);
+}
+
+static void check_old_shaders(SmokeWindow *smoke) {
     ShaderSet old;
-    shader_set_in(&old, copy.to);
+    copy_shaders("cover_old_shaders", true, &old);
     BTBHGPUSceneCover cover;
     memset(&cover, 0, sizeof(cover));
     cover.layers[0] = snow_layer();
@@ -1603,11 +1693,11 @@ static void check_old_shaders(SmokeWindow *smoke) {
     free(frame);
     scene = facets_scene(smoke, false, (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
     scene.shaders = &old;
-    expect_present_refused(smoke, &scene, "production_model.frag");
-    expect_present_refused(smoke, &scene, "build the shaders from 0.18.0");
+    expect_present_refused(smoke, &scene, "cover_old_shaders/production_model_cover");
+    expect_present_refused(smoke, &scene, "doesn't name the cover's block (build the shaders from 0.18.0");
     scene = ice_scene(smoke, false);
     scene.shaders = &old;
-    expect_present_refused(smoke, &scene, "still ice");
+    expect_present_refused(smoke, &scene, "still-ice batch's cover shader");
     /* A layer at amount 0 lays nothing, so it needs nothing of them. */
     cover.layers[0].amount = 0.0f;
     set_cover(smoke, &cover);
@@ -1615,9 +1705,24 @@ static void check_old_shaders(SmokeWindow *smoke) {
     scene.shaders = &old;
     frame = frame_of(smoke, &scene, NULL);
     free(frame);
+    /* Shaders from before 0.18.0 have no cover variants: refused the same way, and the frames without them draw. */
+    copy_shaders("cover_none_shaders", false, &old);
+    cover.layers[0].amount = snow_layer().amount;
+    set_cover(smoke, &cover);
+    scene = facets_scene(smoke, false, (uint8_t)BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
+    scene.shaders = &old;
+    expect_present_refused(smoke, &scene, "cover shader is missing (build the shaders from 0.18.0");
+    expect_present_refused(smoke, &scene, "cover_none_shaders/production_model_cover");
+    scene = ice_scene(smoke, false);
+    scene.shaders = &old;
+    expect_present_refused(smoke, &scene, "still-ice batch's cover shader");
+    scene = facets_scene(smoke, false, 0u);
+    scene.shaders = &old;
+    frame = frame_of(smoke, &scene, NULL);
+    free(frame);
     set_cover(smoke, NULL);
-    printf("old scene shaders (no cover block): a covered frame and an ICE frame refused, naming the shader; frames "
-           "without them draw\n");
+    printf("old cover shaders (no cover block) and none at all: a covered frame and an ICE frame refused, naming the "
+           "shader; frames without them draw\n");
 }
 
 /* ---- Main ---- */
@@ -1719,12 +1824,14 @@ int main(void) {
     check_refusals(&a);
     check_old_shaders(&a);
     SmokeWindow c = open_window(device, "BTBH cover smoke C");
-    check_prewarm(&c);
+    SmokeWindow d = open_window(device, "BTBH cover smoke D");
+    check_prewarm(&c, &d);
     smoke_check_runs_verify(a.window, "btbh_gpu_scene_cover_smoke", verify_requested);
 
     close_window(&a);
     close_window(&b);
     close_window(&c);
+    close_window(&d);
     btbh_gpu_device_shutdown(device);
     btbh_gpu_device_destroy(device);
     printf("cover smoke passed\n");

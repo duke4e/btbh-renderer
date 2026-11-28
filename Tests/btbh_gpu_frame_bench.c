@@ -67,12 +67,13 @@
  *   frame; dist-worst a flat haze disc over the whole frame (radius 160, 2 px) and 20 overlapping flat rings (radius
  *   24, width 10, 18 px, chroma 0.3): 91 % of the frame, 1.8 layers on average. With BTBH_GPU_COST_PASSES=1 the pass frames give the source pass
  *   (distortion_ms) and the composite (composite_ms) apart. Before 0.18.0 the dist modes draw as dist-none.
- * - RFC 0020's cover and still ice (0.18.0's bench): cover-off, cover-full, cover-coarse and cover-ice add a river
- *   across the city (a lit strip on the ground, 200 x 12 units, Be The Bullet Hell v2's water material: roughness 0.07)
- *   and: cover-off nothing more; cover-full a snow layer (v2's starting values: amount 0.8, slope 55, edge 6, noise 14
- *   degrees at 1.6 cells a unit, bump 0.4) on every kit piece and the ground (BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
- *   cover-coarse the same with BTBH_GPU_SCENE_COVER_LAYER_COARSE; cover-ice the river as still ice (frost 0.35, the
- *   other parameters their defaults) and no cover. Before 0.18.0 they all draw as cover-off.
+ * - RFC 0020's cover and still ice (0.18.0's bench): cover-off, cover-bits, cover-full, cover-coarse and cover-ice add
+ *   a river across the city (a lit strip on the ground, 200 x 12 units, Be The Bullet Hell v2's water material:
+ *   roughness 0.07) and: cover-off nothing more; cover-bits BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 on every kit piece and
+ *   the ground, no layer set (the cover off); cover-full the bit and a snow layer (v2's starting values: amount 0.8,
+ *   slope 55, edge 6, noise 14 degrees at 1.6 cells a unit, bump 0.4); cover-coarse the same with
+ *   BTBH_GPU_SCENE_COVER_LAYER_COARSE; cover-ice the river as still ice (frost 0.35, the other parameters their
+ *   defaults) and no cover. Before 0.18.0 they all draw as cover-off.
  * - The light factor (0.11.0's bench): light-off, light and light-mixed light the frame's draws as Be The Bullet Hell
  *   v2's lit kit at night: every piece's draw glows (emission 1.5) and every fourth is glass (pattern 5, half its
  *   panes lit, under window_glow 1.5) instead of pattern 7. light flags every draw with
@@ -175,7 +176,7 @@ typedef struct BenchWindow {
     int light;
     /* RFC 0018's distortion: 0 none, 1 dist-none (bloom), 2 dist-off (and the flag), 3 dist-typical, 4 dist-worst. */
     int distortion;
-    /* RFC 0020's cover: 0 none, 1 cover-off (the river), 2 cover-full, 3 cover-coarse, 4 cover-ice. */
+    /* RFC 0020's cover: 0 none, 1 cover-off (the river), 2 cover-full, 3 cover-coarse, 4 cover-ice, 5 cover-bits. */
     int cover;
     BTBHGPUCustomMesh *river;
     BTBHGPUTexture *smoke_atlas;
@@ -479,7 +480,7 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
         batch->orm_texture = bench->orm;
         batch->detail_parameters[3] = 7.0f;   /* the facade's weather (0.7.0) */
 #if defined(BTBH_GPU_SCENE_HAS_COVER)
-        if (bench->cover == 2 || bench->cover == 3) {
+        if (bench->cover == 2 || bench->cover == 3 || bench->cover == 5) {
             batch->flags2 = (uint8_t)(batch->flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
         }
 #endif
@@ -566,7 +567,7 @@ static void build_frame(BenchWindow *bench, uint32_t draws) {
     bench->triangles += 12u;
     if (bench->cover != 0) {
 #if defined(BTBH_GPU_SCENE_HAS_COVER)
-        if (bench->cover == 2 || bench->cover == 3) {
+        if (bench->cover == 2 || bench->cover == 3 || bench->cover == 5) {
             ground->flags2 = (uint8_t)(ground->flags2 | BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0);
         }
 #endif
@@ -1135,7 +1136,7 @@ static void open_bench_window(BenchWindow *bench, BTBHGPUDevice *device, const c
         (strncmp(bench->mode, "dist-worst", 10) == 0 ? 4 : 0)));
     bench->cover = strncmp(bench->mode, "cover-off", 9) == 0 ? 1 :
         (strncmp(bench->mode, "cover-full", 10) == 0 ? 2 : (strncmp(bench->mode, "cover-coarse", 12) == 0 ? 3 :
-        (strncmp(bench->mode, "cover-ice", 9) == 0 ? 4 : 0)));
+        (strncmp(bench->mode, "cover-ice", 9) == 0 ? 4 : (strncmp(bench->mode, "cover-bits", 10) == 0 ? 5 : 0))));
     char title[64];
     (void)snprintf(title, sizeof(title), "BTBH frame bench %u", number);
     const BTBHGPUWindowDescriptor descriptor = {

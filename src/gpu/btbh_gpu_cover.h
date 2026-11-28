@@ -151,7 +151,7 @@ static inline bool btbh_cover_check(const BTBHGPUSceneCover *cover, char *messag
     return true;
 }
 
-/* --------------------------------------------------------------------------------------------------------- the block */
+/* -------------------------------------------------------------------------------------------------------- the block */
 
 /* A layer's roughness with its zero value resolved. */
 static inline float btbh_cover_layer_roughness(const BTBHGPUSceneCoverLayer *layer) {
@@ -366,7 +366,8 @@ typedef struct BTBHCoverSample {
 /* The reference of apply_cover for layer `index` of a packed block, at flat world (x, y, z) with a pixel footprint of
    `pixel` world units (the larger of the two screen derivatives' x-z lengths, the LOD bias applied), the vertex normal
    and the shading normal (both unit, turned to the side seen), and the surface's albedo, roughness, metalness and
-   occlusion before it. wetness: BTBHGPUSceneLighting.surface_wetness. */
+   occlusion before it. wetness: BTBHGPUSceneLighting.surface_wetness. Past the slope the layer can reach (amount x
+   slope + the noise's reach), the surface is left as it was. */
 static inline BTBHCoverSample btbh_cover_sample(
     const BTBHGPUCoverUniforms *block,
     uint32_t index,
@@ -386,6 +387,26 @@ static inline BTBHCoverSample btbh_cover_sample(
     const float *relief = block->relief[index];
     const uint32_t pattern = block->pattern[index][0];
     const bool coarse = (block->pattern[index][1] & BTBH_COVER_FLAG_COARSE) != 0u;
+    float facing_normal[3];
+    for (int axis = 0; axis < 3; ++axis) {
+        facing_normal[axis] = btbh_cover_lerp(vertex_normal[axis], shading_normal[axis], relief[1]);
+    }
+    btbh_cover_normalize(facing_normal, vertex_normal);
+    const float up = facing_normal[1] < -1.0f ? -1.0f : (facing_normal[1] > 1.0f ? 1.0f : facing_normal[1]);
+    const float slope = acosf(up);
+    if (slope >= facing[0] + facing[2]) {
+        /* Past the farthest it reaches: the surface as it was, no noise worked out. */
+        sample.c = 0.0f;
+        sample.noise = 0.0f;
+        for (int channel = 0; channel < 3; ++channel) {
+            sample.albedo[channel] = albedo[channel];
+            sample.normal[channel] = shading_normal[channel];
+        }
+        sample.roughness = roughness;
+        sample.metalness = metalness;
+        sample.occlusion = occlusion;
+        return sample;
+    }
     float gradient1[2] = {0.0f, 0.0f};
     float gradient2[2] = {0.0f, 0.0f};
     float noise = 0.0f;
@@ -399,13 +420,6 @@ static inline BTBHCoverSample btbh_cover_sample(
             gradient2
         );
     }
-    float facing_normal[3];
-    for (int axis = 0; axis < 3; ++axis) {
-        facing_normal[axis] = btbh_cover_lerp(vertex_normal[axis], shading_normal[axis], relief[1]);
-    }
-    btbh_cover_normalize(facing_normal, vertex_normal);
-    const float up = facing_normal[1] < -1.0f ? -1.0f : (facing_normal[1] > 1.0f ? 1.0f : facing_normal[1]);
-    const float slope = acosf(up);
     const float c = btbh_cover_edge(
         pattern,
         btbh_cover_saturate((facing[0] + facing[2] * noise - slope) * facing[1])

@@ -14,6 +14,12 @@
 #define BTBH_RC_MATERIAL_OUTPUT 0
 #endif
 
+// RFC 0020 (since 0.18.0): the cover laid by facing and still ice, in the production_model_cover*.frag variants only
+// (BTBH_COVER 1): a batch without them draws with these shaders as they were, to the byte.
+#ifndef BTBH_COVER
+#define BTBH_COVER 0
+#endif
+
 // BTBH_GPU_SCENE_MAX_LAMPS
 #define BTBH_MAX_LAMPS 40
 
@@ -22,7 +28,9 @@
 #include "production_dig_mask.hlsli"
 #include "production_world_detail.hlsli"
 #include "production_light_factor.hlsli"
+#if BTBH_COVER
 #include "production_cover.hlsli"
+#endif
 
 Texture2D<float4> albedo_texture : register(t0, space2);
 SamplerState albedo_sampler : register(s0, space2);
@@ -143,9 +151,10 @@ cbuffer WorldDetailTable : register(b2, space3)
     uint4 world_detail_table_count;
 };
 
+#if BTBH_COVER
 // RFC 0020 (since 0.18.0): the window's two cover layers (btbh_gpu_window_scene_set_cover, src/gpu/btbh_gpu_cover.h's
-// btbh_gpu_cover_pack), the fourth uniform buffer, pushed before the first covered batch of a pass. A batch reads only
-// the layer world_detail_mode.z picks, and only when it picks one.
+// btbh_cover_pack), the cover variants' fourth uniform buffer, pushed before the first covered batch of a pass. A batch
+// reads only the layer world_detail_mode.z picks, and only when it picks one.
 cbuffer SurfaceCover : register(b3, space3)
 {
     // linear rgb, w the roughness (the pattern's when the layer's is 0)
@@ -157,6 +166,7 @@ cbuffer SurfaceCover : register(b3, space3)
     // x the pattern, y btbh_cover_flag_* bits, zw 0
     uint4 cover_pattern[2];
 };
+#endif
 
 cbuffer MaterialPBR : register(b0, space3)
 {
@@ -306,11 +316,13 @@ static float3 btbh_position_dx = float3(0.0f, 0.0f, 0.0f);
 static float3 btbh_position_dy = float3(0.0f, 0.0f, 0.0f);
 // The surface-variant-4 coverage cut (apply_surface): discarded with the alpha cut-off, after the last derivative.
 static bool btbh_coverage_cut = false;
+#if BTBH_COVER
 // RFC 0020: still ice's surface gradient (apply_surface), added to the normal with the details' (0 for every other
 // surface); and the share of a glass detail's reflectance the cover leaves (apply_cover; 1 without a cover).
 static float3 btbh_surface_gradient = float3(0.0f, 0.0f, 0.0f);
 static float btbh_cover_glass_keep = 1.0f;
 static const uint btbh_surface_ice = 12u;
+#endif
 
 void apply_surface(
     FragmentInput input,
@@ -632,6 +644,7 @@ void apply_surface(
             albedo.rgb = lerp(albedo.rgb, water, mask);
         }
     }
+#if BTBH_COVER
     else if (surface_variant == btbh_surface_ice)
     {
         // RFC 0020: still ice (production_cover.hlsli's btbh_ice): plates, bevelled cracks and frost from the flat
@@ -650,6 +663,7 @@ void apply_surface(
         const float3 gradient = float3(ice.gradient.x, 0.0f, ice.gradient.y);
         btbh_surface_gradient = gradient - up * dot(up, gradient);
     }
+#endif
     else if (surface_variant == 8u)
     {
         // Glints: the primary light's highlights on moving waves, added to the colour where
@@ -2378,6 +2392,7 @@ float3 apply_world_detail_table(FragmentInput input, float lod_bias, inout float
     return normal_on ? btbh_world_detail_gradient(frame, tilt) : float3(0.0f, 0.0f, 0.0f);
 }
 
+#if BTBH_COVER
 // RFC 0020: the cover's layer `layer` (0 or 1) laid by facing (production_cover.hlsli; btbh_gpu.h's "What a layer
 // does"), after the normal is composed and turned to the side seen and before F0 is taken. vertex_normal: the vertex
 // normal turned the same way. Runs after the discard: its only derivatives are btbh_position_dx and _dy, taken at the
@@ -2400,6 +2415,20 @@ void apply_cover(
     const float4 relief = cover_relief[layer];
     const uint pattern = cover_pattern[layer].x;
     const uint flags = cover_pattern[layer].y;
+    const float3 facing_normal = stable_normalize(lerp(vertex_normal, normal, relief.y), vertex_normal);
+    const float slope = acos(clamp(facing_normal.y, -1.0f, 1.0f));
+    // Past the farthest the cover reaches (the noise at its most) it lays nothing: such a face (a wall under a roof's
+    // snow) is left as it is, and no noise is worked out.
+    [branch]
+    if (slope >= facing.x + facing.z)
+    {
+        if ((flags & btbh_cover_flag_debug) != 0u)
+        {
+            albedo.rgb = float3(0.0f, 0.0f, 0.0f);
+            emission = float3(0.0f, 0.0f, 0.0f);
+        }
+        return;
+    }
     float noise = 0.0f;
     float2 gradient1 = float2(0.0f, 0.0f);
     float2 gradient2 = float2(0.0f, 0.0f);
@@ -2418,8 +2447,6 @@ void apply_cover(
             gradient2
         );
     }
-    const float3 facing_normal = stable_normalize(lerp(vertex_normal, normal, relief.y), vertex_normal);
-    const float slope = acos(clamp(facing_normal.y, -1.0f, 1.0f));
     const float c = btbh_cover_edge(pattern, saturate((facing.x + facing.z * noise - slope) * facing.y));
     float3 cover_normal = vertex_normal;
     [branch]
@@ -2458,6 +2485,7 @@ void apply_cover(
         emission = layer == 0u ? float3(c, 0.0f, 0.0f) : float3(0.0f, c, 0.0f);
     }
 }
+#endif
 
 FragmentOutput shade_fragment(FragmentInput input)
 {
@@ -2570,7 +2598,11 @@ FragmentOutput shade_fragment(FragmentInput input)
         input.world_normal * mapped_normal.z,
         geometric_normal
     );
+#if BTBH_COVER
     normal = stable_normalize(normal - detail_gradient - world_gradient - btbh_surface_gradient, normal);
+#else
+    normal = stable_normalize(normal - detail_gradient - world_gradient, normal);
+#endif
     const bool flip_normal =
         input.animated_model > 0.5f
             ? input.is_front_face
@@ -2581,6 +2613,7 @@ FragmentOutput shade_fragment(FragmentInput input)
     }
     const float3 shadow_normal =
         flip_normal ? -geometric_normal : geometric_normal;
+#if BTBH_COVER
     float occlusion =
         saturate(orm.r * material_factors.y);
     // (RFC 0020: still ice's roughness is its own; the batch's roughness factor doesn't scale it.)
@@ -2591,7 +2624,7 @@ FragmentOutput shade_fragment(FragmentInput input)
     );
     float metalness = saturate(orm.b * material_factors.w);
     // RFC 0020: the cover (world_detail_mode.z bits 0-1: 1 the first layer, 2 the second; bit 2: the batch is
-    // see-through), a uniform branch: a batch without a cover runs none of it.
+    // see-through), a uniform branch (a still-ice batch without a cover runs none of it).
     [branch]
     if ((world_detail_mode.z & 3u) != 0u)
     {
@@ -2613,6 +2646,21 @@ FragmentOutput shade_fragment(FragmentInput input)
         lerp(float3(0.04f, 0.04f, 0.04f), albedo_sample.rgb, metalness),
         (uint)(detail_parameters.w + 0.5f) == 5u ? btbh_glass_reflectance * btbh_cover_glass_keep : 0.0f
     );
+#else
+    const float occlusion =
+        saturate(orm.r * material_factors.y);
+    const float roughness = apply_surface_wetness(
+        input,
+        albedo_sample,
+        saturate(orm.g * material_factors.z)
+    );
+    const float metalness = saturate(orm.b * material_factors.w);
+    // Glass (detail pattern 5) reflects like coated glass.
+    const float3 f0 = max(
+        lerp(float3(0.04f, 0.04f, 0.04f), albedo_sample.rgb, metalness),
+        (uint)(detail_parameters.w + 0.5f) == 5u ? btbh_glass_reflectance : 0.0f
+    );
+#endif
     // unlit_enabled: 1, 2 or 3 (bits 0-1), bit 2 (4): takes the radiance cascades' light, bits 3-5: how it takes
     // part in the horizon-based ambient occlusion (ssao_normal_scale).
     if ((unlit_enabled & 3u) != 0u)

@@ -740,10 +740,10 @@ typedef enum BTBHGPUSceneSurfaceVariant {
      *   (world units; 0 means 3), z the clear ice's roughness, 0..1 (0 means 0.06), w the cracks' and the frost's
      *   roughness, 0..1 (0 means 0.6).
      * A parameter that isn't finite or is below 0, or one of the 0..1 above outside it, fails the present with
-     * BTBH_GPU_INVALID_ARGUMENT, naming the batch. Needs this release's scene fragment shaders: an older one draws it
-     * as NONE, so a present that draws it with a scene fragment shader that doesn't name the cover's block
-     * (cover_color_roughness, of the same release) fails, naming the shader. Adds no pipeline: the batch draws with
-     * the pipeline it has without the variant. */
+     * BTBH_GPU_INVALID_ARGUMENT, naming the batch. It draws with the cover variant of the scene fragment shader
+     * (production_model_cover*.frag, beside the host's fragment shader, of this release; see
+     * btbh_gpu_window_scene_set_cover): a present that draws it where that file is missing or doesn't name the cover's
+     * block (cover_color_roughness) fails, naming the file. btbh_gpu_window_scene_prewarm makes its pipelines. */
     BTBH_GPU_SCENE_SURFACE_ICE = 12,
     BTBH_GPU_SCENE_SURFACE_COUNT = 13
 } BTBHGPUSceneSurfaceVariant;
@@ -1401,9 +1401,9 @@ enum {
      * layer's amount 0, the bit changes nothing (to the byte). Refused (the present fails with
      * BTBH_GPU_INVALID_ARGUMENT, naming the batch): both bits; a LIT_PARTICLE or REFRACT batch (their shaders draw no
      * material); a batch the fast unlit shader draws (unlit, drawn in the transparent pass, no surface variant, no
-     * world detail with a texture, no table with map_layers). Adds no pipeline: the batch draws with the pipeline it
-     * has without the bit. Needs this release's scene fragment shaders: a present that draws a covered batch with one
-     * that doesn't name the cover's block (cover_color_roughness) fails, naming the shader. */
+     * world detail with a texture, no table with map_layers). While its layer is on, the batch draws with the cover
+     * variant of the scene fragment shader (see btbh_gpu_window_scene_set_cover); while it is off, with the shaders
+     * and pipelines it has without the bit. btbh_gpu_window_scene_prewarm makes both for a batch with a bit. */
     BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 = 1u << 2,
     BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_1 = 1u << 3
 };
@@ -3445,8 +3445,9 @@ BTBHGPUResult btbh_gpu_window_scene_set_distortion(
    (btbh_gpu_window_scene_set_cover); a batch takes one by BTBH_GPU_SCENE_BATCH_FLAGS2_COVER_0 or _COVER_1. Where
    it lies it replaces the surface's albedo, roughness, metalness, occlusion and normal by its own, before the
    lighting, so the reflections, the ambient occlusion and the radiance cascades see it as they see the surface. It is
-   worked out from the world position and the normal alone: no texture, no pass, no pipeline. A window that never sets
-   a layer, or a batch without the bits, draws byte for byte as before.
+   worked out from the world position and the normal alone: no texture, no pass. A covered batch draws with the cover
+   variant of the scene fragment shader (btbh_gpu_window_scene_set_cover); a window that never sets a layer, or a batch
+   without the bits, draws byte for byte as before, with the shaders it had.
 
    What a layer does, at a fragment of a batch that takes it (angles in degrees; slopes from level: 0 a face looking
    straight up, 90 a wall, 180 a face looking straight down):
@@ -3466,7 +3467,9 @@ BTBHGPUResult btbh_gpu_window_scene_set_distortion(
      from the second, MUD both; COARSE or bump 0: none); a see-through batch's alpha rises to c (snow on a glass roof
      is opaque);
    - the emission stays, and so do shadows, depth, coverage and motion. The radiance cascades' material sources (an
-     unlit batch's colour projected from above) don't take it. */
+     unlit batch's colour projected from above) don't take it;
+   - past the farthest it can reach (amount x slope_degrees + the noise's reach) a face is left as it is, and costs
+     next to nothing (walls under a roof's snow). */
 
 /* How many layers a window keeps. */
 #define BTBH_GPU_SCENE_COVER_LAYER_COUNT 2u
@@ -3512,8 +3515,8 @@ typedef struct BTBHGPUSceneCoverLayer {
        line, sand drifted against walls. */
     float base_height;
     float base_fade;
-    /* RFC 0020 phase 2 (not in this release; refused unless 0): the wind, x and z, its length 0..1: faces turned into it
-       hold the layer steeper, and SAND's ripples lie across it. */
+    /* RFC 0020 phase 2 (not in this release; refused unless 0): the wind, x and z, its length 0..1: faces turned into
+       it hold the layer steeper, and SAND's ripples lie across it. */
     float wind[2];
     uint8_t pattern;            /* BTBHGPUSceneCoverPattern */
     uint8_t flags;              /* BTBH_GPU_SCENE_COVER_LAYER_* bits */
@@ -3530,10 +3533,18 @@ typedef struct BTBHGPUSceneCover {
 
 /* Sets the cover the window's following scene presents draw (present_instances, _with_visibility, present_views,
    render_to_target and its target views). It is copied at the call and kept until the next call; NULL clears it.
-   - A layer whose amount is 0 is off: the batches that take it draw as without the bit, to the byte.
-   - Prewarms need nothing for it: a covered batch draws with the pipeline it has without the cover.
-   - Needs this release's scene fragment shaders (they name the cover's block, cover_color_roughness): a present that
-     draws a covered batch with older ones fails with BTBH_GPU_INVALID_ARGUMENT, naming the shader.
+   - A layer whose amount is 0 is off: the batches that take it draw as without the bit, to the byte, with the shaders
+     and pipelines they have without it.
+   - A batch whose layer is on, and a BTBH_GPU_SCENE_SURFACE_ICE batch, draw with the cover variant of the scene
+     fragment shader the frame's shadows and cascades pick, a file beside the host's fragment shader:
+     production_model_cover.frag or its _2d_shadows, _unshadowed, _rc, _rc_2d_shadows or _rc_unshadowed sibling (.spv
+     or .metallib, of this release; the shaders without the cover don't change). A present that draws one where that
+     file is missing (shaders from before 0.18.0) or doesn't name the cover's block (cover_color_roughness; a Metal
+     library isn't read for it) fails with BTBH_GPU_INVALID_ARGUMENT, naming the file.
+   - The cover variants have their own pipelines, made by the first frame that draws one or by
+     btbh_gpu_window_scene_prewarm: it makes both a batch's pipelines when the batch has a cover bit (whether its layer
+     is on or off then), and the cover variant's for still ice. A host that turns a layer on mid-game prewarms with the
+     bits on its batches.
    - BTBH_DEBUG_COVER=1 (read at each present) draws each covered pixel's c in place of its colour, the first layer's in
      red and the second's in green, for tuning.
    - Refused with BTBH_GPU_INVALID_ARGUMENT, keeping the setting it had:

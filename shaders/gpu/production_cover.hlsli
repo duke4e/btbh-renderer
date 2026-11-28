@@ -54,8 +54,8 @@ float btbh_cover_value_noise(float2 value, out float2 gradient)
 
 // The cover's noise N in -1..1 over the flat world (x, z): two octaves (the second at 2.03x the frequency, half as
 // strong), each fading out once its cells shrink under about two pixels (footprint: the first octave's cells per
-// pixel), scaled by 4/3 so the sum spans -1..1. COARSE: the first octave alone. gradient1 and gradient2 are each octave's
-// gradient (per its own cell, already faded) for the relief.
+// pixel), scaled by 4/3 so the sum spans -1..1. COARSE: the first octave alone. gradient1 and gradient2 are each
+// octave's gradient (per its own cell, already faded) for the relief.
 float btbh_cover_noise(
     float2 position,
     float footprint,

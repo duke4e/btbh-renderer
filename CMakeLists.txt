@@ -323,6 +323,14 @@ if(BTBH_BUILD_GPU_SPIKE)
         "production_distortion.frag|fragment"
         "production_hdr_composite_distort.frag|fragment"
         "production_hdr_composite_distort_reactive.frag|fragment"
+        # The cover laid by facing and still ice (RFC 0020, since 0.18.0): production_model.frag and its five siblings
+        # with BTBH_COVER, which a batch whose cover layer is on and a still-ice batch draw with.
+        "production_model_cover.frag|fragment"
+        "production_model_cover_2d_shadows.frag|fragment"
+        "production_model_cover_unshadowed.frag|fragment"
+        "production_model_cover_rc.frag|fragment"
+        "production_model_cover_rc_2d_shadows.frag|fragment"
+        "production_model_cover_rc_unshadowed.frag|fragment"
     )
     foreach(_shader_spec IN LISTS BTBH_GPU_SHADER_SPECS)
         string(REPLACE "|" ";" _shader_parts "${_shader_spec}")
@@ -360,7 +368,8 @@ if(BTBH_BUILD_GPU_SPIKE)
             _shader_name STREQUAL "production_model_2d_shadows.frag" OR
             _shader_name STREQUAL "production_model_rc.frag" OR
             _shader_name STREQUAL "production_model_rc_2d_shadows.frag" OR
-            _shader_name STREQUAL "production_model_rc_unshadowed.frag"
+            _shader_name STREQUAL "production_model_rc_unshadowed.frag" OR
+            _shader_name MATCHES "^production_model_cover"
         )
             list(
                 APPEND
@@ -1106,6 +1115,12 @@ if(BTBH_BUILD_GPU_SPIKE)
                 BTBH_PRODUCTION_RC_MATERIAL_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc.frag.json"
                 BTBH_PRODUCTION_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_2d_shadows.frag.json"
                 BTBH_PRODUCTION_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_rc_unshadowed.frag.json"
+                BTBH_PRODUCTION_COVER_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover.frag.json"
+                BTBH_PRODUCTION_COVER_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover_2d_shadows.frag.json"
+                BTBH_PRODUCTION_COVER_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover_unshadowed.frag.json"
+                BTBH_PRODUCTION_COVER_RC_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover_rc.frag.json"
+                BTBH_PRODUCTION_COVER_RC_2D_SHADOW_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover_rc_2d_shadows.frag.json"
+                BTBH_PRODUCTION_COVER_RC_UNSHADOWED_FRAGMENT_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_model_cover_rc_unshadowed.frag.json"
                 BTBH_PRODUCTION_SSAO_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao.frag.json"
                 BTBH_PRODUCTION_SSAO_DENOISE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_denoise.frag.json"
                 BTBH_PRODUCTION_SSAO_RESOLVE_REFLECTION_PATH="${BTBH_GPU_SHADER_OUTPUT_DIR}/production_ssao_resolve.frag.json"

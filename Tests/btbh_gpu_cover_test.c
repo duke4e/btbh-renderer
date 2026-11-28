@@ -276,7 +276,40 @@ static void check_facing(void) {
     assert(coverage_at(&layer, 51.5f) == 1.0f);
     assert(fabsf(coverage_at(&layer, 56.0f) - 0.5f) < 1.0e-3f);
     assert(coverage_at(&layer, 60.5f) == 0.0f);
-    printf("facing: the reach and the edge, monotonic in slope, the patterns' edges, amount 0 lays nothing\n");
+    /* Past the farthest it reaches (amount x slope + the noise's reach: 45 + 12 x min(1, 4 x 0.75) = 57 degrees) the
+       surface is left as it was, wherever it is; short of it (SAND, where the noise passes 0.3) the noise lays some. */
+    layer = layer_valid();
+    layer.pattern = BTBH_GPU_SCENE_COVER_SAND;
+    BTBHGPUSceneCover cover;
+    memset(&cover, 0, sizeof(cover));
+    cover.layers[0] = layer;
+    BTBHGPUCoverUniforms block;
+    btbh_cover_pack(&cover, false, &block);
+    const float reach = block.facing[0][0] + block.facing[0][2];
+    assert(fabsf(reach - 57.0f * BTBH_COVER_PI / 180.0f) < 1.0e-5f);
+    const float albedo[3] = {0.1f, 0.2f, 0.3f};
+    float most_short = 0.0f;
+    for (int at = 0; at < 2000; ++at) {
+        const float position[3] = {-20.0f + 0.0371f * (float)at, 1.0f, 13.0f - 0.0293f * (float)at};
+        for (int side = 0; side < 2; ++side) {
+            const float angle = side == 0 ? reach + 1.0e-4f : reach - 0.7f * block.facing[0][2];
+            const float normal[3] = {0.0f, cosf(angle), sinf(angle)};
+            const BTBHCoverSample sample = btbh_cover_sample(&block, 0u, position, 0.01f, normal, normal, albedo, 0.5f,
+                0.2f, 0.4f, 1.0f);
+            if (side == 0) {
+                assert(sample.c == 0.0f && sample.noise == 0.0f);
+                assert(sample.albedo[0] == albedo[0] && sample.albedo[1] == albedo[1] && sample.albedo[2] == albedo[2]);
+                assert(sample.roughness == 0.5f && sample.metalness == 0.2f && sample.occlusion == 0.4f);
+                assert(sample.normal[0] == normal[0] && sample.normal[1] == normal[1] && sample.normal[2] == normal[2]);
+            } else {
+                most_short = sample.c > most_short ? sample.c : most_short;
+            }
+        }
+    }
+    assert(most_short > 0.0f);
+    printf("facing: the reach and the edge, monotonic in slope, the patterns' edges, amount 0 lays nothing; past the "
+           "reach (%.1f degrees) the surface as it was (short of it, c up to %.3f)\n",
+        (double)(reach * 180.0f / BTBH_COVER_PI), (double)most_short);
 }
 
 static void check_noise(void) {
