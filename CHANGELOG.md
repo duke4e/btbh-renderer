@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-11-28
+
+0.18.0: two answers to Be The Bullet Hell v2's requests after the owner's seventeenth play-test, both opt-in. **The
+distortion pass** (RFC 0018): up to 240 world-placed rings, discs and strips a frame bend the scene (shockwaves, heat
+haze, lensing) inside the HDR composite, the UI never; `BTBH_GPU_SCENE_POST_DISTORTION` turns it on. **The cover and
+still ice** (RFC 0020): two procedural layers a window (snow, sand, mud with puddles) laid on every up-facing surface of
+the batches that pick one, and a still-ice surface variant for frozen water. A game that calls neither setter and uses
+no ice draws every frame byte for byte as 0.17.0. Shaders: rebuild them. 96 are built (0.17.0's 86, whose bytes are
+unchanged, and 10 new ones a game adds to its list).
+
+The renderer's checks (Windows, Vulkan, RTX 3070 Ti) on the merged release: `check.ps1` 53/53, the Swift suite 306 tests
+(2 skipped, 0 failures), and identity against 0.17.0 in four modes (plain, shared meshes, no runs, runs verified): 421
+images a mode, 0 px different, 0 run-verify mismatches, the same through `present_views` with one view and with the cost
+log and its pass frames on; the views smoke passes in the four modes. Distortion's field matches its CPU reference
+within 0.023 px, a 2D fold check keeps every colour unfolded (2.2 million points, the least determinant 0.010), and a
+source on a split's other side draws nothing; the cover and the ice match theirs within a level. Each branch was
+reviewed independently: distortion's two medium findings (culling by the view's half, the fold clamp) and the cover's
+four visual ones were fixed before the candidate.
+
+Be The Bullet Hell v2's test of the candidate (`06218902`; Windows, Vulkan, RTX 3070 Ti, under the perf lock) passed,
+and v2 adopts it. With everything off: `shaders-180` (96) all in its list, no pipeline after frame 1 at High by day and
+night or on the Deck preset, its pixel scenes equal below 4K and within 0.17.0's own run-to-run noise at 4K, 874 tests
+and its golden hashes pass, and a two-player replay from 0.17.0 plays the same. Distortion, at up to 96 sources a frame
+(rings on blasts, stomps and landings; haze over fires, along beams and in the desert; lenses on hazard orbs and
+portals): nothing lingers under FSR 3 after a ring, the split's line shows no seam, bullets inside rings stay round and
+readable, the heavy fight's salience is unchanged within 0.003, and it costs 0.022 ms on the Deck preset and about 0.11
+at 4K (0.14 in the desert). The cover and ice in its four biomes (snow settling over the ice stage, moss and mud with
+puddles, sand, flood mud; ice on frozen water and cells; units, the kaiju, effects, water and anything moving never
+covered): no biome is pixel-equal, the layers pass its palette rule, no pipeline appears after frame 1 even when a
+weapon freezes a canal mid-stage, every biome's heavy-fight salience stays within 0.021, and the frozen river reads by
+day and night with shots crossing it. The settled ice stage costs +0.065 ms on the Deck preset and +0.37 ms at 4K High;
+`COARSE` saved little in its scenes, so High stays full.
+
 ### Added
 - **Screen-space distortion** (RFC 0018 phase 1, `BTBH_GPU_SCENE_HAS_DISTORTION`; asked for by Be The Bullet Hell v2
   after the owner's seventeenth play-test: shockwave rings on blasts and kaiju stomps, heat haze over fires, beams and
@@ -122,8 +155,9 @@ All notable changes to this project are documented here. The format follows
 ### Known
 - **Distortion, not run on Metal:** its shaders build to MSL (and the Mac's metallibs come from its `check.sh`); the
   smoke runs on Windows/Vulkan only.
-- **Distortion under FSR 3** marks displaced pixels reactive by refraction's rule; whether a growing ring or boiling haze
-  leaves trails in v2's scenes is v2's check at 4K High and Medium (`BTBH_DEBUG_MOTION_VECTORS=2`, RFC 0018 decision 4).
+- **Distortion under FSR 3** marks displaced pixels reactive by refraction's rule; whether a growing ring or boiling
+  haze leaves trails in v2's scenes is v2's check at 4K High and Medium (`BTBH_DEBUG_MOTION_VECTORS=2`, RFC 0018
+  decision 4).
 - **Distortion is not depth-tested** (RFC 0018 decision 8): what stands in front of a source is displaced with the rest,
   bullets too (decision 3).
 - **The cover costs more than RFC 0020 estimated:** over the frame bench's whole city, 0.33 ms on the main pass with
