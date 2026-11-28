@@ -602,3 +602,405 @@ Nothing is open for phase 1.
 2. **Phase 2, draw lists (after 0.10.0, only if phase 1 isn't enough).** The structs, the pointer, the indirect
    buffer, the grouping, the refusals. It waits for phase 1's numbers on v2's edge (Decisions, 4: one list per
    chunk, LOD and material would do).
+
+## Phase 2 refreshed for 0.16.1 (2026-11-28)
+
+"Phase 2" above was written against 0.8.0. v2 asked for draw lists again after its perf round of 2026-11-27 at the
+Deck preset. This section restates phase 2 for 0.16.1: the layouts, how a list meets what came after 0.8.0, what SDL
+3.4.2 does with it, the refusals, the tests, a measured baseline and the cost. Where it and the 0.8.0 text differ, this
+section holds. Nothing here is implemented.
+
+**Sources.** master `960dc17c` (v0.16.1); line references are that commit's unless they say otherwise. Short names:
+`scene.c` and `internal.h` for `src/gpu/btbh_gpu_scene.c` and `src/gpu/btbh_gpu_internal.h`, `btbh_gpu.h` for
+`include/btbh_gpu/btbh_gpu.h`, `order_test.c` for `Tests/btbh_gpu_scene_order_test.c`. SDL is `external/SDL` at
+`release-3.4.2` (`683181b47`): `vulkan.c`, `metal.m` and `d3d12.c` for the backends under `src/gpu/`, `SDL_gpu.h` and
+`SDL_gpu.c`. v2's code is BTBH `a96c846af` (`main`), paths under `v2/crates/`.
+
+### v2's case
+
+From v2's perf round of 2026-11-27 (the Deck preset, 1280 x 800):
+
+- **Kit chunks are 62–88 % of the main draws:** 850–970 of 1,125–1,245 in a stage-3 fight, 2,079 of 2,375 on the
+  title, with 17–23 materials a frame (37–40 at 4K and on the title).
+- **Props are 83–188 draws,** each also a sun-shadow draw: 75–85 % of the 100–230 shadow draws.
+- **Both are custom meshes in the shared geometry buffers** (phase 1a; `Gpu::shared_meshes`,
+  `v2-platform/src/gpu.rs:1348-1357`), over persistent instance buffers, one a chunk (`v2-render/src/props.rs:1-3`,
+  `v2-render/src/kitruns.rs:1-17`). v2's custom-mesh batches carry `material_slot` -1
+  (`v2-platform/src/gpu.rs:3090-3101`).
+- **A chunk's draws are sorted into material runs over its instance buffer;** inside a run only the mesh changes. A run
+  is what a list holds.
+- **The ask:** an indirect draw a run, turning the 600–2,100 kit draws into about 50–100 calls. v2 put the gain at
+  0.2–0.5 ms a frame (RFC 0015, design (d)).
+- **Decision 4 stands:** a list per chunk, LOD and material. What changed is how often a list changes: where the stage's
+  look drifts, about half the chunk-frames re-sort their runs (`kitruns.rs:11-13`). The renderer reads lists during the
+  present only and keeps nothing of them, so a list rebuilt every frame costs it what a kept one does.
+
+### What changed since the 0.8.0 text
+
+| 0.8.0 | 0.16.1 | For lists |
+| --- | --- | --- |
+| The batch is 280 bytes, `world_detail_table` at 272 | 288 bytes: `height_lift` at 280 (RFC 0012, 0.11.0), `flags2` in byte 254 (0.12.0) (`order_test.c:24-38`) | `draw_list` lands at 288; the batch is 296 bytes |
+| The run key compares 53 of 59 fields | 55 of 61, with `flags2` and `height_lift` (`scene.c:5660-5722`, `order_test.c:378-440`) | `draw_list` is a seventh field that keeps a run |
+| Three sites draw geometry: the geometry passes, the shadow maps, the cascades' sources | Four: the particle transmittance map joined them (RFC 0013 phase 2, 0.14.0; `scene.c:8199-8302`) | Every site draws lists |
+| One camera | Scene views (RFC 0014, 0.16.0): each view's visibility and shadow visibility per batch, its own opaque order and, where its matrices differ, its own sun and spot maps; each geometry pass holds the views in turn (`scene.c:12476-13178`) | One set of commands serves every view and pass |
+| – | `BTBH_GPU_SCENE_RUNS=verify` (0.13.0) | A list is checked as one batch |
+| – | The upload queue in the frame's transfer (0.11.0; `scene.c:11393-11414`) | The commands go before it |
+| – | The lazy creation log (0.11.0), the prewarms for targets (0.9.0) and views (0.16.0), the cost log's pass frames and view groups | See "Reports, logs and prewarm" |
+| – | The frame context (RFC 0015 phase 1a, 0.16.1) | Nothing; phase 1b would copy lists |
+
+The 0.8.0 text's line references are 0.7.0's: the fast shadow path's instance stream (`btbh_gpu_scene.c:6015-6032`
+there) is `scene.c:8574-8591` now. Its SDL references still hold.
+
+### The API
+
+```c
+/* One entry of a draw list (RFC 0011 phase 2): a geometry and a range of the batch's instances, drawn with the
+ * batch's material. 32 bytes on 64-bit. */
+typedef struct BTBHGPUSceneDrawListEntry {
+    BTBHGPUModel *model;              /* a model, drawn unanimated; or NULL */
+    BTBHGPUCustomMesh *custom_mesh;   /* or a custom mesh made with BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS: one of the
+                                       * two is set */
+    int32_t material_slot;            /* a model's primitives, as BTBHGPUSceneGeometryBatch.material_slot (below 0:
+                                       * all of them); ignored for a custom mesh */
+    uint32_t first_instance;          /* in the batch's instance buffer, or the call's transient instances */
+    uint32_t instance_count;          /* 0 draws nothing */
+    uint32_t reserved;                /* 0 */
+} BTBHGPUSceneDrawListEntry;
+
+/* A batch's draw list (RFC 0011 phase 2). 16 bytes on 64-bit. */
+typedef struct BTBHGPUSceneDrawList {
+    const BTBHGPUSceneDrawListEntry *entries;
+    uint32_t entry_count;             /* 1 or more */
+    uint32_t flags;                   /* 0 */
+} BTBHGPUSceneDrawList;
+
+/* In BTBHGPUSceneGeometryBatch, appended after height_lift: */
+    /* NULL: drawn as before. Otherwise the batch draws its list (RFC 0011 phase 2): each entry's geometry over its
+     * range of the batch's instances, with the batch's material, in the entries' order, through indirect draws; in
+     * every pass as the entries would draw as batches of their own with this material, one after another. kind is
+     * then 0, model, custom_mesh, animation_library and animation_pose NULL, and first_instance, instance_count,
+     * animation_index and animation_time 0; material_slot is ignored. The visibility bytes, the shadows' flags and the
+     * opaque sort take the list as one batch. The host owns the list and its entries; the renderer reads them during
+     * the present call only. 296 bytes on 64-bit with it. */
+    const BTBHGPUSceneDrawList *draw_list;
+
+/* Defined when BTBHGPUSceneGeometryBatch.draw_list and its structs exist. */
+#define BTBH_GPU_SCENE_HAS_DRAW_LISTS 1
+```
+
+**Layouts on 64-bit** (phase 2's `order_test.c` asserts them):
+- **The batch:** `draw_list` at 288, after `height_lift` at 280 (`order_test.c:37-38`); 296 bytes, no padding added.
+  0.16.1's header compiled on its own gives 288 bytes, `height_lift` at 280, `flags2` at 254, `ssao_reserved` at 255.
+- **`BTBHGPUSceneDrawListEntry`:** 32 bytes: `model` 0, `custom_mesh` 8, `material_slot` 16, `first_instance` 20,
+  `instance_count` 24, `reserved` 28.
+- **`BTBHGPUSceneDrawList`:** 16 bytes: `entries` 0, `entry_count` 8, `flags` 12.
+- **With question 1's recommendation:** `BTBHGPUSceneReport.draw_call_count` at 556, in the report's tail padding (it
+  stays 560 bytes: `upscale_mode` at 552, `upscale_reserved` 553-555), and `BTBHGPUSceneViewReport.draw_call_count`
+  at 32 with a reserved word at 36 (32 to 40 bytes).
+
+**The rules:**
+- **A list batch's material** is every field but the seven: its instance buffer (or the call's transient instances),
+  textures, colours, world detail and table, lift, `dug_by`, `flags` and `flags2`, stencil, blend, cull, surface
+  variant, billboard. A list batch may be anything a static direct batch may be: opaque, transparent, refracting, a lit
+  or soft particle, lifted, dug, a particle-shadow caster.
+- **Each entry** draws a custom mesh, or the primitives of a model that its `material_slot` selects, over its
+  instances. A model draws unanimated: entries carry no pose. Ranges may overlap (a kit piece's surfaces over the same
+  instances). An entry of 0 instances draws nothing.
+- **The order is the entries',** and a model's primitives in theirs: the renderer never reorders a list. In every pass a
+  list draws byte for byte as its entries would as consecutive batches with its material, except under the opaque
+  sort, which moves a list as one batch.
+- **Several batches may point at one list,** each drawing it with its own material.
+- **Lifetime:** the host owns lists and entries and may rebuild them every frame or rewrite them between presents; the
+  renderer reads them during the present call only and keeps nothing of them.
+
+### Encoding
+
+1. **Validation,** in `btbh_gpu_scene_validate_batches` (`scene.c:5297-5456`) with the rest of the batch, before
+   anything is made or drawn: the refusals below. The prewarms validate lists without their ranges, as they skip
+   batches' (`check_instances` false, `scene.c:14330`).
+2. **A list batch is one geometry slot.** Its kind is 0, not `BTBH_GPU_SCENE_GEOMETRY_MODEL`, so every loop that walks a
+   batch's geometries (`kind == MODEL ? primitive_count : 1` with `btbh_gpu_scene_batch_uses_geometry`,
+   `scene.c:5642-5651`) counts it once: the bones give it `UINT32_MAX` (`scene.c:6735-6800`), the pipelines' loop
+   makes its material's static pipeline (`scene.c:10444-10500`), the views' shader check wants its static vertex shader
+   (`scene.c:9468-9485`), and the cursors, `opaque_geometry_base` and the check that a pass walked every geometry
+   (`scene.c:13166-13176`) hold as they are. Only the draw changes: the four draw sites call one helper that draws a
+   direct geometry as today, or a list's groups.
+3. **Commands.** In the prepare, before the transfer is sized, each list batch's entries become
+   `SDL_GPUIndexedIndirectDrawCommand`s in a runtime array, one per entry with instances and per geometry:
+   `{ index_count, instance_count, first_index, vertex_base, first_instance }` from the geometry (as
+   `btbh_gpu_scene_geometry_draw` reads it, `scene.c:6286-6309`) and the entry. Then the batch's **groups**: each
+   longest run of consecutive commands whose vertex and index buffers (arena blocks) are the same, split at 65,535
+   commands. A group is a vertex buffer, an index buffer, a byte offset and a count; a batch keeps its first group and
+   its group count. The models `BTBH_GPU_COST_SKIP_MODEL` names (a cost log measurement, `scene.c:811-822`) get
+   instance count 0.
+4. **Upload.** The commands follow the instances, bones and motions in the frame's transfer (each of those a multiple of
+   16 bytes, so the commands start at a multiple of 4) and come before the upload queue, which then starts at the next
+   multiple of 16 after them (`scene.c:11393-11414`). The frame's copy pass copies them into the runtime's indirect
+   buffer, with cycling, as it copies the instances (`scene.c:11522-11564`).
+   - The buffer has `SDL_GPU_BUFFERUSAGE_INDIRECT` alone and is sized as the instance buffer is
+     (`btbh_gpu_scene_buffer_capacity`, `scene.c:5137-5145`: the next power of two from 256 bytes). It is made by the
+     first frame with lists and made again only when a frame needs more. The title's 2,300 commands are 46 KB, in
+     64 KiB.
+   - Each runtime has its own: the window's, the one renders into targets use, each target view's
+     (`internal.h:205-212`). It goes with its runtime.
+   - A frame without lists writes nothing and makes nothing: its transfer is byte for byte 0.16.1's.
+5. **Draw.** The list batch passes the pass's tests and binds and pushes its state as any batch, or continues a run and
+   binds nothing. Then, per group: the vertex and index buffers where they changed (the passes' caches), and
+   `SDL_DrawGPUIndexedPrimitivesIndirect(pass, indirect_buffer, offset, count)`. Under FSR 3 the motion slot is the
+   batch's as before: transient instances' motions are read by the same instance id (`production_model.vert.hlsl:279`),
+   so a command's first instance picks its motions too.
+
+### Every pass
+
+| Pass | Where | A list batch |
+| --- | --- | --- |
+| Opaque, transparent, refraction, each view in turn | `scene.c:12106-13196`; the draw at `:13086-13163` | The batch's tests as today (`scene_visibility`, the view's `visibility`, its phase: `:12633-12639`), its state once, its groups. Transparent and refracting lists keep their entries' order: both APIs draw the commands of a multi-draw in order, so the blending is the batches' |
+| The sun's, the secondary and the spot map; a second view's own sun and spot maps | `scene.c:8304-8648`, called at `:11624-11778` | The casters' tests per batch as today (`:8403-8411`: transparency, the call's or the view's shadow visibility byte, `NO_SUN_SHADOW`; for the spot map `spot_shadow_visible` and the view's byte). The slow path binds the instance storage buffer, as now. The fast path (`:8421-8428`: unanimated, undug, a surface variant that keeps the vertex, no billboard) binds the instance stream at offset 0 instead of `first_instance` x 96 (`:8574-8583`), and each command's first instance picks (the direct draw passes 0, `:8590-8591`). Vulkan fetches instance-rate attributes at the instance index, which starts at the first instance: each vertex reads the bytes the direct draw reads, so the map is the same |
+| The omni map's six faces | `scene.c:11683-11713` | The same commands, each face |
+| The particle transmittance map (and a second view's own) | `scene.c:8199-8302`, `:11810-11837` | A `PARTICLE_SHADOW` list draws its groups after the batch's pushes and binds |
+| The cascades' material sources | `scene.c:8759-9087` | As every batch there: drawn when it emits, whatever its visibility, unlifted. Its groups |
+
+### Views, visibility and the opaque sort
+
+- **The visibility bytes stay per batch.** `scene_visibility`, `directional_shadow_visibility` and each view's
+  `visibility` and `shadow_visibility` let a list in or keep it out whole. A frame's commands are written once, and
+  every view and pass that lets the batch in draws them: the renderer culls no entry, per view or otherwise. A host that
+  culls finer submits other lists. v2 culls per batch, each view by its frustum and half-plane
+  (`v2-platform/src/views.rs:1-7`); a list batch's box is its entries' boxes over their instances.
+- **The views' refusal of a lifted caster** (a lifted batch that a view's `shadow_visibility` would cast) applies to a
+  lifted list as to a lifted batch.
+- **The opaque sort** moves a batch only with transient instances, depth `LESS` (or `LESS_EQUAL` when asked), the
+  stencil off and no `KEEP_ORDER` (`scene.c:6344-6358`). A list batch that qualifies sorts by one key: the mean view
+  depth over every entry's instances, each through its entry's geometry's bounds' centre (the direct batch's sum,
+  `scene.c:6361-6413`, over the entries). An entry without valid bounds keeps the list in place. Each view sorts its own
+  order (`scene.c:11270-11296`). v2's kit and props have persistent buffers and never move, with lists or without.
+
+### Runs, the verify mode and a switch
+
+- **`draw_list` keeps a run,** with `kind`, `model`, `custom_mesh`, `material_slot`, `first_instance` and
+  `instance_count`: it changes what is drawn, not what is bound. A list batch then continues a run of direct batches of
+  its material, and two lists of one material over one buffer bind once. `btbh_gpu_scene_batch_continues_run` compares
+  the other 55 fields (`scene.c:5660-5722`) and doesn't change; `order_test.c` lists the field among those that keep a
+  run, and its coverage check (`:457-470`) fails until it does.
+- **`BTBH_GPU_SCENE_RUNS=0`:** a list binds its whole state once a pass, as any batch; its groups are still indirect
+  draws.
+- **`BTBH_GPU_SCENE_RUNS=verify`:** a list that continues a run is checked once a pass, as one batch; its commands bind
+  nothing.
+- **`BTBH_GPU_SCENE_DRAW_LISTS=0`** (new; read once a present; for measuring and debugging): every list's commands are
+  drawn one by one with `SDL_DrawGPUIndexedPrimitives`, with their parameters and in their order, the list's state
+  bound once; nothing is uploaded. The frame is byte for byte the same and the CPU pays a direct draw a command, so v2
+  can compare lists and draws in its own frames without changing code.
+
+### Reports, logs and prewarm
+
+- **The draw counts of the report and the view reports:** question 1. As recommended there: `primitive_draw_count`
+  counts a list's commands, each a mesh drawn, so a frame reads the same with and without lists;
+  `prepared_geometry_count` counts the commands too; a new `draw_call_count` counts the direct draws and the indirect
+  calls of the opaque, transparent and refraction passes.
+- **`view_reports[].instance_count`** adds a list's entries' instances, once a batch in the view, as for a batch.
+- **The cost log** (`BTBH_GPU_COST_LOG=1`; `scene.c:879-899`, `:1247-1314`): each command counts as a draw with its
+  triangles, in its pass, in the static city's column when the batch's instances are persistent, and in its model's or
+  mesh's line; the totals and the per-model lines are those of the entries drawn as batches. The frame line gains
+  `main_calls=`, `shadow_calls=` and `rc_calls=` at its end: the SDL draw calls, direct and indirect, which equal the
+  draws without lists.
+- **The package telemetry** (`src/gpu/btbh_gpu_package_internal.h:10-36`) gains the indirect calls per kind of pass and
+  the frame's command count.
+- **The lazy creation log:** the indirect buffer's creation and growth are `BUFFER` entries with `prewarm_covers` 0, as
+  the buffers that grow with a frame's instances (`btbh_gpu.h:3104-3107`); so is the transfer buffer's growth by the
+  commands.
+- **The prewarms** (`btbh_gpu_window_scene_prewarm`, `_render_to_target`, `_views`): a list batch makes its material's
+  static pipelines, as a direct static batch does; its entries are validated, their ranges not; no command is written
+  and no indirect buffer made.
+- **RFC 0015 phase 1b** (the frame thread; not built) copies at the submit, by value, what batches point at
+  (`docs/rfc/0015-frame-thread.md:129-132`). Lists and their entries join that copy, deduplicated by pointer: 32 bytes
+  an entry, 74 KB for the title's 2,300. Or the submit writes the commands itself; that is phase 1b's choice.
+
+### What SDL 3.4.2 does
+
+| Backend | One `SDL_DrawGPUIndexedPrimitivesIndirect(pass, buffer, offset, count)` |
+| --- | --- |
+| Vulkan with `multiDrawIndirect` (desktop NVIDIA and AMD; RADV on the Deck) | One `vkCmdDrawIndexedIndirect` of `count` commands, stride 20 (`vulkan.c:5438-5445`). SDL enables the feature where the device has it (`vulkan.c:12293-12296`) |
+| Vulkan without it | One `vkCmdDrawIndexedIndirect` a command (`vulkan.c:5446-5456`): the driver's work a draw stays; the renderer's and SDL's work a draw goes |
+| Vulkan, both | Once a call, not a command: the descriptor sets' bind (`vulkan.c:5436`) and the indirect buffer's tracking (`:5458`), a scan from the end of the buffers the command buffer has used (`TRACK_RESOURCE`, `:2376-2391`). The copy pass tracks the indirect buffer first, so each call scans past every buffer tracked after it (the chunks' instance buffers, the arena blocks, the frame's buffers): tens to a few hundred comparisons a call. Not measured |
+| Metal | No multi-draw: a loop of `drawIndexedPrimitives:...indirectBuffer:indirectBufferOffset:`, one a command (`metal.m:2930-2938`), after the resources are bound once (`:2928`). The renderer's and SDL's work a draw goes; the encoder's call a draw stays |
+| D3D12 | `ExecuteIndirect` (`d3d12.c:5297-5318`). Not a target: the renderer's shader formats are SPIR-V and metallib (`btbh_gpu.h:25-29`) |
+
+- **Layout.** Tightly packed `SDL_GPUIndexedIndirectDrawCommand`s (`SDL_gpu.h:1566-1573`): 20 bytes, the layout of
+  Vulkan's `VkDrawIndexedIndirectCommand` and Metal's `MTLDrawIndexedPrimitivesIndirectArguments`.
+- **Alignment.** Vulkan wants the offset a multiple of 4 and, for more than one command, the stride a multiple of 4 and
+  at least 20; Metal wants the offset a multiple of 4. Groups start at multiples of 20 bytes from the buffer's start, so
+  both hold, and the capacity covers each group's last command.
+- **Count.** With `multiDrawIndirect`, Vulkan guarantees `maxDrawIndirectCount` of at least 65,535. SDL doesn't report
+  the limit, so the renderer splits a group there.
+- **First instance.** SDL asks for `drawIndirectFirstInstance` by default (`vulkan.c:12472`) and passes over a device
+  without it unless the host opts out (`vulkan.c:12036`, `SDL_gpu.h:2272-2276`). The renderer sets no feature property
+  (`src/gpu/btbh_gpu_device.c:30-70`), so every Vulkan device it runs on honours a command's first instance. Metal's
+  indirect arguments carry `baseInstance`.
+- **Instance index.** The scene's vertex shaders read `instances[SV_InstanceID]` (`production_model.vert.hlsl:138-140`
+  and the others). That includes the first instance on Vulkan (SPIR-V's `InstanceIndex`) and on Metal
+  (`[[instance_id]]`), as the direct draws already rely on: they pass `first_instance` to every draw. SDL warns that
+  this isn't portable (`SDL_gpu.h:1553-1560`); it fails on D3D12, which the renderer doesn't use.
+- **The fast shadow path's stream on Metal.** Whether Metal's per-instance vertex fetch starts at `baseInstance` in an
+  indirect draw is what phase 1 left unverified ("Implementation notes (phase 1)"). The Mac session's check decides; if
+  it doesn't, list batches take the slow shadow path on Metal (storage-buffer instances, which direct draws use with a
+  base instance today).
+- **Synchronisation.** The buffer's only usage is `INDIRECT`, so SDL's barrier after the copy pass makes it ready for
+  the draw-indirect stage (`vulkan.c:2561-2563`, `:2590-2592`, `:2752-2753`).
+
+### Refusals
+
+`BTBH_GPU_INVALID_ARGUMENT`, the window left as it was, the message naming the batch and the entry ("batch 12, draw list
+entry 3: ..."), as `btbh_gpu_scene_refuse_batch` names a batch's field (`scene.c:5463`). In every call that takes
+batches: the presents, `present_views`, the renders into targets, the prewarms (without the ranges).
+- **The batch:** `draw_list` set with `kind` not 0, `model` or `custom_mesh` set, `first_instance` or `instance_count`
+  not 0, `animation_library` or `animation_pose` set, or `animation_index` or `animation_time` not 0.
+- **The list:** `entries` NULL, `entry_count` 0, `flags` not 0.
+- **An entry:**
+  - both or neither of `model` and `custom_mesh`;
+  - a geometry of another window;
+  - a custom mesh made without `BTBH_GPU_CUSTOM_MESH_SHARED_BUFFERS` (it would gain nothing: its own buffers are a
+    group of one);
+  - a geometry without indices: a custom mesh made without them, or a model primitive without them (phase 2 draws
+    indexed geometry only);
+  - a model's `material_slot` at or past its material count;
+  - a range past the instances: the instance buffer's uploaded prefix, as for batches (`scene.c:5436-5451`), or the
+    call's transient instance count;
+  - `reserved` not 0.
+- **Not refused:** an entry of 0 instances (nothing drawn, no command); a model entry whose slot selects no primitive
+  (nothing drawn); overlapping ranges; one list in several batches; any material a static direct batch may have.
+
+### Measured: what a draw in a run costs now
+
+The frame bench's CPU mode (`BTBH_FRAME_BENCH_CPU=1`) on 0.16.0's core: the reference build of the 0.16.1 release
+(`%LOCALAPPDATA%\btbh-wt-0161-ref0160`, built from `btbh-renderer-v0.16.0`). 0.16.1 changed the window queries, the
+reflections and the SSAO denoise, not the draw path. Windows, Vulkan, RTX 3070 Ti, under the perf lock, 2026-11-28. Two
+processes of three hidden windows, 60 rounds of 8 frames, the first two frames of each turn dropped (360 frames a window
+a process); the ring row is a third process of 16 rounds through `tools/frame_bench_cpu.py`. Medians, with the 25th and
+75th percentiles; one range per process.
+
+| Window | Geometry encode | Shadow encode | Prepare |
+| --- | --- | --- | --- |
+| `table+arena`: 2,001 draws of one material (the bench's 32 kit pieces in the shared buffers, transient instances, a world-detail table); each draw after the first continues a run | 0.10 and 0.15 ms [0.09–0.34]: 0.05–0.07 µs a draw at the median, 0.17 at the 75th percentile | 0.13 and 0.17 ms [0.13–0.27]: 0.07–0.09 µs a draw | 0.057 ms: 0.03 µs a batch |
+| The same, runs off | 0.62 and 0.74 ms [0.54–1.08]: 0.31–0.37 µs a draw | 0.12 and 0.16 ms | 0.056 ms |
+| `ring+table+sorted+arena`: v2's ring of 0.10.0's bench, 257 batches in 8 chunks with persistent buffers, sorted, shared | 0.13 µs a ring batch [0.11, 0.15] | 0.00 (the ring casts no shadow) | 0.03 µs a ring batch |
+
+- **The geometry encode is bimodal** from frame to frame (about 0.09 or 0.33 ms with runs), hence the wide quartiles.
+- **What it means.** Inside a run a draw costs about 0.05–0.17 µs of encode on this PC (SDL's draw and the driver's
+  record included), and a caster in the sun's map 0.07–0.09 µs. That is what lists take away per entry and pass.
+- **Not in these numbers:** the submission. v2's decision 1 found 0.25–0.35 ms of 257 batches' cost in the submit on
+  0.8.0, before the shared buffers; nobody has measured it since.
+
+### Cost
+
+**Per frame** (this PC; estimates until the bench below measures them):
+
+| Item | Estimate |
+| --- | --- |
+| An entry, once a frame (its checks, 20 bytes written and uploaded) | 0.01–0.02 µs |
+| An entry, in a pass that draws its list | Nothing more on the CPU |
+| A group, in a pass that draws its list | One indirect call: about 0.2–0.4 µs (the vertex and index binds where they change, SDL's descriptor check, the call, the tracking scan) |
+| The list batch's state | A batch's: it starts a run or continues one |
+| GPU | 20 bytes read a command; the same vertices and pixels. Expected unchanged; measured by the bench |
+| Memory | 20 bytes a command, per runtime, in a buffer of the next power of two, times the copies SDL cycles: 64 KiB a copy at the title's 2,300 commands |
+
+**v2's frames** (this PC; the Deck two to three times each):
+- **Stage-3 fight:** 900 kit entries in 50–100 lists. The main pass's 0.05–0.15 ms of continuing draws becomes about
+  0.01–0.02 ms of entries and 0.01–0.04 ms of calls: about 0.03–0.1 ms less.
+- **Title:** 2,079 entries in about 100–150 lists: 0.1–0.35 ms becomes 0.05–0.1 ms: about 0.05–0.25 ms less.
+- **Props in the sun's map:** 83–188 casters, about 0.01 ms.
+- **Prepare:** 0.03 µs for each batch a list replaces: 0.02–0.06 ms.
+- **Two views** draw each list twice: the geometry passes' gain doubles.
+- **The submission,** if its share a draw is still there, on top. v2's 0.2–0.5 ms looks reachable on the Deck only with
+  it; the bench measures the present call and the submit apart to tell.
+
+**The work:**
+
+| Part | Lines (estimate) | Days |
+| --- | --- | --- |
+| Header: the structs, the field, the macro, the report fields, their documentation | 120 | 0.25 |
+| `scene.c`: validation and the refusals | 150 | 0.5 |
+| `scene.c`: commands, groups, the indirect buffer, the upload | 200 | 0.5 |
+| `scene.c`: the draw helper in the four sites, the fast path's stream, the sort's depth, the counts, the cost log, the telemetry, `BTBH_GPU_SCENE_DRAW_LISTS=0` | 300 | 0.75–1 |
+| `order_test.c` and the public header test | 40 | 0.1 |
+| The new smoke (below) | 1,000 | 1–1.5 |
+| The smokes' fold mode (below) | 150 | 0.25–0.5 |
+| The frame bench's list modes | 350 | 0.5 |
+| Identity runs (five modes, two builds), `check.ps1`, the Swift suite, the bench's runs | – | 0.75–1 |
+| CHANGELOG, implementation notes | 150 | 0.25 |
+| **Total** | **about 2,500** | **about 5–6** |
+
+No shader changes; no Swift change (the Swift layer zero-fills its batches,
+`Sources/BTBHRendererGPU/BTBHRendererGPU.swift:2793`). Version 0.17.0: new structs, and the batch grows from 288 to 296
+bytes, so every host that takes 0.17.0 regenerates its bindings or rebuilds (v2's `..Default::default()` leaves
+`draw_list` NULL; CHIMERA regenerates; Tyrian3D is pinned).
+
+### Test plan
+
+1. **Identity with lists off, byte for byte.** This branch against 0.16.1's build (`960dc17c`): every smoke's images in
+   the four modes (plain, `BTBH_SMOKE_SHARED_MESHES=1`, `BTBH_GPU_SCENE_RUNS=0`, runs verified), each also through
+   `present_views` with one view (`BTBH_SMOKE_PRESENT_VIEWS=1`): 421 images a mode at 0.16.1, 0 px different, 0
+   run-verify mismatches. No smoke sets a list, so this checks that `draw_list` NULL changes nothing.
+2. **Lists against batches in every smoke: a fifth mode.** `BTBH_SMOKE_DRAW_LISTS=1`, with the shared meshes, makes the
+   smokes' present helper (`Tests/btbh_gpu_smoke_present.h`) fold each longest run of consecutive batches that the run
+   key joins (the fields as `order_test.c` lists them) into one list batch: unskinned, indexed, models or shared
+   meshes, under the opaque sort only batches it can't move. The images against 0.16.1's: 0 px different; again with
+   runs verified (0 mismatches) and with `BTBH_GPU_SCENE_DRAW_LISTS=0`.
+3. **`btbh_gpu_scene_draw_lists_smoke`** (new, the 47th test). One scene drawn as batches, as lists and as lists with
+   `BTBH_GPU_SCENE_DRAW_LISTS=0`, compared byte for byte:
+   - kit chunks with persistent buffers, three materials each, 6–12 entries a list; a model entry of two primitives with
+     material slots; overlapping ranges; an entry of 0 instances; transient-instance lists; a list across two arena
+     blocks and a group split at its count (a test hook in `internal.h` shrinks the blocks and the split, as the stage
+     bench reads internals);
+   - through the opaque pass in submitted order and front to back (a movable transient list, against the same list
+     expanded), transparent and refracting lists, lit particles; the sun's soft shadow (the fast path, and a billboard
+     list on the slow one), the secondary and spot maps, the omni faces, the particle transmittance map, the cascades'
+     sources; a lifted list and a list with a world-detail table;
+   - two clipped views, each with its own visibility, its own shadow visibility and its own sun map; a render into a
+     target and a target view;
+   - runs verified, 0 mismatches; the telemetry's calls and commands; the reports' counts and the cost log line's calls;
+   - every refusal, each followed by a present that draws as before;
+   - a prewarm with lists, after which the lazy creation log names nothing but the indirect buffer.
+4. **Native.** `order_test.c`: `offsetof(draw_list)` 288, the batch 296 bytes, the entry's and the list's offsets and
+   sizes; `draw_list` among the fields that keep a run.
+5. **Bench.** The frame bench gains `+lists` on its ring (each chunk's walls one list, its glass another), comparable
+   with phase 1's numbers, and a `kit` mode at v2's Deck-like counts: a stage-3 fight of 960 kit entries in 12 chunks
+   of 5–7 materials (about 70 lists, 20 materials a frame) with 150 prop entries casting into the sun's map and 250
+   other draws, and a title of 2,080 entries in about 150 lists over 38 materials. Each as batches with runs (today),
+   as lists, and as lists expanded; through one view and two. CPU: the report's prepare, shadow and geometry encode,
+   the present's wall clock and the canvas present's (the submit); GPU: the cost log's split frames (`main_ms`,
+   `shadow_ms`). Interleaved hidden windows, shuffled turns, several processes, under the perf lock, as phase 1 ran.
+6. **Elsewhere.** The Mac session's `check.sh` with the new smoke (Metal's loop, and the fast shadow path's stream);
+   v2's frames at the Deck preset with lists, and with `BTBH_GPU_SCENE_DRAW_LISTS=0` for the comparison; the Deck
+   itself through v2.
+
+### Not in phase 2
+
+- **Geometry without indices** (`SDL_DrawGPUPrimitivesIndirect`, 16-byte commands): when a host asks.
+- **Regrouping a list by arena block,** as the 0.8.0 wording could be read: it would reorder the entries, which changes
+  blending and depth ties. Groups are consecutive runs instead: a list whose meshes share their blocks is one call.
+- **A shadow-only run key.** The shadow passes read few of a batch's fields (the cull mode, the slow path's surface
+  uniforms, `dug_by`, the instance buffer) but compare all 55. A key of their own would let consecutive lists of
+  different materials over one buffer (a chunk's props) bind once in the shadow maps, and their groups merge. After
+  phase 2's numbers.
+- **GPU culling and count buffers.** SDL 3.4 has no indirect draw with a count from a buffer; culling stays the host's.
+- **Lists kept on the GPU** (an object uploaded once, like an instance buffer): v2's lists change often (`kitruns.rs`),
+  and writing them costs microseconds a frame.
+
+### Open questions for v2
+
+1. **What `draw_calls` should count.** With lists, a list batch draws its entries in one indirect call or a few.
+   `report.primitive_draw_count`, which v2 logs as `draw_calls` (`v2-platform/src/gpu.rs:1985`, `:1990`, `:2616`) and
+   as the scene cost log's `draws` (`:2875`), could count the meshes drawn (each entry, as today) or the calls.
+   **Recommended:** keep `primitive_draw_count` and `prepared_geometry_count` counting meshes drawn, so a frame reads
+   the same with lists and without, and add `draw_call_count` (the direct draws and the indirect calls of the opaque,
+   transparent and refraction passes) to `BTBHGPUSceneReport` (at byte 556, in its tail padding: it stays 560 bytes)
+   and to `BTBHGPUSceneViewReport` (at 32, with a reserved word: 32 to 40 bytes, which the regenerated bindings take
+   along with the batch's growth). v2 points `draw_calls` at the new field. The cost log keeps counting a draw a mesh
+   and adds the calls.
+2. **Shadows per entry.** A list casts as a whole: its batch's `NO_SUN_SHADOW` and `spot_shadow_visible`, its
+   `directional_shadow_visibility` byte and each view's `shadow_visibility` byte. v2's casting comes from the material
+   (`Material::casts_shadow`, `v2-platform/src/gpu.rs:3152`), so a (chunk, LOD, material) list casts or doesn't as
+   one. Must some entries of one list stay out of the shadow maps (props past a shadow distance, a shadow LOD)?
+   **Recommended:** no; such entries go in a second list with the same material and `NO_SUN_SHADOW`. If yes, the
+   entry's `reserved` word takes a flag and each list writes a second command range for the shadow passes: 20 bytes
+   more a casting entry, and about a day more with its tests.
