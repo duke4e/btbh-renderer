@@ -117,9 +117,10 @@ variables.
 ### 7. Pause and screenshots
 
 - **Deploy:** as 3.
-- **Owner:** pause in a bright scene. The frozen backdrop should look like the live frame: no dimming of the
-  highlights. Take a v2 screenshot.
-- **Send back:** the screenshot file; whether the backdrop dimmed.
+- **Owner:** pause in a bright scene (a beam, fire, the sky). v2's backdrop is dimmed to 0.8 and blurred by design, so
+  look only at the highlights: they should stay bright against the dimmed frame, not fold to flat white or grey. v2
+  has no screenshot key; v2's deploy takes the capture with `gamescopectl` (live, then paused).
+- **Send back:** the two `gamescopectl` captures; whether the paused highlights still stood out.
 
 ### 8. SDR fallback
 
